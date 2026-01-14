@@ -2,45 +2,22 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
-## Screenshots
+## Contents
 
-### Terminal Experience (Claude Code)
+- [Features](#features)
+- [Claude Code Integration](#claude-code-integration)
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+- [Scan Types](#scan-types)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Integrated Tools](#integrated-tools)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
-Start the scanner with natural language - Claude handles the rest:
-
-![Starting Shaker Scan](pic/start.png)
-
-Scanner status with all services healthy:
-
-![Scanner Ready](pic/ready.png)
-
-Run a smart scan - Claude asks for authorization before active testing:
-
-![Authorization Prompt](pic/smart.png)
-
-Scan submitted with tracking info:
-
-![Scan Running](pic/running.png)
-
-View findings directly in terminal:
-
-![Findings in Terminal](pic/findings_terminal.png)
-
-### Web UI Experience
-
-Dashboard with real-time metrics and worker control:
-
-![Dashboard](pic/dash.png)
-
-Target management with scan type selection:
-
-![Targets and Scan Types](pic/start_scan.png)
-
-Findings page with severity filters and status management:
-
-![Findings UI](pic/findings_UI.png)
-
----
+**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
 
 ## Features
 
@@ -85,7 +62,7 @@ This project is designed to work seamlessly with Claude Code. Just clone and ope
 
 ```bash
 git clone https://github.com/andriyze/shakerscan
-cd shakerscan-oss
+cd shakerscan
 claude    # Claude reads CLAUDE.md and understands the project
 ```
 
@@ -137,7 +114,7 @@ See `CLAUDE.md` for full API reference and integration details.
 ```bash
 # Clone the repository
 git clone https://github.com/andriyze/shakerscan.git
-cd shakerscan-oss
+cd shakerscan
 
 # Start the scanner (builds images on first run)
 ./scanner.sh start
