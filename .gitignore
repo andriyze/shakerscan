@@ -1,0 +1,41 @@
+# Results
+results/
+
+# Environment
+.env
+.env.local
+.env.*
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Node
+node_modules/
+.next/
+*.log
+bun.lockb
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+coverage/
+
+# Docker
+*.tar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
