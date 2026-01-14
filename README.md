@@ -2,6 +2,46 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
+## Screenshots
+
+### Terminal Experience (Claude Code)
+
+Start the scanner with natural language - Claude handles the rest:
+
+![Starting Shaker Scan](pic/start.png)
+
+Scanner status with all services healthy:
+
+![Scanner Ready](pic/ready.png)
+
+Run a smart scan - Claude asks for authorization before active testing:
+
+![Authorization Prompt](pic/smart.png)
+
+Scan submitted with tracking info:
+
+![Scan Running](pic/running.png)
+
+View findings directly in terminal:
+
+![Findings in Terminal](pic/findings_terminal.png)
+
+### Web UI Experience
+
+Dashboard with real-time metrics and worker control:
+
+![Dashboard](pic/dash.png)
+
+Target management with scan type selection:
+
+![Targets and Scan Types](pic/start_scan.png)
+
+Findings page with severity filters and status management:
+
+![Findings UI](pic/findings_UI.png)
+
+---
+
 ## Features
 
 - **Comprehensive Security Scanning**
