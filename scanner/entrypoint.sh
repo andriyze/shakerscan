@@ -5,29 +5,67 @@
 configure_dns() {
     echo "Configuring DNS resolvers..."
 
-    # Preserve Docker's internal DNS (127.0.0.11) for container networking
-    # This is CRITICAL for container-to-container name resolution (e.g., 'postgres', 'redis')
-    if [ -w /etc/resolv.conf ]; then
-        # Backup original
-        cp /etc/resolv.conf /etc/resolv.conf.bak
-
-        # IMPORTANT: Ensure Docker's internal DNS is FIRST (required for container name resolution)
-        # On some EC2/Linux hosts, Docker's 127.0.0.11 may not be present or may be misconfigured
-        if ! grep -q "nameserver 127.0.0.11" /etc/resolv.conf; then
-            echo "Adding Docker internal DNS (127.0.0.11) as primary resolver..."
-            # Prepend Docker's internal DNS so container names resolve first
-            { echo "nameserver 127.0.0.11"; cat /etc/resolv.conf; } > /tmp/resolv.conf.new
-            cat /tmp/resolv.conf.new > /etc/resolv.conf
-            rm -f /tmp/resolv.conf.new
-        fi
-
-        # Add external DNS as fallback (for scanning external targets)
-        grep -q "nameserver 1.1.1.1" /etc/resolv.conf || echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-        grep -q "nameserver 8.8.8.8" /etc/resolv.conf || echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-
-        # Add DNS options if not already present (avoid duplicates on container restart)
-        grep -q "^options.*timeout" /etc/resolv.conf || echo "options timeout:2 attempts:3 rotate" >> /etc/resolv.conf
+    # Skip DNS configuration if resolv.conf is not writable
+    if [ ! -w /etc/resolv.conf ]; then
+        echo "resolv.conf not writable, skipping DNS configuration"
+        return
     fi
+
+    # Backup original
+    cp /etc/resolv.conf /etc/resolv.conf.bak
+
+    # Detect if we're in host network mode or have custom DNS (127.0.0.11 won't work)
+    # Check if Docker's internal DNS is reachable before injecting
+    local use_docker_dns=true
+    if [ -n "$DOCKER_HOST_NETWORK" ] || [ -n "$CUSTOM_DNS" ]; then
+        echo "Host network or custom DNS detected, skipping Docker DNS injection"
+        use_docker_dns=false
+    elif ! getent hosts localhost >/dev/null 2>&1; then
+        # Basic sanity check - if we can't resolve localhost, DNS is broken
+        echo "Warning: DNS resolution appears broken"
+    fi
+
+    # Build new resolv.conf with proper ordering:
+    # 1. Docker internal DNS first (if applicable) - critical for container name resolution
+    # 2. External DNS as fallback - needed for scanning external targets
+    # 3. Preserve existing options, merge with our required options
+    local tmp_resolv="/tmp/resolv.conf.$$"
+
+    # Extract existing options line (if any) and other directives (search, domain, sortlist)
+    local existing_options=""
+    existing_options=$(grep "^options" /etc/resolv.conf | head -1 || true)
+    grep -E "^(search|domain|sortlist)" /etc/resolv.conf > "$tmp_resolv" 2>/dev/null || true
+
+    # Add nameservers in correct order (deduplicated)
+    {
+        # Docker internal DNS first (unless host network mode)
+        if [ "$use_docker_dns" = true ]; then
+            echo "nameserver 127.0.0.11"
+        fi
+        # External fallback DNS
+        echo "nameserver 1.1.1.1"
+        echo "nameserver 8.8.8.8"
+        # Preserve any other nameservers from original (deduplicated)
+        grep "^nameserver" /etc/resolv.conf | grep -v -E "127.0.0.11|1.1.1.1|8.8.8.8" || true
+    } >> "$tmp_resolv"
+
+    # Merge options: preserve existing options and add our required ones if missing
+    local final_options="options"
+    if [ -n "$existing_options" ]; then
+        # Extract existing option values
+        final_options="$existing_options"
+    fi
+    # Add our required options if not present
+    echo "$final_options" | grep -q "timeout" || final_options="$final_options timeout:2"
+    echo "$final_options" | grep -q "attempts" || final_options="$final_options attempts:3"
+    echo "$final_options" | grep -q "rotate" || final_options="$final_options rotate"
+    echo "$final_options" >> "$tmp_resolv"
+
+    # Atomically replace resolv.conf
+    cat "$tmp_resolv" > /etc/resolv.conf
+    rm -f "$tmp_resolv"
+
+    echo "DNS configured: $(grep -c '^nameserver' /etc/resolv.conf) nameservers"
 
     # Configure subfinder to use specific resolvers
     mkdir -p /tmp/.config/subfinder
