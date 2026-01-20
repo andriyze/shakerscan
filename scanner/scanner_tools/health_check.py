@@ -373,7 +373,7 @@ async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[s
     Checks:
     1. DNS resolution - can we resolve the hostname?
     2. Port connectivity - can we reach the target port (or 443/80 if not specified)?
-    3. HTTP response - do we get a valid response?
+    3. HTTP response - do we get a valid response over HTTP/HTTPS?
 
     Args:
         target: URL or hostname to validate
@@ -381,7 +381,7 @@ async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[s
 
     Returns:
         Dict with:
-        - reachable: bool - whether target is reachable
+        - reachable: bool - whether target is reachable (DNS + HTTP response)
         - dns_ok: bool - DNS resolution worked
         - port_443_open: bool - port 443 is reachable
         - port_80_open: bool - port 80 is reachable
@@ -490,40 +490,67 @@ async def validate_target_connectivity(target: str, timeout: int = 15) -> dict[s
             else:
                 issues.append(f"Neither port 443 nor 80 is reachable on {hostname}")
 
-    # 3. HTTP Response Check (only if we have connectivity)
+    # 3. HTTP Response Check (DNS required)
     http_ok = False
+    http_status = None
+    http_url = None
     any_port_open = target_port_open or port_443_open or port_80_open
 
-    if any_port_open:
-        try:
-            # Use the original target URL if it had a port, otherwise construct one
-            if target_port:
-                url = f"{scheme}://{hostname}:{target_port}"
+    if dns_ok:
+        candidate_urls = []
+        if target_port:
+            candidate_urls.append(f"{scheme}://{hostname}:{target_port}")
+            # Try the opposite scheme too; non-standard ports are often misconfigured.
+            if scheme == "https":
+                candidate_urls.append(f"http://{hostname}:{target_port}")
             else:
-                url = f"{scheme}://{hostname}"
-            out, err, rc = await run(
-                ["curl", "-sI", "-o", "/dev/null", "-w", "%{http_code}",
-                 "--connect-timeout", str(min(timeout, 10)),
-                 "-L", "-k", url],  # -k to ignore cert issues for non-standard ports
-                timeout=timeout + 5
-            )
-            if rc == 0 and out:
-                try:
-                    status_code = int(out.strip())
-                    http_ok = 100 <= status_code < 600
-                    details["http_status"] = status_code
-                    details["http_url"] = url
-                except ValueError:
-                    details["http_raw"] = out[:100]
-        except Exception as e:
-            details["http_error"] = str(e)
+                candidate_urls.append(f"https://{hostname}:{target_port}")
+        else:
+            # Prefer the requested scheme, then fall back.
+            if scheme == "https":
+                candidate_urls = [f"https://{hostname}", f"http://{hostname}"]
+            else:
+                candidate_urls = [f"http://{hostname}", f"https://{hostname}"]
 
-        if not http_ok:
-            issues.append(f"HTTP request to {url} failed or returned invalid status")
+        seen_urls = set()
+        last_url = None
+        for url in candidate_urls:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            last_url = url
+            try:
+                out, err, rc = await run(
+                    ["curl", "-sI", "-o", "/dev/null", "-w", "%{http_code}",
+                     "--connect-timeout", str(min(timeout, 10)),
+                     "-L", "-k", url],
+                    timeout=timeout + 5
+                )
+                if rc == 0 and out:
+                    try:
+                        status_code = int(out.strip())
+                        if 100 <= status_code < 600:
+                            http_ok = True
+                            http_status = status_code
+                            http_url = url
+                            break
+                    except ValueError:
+                        details["http_raw"] = out[:100]
+            except Exception as e:
+                details["http_error"] = str(e)
+
+        if http_status is not None:
+            details["http_status"] = http_status
+            details["http_url"] = http_url
+        elif last_url:
+            details["http_url"] = last_url
+
+        if not http_ok and last_url:
+            issues.append(f"HTTP request to {last_url} failed or returned invalid status")
 
     # Calculate overall reachability
-    # Target is reachable if DNS works, at least one port is open, and HTTP works
-    reachable = dns_ok and any_port_open and http_ok
+    # Target is reachable if DNS works and we can get a valid HTTP response.
+    reachable = dns_ok and http_ok
 
     return {
         "reachable": reachable,

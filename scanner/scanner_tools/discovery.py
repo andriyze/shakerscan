@@ -2071,6 +2071,178 @@ def _is_interesting_path(path: str) -> bool:
     return path.endswith("/") or any(x in path.lower() for x in interesting)
 
 
+# Path-to-parameter inference mapping
+PATH_TO_PARAMS = {
+    "mechanic": ["mechanic_code", "mechanic_id", "id", "code"],
+    "user": ["user_id", "id", "uid", "username"],
+    "users": ["user_id", "id", "uid", "username"],
+    "order": ["order_id", "id", "oid"],
+    "orders": ["order_id", "id", "oid"],
+    "product": ["product_id", "id", "pid", "sku"],
+    "products": ["product_id", "id", "pid", "sku"],
+    "vehicle": ["vehicle_id", "id", "vin", "vehicleid"],
+    "vehicles": ["vehicle_id", "id", "vin", "vehicleid"],
+    "contact": ["contact_id", "id"],
+    "location": ["location_id", "id", "lat", "lon"],
+    "report": ["report_id", "id", "type"],
+    "service": ["service_id", "id"],
+    "booking": ["booking_id", "id", "ref"],
+    "post": ["post_id", "id"],
+    "posts": ["post_id", "id"],
+    "comment": ["comment_id", "id"],
+    "comments": ["comment_id", "id"],
+    "coupon": ["coupon_code", "code", "id"],
+    "coupons": ["coupon_code", "code", "id"],
+    "search": ["q", "query", "search", "keyword"],
+    "login": ["username", "email", "password"],
+    "auth": ["token", "code", "redirect_uri"],
+    "token": ["token", "refresh_token", "code"],
+    "file": ["file", "filename", "path", "id"],
+    "files": ["file", "filename", "path", "id"],
+    "download": ["file", "filename", "path", "id"],
+    "upload": ["file", "filename"],
+    "image": ["image_id", "id", "file"],
+    "video": ["video_id", "id", "file"],
+    "category": ["category_id", "id", "cat"],
+    "categories": ["category_id", "id", "cat"],
+}
+
+
+def infer_params_from_path(path: str) -> list[str]:
+    """
+    Infer likely parameter names from a URL path.
+
+    For example:
+    - /mechanic → ["mechanic_code", "mechanic_id", "id", "code"]
+    - /user/profile → ["user_id", "id", "uid", "username"]
+    """
+    params: list[str] = []
+    path_lower = path.lower().rstrip("/")
+    segments = [s for s in path_lower.split("/") if s]
+
+    for segment in segments:
+        # Direct match
+        if segment in PATH_TO_PARAMS:
+            params.extend(PATH_TO_PARAMS[segment])
+        # Partial match (e.g., "user-details" matches "user")
+        else:
+            for key, key_params in PATH_TO_PARAMS.items():
+                if key in segment:
+                    params.extend(key_params)
+                    break
+
+    # Add generic params for API paths
+    if "/api/" in path_lower or "/rest/" in path_lower:
+        params.extend(["id", "token", "limit", "offset", "page"])
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_params = []
+    for p in params:
+        if p not in seen:
+            seen.add(p)
+            unique_params.append(p)
+
+    return unique_params[:10]  # Limit to 10 params
+
+
+async def probe_api_base(
+    base_url: str,
+    api_path: str,
+    auth_session: Any | None = None,
+    limit: int = 50,
+    concurrency: int = 10
+) -> list[dict[str, Any]]:
+    """
+    Probe common API resources at a discovered API base path.
+
+    When we find an API base like /workshop/api/, probe for common resources:
+    - /workshop/api/mechanic
+    - /workshop/api/users
+    - /workshop/api/vehicles
+    etc.
+
+    Args:
+        base_url: Target base URL
+        api_path: API base path (e.g., "/workshop/api/")
+        auth_session: Optional auth session for authenticated probing
+        limit: Max resources to probe
+        concurrency: Max concurrent requests
+
+    Returns:
+        List of discovered endpoints with their params
+    """
+    discovered: list[dict[str, Any]] = []
+    api_path = api_path.rstrip("/")
+
+    # Read resources from wordlist
+    resources_file = WORDLIST_PATHS.get("api_resources")
+    resources = _read_wordlist(resources_file, limit=limit) if resources_file else []
+
+    # Add high-priority resources at the top
+    priority_resources = [
+        "mechanic", "users", "vehicles", "orders", "products",
+        "posts", "comments", "contact", "location", "service",
+        "otp", "validate", "verify", "check", "report"
+    ]
+    resources = priority_resources + [r for r in resources if r not in priority_resources]
+    resources = resources[:limit]
+
+    headers = {}
+    if auth_session:
+        try:
+            exported = auth_session.export_session()
+            headers = exported.get("headers", {}) or {}
+        except Exception:
+            pass
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def probe_resource(client: httpx.AsyncClient, resource: str) -> dict[str, Any] | None:
+        async with semaphore:
+            endpoint = f"{api_path}/{resource}"
+            url = urllib.parse.urljoin(base_url, endpoint)
+
+            try:
+                resp = await client.get(url, headers=headers)
+                status = resp.status_code
+                content_type = resp.headers.get("content-type", "")
+                body = resp.text[:2000] if resp.text else ""
+
+                # Consider it found if not 404 or if it returns API-like response
+                is_api_response = (
+                    _is_json_response(body, content_type) or
+                    _looks_like_api_error(body)
+                )
+
+                if status != 404 or is_api_response:
+                    # Infer parameters from this endpoint
+                    inferred_params = infer_params_from_path(endpoint)
+
+                    print(f"[discovery] Found API resource: {endpoint} ({status})", file=sys.stderr)
+                    return {
+                        "url": url,
+                        "path": endpoint,
+                        "status": status,
+                        "is_json": _is_json_response(body, content_type),
+                        "params": inferred_params,
+                        "needs_auth": status == 401 or status == 403,
+                    }
+            except Exception:
+                pass
+            return None
+
+    async with httpx.AsyncClient(verify=False, timeout=8.0, follow_redirects=True) as client:
+        tasks = [probe_resource(client, resource) for resource in resources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, dict):
+                discovered.append(result)
+
+    return discovered
+
+
 async def recursive_directory_discovery(
     base_url: str,
     initial_paths: list[str],
@@ -2490,8 +2662,28 @@ async def smart_discovery(
         ]
     directories = list(set(directories))
 
-    # Phase 2: Recursive fuzzing
-    print(f"[discovery] Phase 2: Recursive directory fuzzing ({len(directories)} base directories)", file=sys.stderr)
+    # Phase 2: Probe API bases for common resources
+    probed_endpoints: list[dict[str, Any]] = []
+    config = initial_discovery.get("config", {})
+    api_probe_limit = config.get("api_probe_limit", 600)
+
+    if api_bases:
+        print(f"[discovery] Phase 2a: Probing {len(api_bases)} API bases for common resources", file=sys.stderr)
+        per_base_limit = max(20, api_probe_limit // max(len(api_bases), 1))
+        for api_base in list(api_bases)[:5]:  # Limit to 5 bases
+            probed = await probe_api_base(url, api_base, limit=per_base_limit)
+            probed_endpoints.extend(probed)
+            # Add probed paths to directories for recursive fuzzing
+            for p in probed:
+                path = p.get("path", "")
+                if path and not path.endswith("/"):
+                    directories.append(path + "/")
+
+        if probed_endpoints:
+            print(f"[discovery] Probed {len(probed_endpoints)} API resources from bases", file=sys.stderr)
+
+    # Phase 2b: Recursive fuzzing
+    print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories)", file=sys.stderr)
     recursive_result = await recursive_directory_discovery(
         url,
         directories,
@@ -2518,9 +2710,39 @@ async def smart_discovery(
             return (0 if is_api else 1, 0 if has_params else 1, url)
         all_paths = sorted(all_paths, key=url_priority)[:max_urls]
 
+    # Add probed endpoints to all_urls and re-apply cap
+    probed_urls = [p.get("url", "") for p in probed_endpoints if p.get("url")]
+    all_paths = list(set(all_paths + probed_urls))
+
+    # Re-apply URL cap after merging probed URLs
+    if len(all_paths) > max_urls:
+        def url_priority_final(url: str) -> tuple:
+            has_params = "?" in url
+            is_api = any(p in url.lower() for p in ["/api/", "/rest/", "/graphql", "/v1/", "/v2/"])
+            is_probed = url in probed_urls
+            return (0 if is_probed else 1, 0 if is_api else 1, 0 if has_params else 1, url)
+        all_paths = sorted(all_paths, key=url_priority_final)[:max_urls]
+
     # Extract endpoints with params
     endpoints_with_params = []
+
+    # First, add probed endpoints (they have params from probing)
+    for probed in probed_endpoints:
+        if probed.get("url") and probed.get("params"):
+            endpoints_with_params.append({
+                "url": probed["url"],
+                "params": probed["params"],
+                "inferred": True,
+                "probed": True,
+            })
+
+    # Then process discovered paths
+    probed_url_set = set(probed_urls)
     for path in all_paths:
+        # Skip if already added from probed endpoints
+        if path in probed_url_set:
+            continue
+
         if "?" in path:
             parsed = urllib.parse.urlparse(path)
             params = list(urllib.parse.parse_qs(parsed.query).keys())
@@ -2529,17 +2751,8 @@ async def smart_discovery(
                 "params": params,
             })
         else:
-            # Infer params from path pattern
-            inferred_params = []
-            path_lower = path.lower()
-            if any(x in path_lower for x in ["/search", "/query"]):
-                inferred_params = ["q", "query", "search"]
-            elif any(x in path_lower for x in ["/user", "/profile"]):
-                inferred_params = ["id", "user", "username"]
-            elif any(x in path_lower for x in ["/product", "/item"]):
-                inferred_params = ["id", "product_id", "sku"]
-            elif "/api/" in path_lower:
-                inferred_params = ["id", "token", "limit", "offset"]
+            # Use the new infer_params_from_path function
+            inferred_params = infer_params_from_path(path)
 
             if inferred_params:
                 endpoints_with_params.append({
@@ -2548,11 +2761,19 @@ async def smart_discovery(
                     "inferred": True,
                 })
 
+    # Collect all discovered API endpoints
+    all_api_endpoints = list(set(
+        api_endpoints +
+        [p for p in all_paths if "/api/" in p or "/rest/" in p] +
+        probed_urls
+    ))
+
     return {
         "all_urls": all_paths,
-        "api_endpoints": list(set(api_endpoints + [p for p in all_paths if "/api/" in p or "/rest/" in p])),
+        "api_endpoints": all_api_endpoints,
         "parameterized_urls": initial_discovery.get("parameterized_urls", []),
         "endpoints_with_params": endpoints_with_params,
+        "probed_endpoints": probed_endpoints,  # New: include probed endpoints
         "forms": initial_discovery.get("forms", []),
         "discovered_params": initial_discovery.get("discovered_params", {}),
         "recursive_paths": recursive_paths,

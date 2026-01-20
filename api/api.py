@@ -245,6 +245,18 @@ class ScanOptions(BaseModel):
     # Examples: "POST /api/login username,password", "/api/users", "GET /api/items?id=1"
     custom_endpoints: Optional[list[str]] = None
 
+    # Smart scan tuning options
+    no_early_stop: bool = False                    # Disable early stopping in smart scan
+    thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
+    oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
+
+    # Safety/performance limits
+    smart_bola_max_endpoints: Optional[int] = None # Max endpoints for BOLA testing (default: 30)
+    dom_xss_max_files: Optional[int] = None        # Max JS files for DOM XSS (default: 20)
+    sqli_extract_max: Optional[int] = None         # Max SQLi findings for extraction (default: 3)
+    oob_max_findings: Optional[int] = None         # Max findings for OOB SQLi test (default: 3)
+    oob_max_payloads: Optional[int] = None         # Deprecated alias for oob_max_findings
+
 
 class ScanRequest(BaseModel):
     target: str
@@ -392,6 +404,20 @@ async def submit_scan(request: ScanRequest):
         # Default to quick scan
         scan_type = 'quick'
         request.options.scan_type = 'quick'
+
+    # Validate: public option is incompatible with active-enforced scan types
+    active_enforced_types = {'smart', 'full', 'aggressive'}
+    if scan_type in active_enforced_types and request.options.public:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_options",
+                "message": f"'public' option is incompatible with '{scan_type}' scan type. "
+                           f"{scan_type.capitalize()} scans require active testing (XSS/SQLi probes). "
+                           "Use 'deep' scan type for passive-only comprehensive scanning.",
+                "hint": f"Either remove 'public: true' or change scan_type to 'deep'"
+            }
+        )
 
     # Create or find target
     async with db_pool.acquire() as conn:

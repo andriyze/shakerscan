@@ -258,13 +258,14 @@ async def browser_fetch(
     crawl: bool = False,
     max_pages: int = 6,
     max_depth: int = 2,
-    max_links_per_page: int = 40
+    max_links_per_page: int = 40,
+    seed_urls: list[str] | None = None
 ) -> dict:
     async def curl_fallback(reason: str = "unknown"):
         print(f"[browser_fetch] Using curl fallback ({reason}) - no network capture available", file=sys.stderr)
         out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url])
         headers = {}
-        status = "HTTP/? 200"
+        status = None
         if out:
             lines = out.splitlines()
             if lines:
@@ -273,6 +274,8 @@ async def browser_fetch(
                     if ":" in line:
                         k, v = line.split(":", 1)
                         headers[k.strip().lower()] = [v.strip()]
+        if not status:
+            status = "HTTP/? 0"
         return {
             "headers": headers,
             "status": status,
@@ -438,7 +441,7 @@ async def browser_fetch(
                     return None
                 return urllib.parse.urlunparse(parsed._replace(fragment=""))
 
-            async def interactive_crawl(max_interactions: int = 15) -> int:
+            async def interactive_crawl(max_interactions: int = 40) -> int:
                 """Click through SPA elements to trigger API calls.
 
                 Returns the number of successful interactions.
@@ -476,20 +479,76 @@ async def browser_fetch(
                     '[role="button"]:not([disabled])',
                 ]
 
-                all_selectors = nav_selectors + dropdown_selectors + tab_selectors + action_selectors
+                # SPA-specific selectors (Material UI, Ant Design, etc.)
+                spa_selectors = [
+                    # Material UI (MUI)
+                    '.MuiListItem-root', '.MuiMenuItem-root', '.MuiTab-root',
+                    '.MuiButton-root:not([disabled])', '.MuiIconButton-root',
+                    '.MuiCard-root', '.MuiCardActionArea-root',
+                    # Ant Design
+                    '.ant-menu-item', '.ant-tabs-tab', '.ant-card',
+                    '.ant-btn:not([disabled])', '.ant-list-item',
+                    # Sidebar navigation
+                    '[class*="sidebar"] a', '[class*="Sidebar"] a',
+                    '[class*="side-nav"] a', '[class*="sidenav"] a',
+                    '.menu-item', '.menu-link',
+                    # Data tables and lists
+                    '[class*="table"] tr[data-row-key]',
+                    '[class*="list"] [class*="item"]',
+                    '.data-row', '.clickable-row',
+                    # Cards and tiles
+                    '[class*="card"]:not(.MuiCard-root):not(.ant-card)',
+                    '[class*="tile"]', '[class*="panel"]',
+                    # React Router / SPA Links
+                    'a[href^="/"]', '[class*="link"]',
+                ]
+
+                all_selectors = nav_selectors + dropdown_selectors + tab_selectors + action_selectors + spa_selectors
+
+                # Denylist for destructive/risky actions - skip elements matching these
+                risky_keywords = [
+                    "logout", "log out", "sign out", "signout",
+                    "delete", "remove", "destroy", "erase",
+                    "cancel", "deactivate", "disable", "revoke",
+                    "reset", "clear all", "wipe",
+                    "unsubscribe", "close account", "terminate",
+                ]
+
+                async def is_safe_to_click(element) -> bool:
+                    """Check if element is safe to click (not a destructive action)."""
+                    try:
+                        # Get text content and attributes
+                        text = (await element.text_content() or "").lower().strip()
+                        aria_label = (await element.get_attribute("aria-label") or "").lower()
+                        title = (await element.get_attribute("title") or "").lower()
+                        data_action = (await element.get_attribute("data-action") or "").lower()
+                        class_name = (await element.get_attribute("class") or "").lower()
+
+                        # Check all attributes for risky keywords
+                        all_text = f"{text} {aria_label} {title} {data_action} {class_name}"
+                        for keyword in risky_keywords:
+                            if keyword in all_text:
+                                return False
+                        return True
+                    except Exception:
+                        return True  # If we can't check, assume it's safe
 
                 for selector in all_selectors:
                     if interactions >= max_interactions:
                         break
                     try:
                         elements = await page.query_selector_all(selector)
-                        for el in elements[:3]:  # Limit clicks per selector
+                        for el in elements[:8]:  # Limit clicks per selector
                             if interactions >= max_interactions:
                                 break
                             try:
                                 # Check if element is visible and not already clicked
                                 is_visible = await el.is_visible()
                                 if not is_visible:
+                                    continue
+
+                                # Safe click filter: skip destructive actions
+                                if not await is_safe_to_click(el):
                                     continue
 
                                 await el.click(timeout=2000)
@@ -508,12 +567,22 @@ async def browser_fetch(
 
                 return interactions
 
-            async def crawl_pages(start_url: str) -> tuple[list[str], dict[str, Any]]:
+            async def crawl_pages(start_url: str, extra_seed_urls: list[str] | None = None) -> tuple[list[str], dict[str, Any]]:
                 if max_pages < 2:
                     return [start_url], {"pages_visited": 1, "depth_reached": 0, "interactions": 0}
 
                 visited: set[str] = set()
                 queue: list[tuple[str, int]] = [(start_url, 0)]
+
+                # Add extra seed URLs (e.g., from JS bundle analysis) at depth 1
+                # These are high-priority routes that should be visited early
+                if extra_seed_urls:
+                    for seed_url in extra_seed_urls:
+                        normalized = normalize_link(seed_url, start_url)
+                        if normalized and normalized != start_url:
+                            queue.append((normalized, 1))
+                    print(f"[browser_fetch] Added {len(extra_seed_urls)} seed URLs to crawl queue", file=sys.stderr)
+
                 max_depth_reached = 0
                 total_interactions = 0
 
@@ -534,7 +603,7 @@ async def browser_fetch(
                     # Only do this on first few pages to avoid excessive time
                     if len(visited) <= 5:
                         try:
-                            interactions = await interactive_crawl(max_interactions=10)
+                            interactions = await interactive_crawl(max_interactions=20)
                             total_interactions += interactions
                         except Exception:
                             pass
@@ -936,7 +1005,7 @@ async def browser_fetch(
 
             # Interactive crawl on initial page to trigger SPA API calls
             try:
-                initial_interactions = await interactive_crawl(max_interactions=15)
+                initial_interactions = await interactive_crawl(max_interactions=40)
                 if initial_interactions > 0:
                     print(
                         f"[browser_fetch] Interactive crawl: {initial_interactions} element interactions",
@@ -950,7 +1019,7 @@ async def browser_fetch(
                     f"[browser_fetch] Headless crawl enabled: max_pages={max_pages} depth={max_depth}",
                     file=sys.stderr
                 )
-                page_urls, crawl_stats = await crawl_pages(url)
+                page_urls, crawl_stats = await crawl_pages(url, extra_seed_urls=seed_urls)
                 if crawl_stats:
                     crawl_stats["initial_interactions"] = initial_interactions
 

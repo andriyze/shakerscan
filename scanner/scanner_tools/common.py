@@ -3,6 +3,7 @@ import hashlib
 import os
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
@@ -133,6 +134,44 @@ def get_auth_sqlmap_context(auth_session: Any | None = None) -> tuple[str | None
             header_lines.append(f"{name}: {value}")
 
     return cookie_str, header_lines
+
+
+def _host_from_value(value: str | None) -> str | None:
+    """Extract hostname from a URL or host string."""
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        # urlparse treats bare hosts as paths, so add a scheme-less prefix.
+        parsed = urllib.parse.urlparse(raw if "://" in raw else f"//{raw}")
+    except Exception:
+        return None
+    host = parsed.hostname
+    return host.lower() if host else None
+
+
+def is_in_scope_url(url: str, base_url: str | None, allow_subdomains: bool = True) -> bool:
+    """Check if url is in scope for the target base_url."""
+    if not url:
+        return False
+    if not base_url:
+        return True
+    base_host = _host_from_value(base_url)
+    target_host = _host_from_value(url)
+    if not base_host or not target_host:
+        return False
+    if target_host == base_host:
+        return True
+    if allow_subdomains and target_host.endswith(f".{base_host}"):
+        return True
+    # Common case: base host is www.example.com, allow apex + subdomains.
+    if allow_subdomains and base_host.startswith("www."):
+        apex = base_host[4:]
+        if target_host == apex or target_host.endswith(f".{apex}"):
+            return True
+    return False
 
 
 # =============================================================================
