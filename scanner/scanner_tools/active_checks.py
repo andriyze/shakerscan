@@ -1062,6 +1062,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
     ]
     sensitive_paths = high_priority_paths[:30] if quick_mode else high_priority_paths + medium_priority_paths + low_priority_paths[:20]
     async def test_canary():
+        """Test random non-existent paths to fingerprint error responses and detect catch-all servers."""
         rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         canary_paths = [f"/definitely-not-real-{rand_suffix}.txt", f"/.git/fake-file-{rand_suffix}", f"/test-{rand_suffix}/.env", f"/random-{rand_suffix}/config.php"]
         canary_responses: list[dict[str, Any]] = []
@@ -1071,10 +1072,31 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             headers_with_body, _, _ = await run(["curl", "-sS", "-i", "-L", "-k", "--max-time", "3", "--max-filesize", "50000", "-H", "User-Agent: Mozilla/5.0", full_url])
             if content_rc == 0 and content_out and headers_with_body:
                 first_line = headers_with_body.splitlines()[0] if headers_with_body else ""
-                if "200" in first_line:
-                    content_hash = hashlib.sha256(content_out.encode('utf-8', errors='ignore')).hexdigest()[:16]
-                    canary_responses.append({"path": canary, "content_hash": content_hash, "content_length": len(content_out), "content_sample": content_out[:500]})
-        return canary_responses
+                # Extract status code from response
+                status_code = "unknown"
+                if first_line:
+                    parts = first_line.split()
+                    if len(parts) >= 2:
+                        status_code = parts[1]
+                content_hash = hashlib.sha256(content_out.encode('utf-8', errors='ignore')).hexdigest()[:16]
+                # Record ALL responses regardless of status code
+                canary_responses.append({
+                    "path": canary,
+                    "status": status_code,
+                    "content_hash": content_hash,
+                    "content_length": len(content_out),
+                    "content_sample": content_out[:500]
+                })
+        # Detect catch-all servers: if all canary paths return identical content, server returns same response for everything
+        catch_all = False
+        catch_all_fingerprint = None
+        if len(canary_responses) >= 2:
+            unique_hashes = set(c["content_hash"] for c in canary_responses)
+            if len(unique_hashes) == 1:
+                # All random paths return identical content = catch-all server
+                catch_all = True
+                catch_all_fingerprint = canary_responses[0]
+        return {"catch_all": catch_all, "fingerprint": catch_all_fingerprint, "responses": canary_responses}
     def extract_header(headers: str, header_name: str):
         if not headers:
             return None
@@ -1124,7 +1146,34 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             markers.append("credential_like")
         return markers
 
-    async def check_path_smart(path: str, canary_fps: list[dict[str, Any]]):
+    # Plain-text soft-404 error patterns (common generic error messages)
+    SOFT_404_PATTERNS = [
+        "not found", "page not found", "404", "no available server",
+        "file not found", "does not exist", "cannot be found",
+        "resource not found", "invalid path", "unknown route",
+        "service unavailable", "server error", "bad request",
+        "access denied", "forbidden", "unauthorized", "not available",
+        "error occurred", "something went wrong", "please try again",
+        "the page you requested", "could not be found", "no longer exists"
+    ]
+
+    # Critical files that MUST have valid content markers to be reported
+    CRITICAL_FILE_VALIDATORS = {
+        "id_rsa": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "id_dsa": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "id_ecdsa": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "id_ed25519": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        ".pem": lambda c: "BEGIN" in c and ("PRIVATE KEY" in c or "CERTIFICATE" in c),
+        "server.key": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "private.key": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "privatekey": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "ssl.key": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "cert.key": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "privkey.pem": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+        "key.pem": lambda c: "BEGIN" in c and "PRIVATE KEY" in c,
+    }
+
+    async def check_path_smart(path: str, canary_fps: list[dict[str, Any]], canary_result: dict[str, Any]):
         full_url = urllib.parse.urljoin(base_url, path)
         headers_out, _, headers_rc = await run(["curl", "-sS", "-I", "-L", "-k", "--max-time", "5", "-H", "User-Agent: Mozilla/5.0", full_url])
         head_success = False
@@ -1143,15 +1192,24 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
                     return None
                 headers_out = headers_with_body.split("\r\n\r\n", 1)[0] if "\r\n\r\n" in headers_with_body else headers_with_body.split("\n\n", 1)[0]
         response_fp = create_fingerprint(content_out, headers_out)
+
+        # Check if server is a catch-all (returns identical content for all paths)
+        if canary_result.get("catch_all") and canary_result.get("fingerprint"):
+            catch_all_hash = canary_result["fingerprint"]["content_hash"]
+            if response_fp["hash"] == catch_all_hash:
+                return None  # Same content as random non-existent paths = false positive
+
         # Filter out HTML responses for non-HTML paths to cut false positives
         if response_fp["has_html"]:
             pl = path.lower()
             if not (pl.endswith(('.html', '.htm', '.php', '.asp', '.aspx')) or pl.startswith('.git')):
                 return None
+
+        # Compare against canary fingerprints (only if we have them)
         for canary_fp in canary_fps:
             if canary_fp["hash"] == response_fp["hash"]:
                 return None
-            if abs(canary_fp["length"] - response_fp["length"]) < canary_fp["length"] * 0.1:
+            if canary_fp["length"] > 0 and abs(canary_fp["length"] - response_fp["length"]) < canary_fp["length"] * 0.1:
                 if canary_fp.get("content_sample", "")[:200] == content_out[:200]:
                     return None
         expected_types = {".json": ["application/json", "text/json"], ".yml": ["text/yaml", "application/x-yaml", "text/plain"], ".yaml": ["text/yaml", "application/x-yaml", "text/plain"], ".xml": ["application/xml", "text/xml"], ".txt": ["text/plain"], ".env": ["text/plain", "application/octet-stream"]}
@@ -1176,6 +1234,19 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             except (json.JSONDecodeError, ValueError):
                 pass
 
+        # Filter out plain-text soft-404 error responses (short generic error messages)
+        if len(content_lower) < 200:  # Short responses are suspicious
+            if any(pattern in content_lower for pattern in SOFT_404_PATTERNS):
+                return None
+
+        # Critical files MUST have valid content markers - no marker = false positive
+        path_lower = path.lower()
+        for pattern, validator in CRITICAL_FILE_VALIDATORS.items():
+            if pattern in path_lower:
+                if not validator(content_out):
+                    return None  # Reject without valid markers
+                break  # Passed validation
+
         return {
             "path": path,
             "status": "200",
@@ -1189,11 +1260,12 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             "has_html": response_fp["has_html"],
             "markers": derive_markers(path, content_out),
         }
-    canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in await test_canary()]
+    canary_result = await test_canary()
+    canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in canary_result.get("responses", [])]
     batch_size = 10
     for i in range(0, len(sensitive_paths), batch_size):
         batch = sensitive_paths[i : i + batch_size]
-        results = await asyncio.gather(*[check_path_smart(p, canary_fps) for p in batch])
+        results = await asyncio.gather(*[check_path_smart(p, canary_fps, canary_result) for p in batch])
         exposed.extend([r for r in results if r])
 
     # Bundle .git exposures into a single grouped finding with subentries
