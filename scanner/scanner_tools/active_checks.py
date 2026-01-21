@@ -1157,58 +1157,32 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         "the page you requested", "could not be found", "no longer exists"
     ]
 
-    def is_private_key_content(content: str) -> bool:
-        """Check if content looks like a private key (PEM or binary formats)."""
-        # PEM format
-        if "BEGIN" in content and "PRIVATE KEY" in content:
-            return True
-        # Binary format detection (check raw bytes)
-        try:
-            raw = content.encode('latin-1') if isinstance(content, str) else content
-            # DER-encoded private key (ASN.1 SEQUENCE tag 0x30)
-            if raw[:1] == b'\x30' and len(raw) > 20:
-                # RSA private key typically starts with 30 82 (long form length)
-                if raw[1:2] in (b'\x82', b'\x81', b'\x80'):
-                    return True
-            # PKCS#12/PFX magic bytes
-            if raw[:4] == b'\x30\x82' or raw[:2] == b'0\x82':
-                # Could be PKCS#12 - check for typical structure
-                if len(raw) > 100:
-                    return True
-        except (UnicodeDecodeError, ValueError):
-            pass
-        return False
+    def is_pem_private_key(content: str) -> bool:
+        """Check if content looks like a PEM-encoded private key."""
+        # Note: Binary formats (DER/PKCS#12) can't be reliably detected because
+        # run() decodes stdout as UTF-8, dropping non-UTF8 bytes. PEM is text-based
+        # and survives UTF-8 decoding intact.
+        return "BEGIN" in content and "PRIVATE KEY" in content
 
-    def is_cert_content(content: str) -> bool:
-        """Check if content looks like a certificate (PEM or DER)."""
-        if "BEGIN" in content and "CERTIFICATE" in content:
-            return True
-        try:
-            raw = content.encode('latin-1') if isinstance(content, str) else content
-            # DER-encoded certificate starts with ASN.1 SEQUENCE
-            if raw[:1] == b'\x30' and len(raw) > 100:
-                return True
-        except (UnicodeDecodeError, ValueError):
-            pass
-        return False
+    def is_pem_certificate(content: str) -> bool:
+        """Check if content looks like a PEM-encoded certificate."""
+        return "BEGIN" in content and "CERTIFICATE" in content
 
-    # Critical files that MUST have valid content markers to be reported
+    # Critical files that MUST have valid PEM content markers to be reported.
+    # Binary formats (DER/PKCS#12) are not validated since run() decodes as UTF-8.
     CRITICAL_FILE_VALIDATORS = {
-        "id_rsa": is_private_key_content,
-        "id_dsa": is_private_key_content,
-        "id_ecdsa": is_private_key_content,
-        "id_ed25519": is_private_key_content,
-        ".pem": lambda c: is_private_key_content(c) or is_cert_content(c),
-        ".der": lambda c: is_private_key_content(c) or is_cert_content(c),
-        ".p12": is_private_key_content,
-        ".pfx": is_private_key_content,
-        "server.key": is_private_key_content,
-        "private.key": is_private_key_content,
-        "privatekey": is_private_key_content,
-        "ssl.key": is_private_key_content,
-        "cert.key": is_private_key_content,
-        "privkey.pem": is_private_key_content,
-        "key.pem": is_private_key_content,
+        "id_rsa": is_pem_private_key,
+        "id_dsa": is_pem_private_key,
+        "id_ecdsa": is_pem_private_key,
+        "id_ed25519": is_pem_private_key,
+        ".pem": lambda c: is_pem_private_key(c) or is_pem_certificate(c),
+        "server.key": is_pem_private_key,
+        "private.key": is_pem_private_key,
+        "privatekey": is_pem_private_key,
+        "ssl.key": is_pem_private_key,
+        "cert.key": is_pem_private_key,
+        "privkey.pem": is_pem_private_key,
+        "key.pem": is_pem_private_key,
     }
 
     async def check_path_smart(path: str, canary_fps: list[dict[str, Any]], canary_result: dict[str, Any]):
@@ -1276,7 +1250,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         # Be careful not to filter legitimate config files that happen to contain error words
         if len(content_lower) < 150:
             # Check if this looks like a config/secret file (has key=value or key: value patterns)
-            has_config_pattern = bool(re.search(r'(?m)^[A-Z_][A-Z0-9_]*\s*[=:]', content_out))
+            has_config_pattern = bool(re.search(r'(?mi)^[A-Z_][A-Z0-9_]*\s*[=:]', content_out))
             if not has_config_pattern:
                 # Only filter if error pattern is dominant (>40% of content)
                 for pattern in SOFT_404_PATTERNS:
