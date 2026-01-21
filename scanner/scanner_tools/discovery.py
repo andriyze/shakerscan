@@ -339,7 +339,7 @@ def _looks_like_login_redirect(location: str) -> bool:
     path = _normalize_location(location)
     if not path:
         return False
-    return bool(re.search(r"(^|/)(login|signin|sign-in|authenticate|auth)(/|\\?|$)", path))
+    return bool(re.search(r"(^|/)(login|signin|sign-in|authenticate|auth)(/|\?|$)", path))
 
 
 def path_exists(
@@ -363,6 +363,15 @@ def path_exists(
     if status is None:
         return False, "no_status", False
 
+    # Check login redirect FIRST - before baseline matching
+    # Auth-protected endpoints that redirect to login should not be dropped as baseline matches
+    login_redirect = (
+        redirect_status in (301, 302, 303, 307, 308)
+        and _looks_like_login_redirect(redirect_location)
+    )
+    if login_redirect:
+        return True, "login_redirect", True
+
     signature = build_response_signature(
         status=status,
         content_type=content_type,
@@ -383,13 +392,6 @@ def path_exists(
     is_html = _is_html_response(body, content_type)
     is_json = _is_json_response(body, content_type)
     protected = status in (401, 403)
-
-    login_redirect = (
-        redirect_status in (301, 302, 303, 307, 308)
-        and _looks_like_login_redirect(redirect_location)
-    )
-    if login_redirect:
-        return True, "login_redirect", True
 
     if status in (200, 201, 202, 204):
         if require_api_style and is_html:

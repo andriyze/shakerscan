@@ -190,8 +190,10 @@ def _is_valid_json_auth_success(resp: AuthResponse) -> tuple[bool, str]:
         return False, "not_json_content_type"
 
     # Gate 3: Must parse as valid JSON with token-like field
+    # Strip XSSI prefix before parsing (e.g., ")]}'" or "while(1);")
+    body_to_parse = _strip_xssi_prefix(resp.body)
     try:
-        data = json.loads(resp.body)
+        data = json.loads(body_to_parse)
         if not isinstance(data, dict):
             return False, "json_not_object"
     except json.JSONDecodeError:
