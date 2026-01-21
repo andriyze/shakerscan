@@ -22,18 +22,24 @@ export default function TargetsPage() {
   const [adding, setAdding] = useState(false)
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
   const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
+  const [openScanAllMenu, setOpenScanAllMenu] = useState<string | null>(null)
+  const [scanningDomains, setScanningDomains] = useState<Set<string>>(new Set())
   const [discoveringDomains, setDiscoveringDomains] = useState<Set<string>>(new Set())
   const scanMenuRef = useRef<HTMLDivElement>(null)
+  const scanAllMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     fetchTargets()
   }, [])
 
-  // Close scan menu when clicking outside
+  // Close scan menus when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (scanMenuRef.current && !scanMenuRef.current.contains(event.target as Node)) {
         setOpenScanMenu(null)
+      }
+      if (scanAllMenuRef.current && !scanAllMenuRef.current.contains(event.target as Node)) {
+        setOpenScanAllMenu(null)
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
@@ -101,6 +107,54 @@ export default function TargetsPage() {
       window.location.href = '/scans'
     } catch (err) {
       console.error('Failed to start scan:', err)
+    }
+  }
+
+  async function handleScanDomainSet(domain: GroupedDomain, scanType: ScanType) {
+    const allTargets: Target[] = []
+    if (domain.root_target) {
+      allTargets.push(domain.root_target)
+    }
+    allTargets.push(...domain.subdomains)
+
+    if (allTargets.length === 0) {
+      console.error('No targets to scan')
+      return
+    }
+
+    setScanningDomains(prev => new Set(prev).add(domain.root_domain))
+    setOpenScanAllMenu(null)
+
+    try {
+      const options: Record<string, boolean | string> = {}
+      switch (scanType) {
+        case 'quick':
+          options.quick = true
+          break
+        case 'standard':
+          break
+        case 'deep':
+          options.thorough = true
+          break
+        case 'full':
+          options.thorough = true
+          options.active = true
+          break
+        case 'smart':
+          options.scan_type = 'smart'
+          break
+      }
+
+      // Submit scans for all targets in parallel
+      await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
+      window.location.href = '/scans'
+    } catch (err) {
+      console.error('Failed to start domain set scan:', err)
+      setScanningDomains(prev => {
+        const next = new Set(prev)
+        next.delete(domain.root_domain)
+        return next
+      })
     }
   }
 
@@ -278,6 +332,64 @@ export default function TargetsPage() {
                       )}
                     </div>
                   </>
+                )}
+                {/* Scan All Menu - scan entire domain set */}
+                {domain.total_count > 0 && (
+                  <div className={`relative ${openScanAllMenu === domain.root_domain ? 'z-[100]' : ''}`} ref={openScanAllMenu === domain.root_domain ? scanAllMenuRef : null}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setOpenScanAllMenu(openScanAllMenu === domain.root_domain ? null : domain.root_domain)
+                      }}
+                      disabled={scanningDomains.has(domain.root_domain)}
+                      className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white rounded text-xs font-medium transition-colors"
+                      title={`Scan all ${domain.total_count} target${domain.total_count !== 1 ? 's' : ''} in this domain`}
+                    >
+                      {scanningDomains.has(domain.root_domain) ? (
+                        <>
+                          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                          <span>Starting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          <span>Scan All ({domain.total_count})</span>
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </>
+                      )}
+                    </button>
+                    {openScanAllMenu === domain.root_domain && (
+                      <div className="absolute right-0 mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                        <div className="px-3 py-2 border-b border-gray-700">
+                          <p className="text-xs text-gray-400">
+                            Scan {domain.root_target ? '1 root + ' : ''}{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
+                          </p>
+                        </div>
+                        {SCAN_TYPES.map((type) => (
+                          <button
+                            key={type.value}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleScanDomainSet(domain, type.value)
+                            }}
+                            className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm text-white font-medium">{type.label}</span>
+                              {type.requiresPermission && (
+                                <span className="text-xs text-yellow-500">Active</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-400 mt-0.5">{type.description}</p>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {/* Discover Button - always show for root domains */}
                 <button
