@@ -5874,12 +5874,12 @@ async def build_report(target: str,
 
     # Phase 2 Access Control & Auth Findings
     if rate_limiting_results.get("vulnerable"):
-        # Rate limiting findings - high severity
+        # Rate limiting findings - low severity
         for vuln_endpoint in rate_limiting_results.get("vulnerable_endpoints", []):
             report["findings"].append(normalize_finding(
                 "rate_limiting",
                 f"No rate limiting detected on {vuln_endpoint.get('endpoint')}",
-                "high",
+                "low",
                 vuln_endpoint,
                 "CWE-307"
             ))
