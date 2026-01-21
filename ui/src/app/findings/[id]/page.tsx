@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, Suspense } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { useParams } from 'next/navigation'
+import { useParams, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import FindingCard from '@/components/FindingCard'
 import { formatDate, getFinding, getSeverityBg, type Finding } from '@/lib/api'
 import { formatAnomaly, parseEvidence } from '@/lib/evidence-parser'
@@ -65,12 +66,27 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
   )
 }
 
-export default function FindingDetailPage() {
+function FindingDetailContent() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Build back URL with preserved filters
+  const buildBackUrl = () => {
+    const returnParams = new URLSearchParams()
+    searchParams.forEach((value, key) => {
+      if (key.startsWith('return_')) {
+        returnParams.set(key.replace('return_', ''), value)
+      }
+    })
+    const queryString = returnParams.toString()
+    return queryString ? `/findings?${queryString}` : '/findings'
+  }
+
+  const backUrl = buildBackUrl()
 
   useEffect(() => {
     async function fetchFinding() {
@@ -121,11 +137,11 @@ export default function FindingDetailPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <a href="/findings" className="text-gray-400 hover:text-white">
+        <Link href={backUrl} className="text-gray-400 hover:text-white">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-        </a>
+        </Link>
         <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
       </div>
 
@@ -406,5 +422,17 @@ export default function FindingDetailPage() {
         </SectionCard>
       )}
     </div>
+  )
+}
+
+export default function FindingDetailPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    }>
+      <FindingDetailContent />
+    </Suspense>
   )
 }

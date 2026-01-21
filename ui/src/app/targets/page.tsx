@@ -1,18 +1,9 @@
 'use client'
 
 import { useEffect, useState, useRef } from 'react'
+import Link from 'next/link'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, formatDate, type Target, type GroupedDomain } from '@/lib/api'
-
-type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
-
-const SCAN_TYPES: { value: ScanType; label: string; description: string; requiresPermission?: boolean }[] = [
-  { value: 'quick', label: 'Quick', description: '1-2 min • DNS, TLS, headers' },
-  { value: 'standard', label: 'Standard', description: '5-10 min • + Nuclei, cookies, CORS' },
-  { value: 'deep', label: 'Deep', description: '30-60 min • + Full Nuclei, ports' },
-  { value: 'full', label: 'Full', description: '1-2 hrs • + Active XSS/SQLi', requiresPermission: true },
-  { value: 'aggressive', label: 'Aggressive', description: '2+ hrs • Maximum coverage', requiresPermission: true },
-  { value: 'smart', label: 'Smart', description: 'Adaptive intelligent scan', requiresPermission: true },
-]
+import { SCAN_TYPES, getScanOptions, type ScanType } from '@/lib/constants'
 
 export default function TargetsPage() {
   const [domains, setDomains] = useState<GroupedDomain[]>([])
@@ -84,28 +75,7 @@ export default function TargetsPage() {
 
   async function handleScan(targetId: string, scanType: ScanType) {
     try {
-      const options: Record<string, boolean | string> = {}
-      switch (scanType) {
-        case 'quick':
-          options.quick = true
-          break
-        case 'standard':
-          // Default scan, no special options
-          break
-        case 'deep':
-          options.thorough = true
-          break
-        case 'full':
-          options.thorough = true
-          options.active = true
-          break
-        case 'aggressive':
-          options.scan_type = 'aggressive'
-          break
-        case 'smart':
-          options.scan_type = 'smart'
-          break
-      }
+      const options = getScanOptions(scanType)
       await scanTarget(targetId, options)
       setOpenScanMenu(null)
       window.location.href = '/scans'
@@ -130,28 +100,7 @@ export default function TargetsPage() {
     setOpenScanAllMenu(null)
 
     try {
-      const options: Record<string, boolean | string> = {}
-      switch (scanType) {
-        case 'quick':
-          options.quick = true
-          break
-        case 'standard':
-          break
-        case 'deep':
-          options.thorough = true
-          break
-        case 'full':
-          options.thorough = true
-          options.active = true
-          break
-        case 'aggressive':
-          options.scan_type = 'aggressive'
-          break
-        case 'smart':
-          options.scan_type = 'smart'
-          break
-      }
-
+      const options = getScanOptions(scanType)
       // Submit scans for all targets in parallel
       await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
       window.location.href = '/scans'
@@ -291,9 +240,21 @@ export default function TargetsPage() {
                 {domain.root_target && (
                   <>
                     <div className="flex items-center gap-4 text-sm text-gray-500">
-                      <span>{domain.root_target.total_scans} scans</span>
+                      <Link
+                        href={`/scans?domain=${domain.root_domain}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="hover:text-blue-400 transition-colors"
+                      >
+                        {domain.root_target.total_scans} scans
+                      </Link>
                       {domain.root_target.active_findings_count > 0 && (
-                        <span className="text-yellow-500">{domain.root_target.active_findings_count} findings</span>
+                        <Link
+                          href={`/findings?target_id=${domain.root_target.id}&status=active`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-yellow-500 hover:text-yellow-400 transition-colors"
+                        >
+                          {domain.root_target.active_findings_count} findings
+                        </Link>
                       )}
                     </div>
                     {domain.root_target.last_grade && (
@@ -332,7 +293,9 @@ export default function TargetsPage() {
                                   <span className="text-xs text-yellow-500">Active</span>
                                 )}
                               </div>
-                              <p className="text-xs text-gray-400 mt-0.5">{type.description}</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {type.duration ? `${type.duration} - ` : ''}{type.description}
+                              </p>
                             </button>
                           ))}
                         </div>
@@ -391,7 +354,9 @@ export default function TargetsPage() {
                                 <span className="text-xs text-yellow-500">Active</span>
                               )}
                             </div>
-                            <p className="text-xs text-gray-400 mt-0.5">{type.description}</p>
+                            <p className="text-xs text-gray-400 mt-0.5">
+                              {type.duration ? `${type.duration} - ` : ''}{type.description}
+                            </p>
                           </button>
                         ))}
                       </div>
@@ -452,9 +417,19 @@ export default function TargetsPage() {
 
                       {/* Subdomain Stats */}
                       <div className="flex items-center gap-4 text-sm text-gray-500">
-                        <span>{subdomain.total_scans} scans</span>
+                        <Link
+                          href={`/scans?domain=${domain.root_domain}`}
+                          className="hover:text-blue-400 transition-colors"
+                        >
+                          {subdomain.total_scans} scans
+                        </Link>
                         {subdomain.active_findings_count > 0 && (
-                          <span className="text-yellow-500">{subdomain.active_findings_count}</span>
+                          <Link
+                            href={`/findings?target_id=${subdomain.id}&status=active`}
+                            className="text-yellow-500 hover:text-yellow-400 transition-colors"
+                          >
+                            {subdomain.active_findings_count}
+                          </Link>
                         )}
                       </div>
 
@@ -495,7 +470,9 @@ export default function TargetsPage() {
                                     <span className="text-xs text-yellow-500">Active</span>
                                   )}
                                 </div>
-                                <p className="text-xs text-gray-400 mt-0.5">{type.description}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
+                                </p>
                               </button>
                             ))}
                           </div>

@@ -478,13 +478,16 @@ async def process_scan_job(job_data: dict):
 
     # Update Redis
     status = 'failed' if error else 'completed'
-    r.hset(f"job:{job_id}", mapping={
+    job_key = f"job:{job_id}"
+    r.hset(job_key, mapping={
         'status': status,
         'result_path': filepath,
         'score': str(score) if score else 'N/A',
         'grade': str(grade) if grade else 'N/A',
         'completed_at': completed_at.isoformat()
     })
+    # Expire completed/failed job keys after 24 hours
+    r.expire(job_key, 86400)
 
     print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
 
@@ -548,10 +551,13 @@ async def process_discovery_job(job_data: dict):
                 except Exception:
                     pass
 
-    r.hset(f"job:{job_id}", mapping={
+    job_key = f"job:{job_id}"
+    r.hset(job_key, mapping={
         'status': 'failed' if error else 'completed',
         'completed_at': completed_at.isoformat()
     })
+    # Expire completed/failed job keys after 24 hours
+    r.expire(job_key, 86400)
 
     print(f"[{job_id[:8]}] Discovery completed: {root_domain} | Found: {result.get('total', 0)} subdomains", flush=True)
 

@@ -482,40 +482,58 @@ async def submit_batch(request: BatchRequest):
 async def list_scans(
     status: Optional[str] = None,
     target: Optional[str] = None,
+    root_domain: Optional[str] = None,
     limit: int = Query(50, le=200),
     offset: int = 0
 ):
     """List scans with optional filtering."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT s.*, t.name as target_name
+            SELECT s.*, t.name as target_name, t.root_domain
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            WHERE 1=1
+        """
+        count_query = """
+            SELECT COUNT(*)
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
             WHERE 1=1
         """
         params = []
+        count_params = []
         param_idx = 1
+        count_param_idx = 1
 
         if status:
             query += f" AND s.status = ${param_idx}"
+            count_query += f" AND s.status = ${count_param_idx}"
             params.append(status)
+            count_params.append(status)
             param_idx += 1
+            count_param_idx += 1
 
         if target:
             query += f" AND s.target_url ILIKE ${param_idx}"
+            count_query += f" AND s.target_url ILIKE ${count_param_idx}"
             params.append(f"%{target}%")
+            count_params.append(f"%{target}%")
             param_idx += 1
+            count_param_idx += 1
+
+        if root_domain:
+            query += f" AND t.root_domain = ${param_idx}"
+            count_query += f" AND t.root_domain = ${count_param_idx}"
+            params.append(root_domain)
+            count_params.append(root_domain)
+            param_idx += 1
+            count_param_idx += 1
 
         query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
-
-        # Get total count
-        count_query = "SELECT COUNT(*) FROM scans WHERE 1=1"
-        if status:
-            count_query += f" AND status = '{status}'"
-        total = await conn.fetchval(count_query)
+        total = await conn.fetchval(count_query, *count_params)
 
     return {
         'scans': [dict(r) for r in rows],
@@ -714,6 +732,22 @@ async def list_targets_grouped(include_inactive: bool = False):
     }
 
 
+@app.get("/domains")
+async def list_domains():
+    """List unique root domains from targets."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT root_domain
+            FROM targets
+            WHERE root_domain IS NOT NULL AND is_active = true
+            ORDER BY root_domain
+        """)
+
+    return {
+        'domains': [r['root_domain'] for r in rows]
+    }
+
+
 @app.post("/targets")
 async def create_target(request: TargetCreate):
     """Create a new target."""
@@ -852,58 +886,112 @@ async def list_findings(
     status: Optional[str] = None,
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
+    root_domain: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
+    sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
     limit: int = Query(100, le=500),
     offset: int = 0
 ):
-    """List findings with filtering."""
+    """List findings with filtering and sorting."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT f.*, t.url as target_url, t.name as target_name
+            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE 1=1
+        """
+        count_query = """
+            SELECT COUNT(*)
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             WHERE 1=1
         """
         params = []
+        count_params = []
         param_idx = 1
+        count_param_idx = 1
 
         if severity:
             query += f" AND f.severity = ${param_idx}"
+            count_query += f" AND f.severity = ${count_param_idx}"
             params.append(severity)
+            count_params.append(severity)
             param_idx += 1
+            count_param_idx += 1
 
         if status:
             query += f" AND f.status = ${param_idx}"
+            count_query += f" AND f.status = ${count_param_idx}"
             params.append(status)
+            count_params.append(status)
             param_idx += 1
+            count_param_idx += 1
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
+            count_query += f" AND f.target_id = ${count_param_idx}"
             params.append(uuid.UUID(target_id))
+            count_params.append(uuid.UUID(target_id))
             param_idx += 1
+            count_param_idx += 1
 
         if scan_id:
             query += f" AND f.scan_id = ${param_idx}"
+            count_query += f" AND f.scan_id = ${count_param_idx}"
             params.append(uuid.UUID(scan_id))
+            count_params.append(uuid.UUID(scan_id))
             param_idx += 1
+            count_param_idx += 1
 
-        query += f"""
-            ORDER BY
+        if root_domain:
+            query += f" AND t.root_domain = ${param_idx}"
+            count_query += f" AND t.root_domain = ${count_param_idx}"
+            params.append(root_domain)
+            count_params.append(root_domain)
+            param_idx += 1
+            count_param_idx += 1
+
+        if search:
+            search_pattern = f"%{search}%"
+            query += f" AND (f.title ILIKE ${param_idx} OR f.url ILIKE ${param_idx})"
+            count_query += f" AND (f.title ILIKE ${count_param_idx} OR f.url ILIKE ${count_param_idx})"
+            params.append(search_pattern)
+            count_params.append(search_pattern)
+            param_idx += 1
+            count_param_idx += 1
+
+        # Build ORDER BY clause based on sort_by parameter
+        order_dir = "DESC" if sort_order == "desc" else "ASC"
+        if sort_by == "first_seen":
+            order_clause = f"f.first_seen_at {order_dir}"
+        elif sort_by == "last_seen":
+            order_clause = f"f.last_seen_at {order_dir}"
+        elif sort_by == "cvss":
+            order_clause = f"f.cvss_score {order_dir} NULLS LAST"
+        else:
+            # Default: severity (always show critical first regardless of sort_order)
+            order_clause = """
                 CASE f.severity
                     WHEN 'critical' THEN 1
                     WHEN 'high' THEN 2
                     WHEN 'medium' THEN 3
                     WHEN 'low' THEN 4
                     ELSE 5
-                END,
-                f.first_seen_at DESC
+                END""" + (", f.first_seen_at DESC" if sort_order == "desc" else ", f.first_seen_at ASC")
+
+        query += f"""
+            ORDER BY {order_clause}
             LIMIT ${param_idx} OFFSET ${param_idx + 1}
         """
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
+        total = await conn.fetchval(count_query, *count_params)
 
     return {
         'findings': [dict(r) for r in rows],
+        'total': total,
         'limit': limit,
         'offset': offset
     }
@@ -1769,10 +1857,11 @@ async def queue_stats():
         if not job_data:
             continue
 
-        status_str = job_data.get(b'status', b'').decode()
+        # Redis client uses decode_responses=True, so values are already strings
+        status_str = job_data.get('status', '')
 
         if status_str == 'running':
-            heartbeat = job_data.get(b'heartbeat', b'').decode()
+            heartbeat = job_data.get('heartbeat', '')
             if heartbeat:
                 try:
                     last_beat = datetime.fromisoformat(heartbeat)
