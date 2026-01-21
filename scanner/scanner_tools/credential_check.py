@@ -143,8 +143,15 @@ FAILURE_INDICATORS = [
     r"access\s*denied",
     r'"authenticated"\s*:\s*false',
     r'"success"\s*:\s*false',
-    r'"error"',
+    r'"error"\s*:',
     r"unauthorized",
+    # 404/error page patterns (reduce false positives from Next.js routing state, etc.)
+    r"not\s*found",
+    r"\b404\b",
+    r"page\s*(not\s*found|does\s*not\s*exist)",
+    r"resource\s*not\s*found",
+    r"bad\s*request",
+    r"forbidden",
 ]
 
 
@@ -298,6 +305,11 @@ async def test_credential(
             out = out.split("---RESPONSE_CODE:")[0]
         except IndexError:
             pass
+
+    # Reject 4xx/5xx status codes immediately (reduces false positives from error pages)
+    if response_code and response_code.isdigit():
+        if int(response_code) >= 400:
+            return None
 
     # Check for success indicators
     success_detected = False
