@@ -3,13 +3,14 @@
 import { useEffect, useState, useRef } from 'react'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, formatDate, type Target, type GroupedDomain } from '@/lib/api'
 
-type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart'
+type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
 
 const SCAN_TYPES: { value: ScanType; label: string; description: string; requiresPermission?: boolean }[] = [
   { value: 'quick', label: 'Quick', description: '1-2 min • DNS, TLS, headers' },
   { value: 'standard', label: 'Standard', description: '5-10 min • + Nuclei, cookies, CORS' },
   { value: 'deep', label: 'Deep', description: '30-60 min • + Full Nuclei, ports' },
   { value: 'full', label: 'Full', description: '1-2 hrs • + Active XSS/SQLi', requiresPermission: true },
+  { value: 'aggressive', label: 'Aggressive', description: '2+ hrs • Maximum coverage', requiresPermission: true },
   { value: 'smart', label: 'Smart', description: 'Adaptive intelligent scan', requiresPermission: true },
 ]
 
@@ -98,6 +99,9 @@ export default function TargetsPage() {
           options.thorough = true
           options.active = true
           break
+        case 'aggressive':
+          options.scan_type = 'aggressive'
+          break
         case 'smart':
           options.scan_type = 'smart'
           break
@@ -139,6 +143,9 @@ export default function TargetsPage() {
         case 'full':
           options.thorough = true
           options.active = true
+          break
+        case 'aggressive':
+          options.scan_type = 'aggressive'
           break
         case 'smart':
           options.scan_type = 'smart'
