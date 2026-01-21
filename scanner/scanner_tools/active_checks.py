@@ -1250,7 +1250,8 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         # Be careful not to filter legitimate config files that happen to contain error words
         if len(content_lower) < 150:
             # Check if this looks like a config/secret file (has key=value or key: value patterns)
-            has_config_pattern = bool(re.search(r'(?mi)^[A-Z_][A-Z0-9_]*\s*[=:]', content_out))
+            # Matches: KEY=, key=, db.host=, api-key=, 2fa_secret=, etc.
+            has_config_pattern = bool(re.search(r'(?m)^[A-Za-z0-9_][A-Za-z0-9_.\-]*\s*[=:]', content_out))
             if not has_config_pattern:
                 # Only filter if error pattern is dominant (>40% of content)
                 for pattern in SOFT_404_PATTERNS:
