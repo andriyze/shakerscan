@@ -151,9 +151,24 @@ def _parse_auth_response(raw: str) -> AuthResponse:
     return AuthResponse(status_code, content_type, location, set_cookies, body, is_json)
 
 
+def _strip_xssi_prefix(body: str) -> str:
+    """Strip common XSSI/anti-hijacking prefixes from JSON responses."""
+    stripped = body.lstrip()
+    # Common prefixes used by Google, Facebook, Angular, etc.
+    prefixes = [
+        ")]}'\n", ")]}',\n", ")]}'", ")]}\n", ")]}",
+        "while(1);", "for(;;);", "while(true);",
+        "])}while(1);</x>",
+    ]
+    for prefix in prefixes:
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].lstrip()
+    return stripped
+
+
 def _looks_like_json(body: str) -> bool:
-    """Check if body looks like JSON (starts with { or [)."""
-    stripped = body.strip()
+    """Check if body looks like JSON (starts with { or [), handling XSSI prefixes."""
+    stripped = _strip_xssi_prefix(body)
     return stripped.startswith("{") or stripped.startswith("[")
 
 
@@ -257,25 +272,34 @@ def _is_valid_form_auth_success(resp: AuthResponse, login_path: str) -> tuple[bo
             redirect_path = "/" + redirect_path.split("://", 1)[1].split("/", 1)[-1]
         redirect_path_base = redirect_path.split("?")[0].rstrip("/")
 
-        # Redirect is "away" if:
-        # 1. It goes to a different path than the login path, OR
-        # 2. It goes to a success-like path (dashboard, home, etc.)
+        # Redirect is "away" if it goes to a different path than the login path
         is_same_path = redirect_path_base == login_path_base
-        is_login_retry = redirect_path_base == login_path_base and "error" in loc_lower
 
-        # Success indicators in redirect path
-        success_paths = ["dashboard", "home", "welcome", "admin", "panel", "account", "profile"]
-        is_success_path = any(p in redirect_path_base for p in success_paths)
+        # Detect redirects to other login/auth pages (also a failure signal)
+        # Match paths that end with login markers or have them as path segments
+        # e.g., /signin, /user/login, /auth/login but NOT /login-success, /login-complete
+        login_page_pattern = r"(^|/)(login|signin|sign-in|auth|authenticate)(/|$|\?)"
+        is_redirect_to_login = bool(re.search(login_page_pattern, redirect_path_base))
 
-        # Redirect away if different path OR success path (allow /login-success)
-        has_redirect_away = (not is_same_path and not is_login_retry) or is_success_path
+        # Fix: is_success_path must NOT override same-path check
+        # A redirect to /admin/login?error=1 should NOT be treated as success
+        # Redirects to other login pages (/signin) are also failures
+        has_redirect_away = not is_same_path and not is_redirect_to_login
 
     has_session = resp.has_session_cookie
 
-    if has_redirect_away or has_session:
-        return True, "form_auth_success"
+    # Session cookie alone is weak evidence - many apps set anonymous session
+    # cookies on failed logins. Require positive body signals as confirmation.
+    success_signals = ["welcome", "logged in", "success", "hello", "authenticated"]
+    has_positive_body = any(sig in body_lower for sig in success_signals)
 
-    return False, "no_redirect_or_session"
+    if has_redirect_away:
+        return True, "form_auth_redirect"
+
+    if has_session and has_positive_body:
+        return True, "form_auth_session"
+
+    return False, "no_redirect_or_confirmed_session"
 
 
 def _shannon_entropy(value: str) -> float:

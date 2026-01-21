@@ -16,7 +16,9 @@ from scanner_tools.critical_checks import (
     AuthResponse,
     _is_valid_form_auth_success,
     _is_valid_json_auth_success,
+    _looks_like_json,
     _parse_auth_response,
+    _strip_xssi_prefix,
 )
 
 
@@ -265,7 +267,7 @@ class TestFormAuthValidation:
         )
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert is_success
-        assert reason == "form_auth_success"
+        assert reason == "form_auth_redirect"
 
     def test_rejects_redirect_back_to_login(self):
         """Redirect back to login indicates failed login."""
@@ -279,7 +281,7 @@ class TestFormAuthValidation:
         )
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert not is_success
-        assert reason == "no_redirect_or_session"
+        assert reason == "no_redirect_or_confirmed_session"
 
     def test_rejects_redirect_to_signin(self):
         """Redirect to signin page indicates failed login."""
@@ -294,8 +296,8 @@ class TestFormAuthValidation:
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert not is_success
 
-    def test_accepts_session_cookie(self):
-        """Session cookie indicates successful login."""
+    def test_accepts_session_cookie_with_positive_signal(self):
+        """Session cookie with positive body signal indicates successful login."""
         resp = AuthResponse(
             status_code=200,
             content_type="text/html",
@@ -306,20 +308,21 @@ class TestFormAuthValidation:
         )
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert is_success
-        assert reason == "form_auth_success"
+        assert reason == "form_auth_session"
 
-    def test_accepts_jwt_cookie(self):
-        """JWT cookie indicates successful login."""
+    def test_accepts_jwt_cookie_with_positive_signal(self):
+        """JWT cookie with success signal indicates successful login."""
         resp = AuthResponse(
             status_code=200,
             content_type="text/html",
             location=None,
             set_cookies=["jwt=eyJhbGciOi...; Path=/; HttpOnly; Secure"],
-            body="Dashboard",
+            body="You have successfully logged in",
             is_json=False,
         )
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert is_success
+        assert reason == "form_auth_session"
 
     def test_rejects_error_in_body(self):
         """Error message in body indicates failed login."""
@@ -389,7 +392,7 @@ class TestFormAuthValidation:
         )
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert not is_success
-        assert reason == "no_redirect_or_session"
+        assert reason == "no_redirect_or_confirmed_session"
 
 
 class TestHasSessionCookie:
@@ -694,7 +697,7 @@ class TestIntegration:
         resp = _parse_auth_response(raw)
         is_success, reason = _is_valid_form_auth_success(resp, "/admin/login")
         assert is_success
-        assert reason == "form_auth_success"
+        assert reason == "form_auth_redirect"
 
     def test_csrf_cookie_does_not_cause_false_positive(self):
         """CSRF cookie alone should not indicate successful auth."""
@@ -709,7 +712,7 @@ class TestIntegration:
         resp = _parse_auth_response(raw)
         is_success, reason = _is_valid_form_auth_success(resp, "/login")
         assert not is_success
-        assert reason == "no_redirect_or_session"
+        assert reason == "no_redirect_or_confirmed_session"
 
     def test_100_continue_with_json_auth(self):
         """Full flow with 100 Continue followed by JSON auth success."""
@@ -725,3 +728,105 @@ class TestIntegration:
         resp = _parse_auth_response(raw)
         is_success, reason = _is_valid_json_auth_success(resp)
         assert is_success
+
+
+class TestEdgeCaseFixes:
+    """Tests for edge case fixes: is_success_path override, XSSI prefixes, session-only."""
+
+    def test_rejects_admin_login_redirect_with_error(self):
+        """Redirect to /admin/login?error=1 should NOT be treated as success.
+
+        This tests the fix for the is_success_path override bug where paths
+        containing 'admin' would be treated as success even when redirecting
+        back to the same login path.
+        """
+        resp = AuthResponse(
+            status_code=302,
+            content_type="text/html",
+            location="/admin/login?error=1",
+            set_cookies=[],
+            body="",
+            is_json=False,
+        )
+        is_success, reason = _is_valid_form_auth_success(resp, "/admin/login")
+        assert not is_success
+        assert reason == "no_redirect_or_confirmed_session"
+
+    def test_rejects_account_login_redirect_with_retry(self):
+        """Redirect to /account/login?retry=true should NOT be success.
+
+        Similar test with 'account' in the path which was in success_paths.
+        """
+        resp = AuthResponse(
+            status_code=302,
+            content_type="text/html",
+            location="/account/login?retry=true",
+            set_cookies=[],
+            body="",
+            is_json=False,
+        )
+        is_success, reason = _is_valid_form_auth_success(resp, "/account/login")
+        assert not is_success
+
+    def test_rejects_session_cookie_without_positive_body(self):
+        """Session cookie without positive body signals should be rejected.
+
+        Many apps set anonymous session cookies on failed logins. We require
+        positive body signals like 'welcome', 'success', 'logged in', etc.
+        """
+        resp = AuthResponse(
+            status_code=200,
+            content_type="text/html",
+            location=None,
+            set_cookies=["session_id=abc123; Path=/; HttpOnly"],
+            body="<html><body>Please enter your credentials</body></html>",
+            is_json=False,
+        )
+        is_success, reason = _is_valid_form_auth_success(resp, "/login")
+        assert not is_success
+        assert reason == "no_redirect_or_confirmed_session"
+
+
+class TestXSSIPrefixStripping:
+    """Tests for XSSI anti-hijacking prefix handling."""
+
+    def test_strip_angular_prefix(self):
+        """Strip Angular/Google style )]}' prefix."""
+        body = ")]}'\n{\"token\": \"abc123\"}"
+        assert _strip_xssi_prefix(body) == '{"token": "abc123"}'
+
+    def test_strip_angular_prefix_with_comma(self):
+        """Strip )]}', prefix variant."""
+        body = ")]}',\n{\"success\": true}"
+        assert _strip_xssi_prefix(body) == '{"success": true}'
+
+    def test_strip_while_prefix(self):
+        """Strip while(1); prefix."""
+        body = "while(1);{\"data\": []}"
+        assert _strip_xssi_prefix(body) == '{"data": []}'
+
+    def test_strip_for_prefix(self):
+        """Strip Facebook style for(;;); prefix."""
+        body = "for(;;);{\"user\": \"test\"}"
+        assert _strip_xssi_prefix(body) == '{"user": "test"}'
+
+    def test_strip_complex_prefix(self):
+        """Strip complex ])}while(1);</x> prefix."""
+        body = "])}while(1);</x>{\"result\": \"ok\"}"
+        assert _strip_xssi_prefix(body) == '{"result": "ok"}'
+
+    def test_no_strip_normal_json(self):
+        """Normal JSON should not be modified."""
+        body = '{"token": "xyz"}'
+        assert _strip_xssi_prefix(body) == body
+
+    def test_looks_like_json_with_xssi_prefix(self):
+        """_looks_like_json should detect JSON with XSSI prefix."""
+        assert _looks_like_json(")]}'\n{\"token\": \"abc\"}")
+        assert _looks_like_json("while(1);[1, 2, 3]")
+        assert _looks_like_json("for(;;);{}")
+
+    def test_looks_like_json_rejects_non_json(self):
+        """_looks_like_json should reject non-JSON even with similar prefixes."""
+        assert not _looks_like_json(")]}'\n<html>Not JSON</html>")
+        assert not _looks_like_json("while(1);plain text")

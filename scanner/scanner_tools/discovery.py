@@ -6,6 +6,7 @@ import re
 import secrets
 import sys
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -200,6 +201,15 @@ def _normalize_candidate_path(path: str) -> str | None:
     return cleaned
 
 
+@dataclass(frozen=True)
+class ResponseSignature:
+    status: int | None
+    content_type: str
+    body_hash: str
+    redirect_status: int | None
+    redirect_location: str
+
+
 def _is_api_candidate_path(target_url: str) -> bool:
     if not target_url:
         return False
@@ -245,6 +255,166 @@ def _is_json_response(body: str, content_type: str) -> bool:
         return False
     sample = body.lstrip()
     return sample.startswith("{") or sample.startswith("[")
+
+
+def _normalize_content_type(content_type: str) -> str:
+    return content_type.split(";", 1)[0].strip().lower() if content_type else ""
+
+
+def _normalize_location(location: str) -> str:
+    if not location:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(location)
+    except Exception:
+        return location.strip().lower()
+    path = parsed.path or ""
+    query = parsed.query or ""
+    if query:
+        return f"{path}?{query}".strip().lower()
+    return path.strip().lower()
+
+
+def _body_hash(body: str) -> str:
+    sample = body[:4000] if body else ""
+    return hashlib.sha256(sample.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _extract_redirect_info(resp: httpx.Response) -> tuple[int | None, str]:
+    if resp.history:
+        last = resp.history[-1]
+        return last.status_code, last.headers.get("location", "")
+    return None, resp.headers.get("location", "")
+
+
+def build_response_signature(
+    status: int | None,
+    content_type: str,
+    body: str,
+    redirect_status: int | None = None,
+    redirect_location: str = ""
+) -> ResponseSignature:
+    return ResponseSignature(
+        status=status,
+        content_type=_normalize_content_type(content_type),
+        body_hash=_body_hash(body),
+        redirect_status=redirect_status,
+        redirect_location=_normalize_location(redirect_location),
+    )
+
+
+_BASELINE_SIGNATURE_CACHE: dict[str, ResponseSignature] = {}
+
+
+async def get_baseline_signature(
+    base_url: str,
+    client: httpx.AsyncClient,
+    timeout: float = 5.0
+) -> ResponseSignature | None:
+    cache_key = base_url.rstrip("/")
+    cached = _BASELINE_SIGNATURE_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    baseline_path = f"/__probe_{secrets.token_hex(4)}"
+    baseline_url = urllib.parse.urljoin(base_url, baseline_path)
+    try:
+        resp = await client.get(baseline_url, timeout=timeout)
+    except Exception:
+        return None
+
+    redirect_status, redirect_location = _extract_redirect_info(resp)
+    signature = build_response_signature(
+        status=resp.status_code,
+        content_type=resp.headers.get("content-type", ""),
+        body=resp.text or "",
+        redirect_status=redirect_status,
+        redirect_location=redirect_location,
+    )
+    _BASELINE_SIGNATURE_CACHE[cache_key] = signature
+    return signature
+
+
+def _looks_like_login_redirect(location: str) -> bool:
+    path = _normalize_location(location)
+    if not path:
+        return False
+    return bool(re.search(r"(^|/)(login|signin|sign-in|authenticate|auth)(/|\\?|$)", path))
+
+
+def path_exists(
+    *,
+    status: int | None,
+    content_type: str,
+    body: str,
+    redirect_status: int | None,
+    redirect_location: str,
+    allow: str,
+    www_auth: str,
+    target_url: str,
+    baseline_signature: ResponseSignature | None,
+    require_api_style: bool = False
+) -> tuple[bool, str, bool]:
+    """
+    Determine if a probed path likely exists.
+
+    Returns: (exists, reason, protected)
+    """
+    if status is None:
+        return False, "no_status", False
+
+    signature = build_response_signature(
+        status=status,
+        content_type=content_type,
+        body=body,
+        redirect_status=redirect_status,
+        redirect_location=redirect_location,
+    )
+    if baseline_signature and signature == baseline_signature:
+        if status in (401, 403, 405):
+            if not (www_auth or allow or _is_api_candidate_path(target_url)):
+                return False, "baseline_match", False
+        else:
+            return False, "baseline_match", False
+
+    if status in (404, 410):
+        return False, f"status_{status}", False
+
+    is_html = _is_html_response(body, content_type)
+    is_json = _is_json_response(body, content_type)
+    protected = status in (401, 403)
+
+    login_redirect = (
+        redirect_status in (301, 302, 303, 307, 308)
+        and _looks_like_login_redirect(redirect_location)
+    )
+    if login_redirect:
+        return True, "login_redirect", True
+
+    if status in (200, 201, 202, 204):
+        if require_api_style and is_html:
+            return False, "html_success", False
+        return True, "success", protected
+
+    if status in (301, 302, 303, 307, 308):
+        if redirect_location or is_json:
+            return True, "redirect", protected
+        return False, "redirect_no_location", False
+
+    if status == 405:
+        if allow or is_json or (not is_html and _looks_like_api_error(body)):
+            return True, "method_not_allowed", protected
+        return False, "method_not_allowed_no_signal", False
+
+    if status in (400, 401, 403, 409, 422, 429, 500):
+        if www_auth:
+            return True, "auth_required", True
+        if is_json or (not is_html and _looks_like_api_error(body)):
+            return True, "api_error", protected
+        if not require_api_style and not is_html:
+            return True, "non_html_error", protected
+
+    return False, f"status_{status}", protected
 
 
 def _normalize_json_link(link: str, base_url: str, current_url: str | None = None) -> str | None:
@@ -537,24 +707,7 @@ async def _probe_api_candidates(
             "Accept": "application/json, */*;q=0.1",
         }
     ) as client:
-        baseline_path = f"/__probe_{secrets.token_hex(4)}"
-        baseline_url = urllib.parse.urljoin(base_url, baseline_path)
-        baseline_body = ""
-        baseline_status = None
-        baseline_signature = None
-        try:
-            baseline_resp = await client.get(baseline_url)
-            baseline_body = baseline_resp.text or ""
-            baseline_ct = baseline_resp.headers.get("content-type", "")
-            baseline_status = baseline_resp.status_code
-            baseline_signature = (
-                baseline_status,
-                baseline_ct.split(";")[0].strip().lower(),
-                hashlib.sha256(baseline_body[:4000].encode("utf-8", errors="ignore")).hexdigest()[:12],
-            )
-        except Exception:
-            baseline_ct = ""
-            baseline_signature = None
+        baseline_signature = await get_baseline_signature(base_url, client, timeout=timeout)
 
         sem = asyncio.Semaphore(concurrency)
         discovered: list[str] = []
@@ -575,41 +728,22 @@ async def _probe_api_candidates(
             content_type = resp.headers.get("content-type", "")
             allow = resp.headers.get("allow", "")
             www_auth = resp.headers.get("www-authenticate", "")
-            location = resp.headers.get("location", "")
+            redirect_status, redirect_location = _extract_redirect_info(resp)
 
-            is_html = _is_html_response(body, content_type)
-            is_json = _is_json_response(body, content_type)
-            signature = (
-                status,
-                content_type.split(";")[0].strip().lower(),
-                hashlib.sha256(body[:4000].encode("utf-8", errors="ignore")).hexdigest()[:12],
+            exists, _reason, _protected = path_exists(
+                status=status,
+                content_type=content_type,
+                body=body,
+                redirect_status=redirect_status,
+                redirect_location=redirect_location,
+                allow=allow,
+                www_auth=www_auth,
+                target_url=target_url,
+                baseline_signature=baseline_signature,
+                require_api_style=True,
             )
-            matches_baseline = baseline_signature and signature == baseline_signature and status == baseline_status
-            if matches_baseline and status in (401, 403, 405):
-                if not (www_auth or allow or _is_api_candidate_path(target_url)):
-                    return
-            elif matches_baseline:
-                return
-
-            if status in (200, 201, 202, 204):
-                if is_json or not is_html:
-                    discovered.append(target_url)
-                return
-
-            if status in (301, 302, 307, 308):
-                if location or is_json:
-                    discovered.append(target_url)
-                return
-
-            if status == 405:
-                if allow or is_json or (not is_html and _looks_like_api_error(body)):
-                    discovered.append(target_url)
-                return
-
-            if status in (400, 401, 403, 409, 422, 429, 500):
-                if is_json or (not is_html and _looks_like_api_error(body)) or www_auth:
-                    discovered.append(target_url)
-                return
+            if exists:
+                discovered.append(target_url)
 
         tasks = [fetch(candidate) for candidate in candidates]
         if tasks:
@@ -2208,14 +2342,25 @@ async def probe_api_base(
                 status = resp.status_code
                 content_type = resp.headers.get("content-type", "")
                 body = resp.text[:2000] if resp.text else ""
+                allow = resp.headers.get("allow", "")
+                www_auth = resp.headers.get("www-authenticate", "")
+                redirect_status, redirect_location = _extract_redirect_info(resp)
 
                 # Consider it found if not 404 or if it returns API-like response
-                is_api_response = (
-                    _is_json_response(body, content_type) or
-                    _looks_like_api_error(body)
+                exists, reason, protected = path_exists(
+                    status=status,
+                    content_type=content_type,
+                    body=body,
+                    redirect_status=redirect_status,
+                    redirect_location=redirect_location,
+                    allow=allow,
+                    www_auth=www_auth,
+                    target_url=url,
+                    baseline_signature=baseline_signature,
+                    require_api_style=True,
                 )
 
-                if status != 404 or is_api_response:
+                if exists:
                     # Infer parameters from this endpoint
                     inferred_params = infer_params_from_path(endpoint)
 
@@ -2226,13 +2371,15 @@ async def probe_api_base(
                         "status": status,
                         "is_json": _is_json_response(body, content_type),
                         "params": inferred_params,
-                        "needs_auth": status == 401 or status == 403,
+                        "needs_auth": protected,
+                        "decision_reason": reason,
                     }
             except Exception:
                 pass
             return None
 
     async with httpx.AsyncClient(verify=False, timeout=8.0, follow_redirects=True) as client:
+        baseline_signature = await get_baseline_signature(base_url, client, timeout=8.0)
         tasks = [probe_resource(client, resource) for resource in resources]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
