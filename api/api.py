@@ -34,7 +34,8 @@ MAX_SCAN_DURATION = {
     'standard': 45,
     'deep': 120,
     'full': 180,
-    'aggressive': 300,
+    'aggressive': 480,
+    'smart': 360,
 }
 
 
