@@ -9,7 +9,8 @@ from .common import run
 
 async def tlsx_probe(host: str, port: int) -> dict[str, Any]:
     tlsx_cmd = "/opt/tools/tlsx" if os.path.exists("/opt/tools/tlsx") else "tlsx"
-    out, err, rc = await run([tlsx_cmd, "-host", f"{host}:{port}", "-json", "-verbose"], timeout=90)
+    # Add timeout, san flags and explicit resolver (Docker DNS not compatible with tlsx's fastdialer)
+    out, err, rc = await run([tlsx_cmd, "-host", f"{host}:{port}", "-json", "-san", "-timeout", "30", "-resolvers", "8.8.8.8,1.1.1.1"], timeout=60)
     endpoints, cert = [], {}
     if rc == 0 and out:
         for line in out.splitlines():
@@ -23,22 +24,30 @@ async def tlsx_probe(host: str, port: int) -> dict[str, Any]:
                 "tlsversion": row.get("tls_version") or row.get("tlsversion"),
                 "cipher": row.get("cipher"),
                 "alpn": row.get("alpn"),
-                "handshake_completed": row.get("handshake_completed"),
+                "handshake_completed": row.get("handshake_completed") or row.get("probe_status"),
             })
-            if not cert and row.get("certificate_response"):
-                c = row["certificate_response"]
-                cert = {
-                    "subject": c.get("subject_dn"),
-                    "issuer": c.get("issuer_dn"),
-                    "sans": c.get("dns_names"),
-                    "not_before": c.get("not_before"),
-                    "not_after": c.get("not_after"),
-                    "key_algo": c.get("public_key_info", {}).get("key_algorithm"),
-                    "key_size": c.get("public_key_info", {}).get("key_size"),
-                    "sig_algo": c.get("signature_algorithm"),
-                    "ocsp_urls": c.get("ocsp_urls"),
-                    "ca_issuer_urls": c.get("ca_issuers_urls"),
-                }
+            # Handle both old format (certificate_response) and new format (flat fields)
+            if not cert:
+                c = row.get("certificate_response") or row
+                # Check if we have certificate data
+                if c.get("subject_dn") or c.get("subject_cn") or c.get("not_before"):
+                    cert = {
+                        "subject": c.get("subject_dn") or c.get("subject_cn"),
+                        "issuer": c.get("issuer_dn"),
+                        "issuer_org": c.get("issuer_org"),
+                        "issuer_cn": c.get("issuer_cn"),
+                        "sans": c.get("dns_names") or c.get("subject_an"),  # subject_an is new field name
+                        "not_before": c.get("not_before"),
+                        "not_after": c.get("not_after"),
+                        "key_algo": c.get("public_key_info", {}).get("key_algorithm") if isinstance(c.get("public_key_info"), dict) else None,
+                        "key_size": c.get("public_key_info", {}).get("key_size") if isinstance(c.get("public_key_info"), dict) else None,
+                        "sig_algo": c.get("signature_algorithm"),
+                        "ocsp_urls": c.get("ocsp_urls"),
+                        "ca_issuer_urls": c.get("ca_issuers_urls"),
+                        "serial": c.get("serial"),
+                        "fingerprints": c.get("fingerprint_hash"),
+                        "wildcard": c.get("wildcard_certificate"),
+                    }
     return {"endpoints": endpoints, "certificate": cert}
 
 def days_until(iso_dt: str | None) -> int | None:

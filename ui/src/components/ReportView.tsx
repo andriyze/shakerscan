@@ -278,7 +278,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {dns.dmarc?.record && <div><h3 className="text-sm text-gray-400 mb-1">DMARC Record</h3><p className="font-mono text-xs break-all">{dns.dmarc.record}</p></div>}
             {dns.dkim && <div><h3 className="text-sm text-gray-400 mb-1">DKIM</h3><p className={`text-sm ${dns.dkim.found ? 'text-green-400' : 'text-gray-500'}`}>{dns.dkim.found ? `Found (${dns.dkim.selectors_found?.join(', ') || 'selectors detected'})` : 'Not detected'}</p></div>}
             {dns.caa && <div><h3 className="text-sm text-gray-400 mb-1">CAA Records</h3><p className="font-mono text-xs">{Array.isArray(dns.caa) ? dns.caa.map((r: any) => typeof r === 'string' ? r : `${r.flags || 0} ${r.tag} ${r.value}`).join('; ') : (dns.caa.records ? dns.caa.records.join('; ') : 'Not configured')}</p></div>}
-            {dns.dnssec && <div><h3 className="text-sm text-gray-400 mb-1">DNSSEC</h3><p className={`capitalize ${dns.dnssec.status === 'secure' ? 'text-green-400' : 'text-orange-400'}`}>{dns.dnssec.status || 'Not configured'}</p></div>}
+            {dns.dnssec && <div><h3 className="text-sm text-gray-400 mb-1">DNSSEC</h3><p className={`capitalize ${dns.dnssec.status === 'secure' ? 'text-green-400' : dns.dnssec.status === 'timeout' ? 'text-gray-500' : 'text-orange-400'}`}>{dns.dnssec.status === 'timeout' ? 'Check timed out' : dns.dnssec.status || 'Not configured'}</p></div>}
             {dns.mta_sts !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">MTA-STS</h3><p className={`text-sm ${dns.mta_sts?.enabled || dns.mta_sts === true ? 'text-green-400' : 'text-gray-500'}`}>{dns.mta_sts?.enabled || dns.mta_sts === true ? 'Enabled' : 'Not configured'}</p></div>}
             {dns.tls_rpt !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">TLS-RPT</h3><p className={`text-sm ${dns.tls_rpt?.enabled || dns.tls_rpt === true ? 'text-green-400' : 'text-gray-500'}`}>{dns.tls_rpt?.enabled || dns.tls_rpt === true ? 'Enabled' : 'Not configured'}</p></div>}
             {dns.zone_transfer !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">Zone Transfer</h3><p className={`text-sm ${dns.zone_transfer?.vulnerable ? 'text-red-400' : 'text-green-400'}`}>{dns.zone_transfer?.vulnerable ? 'Vulnerable!' : 'Protected'}</p></div>}
@@ -350,6 +350,84 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <h4 className="text-sm text-gray-400 mb-1">Signature</h4>
                 <p className="font-mono text-sm text-white">{tls.certificate.sig_algo || '—'}</p>
               </div>
+              {tls.certificate.serial && (
+                <div className="bg-gray-900 rounded-lg p-4">
+                  <h4 className="text-sm text-gray-400 mb-1">Serial</h4>
+                  <p className="font-mono text-xs text-white break-all">{tls.certificate.serial}</p>
+                </div>
+              )}
+              {tls.certificate.wildcard !== undefined && (
+                <div className="bg-gray-900 rounded-lg p-4">
+                  <h4 className="text-sm text-gray-400 mb-1">Type</h4>
+                  <p className={`text-sm ${tls.certificate.wildcard ? 'text-yellow-400' : 'text-green-400'}`}>
+                    {tls.certificate.wildcard ? 'Wildcard Certificate' : 'Single Domain'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Certificate Fingerprints */}
+          {tls.certificate?.fingerprints && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Certificate Fingerprints</h3>
+              <div className="bg-gray-900 rounded-lg p-3 space-y-2">
+                {tls.certificate.fingerprints.sha256 && (
+                  <div>
+                    <span className="text-xs text-gray-500">SHA-256: </span>
+                    <span className="text-xs font-mono text-gray-300 break-all">{tls.certificate.fingerprints.sha256}</span>
+                  </div>
+                )}
+                {tls.certificate.fingerprints.sha1 && (
+                  <div>
+                    <span className="text-xs text-gray-500">SHA-1: </span>
+                    <span className="text-xs font-mono text-gray-400 break-all">{tls.certificate.fingerprints.sha1}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Subject Alternative Names (SANs) */}
+          {tls.certificate?.sans && Array.isArray(tls.certificate.sans) && tls.certificate.sans.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Subject Alternative Names (SANs)</h3>
+              <div className="flex flex-wrap gap-2">
+                {tls.certificate.sans.map((san: string, i: number) => (
+                  <span key={i} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs font-mono rounded">
+                    {san}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* OCSP & CA Issuer URLs */}
+          {(tls.certificate?.ocsp_urls?.length > 0 || tls.certificate?.ca_issuer_urls?.length > 0 || tls.ocsp?.ocsp_url) && (
+            <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {(tls.certificate?.ocsp_urls?.length > 0 || tls.ocsp?.ocsp_url) && (
+                <div className="bg-gray-900 rounded-lg p-3">
+                  <h4 className="text-xs font-semibold text-gray-400 mb-2">OCSP Responder</h4>
+                  <div className="space-y-1">
+                    {tls.certificate?.ocsp_urls?.map((url: string, i: number) => (
+                      <p key={i} className="text-xs font-mono text-blue-400 break-all">{url}</p>
+                    ))}
+                    {!tls.certificate?.ocsp_urls?.length && tls.ocsp?.ocsp_url && (
+                      <p className="text-xs font-mono text-blue-400 break-all">{tls.ocsp.ocsp_url}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {tls.certificate?.ca_issuer_urls?.length > 0 && (
+                <div className="bg-gray-900 rounded-lg p-3">
+                  <h4 className="text-xs font-semibold text-gray-400 mb-2">CA Issuer URLs</h4>
+                  <div className="space-y-1">
+                    {tls.certificate.ca_issuer_urls.map((url: string, i: number) => (
+                      <p key={i} className="text-xs font-mono text-blue-400 break-all">{url}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
