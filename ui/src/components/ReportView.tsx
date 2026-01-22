@@ -301,12 +301,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <p className="font-mono text-sm text-white">
                   {(() => {
                     const issuer = tls.certificate.issuer || ''
-                    // Try to extract CN from various formats
-                    const cnMatch = issuer.match(/CN\s*=\s*([^,]+)/i)
-                    if (cnMatch) return cnMatch[1].trim()
-                    // Try O (Organization) as fallback
+                    // Extract both Organization and CN for better display
                     const oMatch = issuer.match(/O\s*=\s*([^,]+)/i)
-                    if (oMatch) return oMatch[1].trim()
+                    const cnMatch = issuer.match(/CN\s*=\s*([^,]+)/i)
+                    const org = oMatch ? oMatch[1].trim() : null
+                    const cn = cnMatch ? cnMatch[1].trim() : null
+                    // Show "Organization (CN)" or just one if only one exists
+                    if (org && cn && org !== cn) return `${org} (${cn})`
+                    if (org) return org
+                    if (cn) return cn
                     return issuer || '—'
                   })()}
                 </p>
@@ -350,25 +353,85 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
 
-          {/* TLS Versions */}
-          {tls.sslyze?.tls_versions && Object.keys(tls.sslyze.tls_versions).length > 0 && (
+          {/* Certificate Chain */}
+          {tls.sslyze?.certificate_chain && tls.sslyze.certificate_chain.length > 1 && (
             <div className="mb-4">
-              <h3 className="text-sm font-semibold text-gray-400 mb-2">Protocol Support</h3>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(tls.sslyze.tls_versions).map(([version, supported]: [string, any]) => (
-                  <span key={version} className={`px-3 py-1 rounded text-sm font-mono ${
-                    supported
-                      ? (version.includes('1.3') || version.includes('1.2'))
-                        ? 'bg-green-900 text-green-200'
-                        : 'bg-yellow-900 text-yellow-200'
-                      : 'bg-gray-700 text-gray-400'
-                  }`}>
-                    {version}: {supported ? '✓' : '✗'}
-                  </span>
-                ))}
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Certificate Chain</h3>
+              <div className="space-y-2">
+                {tls.sslyze.certificate_chain.map((cert: any, idx: number) => {
+                  const subjectCN = cert.subject?.rfc4514_string || cert.subject?.attributes?.find((a: any) => a.oid?.name === 'commonName')?.value || 'Unknown'
+                  const issuerOrg = cert.issuer?.attributes?.find((a: any) => a.oid?.name === 'organizationName')?.value
+                  const issuerCN = cert.issuer?.attributes?.find((a: any) => a.oid?.name === 'commonName')?.value
+                  const issuerDisplay = issuerOrg && issuerCN && issuerOrg !== issuerCN ? `${issuerOrg} (${issuerCN})` : issuerOrg || issuerCN || 'Unknown'
+                  return (
+                    <div key={idx} className="bg-gray-900 rounded-lg p-3 flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${idx === 0 ? 'bg-blue-900 text-blue-200' : idx === tls.sslyze.certificate_chain.length - 1 ? 'bg-green-900 text-green-200' : 'bg-gray-700 text-gray-300'}`}>
+                        {idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white text-sm font-medium truncate">{subjectCN}</p>
+                        <p className="text-gray-500 text-xs truncate">Issued by: {issuerDisplay}</p>
+                      </div>
+                      <div className="text-right text-xs text-gray-500">
+                        {idx === 0 && <span className="px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded">Leaf</span>}
+                        {idx === tls.sslyze.certificate_chain.length - 1 && idx > 0 && <span className="px-2 py-0.5 bg-green-900/50 text-green-300 rounded">Root/Intermediate</span>}
+                        {idx > 0 && idx < tls.sslyze.certificate_chain.length - 1 && <span className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded">Intermediate</span>}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
+
+          {/* TLS Versions - derive from cipher_suites, nmap, or sslyze.tls_versions */}
+          {(() => {
+            // Collect TLS versions from all available sources
+            const versions: Record<string, boolean> = {}
+            // From sslyze.tls_versions
+            if (tls.sslyze?.tls_versions) {
+              Object.entries(tls.sslyze.tls_versions).forEach(([v, supported]) => {
+                if (supported) versions[v] = true
+              })
+            }
+            // From cipher_suites keys (top-level)
+            if (tls.cipher_suites) {
+              Object.keys(tls.cipher_suites).forEach(v => {
+                if (tls.cipher_suites[v]?.length > 0) versions[v] = true
+              })
+            }
+            // From nmap.ciphers_by_protocol keys
+            if (tls.nmap?.ciphers_by_protocol) {
+              Object.keys(tls.nmap.ciphers_by_protocol).forEach(v => {
+                if (tls.nmap.ciphers_by_protocol[v]?.length > 0) versions[v] = true
+              })
+            }
+            const versionOrder = ['SSLv2', 'SSLv3', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3', 'ssl_2_0', 'ssl_3_0', 'tls_1_0', 'tls_1_1', 'tls_1_2', 'tls_1_3']
+            const sortedVersions = Object.keys(versions).sort((a, b) => {
+              const ai = versionOrder.findIndex(v => a.toLowerCase().includes(v.toLowerCase().replace('.', '').replace('_', '')))
+              const bi = versionOrder.findIndex(v => b.toLowerCase().includes(v.toLowerCase().replace('.', '').replace('_', '')))
+              return ai - bi
+            })
+            if (sortedVersions.length === 0) return null
+            return (
+              <div className="mb-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Protocol Support</h3>
+                <div className="flex flex-wrap gap-2">
+                  {sortedVersions.map(version => (
+                    <span key={version} className={`px-3 py-1 rounded text-sm font-mono ${
+                      (version.includes('1.3') || version.includes('1.2') || version.includes('1_3') || version.includes('1_2'))
+                        ? 'bg-green-900 text-green-200'
+                        : (version.toLowerCase().includes('ssl') || version.includes('1.0') || version.includes('1.1') || version.includes('1_0') || version.includes('1_1'))
+                        ? 'bg-red-900 text-red-200'
+                        : 'bg-yellow-900 text-yellow-200'
+                    }`}>
+                      {version}: ✓
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Cipher Suites - prefer nmap data (has grades), fallback to sslyze */}
           {(tls.nmap?.ciphers_by_protocol || tls.sslyze?.cipher_suites) && (
