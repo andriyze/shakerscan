@@ -273,7 +273,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {dns.a && <div><h3 className="text-sm text-gray-400 mb-1">A Records</h3><p className="font-mono text-sm">{Array.isArray(dns.a) ? dns.a.join(', ') : dns.a}</p></div>}
             {dns.aaaa && <div><h3 className="text-sm text-gray-400 mb-1">AAAA Records</h3><p className="font-mono text-sm">{Array.isArray(dns.aaaa) ? dns.aaaa.join(', ') : dns.aaaa}</p></div>}
-            {dns.mx && <div><h3 className="text-sm text-gray-400 mb-1">MX Records</h3><p className="font-mono text-xs">{Array.isArray(dns.mx) ? dns.mx.map((r: any) => typeof r === 'string' ? r : r.exchange).join(', ') : dns.mx}</p></div>}
+            {dns.mx && <div><h3 className="text-sm text-gray-400 mb-1">MX Records</h3><p className="font-mono text-xs">{Array.isArray(dns.mx) ? dns.mx.map((r: any) => {
+              if (typeof r === 'string') return r
+              const host = r?.host ?? r?.exchange ?? r?.value ?? ''
+              const prio = r?.priority
+              if ((prio !== undefined && prio !== null) && host) return `${prio} ${host}`
+              return host || (prio !== undefined && prio !== null ? String(prio) : '')
+            }).filter(Boolean).join(', ') : dns.mx}</p></div>}
             {dns.spf && <div><h3 className="text-sm text-gray-400 mb-1">SPF Record</h3><p className="font-mono text-xs break-all">{dns.spf}</p></div>}
             {dns.dmarc?.record && <div><h3 className="text-sm text-gray-400 mb-1">DMARC Record</h3><p className="font-mono text-xs break-all">{dns.dmarc.record}</p></div>}
             {dns.dkim && <div><h3 className="text-sm text-gray-400 mb-1">DKIM</h3><p className={`text-sm ${dns.dkim.found ? 'text-green-400' : 'text-gray-500'}`}>{dns.dkim.found ? `Found (${dns.dkim.selectors_found?.join(', ') || 'selectors detected'})` : 'Not detected'}</p></div>}

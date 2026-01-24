@@ -4868,7 +4868,8 @@ async def build_report(target: str,
     if not cert or not cert.get("not_after"):
         openssl_cert = parse_openssl_cert(ocsp.get("raw"))
         for k, v in openssl_cert.items():
-            cert.setdefault(k, v)
+            if k not in cert or cert.get(k) in (None, "", [], {}):
+                cert[k] = v
     cert["days_remaining"] = days_until(cert.get("not_after"))
 
     # Discovery summary - combine tech detection from multiple sources
