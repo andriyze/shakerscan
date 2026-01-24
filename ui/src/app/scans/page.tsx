@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, type Scan } from '@/lib/api'
+import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SCAN_STATUSES } from '@/lib/constants'
+import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -28,7 +28,9 @@ function ScansContent() {
   const [domains, setDomains] = useState<string[]>([])
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
   const [total, setTotal] = useState(0)
+  const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const scanMenuRef = useRef<HTMLDivElement>(null)
 
   const statusFilter = filters.status || ''
   const domainFilter = filters.domain || ''
@@ -38,6 +40,17 @@ function ScansContent() {
 
   useEffect(() => {
     getDomains().then(data => setDomains(data.domains || [])).catch(() => {})
+  }, [])
+
+  // Close scan menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (scanMenuRef.current && !scanMenuRef.current.contains(event.target as Node)) {
+        setOpenScanMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
   // Sync searchInput with URL when filters change externally (e.g., browser back)
@@ -113,6 +126,18 @@ function ScansContent() {
         next.delete(scanId)
         return next
       })
+    }
+  }
+
+  async function handleScan(targetUrl: string, scanType: string) {
+    const type = SCAN_TYPES.find(t => t.value === scanType)
+    if (!type) return
+    try {
+      await submitScan(targetUrl, { ...type.options, scan_type: scanType })
+      setOpenScanMenu(null)
+      fetchScans()
+    } catch (err) {
+      console.error('Failed to start scan:', err)
     }
   }
 
@@ -302,7 +327,7 @@ function ScansContent() {
                     <span className="text-sm text-gray-500">{formatDate(scan.created_at)}</span>
                   </td>
                   <td className="px-4 py-3">
-                    {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') && (
+                    {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
                       <button
                         onClick={() => handleCancel(scan.id)}
                         disabled={cancelling.has(scan.id)}
@@ -310,6 +335,39 @@ function ScansContent() {
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                       </button>
+                    ) : (
+                      <div className={`relative ${openScanMenu === scan.id ? 'z-[100]' : ''}`} ref={openScanMenu === scan.id ? scanMenuRef : null}>
+                        <button
+                          onClick={() => setOpenScanMenu(openScanMenu === scan.id ? null : scan.id)}
+                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        >
+                          Scan
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openScanMenu === scan.id && (
+                          <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                            {SCAN_TYPES.map((type) => (
+                              <button
+                                key={type.value}
+                                onClick={() => handleScan(scan.target_url, type.value)}
+                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm text-white font-medium">{type.label}</span>
+                                  {type.requiresPermission && (
+                                    <span className="text-xs text-yellow-500">Active</span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
+                                </p>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
