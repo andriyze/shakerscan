@@ -77,6 +77,21 @@ export type SortOption = typeof SORT_OPTIONS[number]['value']
 
 export type SortOrder = 'asc' | 'desc'
 
+export const DISCOVERY_SOURCES = ['manual', 'subfinder', 'gungnir-monitor', 'import'] as const
+export type DiscoverySource = typeof DISCOVERY_SOURCES[number]
+
+export const GRADES = ['A', 'B', 'C', 'D', 'F'] as const
+export type Grade = typeof GRADES[number]
+
+export const TARGET_SORT_OPTIONS = [
+  { value: 'root_domain', label: 'Domain Name' },
+  { value: 'last_scanned_at', label: 'Last Scanned' },
+  { value: 'active_findings_count', label: 'Findings Count' },
+  { value: 'last_score', label: 'Score' },
+  { value: 'created_at', label: 'Date Added' },
+] as const
+export type TargetSortOption = typeof TARGET_SORT_OPTIONS[number]['value']
+
 // Helper to get scan type options for API calls
 export function getScanOptions(scanType: ScanType): Record<string, boolean | string> {
   const type = SCAN_TYPES.find(t => t.value === scanType)

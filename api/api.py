@@ -680,7 +680,15 @@ async def list_targets(
 
 
 @app.get("/targets/grouped")
-async def list_targets_grouped(include_inactive: bool = False):
+async def list_targets_grouped(
+    include_inactive: bool = False,
+    search: Optional[str] = None,
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import)$"),
+    grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
+    has_findings: Optional[bool] = None,
+    sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
+    sort_order: Optional[str] = Query("asc", pattern="^(asc|desc)$")
+):
     """List all targets grouped by root domain for hierarchical display."""
     async with db_pool.acquire() as conn:
         query = """
@@ -693,11 +701,36 @@ async def list_targets_grouped(include_inactive: bool = False):
             FROM targets t
             WHERE 1=1
         """
+        params = []
+        param_idx = 1
+
         if not include_inactive:
             query += " AND t.is_active = true"
+
+        if search:
+            query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
+            params.append(search)
+            param_idx += 1
+
+        if discovery_source:
+            query += f" AND t.discovery_source = ${param_idx}"
+            params.append(discovery_source)
+            param_idx += 1
+
+        if grade:
+            query += f" AND UPPER(t.last_grade) = UPPER(${param_idx})"
+            params.append(grade)
+            param_idx += 1
+
+        if has_findings is not None:
+            if has_findings:
+                query += " AND t.active_findings_count > 0"
+            else:
+                query += " AND t.active_findings_count = 0"
+
         query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
 
-        rows = await conn.fetch(query)
+        rows = await conn.fetch(query, *params)
 
     # Group by root_domain
     grouped = {}
@@ -721,10 +754,38 @@ async def list_targets_grouped(include_inactive: bool = False):
     for rd, data in grouped.items():
         data['subdomain_count'] = len(data['subdomains'])
         data['total_count'] = data['subdomain_count'] + (1 if data['root_target'] else 0)
+        # Add aggregate stats for sorting
+        root_findings = data['root_target']['active_findings_count'] if data['root_target'] else 0
+        subdomain_findings = sum(s['active_findings_count'] for s in data['subdomains'])
+        data['total_findings'] = root_findings + subdomain_findings
+        data['best_score'] = data['root_target']['last_score'] if data['root_target'] and data['root_target']['last_score'] is not None else None
+        data['latest_scan'] = data['root_target']['last_scanned_at'] if data['root_target'] else None
+        data['earliest_created'] = data['root_target']['created_at'] if data['root_target'] else (
+            min((s['created_at'] for s in data['subdomains']), default=None)
+        )
         result.append(data)
 
-    # Sort by root_domain
-    result.sort(key=lambda x: x['root_domain'])
+    # Sort based on sort_by and sort_order
+    reverse = sort_order == 'desc'
+
+    def sort_key(x):
+        if sort_by == 'root_domain':
+            return x['root_domain'].lower()
+        elif sort_by == 'last_scanned_at':
+            return x['latest_scan'] or ''
+        elif sort_by == 'active_findings_count':
+            return x['total_findings']
+        elif sort_by == 'last_score':
+            # None values should sort last in ascending, first in descending
+            score = x['best_score']
+            if score is None:
+                return -1 if reverse else 101
+            return score
+        elif sort_by == 'created_at':
+            return x['earliest_created'] or ''
+        return x['root_domain'].lower()
+
+    result.sort(key=sort_key, reverse=reverse)
 
     return {
         'domains': result,

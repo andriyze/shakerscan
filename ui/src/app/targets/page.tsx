@@ -1,11 +1,28 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, formatDate, type Target, type GroupedDomain } from '@/lib/api'
-import { SCAN_TYPES, getScanOptions, type ScanType } from '@/lib/constants'
+import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
+import { useUrlFilters } from '@/lib/useUrlFilters'
 
-export default function TargetsPage() {
+const SEARCH_DEBOUNCE_MS = 300
+
+interface TargetsFilters {
+  [key: string]: string | number | undefined
+  search?: string
+  discovery_source?: string
+  grade?: string
+  has_findings?: string
+  sort_by?: string
+  sort_order?: string
+}
+
+function TargetsContent() {
+  const { filters, setFilter, setFilters } = useUrlFilters<TargetsFilters>({
+    defaults: { sort_by: 'root_domain', sort_order: 'asc' }
+  })
+
   const [domains, setDomains] = useState<GroupedDomain[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
@@ -17,12 +34,22 @@ export default function TargetsPage() {
   const [openScanAllMenu, setOpenScanAllMenu] = useState<string | null>(null)
   const [scanningDomains, setScanningDomains] = useState<Set<string>>(new Set())
   const [discoveringDomains, setDiscoveringDomains] = useState<Set<string>>(new Set())
+  const [searchInput, setSearchInput] = useState<string>(filters.search || '')
+  const [totalRootDomains, setTotalRootDomains] = useState(0)
+  const [totalTargets, setTotalTargets] = useState(0)
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
+  const searchTimeout = useRef<NodeJS.Timeout | null>(null)
 
-  useEffect(() => {
-    fetchTargets()
-  }, [])
+  const searchQuery = filters.search || ''
+  const discoverySourceFilter = filters.discovery_source || ''
+  const gradeFilter = filters.grade || ''
+  const hasFindingsFilter = filters.has_findings || ''
+  const sortBy = filters.sort_by || 'root_domain'
+  const sortOrder = (filters.sort_order || 'asc') as SortOrder
+
+  // Check if any filters are active
+  const hasActiveFilters = !!(searchQuery || discoverySourceFilter || gradeFilter || hasFindingsFilter || sortBy !== 'root_domain' || sortOrder !== 'asc')
 
   // Close scan menus when clicking outside
   useEffect(() => {
@@ -38,10 +65,43 @@ export default function TargetsPage() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  async function fetchTargets() {
+  // Sync searchInput with URL when filters change externally (e.g., browser back)
+  useEffect(() => {
+    setSearchInput(searchQuery)
+  }, [searchQuery])
+
+  // Debounce search input -> URL update
+  useEffect(() => {
+    if (searchTimeout.current) {
+      clearTimeout(searchTimeout.current)
+    }
+    searchTimeout.current = setTimeout(() => {
+      if (searchInput !== searchQuery) {
+        setFilter('search', searchInput || undefined)
+      }
+    }, SEARCH_DEBOUNCE_MS)
+    return () => {
+      if (searchTimeout.current) {
+        clearTimeout(searchTimeout.current)
+      }
+    }
+  }, [searchInput, searchQuery, setFilter])
+
+  const fetchTargets = useCallback(async () => {
+    setLoading(true)
     try {
-      const data = await getTargetsGrouped()
+      const hasFindingsBool = hasFindingsFilter === 'true' ? true : hasFindingsFilter === 'false' ? false : undefined
+      const data = await getTargetsGrouped({
+        search: searchQuery || undefined,
+        discovery_source: discoverySourceFilter || undefined,
+        grade: gradeFilter || undefined,
+        has_findings: hasFindingsBool,
+        sort_by: sortBy,
+        sort_order: sortOrder
+      })
       setDomains(data.domains || [])
+      setTotalRootDomains(data.total_root_domains || 0)
+      setTotalTargets(data.total_targets || 0)
       // Auto-expand domains with subdomains
       const toExpand = new Set<string>()
       data.domains?.forEach(d => {
@@ -53,7 +113,11 @@ export default function TargetsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [searchQuery, discoverySourceFilter, gradeFilter, hasFindingsFilter, sortBy, sortOrder])
+
+  useEffect(() => {
+    fetchTargets()
+  }, [fetchTargets])
 
   async function handleAddTarget(e: React.FormEvent) {
     e.preventDefault()
@@ -159,16 +223,28 @@ export default function TargetsPage() {
     return styles[source] || styles['manual']
   }
 
-  const totalTargets = domains.reduce((sum, d) => sum + d.total_count, 0)
+  function clearFilters() {
+    setSearchInput('')
+    setFilters({
+      search: undefined,
+      discovery_source: undefined,
+      grade: undefined,
+      has_findings: undefined,
+      sort_by: undefined,
+      sort_order: undefined
+    })
+  }
+
+  function toggleSortOrder() {
+    setFilter('sort_order', sortOrder === 'asc' ? 'desc' : 'asc')
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Targets</h1>
-          <p className="text-gray-400 mt-1">
-            {domains.length} domain{domains.length !== 1 ? 's' : ''} • {totalTargets} target{totalTargets !== 1 ? 's' : ''}
-          </p>
+          <p className="text-gray-400 mt-1">Manage your scan targets</p>
         </div>
         <button
           onClick={() => setShowAddModal(true)}
@@ -181,6 +257,111 @@ export default function TargetsPage() {
         </button>
       </div>
 
+      {/* Filters */}
+      <div className="flex gap-4 flex-wrap">
+        {/* Discovery Source Filter */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-gray-400">Source:</label>
+          <select
+            value={discoverySourceFilter}
+            onChange={(e) => setFilter('discovery_source', e.target.value || undefined)}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All sources</option>
+            {DISCOVERY_SOURCES.map((source) => (
+              <option key={source} value={source}>{source}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Grade Filter */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-gray-400">Grade:</label>
+          <select
+            value={gradeFilter}
+            onChange={(e) => setFilter('grade', e.target.value || undefined)}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All grades</option>
+            {GRADES.map((grade) => (
+              <option key={grade} value={grade}>{grade}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Has Findings Filter */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-gray-400">Findings:</label>
+          <select
+            value={hasFindingsFilter}
+            onChange={(e) => setFilter('has_findings', e.target.value || undefined)}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All</option>
+            <option value="true">With findings</option>
+            <option value="false">No findings</option>
+          </select>
+        </div>
+
+        {/* Sort By */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-gray-400">Sort:</label>
+          <select
+            value={sortBy}
+            onChange={(e) => setFilter('sort_by', e.target.value || undefined)}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            {TARGET_SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <button
+            onClick={toggleSortOrder}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
+            title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
+          >
+            {sortOrder === 'asc' ? (
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            )}
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="relative flex-1 min-w-[200px]">
+          <input
+            type="text"
+            placeholder="Search by URL or domain..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+          />
+          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
+      </div>
+
+      {/* Summary with Clear Filters */}
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-gray-400">
+          {totalRootDomains} domain{totalRootDomains !== 1 ? 's' : ''} - {totalTargets} target{totalTargets !== 1 ? 's' : ''}
+        </span>
+        {hasActiveFilters && (
+          <button
+            onClick={clearFilters}
+            className="text-sm text-blue-400 hover:text-blue-300"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       {/* Targets List - Hierarchical */}
       {loading ? (
         <div className="flex items-center justify-center h-32">
@@ -191,7 +372,9 @@ export default function TargetsPage() {
           <svg className="w-12 h-12 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
           </svg>
-          <p className="text-gray-500">No targets yet. Add a target to get started.</p>
+          <p className="text-gray-500">
+            {hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet. Add a target to get started.'}
+          </p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -401,7 +584,7 @@ export default function TargetsPage() {
                       className="flex items-center gap-3 px-4 py-3 pl-12 hover:bg-gray-800/30 transition-colors border-b border-gray-800/50 last:border-b-0"
                     >
                       {/* Tree connector */}
-                      <span className="text-gray-700">└</span>
+                      <span className="text-gray-700">&#x2514;</span>
 
                       {/* Subdomain Info */}
                       <div className="flex-1 min-w-0">
@@ -545,5 +728,17 @@ export default function TargetsPage() {
         </div>
       )}
     </div>
+  )
+}
+
+export default function TargetsPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-32">
+        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+      </div>
+    }>
+      <TargetsContent />
+    </Suspense>
   )
 }

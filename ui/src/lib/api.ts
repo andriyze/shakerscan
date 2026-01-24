@@ -175,13 +175,27 @@ export async function getTargets(params?: { includeInactive?: boolean }) {
   return res.json()
 }
 
-export async function getTargetsGrouped(params?: { includeInactive?: boolean }): Promise<{
+export async function getTargetsGrouped(params?: {
+  includeInactive?: boolean
+  search?: string
+  discovery_source?: string
+  grade?: string
+  has_findings?: boolean
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}): Promise<{
   domains: GroupedDomain[]
   total_root_domains: number
   total_targets: number
 }> {
   const searchParams = new URLSearchParams()
   if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.search) searchParams.set('search', params.search)
+  if (params?.discovery_source) searchParams.set('discovery_source', params.discovery_source)
+  if (params?.grade) searchParams.set('grade', params.grade)
+  if (params?.has_findings !== undefined) searchParams.set('has_findings', String(params.has_findings))
+  if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
+  if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
   const res = await fetch(`${API_URL}/targets/grouped?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch grouped targets')
