@@ -130,6 +130,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const container_registry = scanData.container_registry || {}
   const scan_metadata = scanData.scan_metadata || {}
   const coverage = scanData.coverage || {}
+  const smart_coverage = scanData.smart_coverage || {}
   const ai_logs = scanData.ai_logs || null
   const ai_summary = ai_logs?.summary || null
   const ai_executive = ai_summary?.executive_summary || null
@@ -272,12 +273,18 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {dns.a && <div><h3 className="text-sm text-gray-400 mb-1">A Records</h3><p className="font-mono text-sm">{Array.isArray(dns.a) ? dns.a.join(', ') : dns.a}</p></div>}
             {dns.aaaa && <div><h3 className="text-sm text-gray-400 mb-1">AAAA Records</h3><p className="font-mono text-sm">{Array.isArray(dns.aaaa) ? dns.aaaa.join(', ') : dns.aaaa}</p></div>}
-            {dns.mx && <div><h3 className="text-sm text-gray-400 mb-1">MX Records</h3><p className="font-mono text-xs">{Array.isArray(dns.mx) ? dns.mx.map((r: any) => typeof r === 'string' ? r : r.exchange).join(', ') : dns.mx}</p></div>}
+            {dns.mx && <div><h3 className="text-sm text-gray-400 mb-1">MX Records</h3><p className="font-mono text-xs">{Array.isArray(dns.mx) ? dns.mx.map((r: any) => {
+              if (typeof r === 'string') return r
+              const host = r?.host ?? r?.exchange ?? r?.value ?? ''
+              const prio = r?.priority
+              if ((prio !== undefined && prio !== null) && host) return `${prio} ${host}`
+              return host || (prio !== undefined && prio !== null ? String(prio) : '')
+            }).filter(Boolean).join(', ') : dns.mx}</p></div>}
             {dns.spf && <div><h3 className="text-sm text-gray-400 mb-1">SPF Record</h3><p className="font-mono text-xs break-all">{dns.spf}</p></div>}
             {dns.dmarc?.record && <div><h3 className="text-sm text-gray-400 mb-1">DMARC Record</h3><p className="font-mono text-xs break-all">{dns.dmarc.record}</p></div>}
             {dns.dkim && <div><h3 className="text-sm text-gray-400 mb-1">DKIM</h3><p className={`text-sm ${dns.dkim.found ? 'text-green-400' : 'text-gray-500'}`}>{dns.dkim.found ? `Found (${dns.dkim.selectors_found?.join(', ') || 'selectors detected'})` : 'Not detected'}</p></div>}
             {dns.caa && <div><h3 className="text-sm text-gray-400 mb-1">CAA Records</h3><p className="font-mono text-xs">{Array.isArray(dns.caa) ? dns.caa.map((r: any) => typeof r === 'string' ? r : `${r.flags || 0} ${r.tag} ${r.value}`).join('; ') : (dns.caa.records ? dns.caa.records.join('; ') : 'Not configured')}</p></div>}
-            {dns.dnssec && <div><h3 className="text-sm text-gray-400 mb-1">DNSSEC</h3><p className={`capitalize ${dns.dnssec.status === 'secure' ? 'text-green-400' : 'text-orange-400'}`}>{dns.dnssec.status || 'Not configured'}</p></div>}
+            {dns.dnssec && <div><h3 className="text-sm text-gray-400 mb-1">DNSSEC</h3><p className={`capitalize ${dns.dnssec.status === 'secure' ? 'text-green-400' : dns.dnssec.status === 'timeout' ? 'text-gray-500' : 'text-orange-400'}`}>{dns.dnssec.status === 'timeout' ? 'Check timed out' : dns.dnssec.status || 'Not configured'}</p></div>}
             {dns.mta_sts !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">MTA-STS</h3><p className={`text-sm ${dns.mta_sts?.enabled || dns.mta_sts === true ? 'text-green-400' : 'text-gray-500'}`}>{dns.mta_sts?.enabled || dns.mta_sts === true ? 'Enabled' : 'Not configured'}</p></div>}
             {dns.tls_rpt !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">TLS-RPT</h3><p className={`text-sm ${dns.tls_rpt?.enabled || dns.tls_rpt === true ? 'text-green-400' : 'text-gray-500'}`}>{dns.tls_rpt?.enabled || dns.tls_rpt === true ? 'Enabled' : 'Not configured'}</p></div>}
             {dns.zone_transfer !== undefined && <div><h3 className="text-sm text-gray-400 mb-1">Zone Transfer</h3><p className={`text-sm ${dns.zone_transfer?.vulnerable ? 'text-red-400' : 'text-green-400'}`}>{dns.zone_transfer?.vulnerable ? 'Vulnerable!' : 'Protected'}</p></div>}
@@ -300,12 +307,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <p className="font-mono text-sm text-white">
                   {(() => {
                     const issuer = tls.certificate.issuer || ''
-                    // Try to extract CN from various formats
-                    const cnMatch = issuer.match(/CN\s*=\s*([^,]+)/i)
-                    if (cnMatch) return cnMatch[1].trim()
-                    // Try O (Organization) as fallback
+                    // Extract both Organization and CN for better display
                     const oMatch = issuer.match(/O\s*=\s*([^,]+)/i)
-                    if (oMatch) return oMatch[1].trim()
+                    const cnMatch = issuer.match(/CN\s*=\s*([^,]+)/i)
+                    const org = oMatch ? oMatch[1].trim() : null
+                    const cn = cnMatch ? cnMatch[1].trim() : null
+                    // Show "Organization (CN)" or just one if only one exists
+                    if (org && cn && org !== cn) return `${org} (${cn})`
+                    if (org) return org
+                    if (cn) return cn
                     return issuer || '—'
                   })()}
                 </p>
@@ -346,28 +356,166 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <h4 className="text-sm text-gray-400 mb-1">Signature</h4>
                 <p className="font-mono text-sm text-white">{tls.certificate.sig_algo || '—'}</p>
               </div>
+              {tls.certificate.serial && (
+                <div className="bg-gray-900 rounded-lg p-4">
+                  <h4 className="text-sm text-gray-400 mb-1">Serial</h4>
+                  <p className="font-mono text-xs text-white break-all">{tls.certificate.serial}</p>
+                </div>
+              )}
+              {tls.certificate.wildcard !== undefined && (
+                <div className="bg-gray-900 rounded-lg p-4">
+                  <h4 className="text-sm text-gray-400 mb-1">Type</h4>
+                  <p className={`text-sm ${tls.certificate.wildcard ? 'text-yellow-400' : 'text-green-400'}`}>
+                    {tls.certificate.wildcard ? 'Wildcard Certificate' : 'Single Domain'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
-          {/* TLS Versions */}
-          {tls.sslyze?.tls_versions && Object.keys(tls.sslyze.tls_versions).length > 0 && (
+          {/* Certificate Fingerprints */}
+          {tls.certificate?.fingerprints && (
             <div className="mb-4">
-              <h3 className="text-sm font-semibold text-gray-400 mb-2">Protocol Support</h3>
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Certificate Fingerprints</h3>
+              <div className="bg-gray-900 rounded-lg p-3 space-y-2">
+                {tls.certificate.fingerprints.sha256 && (
+                  <div>
+                    <span className="text-xs text-gray-500">SHA-256: </span>
+                    <span className="text-xs font-mono text-gray-300 break-all">{tls.certificate.fingerprints.sha256}</span>
+                  </div>
+                )}
+                {tls.certificate.fingerprints.sha1 && (
+                  <div>
+                    <span className="text-xs text-gray-500">SHA-1: </span>
+                    <span className="text-xs font-mono text-gray-400 break-all">{tls.certificate.fingerprints.sha1}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Subject Alternative Names (SANs) */}
+          {tls.certificate?.sans && Array.isArray(tls.certificate.sans) && tls.certificate.sans.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Subject Alternative Names (SANs)</h3>
               <div className="flex flex-wrap gap-2">
-                {Object.entries(tls.sslyze.tls_versions).map(([version, supported]: [string, any]) => (
-                  <span key={version} className={`px-3 py-1 rounded text-sm font-mono ${
-                    supported
-                      ? (version.includes('1.3') || version.includes('1.2'))
-                        ? 'bg-green-900 text-green-200'
-                        : 'bg-yellow-900 text-yellow-200'
-                      : 'bg-gray-700 text-gray-400'
-                  }`}>
-                    {version}: {supported ? '✓' : '✗'}
+                {tls.certificate.sans.map((san: string, i: number) => (
+                  <span key={i} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs font-mono rounded">
+                    {san}
                   </span>
                 ))}
               </div>
             </div>
           )}
+
+          {/* OCSP & CA Issuer URLs */}
+          {(tls.certificate?.ocsp_urls?.length > 0 || tls.certificate?.ca_issuer_urls?.length > 0 || tls.ocsp?.ocsp_url) && (
+            <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {(tls.certificate?.ocsp_urls?.length > 0 || tls.ocsp?.ocsp_url) && (
+                <div className="bg-gray-900 rounded-lg p-3">
+                  <h4 className="text-xs font-semibold text-gray-400 mb-2">OCSP Responder</h4>
+                  <div className="space-y-1">
+                    {tls.certificate?.ocsp_urls?.map((url: string, i: number) => (
+                      <p key={i} className="text-xs font-mono text-blue-400 break-all">{url}</p>
+                    ))}
+                    {!tls.certificate?.ocsp_urls?.length && tls.ocsp?.ocsp_url && (
+                      <p className="text-xs font-mono text-blue-400 break-all">{tls.ocsp.ocsp_url}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {tls.certificate?.ca_issuer_urls?.length > 0 && (
+                <div className="bg-gray-900 rounded-lg p-3">
+                  <h4 className="text-xs font-semibold text-gray-400 mb-2">CA Issuer URLs</h4>
+                  <div className="space-y-1">
+                    {tls.certificate.ca_issuer_urls.map((url: string, i: number) => (
+                      <p key={i} className="text-xs font-mono text-blue-400 break-all">{url}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Certificate Chain */}
+          {tls.sslyze?.certificate_chain && tls.sslyze.certificate_chain.length > 1 && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Certificate Chain</h3>
+              <div className="space-y-2">
+                {tls.sslyze.certificate_chain.map((cert: any, idx: number) => {
+                  const subjectCN = cert.subject?.rfc4514_string || cert.subject?.attributes?.find((a: any) => a.oid?.name === 'commonName')?.value || 'Unknown'
+                  const issuerOrg = cert.issuer?.attributes?.find((a: any) => a.oid?.name === 'organizationName')?.value
+                  const issuerCN = cert.issuer?.attributes?.find((a: any) => a.oid?.name === 'commonName')?.value
+                  const issuerDisplay = issuerOrg && issuerCN && issuerOrg !== issuerCN ? `${issuerOrg} (${issuerCN})` : issuerOrg || issuerCN || 'Unknown'
+                  return (
+                    <div key={idx} className="bg-gray-900 rounded-lg p-3 flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${idx === 0 ? 'bg-blue-900 text-blue-200' : idx === tls.sslyze.certificate_chain.length - 1 ? 'bg-green-900 text-green-200' : 'bg-gray-700 text-gray-300'}`}>
+                        {idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white text-sm font-medium truncate">{subjectCN}</p>
+                        <p className="text-gray-500 text-xs truncate">Issued by: {issuerDisplay}</p>
+                      </div>
+                      <div className="text-right text-xs text-gray-500">
+                        {idx === 0 && <span className="px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded">Leaf</span>}
+                        {idx === tls.sslyze.certificate_chain.length - 1 && idx > 0 && <span className="px-2 py-0.5 bg-green-900/50 text-green-300 rounded">Root/Intermediate</span>}
+                        {idx > 0 && idx < tls.sslyze.certificate_chain.length - 1 && <span className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded">Intermediate</span>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* TLS Versions - derive from cipher_suites, nmap, or sslyze.tls_versions */}
+          {(() => {
+            // Collect TLS versions from all available sources
+            const versions: Record<string, boolean> = {}
+            // From sslyze.tls_versions
+            if (tls.sslyze?.tls_versions) {
+              Object.entries(tls.sslyze.tls_versions).forEach(([v, supported]) => {
+                if (supported) versions[v] = true
+              })
+            }
+            // From cipher_suites keys (top-level)
+            if (tls.cipher_suites) {
+              Object.keys(tls.cipher_suites).forEach(v => {
+                if (tls.cipher_suites[v]?.length > 0) versions[v] = true
+              })
+            }
+            // From nmap.ciphers_by_protocol keys
+            if (tls.nmap?.ciphers_by_protocol) {
+              Object.keys(tls.nmap.ciphers_by_protocol).forEach(v => {
+                if (tls.nmap.ciphers_by_protocol[v]?.length > 0) versions[v] = true
+              })
+            }
+            const versionOrder = ['SSLv2', 'SSLv3', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3', 'ssl_2_0', 'ssl_3_0', 'tls_1_0', 'tls_1_1', 'tls_1_2', 'tls_1_3']
+            const sortedVersions = Object.keys(versions).sort((a, b) => {
+              const ai = versionOrder.findIndex(v => a.toLowerCase().includes(v.toLowerCase().replace('.', '').replace('_', '')))
+              const bi = versionOrder.findIndex(v => b.toLowerCase().includes(v.toLowerCase().replace('.', '').replace('_', '')))
+              return ai - bi
+            })
+            if (sortedVersions.length === 0) return null
+            return (
+              <div className="mb-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Protocol Support</h3>
+                <div className="flex flex-wrap gap-2">
+                  {sortedVersions.map(version => (
+                    <span key={version} className={`px-3 py-1 rounded text-sm font-mono ${
+                      (version.includes('1.3') || version.includes('1.2') || version.includes('1_3') || version.includes('1_2'))
+                        ? 'bg-green-900 text-green-200'
+                        : (version.toLowerCase().includes('ssl') || version.includes('1.0') || version.includes('1.1') || version.includes('1_0') || version.includes('1_1'))
+                        ? 'bg-red-900 text-red-200'
+                        : 'bg-yellow-900 text-yellow-200'
+                    }`}>
+                      {version}: ✓
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Cipher Suites - prefer nmap data (has grades), fallback to sslyze */}
           {(tls.nmap?.ciphers_by_protocol || tls.sslyze?.cipher_suites) && (
@@ -1006,6 +1154,185 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <p className="text-gray-500 text-xs mt-1">Found in: <code className="text-gray-400">{secret.file}</code></p>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Smart Scan Coverage */}
+      {(smart_coverage.endpoints || smart_coverage.parameters || smart_coverage.nuclei_templates) && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">Smart Scan Coverage</h2>
+
+          {/* Coverage Progress Bars */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+            {/* Endpoint Coverage */}
+            {smart_coverage.endpoints && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-gray-400">Endpoint Coverage</h3>
+                  <span className="text-lg font-bold text-white">
+                    {Math.round((smart_coverage.endpoints.coverage || 0) * 100)}%
+                  </span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full transition-all"
+                    style={{ width: `${Math.min((smart_coverage.endpoints.coverage || 0) * 100, 100)}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-500">
+                  {smart_coverage.endpoints.tested || 0} tested / {smart_coverage.endpoints.discovered || 0} discovered
+                </p>
+              </div>
+            )}
+
+            {/* Parameter Coverage */}
+            {smart_coverage.parameters && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-gray-400">Parameter Coverage</h3>
+                  <span className="text-lg font-bold text-white">
+                    {Math.round((smart_coverage.parameters.coverage || 0) * 100)}%
+                  </span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
+                  <div
+                    className="bg-green-500 h-2 rounded-full transition-all"
+                    style={{ width: `${Math.min((smart_coverage.parameters.coverage || 0) * 100, 100)}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-500">
+                  {smart_coverage.parameters.tested || 0} tested / {smart_coverage.parameters.discovered || 0} discovered
+                </p>
+              </div>
+            )}
+
+            {/* Nuclei Template Hit Rate */}
+            {smart_coverage.nuclei_templates && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-gray-400">Template Hit Rate</h3>
+                  <span className="text-lg font-bold text-white">
+                    {Math.round((smart_coverage.nuclei_templates.hit_rate || 0) * 100)}%
+                  </span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
+                  <div
+                    className={`h-2 rounded-full transition-all ${
+                      (smart_coverage.nuclei_templates.hit_rate || 0) > 0.1 ? 'bg-red-500' :
+                      (smart_coverage.nuclei_templates.hit_rate || 0) > 0.05 ? 'bg-yellow-500' : 'bg-green-500'
+                    }`}
+                    style={{ width: `${Math.min((smart_coverage.nuclei_templates.hit_rate || 0) * 100, 100)}%` }}
+                  />
+                </div>
+                <p className="text-xs text-gray-500">
+                  {smart_coverage.nuclei_templates.matched || 0} matched / {smart_coverage.nuclei_templates.run || 0} run
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Breakdown by Method and Location */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            {/* Endpoints by Method */}
+            {smart_coverage.endpoints?.by_method && Object.keys(smart_coverage.endpoints.by_method).length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-3">Endpoints by Method</h3>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(smart_coverage.endpoints.by_method).map(([method, count]: [string, any]) => (
+                    <span
+                      key={method}
+                      className={`px-2 py-1 text-xs font-mono rounded ${
+                        method === 'GET' ? 'bg-green-900/50 text-green-300' :
+                        method === 'POST' ? 'bg-blue-900/50 text-blue-300' :
+                        method === 'PUT' ? 'bg-yellow-900/50 text-yellow-300' :
+                        method === 'DELETE' ? 'bg-red-900/50 text-red-300' :
+                        method === 'PATCH' ? 'bg-purple-900/50 text-purple-300' :
+                        'bg-gray-700 text-gray-300'
+                      }`}
+                    >
+                      {method}: {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Parameters by Location */}
+            {smart_coverage.parameters?.by_location && Object.keys(smart_coverage.parameters.by_location).length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-3">Parameters by Location</h3>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(smart_coverage.parameters.by_location).map(([location, count]: [string, any]) => (
+                    <span
+                      key={location}
+                      className={`px-2 py-1 text-xs font-mono rounded ${
+                        location === 'query' ? 'bg-blue-900/50 text-blue-300' :
+                        location === 'body' ? 'bg-purple-900/50 text-purple-300' :
+                        location === 'path' ? 'bg-green-900/50 text-green-300' :
+                        location === 'header' ? 'bg-yellow-900/50 text-yellow-300' :
+                        'bg-gray-700 text-gray-300'
+                      }`}
+                    >
+                      {location}: {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Nuclei Categories */}
+          {smart_coverage.nuclei_templates?.by_category && Object.keys(smart_coverage.nuclei_templates.by_category).length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-gray-400 mb-3">Templates by Category</h3>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(smart_coverage.nuclei_templates.by_category)
+                  .sort(([, a]: [string, any], [, b]: [string, any]) => b - a)
+                  .slice(0, 12)
+                  .map(([category, count]: [string, any]) => (
+                    <span key={category} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs rounded">
+                      {category}: {count}
+                    </span>
+                  ))}
+                {Object.keys(smart_coverage.nuclei_templates.by_category).length > 12 && (
+                  <span className="px-2 py-1 text-gray-500 text-xs">
+                    +{Object.keys(smart_coverage.nuclei_templates.by_category).length - 12} more
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Auth States and Discovery Sources */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Auth States Tested */}
+            {smart_coverage.auth_states_tested?.length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Auth States Tested</h3>
+                <div className="flex flex-wrap gap-2">
+                  {smart_coverage.auth_states_tested.map((state: string, i: number) => (
+                    <span key={i} className="px-2 py-1 bg-yellow-900/30 text-yellow-400 rounded text-xs">
+                      {state}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Discovery Sources */}
+            {smart_coverage.discovery_sources?.length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Discovery Sources</h3>
+                <div className="flex flex-wrap gap-2">
+                  {smart_coverage.discovery_sources.map((source: string, i: number) => (
+                    <span key={i} className="px-2 py-1 bg-blue-900/30 text-blue-400 rounded text-xs">
+                      {source}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

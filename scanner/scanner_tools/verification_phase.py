@@ -1,0 +1,551 @@
+"""
+Verification Phase - Proof of Exploitation for High-Severity Findings
+
+This module implements Phase V of the smart scan workflow: verification
+and reproduction of detected vulnerabilities before reporting them as
+confirmed High/Critical findings.
+
+Philosophy: "No High/Critical finding without reproducible evidence"
+
+Verification Types:
+- XSS: Browser execution proof (dialog/console/DOM)
+- SQLi (blind): Statistical timing proof with multiple samples
+- SQLi (error-based): Data extraction proof
+- BOLA: Differential authorization proof
+- SSRF: OOB callback proof (if callback server available)
+"""
+
+import asyncio
+import sys
+from typing import Any
+
+from .common import run, get_auth_curl_args
+
+
+def _coerce_header_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value if v is not None)
+    return str(value)
+
+
+def _header_map_from_args(args: list[str]) -> dict[str, tuple[str, str]]:
+    headers: dict[str, tuple[str, str]] = {}
+    i = 0
+    while i < len(args) - 1:
+        if args[i] == "-H":
+            name, _, value = args[i + 1].partition(":")
+            name = name.strip()
+            value = value.strip()
+            if name:
+                headers[name.lower()] = (name, value)
+            i += 2
+            continue
+        i += 1
+    return headers
+
+
+def _header_args_from_map(headers: dict[str, tuple[str, str]]) -> list[str]:
+    header_args: list[str] = []
+    for name, value in headers.values():
+        if value:
+            header_args.extend(["-H", f"{name}: {value}"])
+    return header_args
+
+
+def _guess_content_type(body: str, current: str) -> str:
+    if current:
+        return current
+    if not body:
+        return ""
+    stripped = body.lstrip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        return "application/json"
+    return "application/x-www-form-urlencoded"
+
+
+def _mark_verification_skipped(finding: dict, reason: str) -> dict:
+    finding = dict(finding)
+    finding["verification_attempted"] = False
+    finding["verification_skipped"] = True
+    finding["verification_reason"] = reason
+    evidence = finding.get("evidence", [])
+    if isinstance(evidence, list):
+        evidence.append(f"Verification skipped: {reason}")
+    finding["evidence"] = evidence
+    return finding
+
+
+async def verify_high_severity_findings(
+    findings: list[dict],
+    auth_session: Any | None = None,
+    verify_xss: bool = True,
+    verify_sqli: bool = True,
+    max_verification_attempts: int = 3,
+) -> list[dict]:
+    """
+    Attempt to verify High/Critical findings before final report.
+
+    Findings that cannot be verified are:
+    - Downgraded to Medium severity
+    - Marked with verification_attempted=True
+
+    Findings that are verified are:
+    - Marked with verified=True
+    - Given higher confidence scores
+
+    Args:
+        findings: List of finding dicts from active testing
+        auth_session: AuthSession for authenticated requests
+        verify_xss: Whether to verify XSS findings with browser proof
+        verify_sqli: Whether to verify SQLi findings with statistical timing
+        max_verification_attempts: Max verification attempts per finding
+
+    Returns:
+        List of findings with verification status and adjusted severity/confidence
+    """
+    # Import verification tools (with graceful degradation)
+    try:
+        from .proof_of_exploit import prove_xss_headless
+        has_xss_proof = True
+    except ImportError:
+        has_xss_proof = False
+        prove_xss_headless = None
+
+    try:
+        from .active_checks import statistical_timing_test
+        has_timing_test = True
+    except ImportError:
+        has_timing_test = False
+
+    verified_findings = []
+
+    for finding in findings:
+        severity = finding.get("severity", "info").lower()
+        vuln_type = finding.get("type", "").lower()
+
+        # Only verify high/critical findings
+        if severity not in ("high", "critical"):
+            verified_findings.append(finding)
+            continue
+
+        # Skip if already verified
+        if finding.get("verified"):
+            verified_findings.append(finding)
+            continue
+
+        # XSS verification
+        if "xss" in vuln_type and verify_xss and has_xss_proof:
+            finding = await _verify_xss_finding(
+                finding,
+                prove_xss_headless,
+                max_attempts=max_verification_attempts
+            )
+
+        # SQLi verification (blind/time-based)
+        elif "sqli" in vuln_type and verify_sqli:
+            technique = finding.get("technique", "").lower()
+            if "time" in technique:
+                finding = await _verify_sqli_timing(
+                    finding,
+                    auth_session,
+                    max_samples=max_verification_attempts
+                )
+            elif "error" in technique or "union" in technique:
+                # Error-based and union SQLi can be verified by data extraction
+                finding = await _verify_sqli_extraction(
+                    finding,
+                    auth_session
+                )
+
+        verified_findings.append(finding)
+
+    # Report verification stats
+    verified_count = sum(1 for f in verified_findings if f.get("verified"))
+    downgraded_count = sum(1 for f in verified_findings if f.get("verification_attempted") and not f.get("verified"))
+
+    if verified_count > 0 or downgraded_count > 0:
+        print(
+            f"[verification] Verified {verified_count} findings, downgraded {downgraded_count}",
+            file=sys.stderr
+        )
+
+    return verified_findings
+
+
+async def _verify_xss_finding(
+    finding: dict,
+    prove_xss_headless,
+    max_attempts: int = 3
+) -> dict:
+    """Verify XSS finding using headless browser proof."""
+    url = finding.get("url", "")
+    param = finding.get("param", "")
+    payload = finding.get("payload", "")
+
+    if not url or not param or not payload:
+        return _mark_verification_skipped(finding, "missing url/param/payload for XSS verification")
+
+    finding = dict(finding)  # Don't mutate original
+    finding["verification_attempted"] = True
+
+    try:
+        proof = await prove_xss_headless(
+            url=url,
+            param=param,
+            payload=payload,
+            screenshot_dir=None
+        )
+
+        if proof and proof.proven:
+            finding["verified"] = True
+            finding["confidence"] = proof.confidence
+            evidence = finding.get("evidence", [])
+            if isinstance(evidence, list):
+                evidence.append(f"Browser verified: {proof.technique}")
+                if proof.extracted_data:
+                    evidence.append(f"Proof: {proof.extracted_data}")
+            finding["evidence"] = evidence
+            finding["browser_proof"] = proof.to_dict()
+        else:
+            # Downgrade unverified high findings
+            if finding.get("severity") == "high":
+                finding["severity"] = "medium"
+                finding["confidence"] = 0.65
+            elif finding.get("severity") == "critical":
+                finding["severity"] = "high"
+                finding["confidence"] = 0.70
+            evidence = finding.get("evidence", [])
+            if isinstance(evidence, list):
+                evidence.append("Browser verification failed - no execution confirmed")
+            finding["evidence"] = evidence
+
+    except Exception as e:
+        # Don't fail verification, just note the error
+        evidence = finding.get("evidence", [])
+        if isinstance(evidence, list):
+            evidence.append(f"Browser verification error: {str(e)[:100]}")
+        finding["evidence"] = evidence
+
+    return finding
+
+
+async def _verify_sqli_timing(
+    finding: dict,
+    auth_session: Any | None,
+    max_samples: int = 3
+) -> dict:
+    """Verify time-based SQLi using statistical timing analysis.
+
+    Supports both GET (query params) and POST/PUT/PATCH (body params).
+    """
+    import copy
+    import json
+    import time
+    import urllib.parse
+
+    url = finding.get("url", "")
+    param = finding.get("param", "")
+    payload = finding.get("payload", "")
+    method = finding.get("method", "GET").upper()
+    content_type = finding.get("content_type", "")
+    original_body = finding.get("body", "")
+
+    if not url or not param or not payload:
+        return _mark_verification_skipped(finding, "missing url/param/payload for SQLi timing verification")
+
+    finding = dict(finding)  # Don't mutate original
+    finding["verification_attempted"] = True
+
+    try:
+        from .active_checks import statistical_timing_test
+    except ImportError:
+        # Can't verify without statistical test
+        return finding
+
+    if method in ("POST", "PUT", "PATCH"):
+        if not original_body:
+            return _mark_verification_skipped(finding, "missing request body for SQLi timing verification")
+        content_type = _guess_content_type(original_body, content_type)
+        if not content_type:
+            return _mark_verification_skipped(finding, "missing content type for SQLi timing verification")
+
+    auth_args = get_auth_curl_args(auth_session)
+    request_headers = finding.get("request_headers") or finding.get("headers")
+    header_map = _header_map_from_args(auth_args)
+    if isinstance(request_headers, dict):
+        for name, value in request_headers.items():
+            key = str(name).strip()
+            if not key:
+                continue
+            header_map[key.lower()] = (key, _coerce_header_value(value).strip())
+
+    def _apply_json_param(body_data: Any, param_name: str, param_value: str) -> Any:
+        if isinstance(body_data, list):
+            updated = copy.deepcopy(body_data)
+            if not updated:
+                return [{}] if param_name != "__item__" else [param_value]
+            if isinstance(updated[0], dict):
+                updated[0][param_name] = param_value
+            else:
+                updated[0] = param_value
+            return updated
+        if isinstance(body_data, dict):
+            updated = dict(body_data)
+            updated[param_name] = param_value
+            return updated
+        return {param_name: param_value}
+
+    def _build_curl_args(inject_payload: bool) -> list[str]:
+        """Build curl args for GET or POST/PUT/PATCH requests."""
+        base_args = ["curl", "-sS", "-L", "-k", "--max-time", "15"]
+        headers = dict(header_map)
+
+        if method == "GET":
+            # GET: inject into query params
+            parsed = urllib.parse.urlparse(url)
+            query_params = dict(urllib.parse.parse_qsl(parsed.query))
+            if inject_payload:
+                query_params[param] = payload
+            test_url = urllib.parse.urlunparse(
+                parsed._replace(query=urllib.parse.urlencode(query_params))
+            )
+            header_args = _header_args_from_map(headers)
+            return base_args + header_args + [test_url]
+
+        elif method in ("POST", "PUT", "PATCH"):
+            # POST/PUT/PATCH: inject into body
+            curl_args = base_args + ["-X", method]
+
+            if "json" in content_type.lower():
+                # JSON body injection
+                headers.setdefault("content-type", ("Content-Type", content_type or "application/json"))
+                try:
+                    body_data = json.loads(original_body) if original_body else {}
+                except json.JSONDecodeError:
+                    body_data = {}
+                if inject_payload:
+                    body_data = _apply_json_param(body_data, param, payload)
+                curl_args += _header_args_from_map(headers) + ["-d", json.dumps(body_data)]
+            else:
+                # Form-encoded body injection
+                headers.setdefault("content-type", ("Content-Type", "application/x-www-form-urlencoded"))
+                if original_body:
+                    body_params = dict(urllib.parse.parse_qsl(original_body))
+                else:
+                    body_params = {}
+                if inject_payload:
+                    body_params[param] = payload
+                curl_args += _header_args_from_map(headers) + ["-d", urllib.parse.urlencode(body_params)]
+
+            return curl_args + [url]
+        else:
+            # Fallback: treat as GET
+            header_args = _header_args_from_map(headers)
+            return base_args + header_args + [url]
+
+    # Collect baseline samples (without payload)
+    baseline_times = []
+    for _ in range(max_samples):
+        start = time.time()
+        await run(_build_curl_args(inject_payload=False), timeout=17)
+        baseline_times.append(time.time() - start)
+        await asyncio.sleep(0.1)  # Small delay between samples
+
+    # Collect payload samples (with timing payload)
+    payload_times = []
+    for _ in range(max_samples):
+        start = time.time()
+        await run(_build_curl_args(inject_payload=True), timeout=17)
+        payload_times.append(time.time() - start)
+        await asyncio.sleep(0.1)
+
+    # Statistical test
+    result = statistical_timing_test(
+        baseline_times=baseline_times,
+        payload_times=payload_times,
+        expected_delay=2.0,  # Standard SLEEP(2)
+        significance_level=0.05
+    )
+
+    evidence = finding.get("evidence", [])
+    if isinstance(evidence, list):
+        evidence.append(
+            f"Statistical timing: baseline_median={result.get('baseline_median', 0):.2f}s, "
+            f"payload_median={result.get('payload_median', 0):.2f}s, "
+            f"delay={result.get('delay_observed', 0):.2f}s"
+        )
+        if result.get("p_value"):
+            evidence.append(f"Mann-Whitney p-value={result.get('p_value')}")
+
+    if result.get("confirmed"):
+        finding["verified"] = True
+        finding["confidence"] = result.get("confidence", 0.85)
+        finding["statistical_proof"] = result
+    else:
+        # Downgrade unverified finding
+        if finding.get("severity") == "high":
+            finding["severity"] = "medium"
+            finding["confidence"] = 0.60
+        elif finding.get("severity") == "critical":
+            finding["severity"] = "high"
+            finding["confidence"] = 0.65
+        evidence.append("Statistical timing verification failed")
+        finding["statistical_proof"] = result
+
+    finding["evidence"] = evidence
+    return finding
+
+
+async def _verify_sqli_extraction(
+    finding: dict,
+    auth_session: Any | None
+) -> dict:
+    """Verify error-based/union SQLi by attempting data extraction.
+
+    Supports both GET (query params) and POST/PUT/PATCH (body params).
+    """
+    import copy
+    import json
+    import urllib.parse
+
+    url = finding.get("url", "")
+    param = finding.get("param", "")
+    dbms = finding.get("dbms", "").lower()
+    method = finding.get("method", "GET").upper()
+    content_type = finding.get("content_type", "")
+    original_body = finding.get("body", "")
+
+    if not url or not param:
+        return _mark_verification_skipped(finding, "missing url/param for SQLi extraction verification")
+
+    finding = dict(finding)  # Don't mutate original
+    finding["verification_attempted"] = True
+
+    # If we already have extracted data, it's verified
+    if finding.get("extracted_data"):
+        finding["verified"] = True
+        return finding
+
+    if method in ("POST", "PUT", "PATCH"):
+        if not original_body:
+            return _mark_verification_skipped(finding, "missing request body for SQLi extraction verification")
+        content_type = _guess_content_type(original_body, content_type)
+        if not content_type:
+            return _mark_verification_skipped(finding, "missing content type for SQLi extraction verification")
+
+    # Attempt version extraction as proof
+    auth_args = get_auth_curl_args(auth_session)
+    request_headers = finding.get("request_headers") or finding.get("headers")
+    header_map = _header_map_from_args(auth_args)
+    if isinstance(request_headers, dict):
+        for name, value in request_headers.items():
+            key = str(name).strip()
+            if not key:
+                continue
+            header_map[key.lower()] = (key, _coerce_header_value(value).strip())
+
+    version_payloads = {
+        "mysql": "' UNION SELECT NULL,@@version,NULL-- -",
+        "postgresql": "' UNION SELECT NULL,version(),NULL-- -",
+        "sqlite": "' UNION SELECT NULL,sqlite_version(),NULL-- -",
+        "mssql": "' UNION SELECT NULL,@@VERSION,NULL-- -",
+        "oracle": "' UNION SELECT NULL,banner,NULL FROM v$version WHERE ROWNUM=1-- -",
+    }
+
+    payload = version_payloads.get(dbms, version_payloads.get("mysql"))
+
+    # Build curl command based on HTTP method
+    base_args = ["curl", "-sS", "-L", "-k", "--max-time", "10"]
+
+    def _apply_json_param(body_data: Any, param_name: str, param_value: str) -> Any:
+        if isinstance(body_data, list):
+            updated = copy.deepcopy(body_data)
+            if not updated:
+                return [{}] if param_name != "__item__" else [param_value]
+            if isinstance(updated[0], dict):
+                updated[0][param_name] = param_value
+            else:
+                updated[0] = param_value
+            return updated
+        if isinstance(body_data, dict):
+            updated = dict(body_data)
+            updated[param_name] = param_value
+            return updated
+        return {param_name: param_value}
+
+    if method == "GET":
+        # GET: inject into query params
+        parsed = urllib.parse.urlparse(url)
+        query_params = dict(urllib.parse.parse_qsl(parsed.query))
+        query_params[param] = payload
+        test_url = urllib.parse.urlunparse(
+            parsed._replace(query=urllib.parse.urlencode(query_params))
+        )
+        curl_args = base_args + _header_args_from_map(header_map) + [test_url]
+
+    elif method in ("POST", "PUT", "PATCH"):
+        # POST/PUT/PATCH: inject into body
+        curl_args = base_args + ["-X", method]
+
+        if "json" in content_type.lower():
+            # JSON body injection
+            header_map.setdefault("content-type", ("Content-Type", content_type or "application/json"))
+            try:
+                body_data = json.loads(original_body) if original_body else {}
+            except json.JSONDecodeError:
+                body_data = {}
+            body_data = _apply_json_param(body_data, param, payload)
+            curl_args += _header_args_from_map(header_map) + ["-d", json.dumps(body_data)]
+        else:
+            # Form-encoded body injection
+            header_map.setdefault("content-type", ("Content-Type", "application/x-www-form-urlencoded"))
+            if original_body:
+                body_params = dict(urllib.parse.parse_qsl(original_body))
+            else:
+                body_params = {}
+            body_params[param] = payload
+            curl_args += _header_args_from_map(header_map) + ["-d", urllib.parse.urlencode(body_params)]
+
+        curl_args += [url]
+    else:
+        # Fallback: treat as GET
+        curl_args = base_args + _header_args_from_map(header_map) + [url]
+
+    out, _, rc = await run(curl_args, timeout=12)
+
+    evidence = finding.get("evidence", [])
+
+    if rc == 0 and out:
+        # Look for version strings
+        import re
+        version_patterns = [
+            r"(\d+\.\d+\.\d+[-\w]*)",  # Generic version
+            r"MySQL (\d+\.\d+)",
+            r"PostgreSQL (\d+\.\d+)",
+            r"Microsoft SQL Server",
+            r"Oracle Database",
+            r"SQLite version (\d+\.\d+)",
+        ]
+
+        for pattern in version_patterns:
+            match = re.search(pattern, out)
+            if match:
+                finding["verified"] = True
+                finding["confidence"] = 0.95
+                finding["extracted_data"] = match.group(0)
+                if isinstance(evidence, list):
+                    evidence.append(f"Data extraction confirmed: {match.group(0)}")
+                break
+
+    if not finding.get("verified"):
+        # Downgrade if extraction failed
+        if finding.get("severity") == "critical":
+            finding["severity"] = "high"
+            finding["confidence"] = 0.75
+        if isinstance(evidence, list):
+            evidence.append("Data extraction verification failed")
+
+    finding["evidence"] = evidence
+    return finding

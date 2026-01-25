@@ -34,7 +34,8 @@ MAX_SCAN_DURATION = {
     'standard': 45,
     'deep': 120,
     'full': 180,
-    'aggressive': 300,
+    'aggressive': 480,
+    'smart': 360,
 }
 
 
@@ -245,6 +246,18 @@ class ScanOptions(BaseModel):
     # Examples: "POST /api/login username,password", "/api/users", "GET /api/items?id=1"
     custom_endpoints: Optional[list[str]] = None
 
+    # Smart scan tuning options
+    no_early_stop: bool = False                    # Disable early stopping in smart scan
+    thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
+    oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
+
+    # Safety/performance limits
+    smart_bola_max_endpoints: Optional[int] = None # Max endpoints for BOLA testing (default: 30)
+    dom_xss_max_files: Optional[int] = None        # Max JS files for DOM XSS (default: 20)
+    sqli_extract_max: Optional[int] = None         # Max SQLi findings for extraction (default: 3)
+    oob_max_findings: Optional[int] = None         # Max findings for OOB SQLi test (default: 3)
+    oob_max_payloads: Optional[int] = None         # Deprecated alias for oob_max_findings
+
 
 class ScanRequest(BaseModel):
     target: str
@@ -393,6 +406,20 @@ async def submit_scan(request: ScanRequest):
         scan_type = 'quick'
         request.options.scan_type = 'quick'
 
+    # Validate: public option is incompatible with active-enforced scan types
+    active_enforced_types = {'smart', 'full', 'aggressive'}
+    if scan_type in active_enforced_types and request.options.public:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_options",
+                "message": f"'public' option is incompatible with '{scan_type}' scan type. "
+                           f"{scan_type.capitalize()} scans require active testing (XSS/SQLi probes). "
+                           "Use 'deep' scan type for passive-only comprehensive scanning.",
+                "hint": f"Either remove 'public: true' or change scan_type to 'deep'"
+            }
+        )
+
     # Create or find target
     async with db_pool.acquire() as conn:
         # Check if target exists
@@ -456,40 +483,58 @@ async def submit_batch(request: BatchRequest):
 async def list_scans(
     status: Optional[str] = None,
     target: Optional[str] = None,
+    root_domain: Optional[str] = None,
     limit: int = Query(50, le=200),
     offset: int = 0
 ):
     """List scans with optional filtering."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT s.*, t.name as target_name
+            SELECT s.*, t.name as target_name, t.root_domain
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            WHERE 1=1
+        """
+        count_query = """
+            SELECT COUNT(*)
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
             WHERE 1=1
         """
         params = []
+        count_params = []
         param_idx = 1
+        count_param_idx = 1
 
         if status:
             query += f" AND s.status = ${param_idx}"
+            count_query += f" AND s.status = ${count_param_idx}"
             params.append(status)
+            count_params.append(status)
             param_idx += 1
+            count_param_idx += 1
 
         if target:
             query += f" AND s.target_url ILIKE ${param_idx}"
+            count_query += f" AND s.target_url ILIKE ${count_param_idx}"
             params.append(f"%{target}%")
+            count_params.append(f"%{target}%")
             param_idx += 1
+            count_param_idx += 1
+
+        if root_domain:
+            query += f" AND t.root_domain = ${param_idx}"
+            count_query += f" AND t.root_domain = ${count_param_idx}"
+            params.append(root_domain)
+            count_params.append(root_domain)
+            param_idx += 1
+            count_param_idx += 1
 
         query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
-
-        # Get total count
-        count_query = "SELECT COUNT(*) FROM scans WHERE 1=1"
-        if status:
-            count_query += f" AND status = '{status}'"
-        total = await conn.fetchval(count_query)
+        total = await conn.fetchval(count_query, *count_params)
 
     return {
         'scans': [dict(r) for r in rows],
@@ -635,7 +680,15 @@ async def list_targets(
 
 
 @app.get("/targets/grouped")
-async def list_targets_grouped(include_inactive: bool = False):
+async def list_targets_grouped(
+    include_inactive: bool = False,
+    search: Optional[str] = None,
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import)$"),
+    grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
+    has_findings: Optional[bool] = None,
+    sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
+    sort_order: Optional[str] = Query("asc", pattern="^(asc|desc)$")
+):
     """List all targets grouped by root domain for hierarchical display."""
     async with db_pool.acquire() as conn:
         query = """
@@ -648,11 +701,36 @@ async def list_targets_grouped(include_inactive: bool = False):
             FROM targets t
             WHERE 1=1
         """
+        params = []
+        param_idx = 1
+
         if not include_inactive:
             query += " AND t.is_active = true"
+
+        if search:
+            query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
+            params.append(search)
+            param_idx += 1
+
+        if discovery_source:
+            query += f" AND t.discovery_source = ${param_idx}"
+            params.append(discovery_source)
+            param_idx += 1
+
+        if grade:
+            query += f" AND UPPER(t.last_grade) = UPPER(${param_idx})"
+            params.append(grade)
+            param_idx += 1
+
+        if has_findings is not None:
+            if has_findings:
+                query += " AND t.active_findings_count > 0"
+            else:
+                query += " AND t.active_findings_count = 0"
+
         query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
 
-        rows = await conn.fetch(query)
+        rows = await conn.fetch(query, *params)
 
     # Group by root_domain
     grouped = {}
@@ -676,15 +754,59 @@ async def list_targets_grouped(include_inactive: bool = False):
     for rd, data in grouped.items():
         data['subdomain_count'] = len(data['subdomains'])
         data['total_count'] = data['subdomain_count'] + (1 if data['root_target'] else 0)
+        # Add aggregate stats for sorting
+        root_findings = data['root_target']['active_findings_count'] if data['root_target'] else 0
+        subdomain_findings = sum(s['active_findings_count'] for s in data['subdomains'])
+        data['total_findings'] = root_findings + subdomain_findings
+        data['best_score'] = data['root_target']['last_score'] if data['root_target'] and data['root_target']['last_score'] is not None else None
+        data['latest_scan'] = data['root_target']['last_scanned_at'] if data['root_target'] else None
+        data['earliest_created'] = data['root_target']['created_at'] if data['root_target'] else (
+            min((s['created_at'] for s in data['subdomains']), default=None)
+        )
         result.append(data)
 
-    # Sort by root_domain
-    result.sort(key=lambda x: x['root_domain'])
+    # Sort based on sort_by and sort_order
+    reverse = sort_order == 'desc'
+
+    def sort_key(x):
+        if sort_by == 'root_domain':
+            return x['root_domain'].lower()
+        elif sort_by == 'last_scanned_at':
+            return x['latest_scan'] or ''
+        elif sort_by == 'active_findings_count':
+            return x['total_findings']
+        elif sort_by == 'last_score':
+            # None values should sort last in ascending, first in descending
+            score = x['best_score']
+            if score is None:
+                return -1 if reverse else 101
+            return score
+        elif sort_by == 'created_at':
+            return x['earliest_created'] or ''
+        return x['root_domain'].lower()
+
+    result.sort(key=sort_key, reverse=reverse)
 
     return {
         'domains': result,
         'total_root_domains': len(result),
         'total_targets': sum(d['total_count'] for d in result)
+    }
+
+
+@app.get("/domains")
+async def list_domains():
+    """List unique root domains from targets."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT root_domain
+            FROM targets
+            WHERE root_domain IS NOT NULL AND is_active = true
+            ORDER BY root_domain
+        """)
+
+    return {
+        'domains': [r['root_domain'] for r in rows]
     }
 
 
@@ -826,58 +948,112 @@ async def list_findings(
     status: Optional[str] = None,
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
+    root_domain: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
+    sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
     limit: int = Query(100, le=500),
     offset: int = 0
 ):
-    """List findings with filtering."""
+    """List findings with filtering and sorting."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT f.*, t.url as target_url, t.name as target_name
+            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE 1=1
+        """
+        count_query = """
+            SELECT COUNT(*)
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             WHERE 1=1
         """
         params = []
+        count_params = []
         param_idx = 1
+        count_param_idx = 1
 
         if severity:
             query += f" AND f.severity = ${param_idx}"
+            count_query += f" AND f.severity = ${count_param_idx}"
             params.append(severity)
+            count_params.append(severity)
             param_idx += 1
+            count_param_idx += 1
 
         if status:
             query += f" AND f.status = ${param_idx}"
+            count_query += f" AND f.status = ${count_param_idx}"
             params.append(status)
+            count_params.append(status)
             param_idx += 1
+            count_param_idx += 1
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
+            count_query += f" AND f.target_id = ${count_param_idx}"
             params.append(uuid.UUID(target_id))
+            count_params.append(uuid.UUID(target_id))
             param_idx += 1
+            count_param_idx += 1
 
         if scan_id:
             query += f" AND f.scan_id = ${param_idx}"
+            count_query += f" AND f.scan_id = ${count_param_idx}"
             params.append(uuid.UUID(scan_id))
+            count_params.append(uuid.UUID(scan_id))
             param_idx += 1
+            count_param_idx += 1
 
-        query += f"""
-            ORDER BY
+        if root_domain:
+            query += f" AND t.root_domain = ${param_idx}"
+            count_query += f" AND t.root_domain = ${count_param_idx}"
+            params.append(root_domain)
+            count_params.append(root_domain)
+            param_idx += 1
+            count_param_idx += 1
+
+        if search:
+            search_pattern = f"%{search}%"
+            query += f" AND (f.title ILIKE ${param_idx} OR f.url ILIKE ${param_idx})"
+            count_query += f" AND (f.title ILIKE ${count_param_idx} OR f.url ILIKE ${count_param_idx})"
+            params.append(search_pattern)
+            count_params.append(search_pattern)
+            param_idx += 1
+            count_param_idx += 1
+
+        # Build ORDER BY clause based on sort_by parameter
+        order_dir = "DESC" if sort_order == "desc" else "ASC"
+        if sort_by == "first_seen":
+            order_clause = f"f.first_seen_at {order_dir}"
+        elif sort_by == "last_seen":
+            order_clause = f"f.last_seen_at {order_dir}"
+        elif sort_by == "cvss":
+            order_clause = f"f.cvss_score {order_dir} NULLS LAST"
+        else:
+            # Default: severity (always show critical first regardless of sort_order)
+            order_clause = """
                 CASE f.severity
                     WHEN 'critical' THEN 1
                     WHEN 'high' THEN 2
                     WHEN 'medium' THEN 3
                     WHEN 'low' THEN 4
                     ELSE 5
-                END,
-                f.first_seen_at DESC
+                END""" + (", f.first_seen_at DESC" if sort_order == "desc" else ", f.first_seen_at ASC")
+
+        query += f"""
+            ORDER BY {order_clause}
             LIMIT ${param_idx} OFFSET ${param_idx + 1}
         """
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
+        total = await conn.fetchval(count_query, *count_params)
 
     return {
         'findings': [dict(r) for r in rows],
+        'total': total,
         'limit': limit,
         'offset': offset
     }
@@ -1743,10 +1919,11 @@ async def queue_stats():
         if not job_data:
             continue
 
-        status_str = job_data.get(b'status', b'').decode()
+        # Redis client uses decode_responses=True, so values are already strings
+        status_str = job_data.get('status', '')
 
         if status_str == 'running':
-            heartbeat = job_data.get(b'heartbeat', b'').decode()
+            heartbeat = job_data.get('heartbeat', '')
             if heartbeat:
                 try:
                     last_beat = datetime.fromisoformat(heartbeat)

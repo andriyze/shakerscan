@@ -306,7 +306,7 @@ Auth is propagated to discovery (Playwright crawl, JSON link following), Nuclei,
 | `json_link_following` | Follow JSON/HATEOAS links to expand API endpoints |
 | `options_method_discovery` | Use HTTP OPTIONS to enumerate allowed methods |
 | `grpc_discovery` | Use gRPC reflection to list services/methods (requires grpcurl) |
-| `custom_endpoints` | Manual endpoint list for API-only targets (same format as `--endpoints`) |
+| `custom_endpoints` | Manual endpoint list with params for testing (see format below). **Include params or endpoints won't be tested for SQLi/XSS** |
 
 **Active Check Filters:**
 

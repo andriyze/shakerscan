@@ -122,10 +122,19 @@ export async function getDashboard() {
 }
 
 // Scans
-export async function getScans(params?: { status?: string; limit?: number }) {
+export async function getScans(params?: {
+  status?: string
+  limit?: number
+  offset?: number
+  root_domain?: string
+  target?: string
+}): Promise<{ scans: Scan[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
+  if (params?.offset) searchParams.set('offset', params.offset.toString())
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.target) searchParams.set('target', params.target)
 
   const res = await fetch(`${API_URL}/scans?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch scans')
@@ -166,13 +175,27 @@ export async function getTargets(params?: { includeInactive?: boolean }) {
   return res.json()
 }
 
-export async function getTargetsGrouped(params?: { includeInactive?: boolean }): Promise<{
+export async function getTargetsGrouped(params?: {
+  includeInactive?: boolean
+  search?: string
+  discovery_source?: string
+  grade?: string
+  has_findings?: boolean
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}): Promise<{
   domains: GroupedDomain[]
   total_root_domains: number
   total_targets: number
 }> {
   const searchParams = new URLSearchParams()
   if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.search) searchParams.set('search', params.search)
+  if (params?.discovery_source) searchParams.set('discovery_source', params.discovery_source)
+  if (params?.grade) searchParams.set('grade', params.grade)
+  if (params?.has_findings !== undefined) searchParams.set('has_findings', String(params.has_findings))
+  if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
+  if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
   const res = await fetch(`${API_URL}/targets/grouped?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch grouped targets')
@@ -204,14 +227,35 @@ export async function getFindings(params?: {
   severity?: string
   status?: string
   limit?: number
-}) {
+  offset?: number
+  root_domain?: string
+  scan_id?: string
+  target_id?: string
+  search?: string
+  sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
+  sort_order?: 'asc' | 'desc'
+}): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.severity) searchParams.set('severity', params.severity)
   if (params?.status) searchParams.set('status', params.status)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
+  if (params?.offset) searchParams.set('offset', params.offset.toString())
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.search) searchParams.set('search', params.search)
+  if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
+  if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
   const res = await fetch(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')
+  return res.json()
+}
+
+// Domains
+export async function getDomains(): Promise<{ domains: string[] }> {
+  const res = await fetch(`${API_URL}/domains`)
+  if (!res.ok) throw new Error('Failed to fetch domains')
   return res.json()
 }
 

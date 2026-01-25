@@ -3,11 +3,12 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { submitScan } from '@/lib/api'
+import { SCAN_TYPES, getScanOptions, type ScanType } from '@/lib/constants'
 
 export default function NewScanPage() {
   const router = useRouter()
   const [target, setTarget] = useState('')
-  const [scanType, setScanType] = useState<'quick' | 'standard' | 'thorough' | 'full' | 'smart'>('quick')
+  const [scanType, setScanType] = useState<ScanType>('quick')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,34 +23,6 @@ export default function NewScanPage() {
     js_secret_scanning: false
   })
 
-  const scanTypes = {
-    quick: {
-      name: 'Quick Scan',
-      description: 'DNS, TLS, and security headers only. Fast (~1-2 min)',
-      options: { quick: true, public: true }
-    },
-    standard: {
-      name: 'Standard Scan',
-      description: 'Full passive reconnaissance with technology detection (~5-10 min)',
-      options: { quick: false, public: false }
-    },
-    thorough: {
-      name: 'Thorough Scan',
-      description: 'Includes Nuclei templates and deep discovery (~30-60 min)',
-      options: { quick: false, thorough: true }
-    },
-    full: {
-      name: 'Full Assessment',
-      description: 'All checks including active vulnerability testing (~45-90 min)',
-      options: { quick: false, thorough: true, active: true }
-    },
-    smart: {
-      name: 'Smart Scan',
-      description: 'Adaptive scanning: staged templates, DBMS-aware SQLi, context-aware XSS',
-      options: { scan_type: 'smart' }
-    }
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!target.trim()) {
@@ -63,7 +36,7 @@ export default function NewScanPage() {
     try {
       // Combine scan type options with advanced options
       const scanOptions = {
-        ...scanTypes[scanType].options,
+        ...getScanOptions(scanType),
         ...(showAdvanced ? options : {})
       }
 
@@ -107,19 +80,26 @@ export default function NewScanPage() {
             Scan Type
           </label>
           <div className="grid grid-cols-2 gap-3">
-            {(Object.entries(scanTypes) as [keyof typeof scanTypes, typeof scanTypes[keyof typeof scanTypes]][]).map(([key, type]) => (
+            {SCAN_TYPES.map((type) => (
               <button
-                key={key}
+                key={type.value}
                 type="button"
-                onClick={() => setScanType(key)}
+                onClick={() => setScanType(type.value)}
                 className={`p-3 rounded-lg border text-left transition-colors ${
-                  scanType === key
+                  scanType === type.value
                     ? 'border-blue-500 bg-blue-500/10'
                     : 'border-gray-700 bg-gray-800 hover:border-gray-600'
                 }`}
               >
-                <div className="font-medium text-white">{type.name}</div>
-                <div className="text-xs text-gray-500 mt-1">{type.description}</div>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-white">{type.label}</span>
+                  {type.requiresPermission && (
+                    <span className="text-xs text-yellow-500">Active</span>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  {type.duration ? `${type.duration} - ` : ''}{type.description}
+                </div>
               </button>
             ))}
           </div>
@@ -213,7 +193,7 @@ export default function NewScanPage() {
         </button>
 
         {/* Warning for Active Testing */}
-        {(scanType === 'full' || scanType === 'smart' || options.active) && (
+        {(SCAN_TYPES.find(t => t.value === scanType)?.requiresPermission || options.active) && (
           <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-yellow-400 text-sm">
             <strong>Warning:</strong> Active testing sends probes that may trigger security alerts.
             Only scan targets you own or have explicit permission to test.

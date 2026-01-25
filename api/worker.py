@@ -44,6 +44,17 @@ async def run_scan(target: str, options: dict) -> dict:
     # Scan types: quick, standard, deep, full, aggressive, smart
     scan_type = options.get('scan_type', '')
 
+    # Scan types that require active testing (XSS/SQLi probes)
+    active_enforced_types = {'smart', 'full', 'aggressive'}
+
+    # Validate: public mode is incompatible with active-enforced scan types
+    if scan_type in active_enforced_types and options.get('public'):
+        raise ValueError(
+            f"public option is incompatible with '{scan_type}' scan type. "
+            f"{scan_type.capitalize()} scans require active testing. "
+            "Use 'deep' scan type for passive-only comprehensive scanning."
+        )
+
     if scan_type == 'smart':
         cmd.append('--smart')
     elif scan_type == 'aggressive':
@@ -59,6 +70,7 @@ async def run_scan(target: str, options: dict) -> dict:
     # If no scan_type, run standard scan (no flag needed)
 
     # Additional flags (can be combined with scan types)
+    # Note: public is not allowed for smart/full/aggressive (validated above)
     if options.get('public'):
         cmd.append('--public')
     if options.get('xss'):
@@ -83,6 +95,28 @@ async def run_scan(target: str, options: dict) -> dict:
         cmd.append('--json-link-following')
     if options.get('options_method_discovery'):
         cmd.append('--options-method-discovery')
+
+    # Smart scan tuning options
+    if options.get('no_early_stop'):
+        cmd.append('--no-early-stop')
+    if options.get('thorough_params'):
+        cmd.append('--thorough-params')
+    if options.get('oob_callback_url'):
+        cmd.extend(['--oob-callback-url', options['oob_callback_url']])
+
+    # Safety/performance limits
+    if options.get('smart_bola_max_endpoints'):
+        cmd.extend(['--smart-bola-max-endpoints', str(options['smart_bola_max_endpoints'])])
+    if options.get('dom_xss_max_files'):
+        cmd.extend(['--dom-xss-max-files', str(options['dom_xss_max_files'])])
+    if options.get('sqli_extract_max'):
+        cmd.extend(['--sqli-extract-max', str(options['sqli_extract_max'])])
+    # oob_max_findings (prefer new name, fall back to deprecated oob_max_payloads)
+    oob_max = options.get('oob_max_findings')
+    if oob_max is None:
+        oob_max = options.get('oob_max_payloads')
+    if oob_max is not None:
+        cmd.extend(['--oob-max-findings', str(oob_max)])
 
     # AI options
     ai_url = options.get('ai_url') or os.environ.get('AI_URL')
@@ -380,6 +414,15 @@ async def process_scan_job(job_data: dict):
 
     try:
         result = await run_scan(target, options)
+    except ValueError as e:
+        # Validation errors (e.g., incompatible options like public+smart)
+        result = {
+            'target': target,
+            'error': str(e),
+            'result': {'score': None, 'grade': None},
+            'findings': []
+        }
+        print(f"[{job_id[:8]}] Validation error: {e}", flush=True)
     finally:
         stop_heartbeat.set()
         try:
@@ -435,13 +478,16 @@ async def process_scan_job(job_data: dict):
 
     # Update Redis
     status = 'failed' if error else 'completed'
-    r.hset(f"job:{job_id}", mapping={
+    job_key = f"job:{job_id}"
+    r.hset(job_key, mapping={
         'status': status,
         'result_path': filepath,
         'score': str(score) if score else 'N/A',
         'grade': str(grade) if grade else 'N/A',
         'completed_at': completed_at.isoformat()
     })
+    # Expire completed/failed job keys after 24 hours
+    r.expire(job_key, 86400)
 
     print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
 
@@ -505,10 +551,13 @@ async def process_discovery_job(job_data: dict):
                 except Exception:
                     pass
 
-    r.hset(f"job:{job_id}", mapping={
+    job_key = f"job:{job_id}"
+    r.hset(job_key, mapping={
         'status': 'failed' if error else 'completed',
         'completed_at': completed_at.isoformat()
     })
+    # Expire completed/failed job keys after 24 hours
+    r.expire(job_key, 86400)
 
     print(f"[{job_id[:8]}] Discovery completed: {root_domain} | Found: {result.get('total', 0)} subdomains", flush=True)
 

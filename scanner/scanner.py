@@ -14,7 +14,16 @@ import urllib.parse
 from datetime import UTC, datetime
 from typing import Any
 
-from scanner_tools.common import run
+from scanner_tools.common import is_in_scope_url, run
+from scanner_tools.coverage_tracker import CoverageTracker
+from scanner_tools.har_discovery import (
+    extract_discovery_from_har,
+    get_testable_endpoints,
+    get_bola_candidates,
+    HARDiscoveryResult,
+)
+from scanner_tools.signal_types import Signal, SignalSet
+from scanner_tools.verification_phase import verify_high_severity_findings
 
 # Set global socket timeout to prevent DNS hangs (critical fix for scanner.py)
 socket.setdefaulttimeout(10)
@@ -2099,57 +2108,229 @@ def validate_severity_cvss(severity: str, cvss_score: float) -> str:
     return canonical_severity
 
 
-def extract_signals_from_nuclei(nuclei_results: dict) -> dict:
+def extract_signals_from_nuclei(nuclei_results: dict) -> SignalSet:
     """
     Extract vulnerability signals from nuclei findings for guiding later phases.
+
+    This function goes beyond simple keyword matching to:
+    1. Analyze template IDs, tags, and titles
+    2. Parse response patterns and evidence
+    3. Consider CVSS scores and severity
+    4. Detect technology-specific vulnerabilities
+    5. Track confidence levels for each signal
 
     These signals inform:
     - Discovery: Which paths to prioritize
     - Active testing: Which attack types to focus on
+
+    Returns:
+        SignalSet with scored signals. Backward compatible with dict-like access
+        (supports .get(), [] access, and boolean checks).
     """
-    signals = {
-        "sql_errors": False,
-        "xss_reflection": False,
-        "auth_issues": False,
-        "file_inclusion": False,
-        "ssrf_potential": False,
-        "rce_potential": False,
-    }
+    signals = SignalSet()
 
     findings = nuclei_results.get("findings", [])
     if not findings:
         findings = nuclei_results.get("vulnerabilities", [])
+
+    # Enhanced patterns for signal detection
+    sql_patterns = ["sql", "database", "query", "mysql", "postgres", "sqlite", "mssql",
+                    "oracle", "mariadb", "nosql", "mongodb", "injection"]
+    xss_patterns = ["xss", "reflect", "cross-site", "script", "dom-based", "stored-xss"]
+    auth_patterns = ["auth", "login", "jwt", "session", "token", "oauth", "saml", "credential",
+                     "password", "apikey", "api-key", "bearer", "cookie"]
+    lfi_patterns = ["lfi", "rfi", "path-traversal", "file-inclusion", "directory-traversal",
+                    "file-read", "arbitrary-file"]
+    ssrf_patterns = ["ssrf", "server-side-request", "url-fetch", "redirect", "open-redirect"]
+    rce_patterns = ["rce", "command-injection", "code-execution", "remote-code", "exec", "shell",
+                    "deserialization", "template-injection", "ssti"]
+    api_patterns = ["api", "graphql", "rest", "swagger", "openapi", "endpoint", "webhook"]
+    info_patterns = ["disclosure", "exposure", "leak", "sensitive", "debug", "stack-trace",
+                     "error-message", "verbose"]
+    misconfig_patterns = ["misconfig", "misconfiguration", "insecure", "default", "weak",
+                          "cors", "headers", "security-header"]
+    default_cred_patterns = ["default-login", "default-credential", "admin-panel",
+                             "hardcoded", "weak-password"]
 
     for finding in findings:
         template_id = str(finding.get("template_id", "") or finding.get("template-id", "")).lower()
         tags = [t.lower() for t in (finding.get("tags", []) or [])]
         title = str(finding.get("title", "") or finding.get("info", {}).get("name", "")).lower()
         matcher_name = str(finding.get("matcher-name", "") or finding.get("matcher_name", "")).lower()
+        severity = str(finding.get("severity", "") or finding.get("info", {}).get("severity", "")).lower()
+        evidence = finding.get("evidence", {}) or {}
+        matched_at = finding.get("matched-at", "") or finding.get("matched_at", "") or ""
+        extracted_results = finding.get("extracted-results", []) or []
 
-        # SQL/Database signals
-        if any(x in template_id or x in title or x in matcher_name
-               for x in ["sql", "database", "query", "mysql", "postgres", "sqlite", "mssql"]):
-            signals["sql_errors"] = True
+        # Combine all text for pattern matching
+        all_text = f"{template_id} {title} {matcher_name} {' '.join(tags)}"
+
+        # Extract CVSS if available
+        cvss = 0.0
+        info = finding.get("info", {})
+        if info:
+            classification = info.get("classification", {})
+            if classification:
+                cvss = float(classification.get("cvss-score", 0) or classification.get("cvss_score", 0) or 0)
+
+        # Track severity counts
+        if severity == "critical" or cvss >= 9.0:
+            signals.critical_count += 1
+        elif severity == "high" or cvss >= 7.0:
+            signals.high_count += 1
+
+        # SQL/Database signals (enhanced with evidence analysis)
+        if any(p in all_text for p in sql_patterns):
+            confidence = 0.9 if cvss >= 7.0 else 0.7
+            if not signals.sql_errors.active or confidence > signals.sql_errors.confidence:
+                signals.sql_errors = Signal(
+                    active=True,
+                    confidence=confidence,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.sql_errors.add_evidence(f"template:{template_id}")
+
+        # Also check evidence for SQL error patterns
+        evidence_str = str(evidence).lower() if evidence else ""
+        extracted_str = " ".join(str(e) for e in extracted_results).lower()
+        sql_error_keywords = ["sql syntax", "mysql", "ora-", "pg_", "sqlite", "mssql", "syntax error"]
+        if any(err in evidence_str or err in extracted_str for err in sql_error_keywords):
+            signals.sql_errors = Signal(
+                active=True,
+                confidence=0.95,
+                evidence=signals.sql_errors.evidence + ["error_pattern_in_response"],
+                source="nuclei"
+            )
 
         # XSS/Reflection signals
-        if any(x in template_id or x in title for x in ["xss", "reflect", "cross-site"]):
-            signals["xss_reflection"] = True
+        if any(p in all_text for p in xss_patterns):
+            confidence = 0.85 if cvss >= 6.0 else 0.6
+            if not signals.xss_reflection.active or confidence > signals.xss_reflection.confidence:
+                signals.xss_reflection = Signal(
+                    active=True,
+                    confidence=confidence,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.xss_reflection.add_evidence(f"template:{template_id}")
 
         # Auth signals
-        if any(x in tags or x in template_id for x in ["auth", "login", "jwt", "session", "token"]):
-            signals["auth_issues"] = True
+        if any(p in all_text for p in auth_patterns):
+            confidence = 0.9 if severity in ["critical", "high"] else 0.7
+            if not signals.auth_issues.active or confidence > signals.auth_issues.confidence:
+                signals.auth_issues = Signal(
+                    active=True,
+                    confidence=confidence,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.auth_issues.add_evidence(f"template:{template_id}")
 
         # LFI/RFI signals
-        if any(x in template_id or x in title for x in ["lfi", "rfi", "path-traversal", "file-inclusion"]):
-            signals["file_inclusion"] = True
+        if any(p in all_text for p in lfi_patterns):
+            if not signals.file_inclusion.active:
+                signals.file_inclusion = Signal(
+                    active=True,
+                    confidence=0.9,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.file_inclusion.add_evidence(f"template:{template_id}")
 
         # SSRF signals
-        if "ssrf" in template_id or "ssrf" in title:
-            signals["ssrf_potential"] = True
+        if any(p in all_text for p in ssrf_patterns):
+            if not signals.ssrf_potential.active:
+                signals.ssrf_potential = Signal(
+                    active=True,
+                    confidence=0.8,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.ssrf_potential.add_evidence(f"template:{template_id}")
 
         # RCE signals
-        if any(x in template_id or x in title for x in ["rce", "command-injection", "code-execution"]):
-            signals["rce_potential"] = True
+        if any(p in all_text for p in rce_patterns):
+            if not signals.rce_potential.active:
+                signals.rce_potential = Signal(
+                    active=True,
+                    confidence=0.95,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.rce_potential.add_evidence(f"template:{template_id}")
+
+        # API exposure signals
+        if any(p in all_text for p in api_patterns):
+            if not signals.api_exposure.active:
+                signals.api_exposure = Signal(
+                    active=True,
+                    confidence=0.7,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.api_exposure.add_evidence(f"template:{template_id}")
+
+        # Information disclosure signals
+        if any(p in all_text for p in info_patterns):
+            if not signals.information_disclosure.active:
+                signals.information_disclosure = Signal(
+                    active=True,
+                    confidence=0.7,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.information_disclosure.add_evidence(f"template:{template_id}")
+
+        # Misconfiguration signals
+        if any(p in all_text for p in misconfig_patterns):
+            if not signals.misconfig.active:
+                signals.misconfig = Signal(
+                    active=True,
+                    confidence=0.7,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.misconfig.add_evidence(f"template:{template_id}")
+
+        # Default credentials signals
+        if any(p in all_text for p in default_cred_patterns):
+            if not signals.default_creds.active:
+                signals.default_creds = Signal(
+                    active=True,
+                    confidence=0.85,
+                    evidence=[f"template:{template_id}"],
+                    source="nuclei"
+                )
+            else:
+                signals.default_creds.add_evidence(f"template:{template_id}")
+
+        # Track high-value targets (URLs where critical/high findings were found)
+        if (severity in ["critical", "high"] or cvss >= 7.0) and matched_at:
+            signals.high_value_targets.append(matched_at)
+
+        # Technology-specific signals from tags
+        tech_tags = ["wordpress", "drupal", "joomla", "spring", "struts", "rails",
+                     "django", "laravel", "express", "react", "angular", "vue",
+                     "tomcat", "nginx", "apache", "iis", "jenkins", "gitlab",
+                     "kubernetes", "docker", "aws", "azure", "gcp"]
+        for tech in tech_tags:
+            if tech in tags or tech in template_id:
+                if tech not in signals.tech_specific:
+                    signals.tech_specific[tech] = []
+                signals.tech_specific[tech].append(template_id)
+
+    # Deduplicate high-value targets
+    signals.high_value_targets = list(set(signals.high_value_targets))[:20]
 
     return signals
 
@@ -2167,6 +2348,19 @@ def normalize_finding(tool: str, title: str, severity: str, evidence: dict, cwe:
         "evidence": evidence,
         "first_seen": now_utc_iso()
     }
+
+    # Promote key fields to top-level for verification phase to access
+    # These fields are needed by verify_high_severity_findings
+    for key in ("type", "url", "param", "payload", "method", "technique", "dbms", "content_type", "body", "request_headers"):
+        if key in evidence and evidence[key] is not None:
+            finding[key] = evidence[key]
+
+    # Infer type from tool name if not explicitly provided
+    if "type" not in finding:
+        if "sqli" in tool.lower():
+            finding["type"] = "SQLi"
+        elif "xss" in tool.lower():
+            finding["type"] = "XSS"
 
     # =========================================================================
     # NOISE REDUCTION: Force info severity for non-vulnerability findings
@@ -2403,6 +2597,7 @@ try:
     from scanner_tools.access_control_checks import (
         check_forced_browsing as _check_forced_browsing_mod,
         format_findings_for_scanner as _format_forced_browsing_findings_mod,
+        smart_bola_test as _smart_bola_test_mod,
     )
     from scanner_tools.active_checks import (
         advanced_vuln_tests as _advanced_vuln_tests_mod,
@@ -2424,6 +2619,9 @@ try:
         session_vulnerability_test as _session_vulnerability_test_mod,
         smart_sqli_test as _smart_sqli_test_mod,
         smart_xss_test as _smart_xss_test_mod,
+        dom_xss_analysis as _dom_xss_analysis_mod,
+        sqli_data_extraction as _sqli_data_extraction_mod,
+        oob_sqli_test as _oob_sqli_test_mod,
         sqlmap_test as _sqlmap_test_mod,
         sqlmap_test_context as _sqlmap_test_context_mod,
         sqlmap_replay_request as _sqlmap_replay_request_mod,
@@ -2701,6 +2899,9 @@ try:
     detect_dbms = _detect_dbms_mod
     smart_sqli_test = _smart_sqli_test_mod
     smart_xss_test = _smart_xss_test_mod
+    dom_xss_analysis = _dom_xss_analysis_mod
+    sqli_data_extraction = _sqli_data_extraction_mod
+    oob_sqli_test = _oob_sqli_test_mod
     run_smart_active_tests = _run_smart_active_tests_mod
     subdomain_takeover_check = _subdomain_takeover_check_mod
     nosql_injection_test = _nosql_injection_test_mod
@@ -2810,6 +3011,7 @@ try:
     # Access control checks
     check_forced_browsing = _check_forced_browsing_mod
     format_forced_browsing_findings = _format_forced_browsing_findings_mod
+    smart_bola_test = _smart_bola_test_mod
     # SSH checks
     ssh_auth_methods = _ssh_auth_methods_mod
     # AI Classifier
@@ -3032,16 +3234,30 @@ async def build_report(target: str,
                        json_link_following: bool=False,
                        options_method_discovery: bool=False,
                        # Smart scan mode
-                       smart_mode: bool=False) -> dict[str, Any]:
+                       smart_mode: bool=False,
+                       # Smart scan tuning
+                       no_early_stop: bool=False,
+                       thorough_params: bool=False,
+                       oob_callback_url: str | None=None,
+                       # Safety/performance limits
+                       smart_bola_max_endpoints: int=30,
+                       dom_xss_max_files: int=20,
+                       sqli_extract_max: int=3,
+                       oob_max_findings: int=3,
+                       # Active enforcement metadata
+                       active_enforced: bool=False) -> dict[str, Any]:
 
-    # Warning if conflicting flags are used
-    if public_only and active_checks:
+    # Warning if conflicting flags are used (only for non-enforced scan types)
+    if public_only and active_checks and not active_enforced:
         print("Warning: --active flag ignored when --public is set (public mode disables active scans)", file=sys.stderr)
 
     host, port, scheme = normalize_host(target)
     base_url = f"{scheme}://{host}"
     if port and port not in [80, 443]:
         base_url = f"{scheme}://{host}:{port}"
+
+    # Initialize coverage tracker for smart scans
+    coverage_tracker = CoverageTracker() if smart_mode else None
 
     manual_endpoints_norm = normalize_manual_endpoints(base_url, manual_endpoints)
     if manual_endpoints_norm:
@@ -3055,15 +3271,158 @@ async def build_report(target: str,
                 file=sys.stderr
             )
 
+    # Initialize scan session ID early for consistent reporting.
+    import uuid as _uuid
+    scan_session_id = str(_uuid.uuid4())
+
     # Pre-scan connectivity validation
     pre_scan_issues = []
+    pre_scan_validation_result = None
     try:
         from scanner_tools.health_check import pre_scan_validation
-        validation = await pre_scan_validation(target)
-        if not validation["can_proceed"]:
-            logging.warning(f"Pre-scan validation failed for {target}: {validation['warnings']}")
-            pre_scan_issues = validation["warnings"]
-            # We continue anyway but log the warning - the completeness gate will handle it
+        pre_scan_validation_result = await pre_scan_validation(target)
+        if not pre_scan_validation_result["can_proceed"]:
+            logging.warning(f"Pre-scan validation failed for {target}: {pre_scan_validation_result['warnings']}")
+            pre_scan_issues = pre_scan_validation_result["warnings"]
+
+            connectivity = pre_scan_validation_result.get("connectivity") or {}
+            details = connectivity.get("details") or {}
+            ip_addresses = details.get("ip_addresses") or []
+            a_records = [ip for ip in ip_addresses if ":" not in ip]
+            aaaa_records = [ip for ip in ip_addresses if ":" in ip]
+
+            http_status_code = details.get("http_status")
+            http_status_line = f"HTTP/? {http_status_code}" if http_status_code else "HTTP/? 0"
+            http_url = details.get("http_url") or base_url
+            security_txt_url = http_url.rstrip("/") + "/.well-known/security.txt"
+
+            empty_headers: dict[str, list[str]] = {}
+            sec_headers = parse_security_headers(empty_headers)
+            csp_eval = analyze_csp(None)
+            cookies = analyze_cookies(empty_headers)
+
+            scan_mode_label = "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard"))
+            report: dict[str, Any] = {
+                "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
+                "scan_mode": scan_mode_label,
+                "scan_config": {
+                    "active_enforced": active_enforced,
+                    "active_checks": active_checks,
+                    "smart_mode": smart_mode,
+                    "no_early_stop": no_early_stop,
+                    "thorough_params": thorough_params,
+                },
+                "timestamp_utc": now_utc_iso(),
+                "dns": {
+                    "a": a_records,
+                    "aaaa": aaaa_records,
+                    "cname": None,
+                    "mx": [],
+                    "txt_sample": [],
+                    "spf": None,
+                    "dmarc": {},
+                    "dnssec": {},
+                    "dkim": {},
+                    "caa": {},
+                    "mta_sts": {},
+                    "tls_rpt": {},
+                },
+                "tls": {
+                    "endpoints": [],
+                    "certificate": {},
+                    "ocsp": {"stapled": False},
+                    "nmap": {},
+                    "testssl": {},
+                    "sslyze": {},
+                    "cipher_suites": {},
+                },
+                "http": {
+                    "source": "pre_scan",
+                    "status": http_status_line,
+                    "final_url": http_url,
+                    "headers": empty_headers,
+                    "security_headers": sec_headers,
+                    "csp_evaluation": csp_eval,
+                    "cookies": cookies,
+                    "http2": None,
+                    "http3": None,
+                    "http3_advertised": False,
+                    "scheme_redirect": "n/a",
+                    "security_txt": {"present": False, "url": security_txt_url, "sample": None},
+                    "evidence": {"screenshot": None, "page_title": None},
+                },
+                "discovery": {
+                    "summary": {
+                        "total_urls": 0,
+                        "browser_endpoints": 0,
+                        "manual_endpoints": 0,
+                        "methods_used": [],
+                        "warnings": ["Target unreachable during pre-scan validation."],
+                    }
+                },
+                "findings": [],
+                "connectivity": connectivity,
+            }
+
+            coverage = assess_scan_completeness(
+                report,
+                public_only=public_only,
+                active_checks_requested=active_checks,
+                js_dependency_scanning=js_dependency_scanning,
+                js_secret_scanning=js_secret_scanning,
+            )
+            if pre_scan_issues:
+                for issue in pre_scan_issues:
+                    labeled = f"Pre-scan: {issue}"
+                    if labeled not in coverage["issues"]:
+                        coverage["issues"].append(labeled)
+            report["coverage"] = coverage
+
+            grade_result = grade(report)
+            if not coverage["grade_reliable"]:
+                grade_result["grade_reliable"] = False
+                grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
+                grade_result["coverage_issues"] = coverage["issues"]
+                grade_result["original_grade"] = grade_result["grade"]
+                grade_result["grade"] = grade_result["grade"] + "*"
+                grade_result["summary"] = f"[INCOMPLETE] {grade_result['summary']}"
+            else:
+                grade_result["grade_reliable"] = True
+            report["result"] = grade_result
+
+            checks_skipped = []
+            if active_checks and public_only:
+                checks_skipped.append({
+                    "check": "active_checks",
+                    "reason": "Active scans disabled in public-only mode"
+                })
+            if js_dependency_scanning and public_only:
+                checks_skipped.append({
+                    "check": "js_dependency_scanning",
+                    "reason": "JS scanning disabled in public-only mode"
+                })
+            if js_secret_scanning and public_only:
+                checks_skipped.append({
+                    "check": "js_secret_scanning",
+                    "reason": "JS secret scanning disabled in public-only mode"
+                })
+
+            report["scan_metadata"] = {
+                "scan_id": scan_session_id,
+                "target": target,
+                "completed_at": now_utc_iso(),
+                "scan_mode": scan_mode_label,
+                "coverage_status": coverage["status"],
+                "options": {
+                    "public_only": public_only,
+                    "active_checks_requested": active_checks,
+                    "ai_validation_enabled": ai_validation,
+                },
+                "checks_skipped": checks_skipped,
+                "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
+            }
+
+            return report
         else:
             logging.info(f"Pre-scan validation passed for {target}")
     except Exception as e:
@@ -3071,8 +3430,6 @@ async def build_report(target: str,
 
     # Initialize scan-scoped PoE session to ensure request counts are isolated per scan
     # This prevents cross-scan throttling issues in long-lived worker processes
-    import uuid as _uuid
-    scan_session_id = str(_uuid.uuid4())
     try:
         from scanner_tools.proof_of_exploit import end_scan_session, reset_request_counts, start_scan_session
         start_scan_session(scan_session_id)
@@ -3584,10 +3941,72 @@ async def build_report(target: str,
         "deep": {"max_pages": 12, "max_depth": 2},
         "full": {"max_pages": 20, "max_depth": 3},
         "aggressive": {"max_pages": 30, "max_depth": 3},
-        "smart": {"max_pages": 18, "max_depth": 3},
+        "smart": {"max_pages": 30, "max_depth": 4},
     }
     crawl_limits = browser_crawl_limits.get(discovery_scan_type, {"max_pages": 6, "max_depth": 2})
     enable_browser_crawl = smart_mode or complete_mode or bool(auth_session)
+
+    # For smart mode: Quick JS route discovery to seed browser crawl
+    # This helps SPAs by finding routes before the browser crawl starts
+    browser_seed_urls: list[str] = []
+    if smart_mode and not no_browser:
+        try:
+            import re
+            import httpx as _httpx
+
+            print(f"[smart] Quick JS route discovery for browser crawl seeding", file=sys.stderr)
+            async with _httpx.AsyncClient(verify=False, timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(base_url)
+                html = resp.text or ""
+
+                # Extract script URLs from HTML
+                script_urls: list[str] = []
+                script_pattern = r'<script[^>]+src=["\']([^"\']+)["\']'
+                for match in re.finditer(script_pattern, html, re.IGNORECASE):
+                    src = match.group(1)
+                    if src and not src.startswith("data:"):
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        elif src.startswith("/"):
+                            src = base_url.rstrip("/") + src
+                        elif not src.startswith("http"):
+                            src = base_url.rstrip("/") + "/" + src
+                        script_urls.append(src)
+
+                # Quick JS analysis for routes (limit to 5 scripts)
+                route_patterns = [
+                    r'''["'](/[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+){0,3})["']''',  # Path strings
+                    r'''path:\s*["']([^"']+)["']''',  # path: '/route'
+                    r'''to:\s*["']([^"']+)["']''',  # to: '/route'
+                ]
+
+                for js_url in script_urls[:5]:
+                    try:
+                        js_resp = await client.get(js_url)
+                        js_content = js_resp.text or ""
+                        if len(js_content) > 500000:  # Skip very large bundles (>500KB)
+                            continue
+                        if len(js_content) < 1000:  # Skip tiny files (likely not app bundles)
+                            continue
+
+                        for pattern in route_patterns:
+                            for match in re.finditer(pattern, js_content):
+                                route = match.group(1)
+                                if route and route.startswith("/") and len(route) > 1:
+                                    # Filter out static assets and common non-routes
+                                    if not any(route.endswith(ext) for ext in [".js", ".css", ".png", ".jpg", ".svg", ".ico"]):
+                                        browser_seed_urls.append(route)
+                    except Exception:
+                        continue
+
+                # Deduplicate and limit
+                browser_seed_urls = list(set(browser_seed_urls))[:20]
+                if browser_seed_urls:
+                    print(f"[smart] Found {len(browser_seed_urls)} routes to seed browser crawl: {browser_seed_urls[:5]}...", file=sys.stderr)
+        except Exception as e:
+            print(f"[smart] Quick JS route discovery failed: {e}", file=sys.stderr)
+            browser_seed_urls = []
+
     browser_task= asyncio.create_task(browser_fetch(
         base_url,
         "/tmp",
@@ -3596,6 +4015,7 @@ async def build_report(target: str,
         crawl=enable_browser_crawl,
         max_pages=crawl_limits["max_pages"],
         max_depth=crawl_limits["max_depth"],
+        seed_urls=browser_seed_urls if browser_seed_urls else None,
     ))
 
     # Additional security checks
@@ -3749,6 +4169,39 @@ async def build_report(target: str,
     katana_result = await katana_task
     browser_res = await browser_task
 
+    # HAR-First Discovery: Extract endpoints and parameters from browser network capture
+    # This is the primary discovery source in smart mode
+    har_discovery_result: HARDiscoveryResult | None = None
+    if smart_mode and browser_res:
+        captured_requests = browser_res.get("captured_requests", [])
+        websocket_endpoints = browser_res.get("websocket_endpoints", [])
+        if captured_requests:
+            har_discovery_result = extract_discovery_from_har(
+                captured_requests=captured_requests,
+                websocket_endpoints=websocket_endpoints,
+                base_url=base_url,
+            )
+            print(
+                f"[scanner] HAR discovery: {len(har_discovery_result.endpoints)} endpoints, "
+                f"{len(har_discovery_result.parameters)} parameters, "
+                f"{har_discovery_result.api_requests} API calls",
+                file=sys.stderr
+            )
+            # Track discovery coverage
+            if coverage_tracker and har_discovery_result:
+                coverage_tracker.record_discovery_source("har_network_capture")
+                for endpoint in har_discovery_result.endpoints:
+                    coverage_tracker.record_endpoint_discovered(endpoint.method)
+                for param in har_discovery_result.parameters:
+                    coverage_tracker.record_param_discovered(param.location)
+
+    # Extract prioritized endpoints from HAR discovery for active testing
+    har_test_targets: list[dict] = []
+    if har_discovery_result and har_discovery_result.endpoints:
+        har_test_targets = get_testable_endpoints(har_discovery_result, max_endpoints=50)
+        if har_test_targets:
+            print(f"[scanner] HAR discovery: {len(har_test_targets)} prioritized endpoints for active testing", file=sys.stderr)
+
     # Smart mode: Collect early tech detection hints for staged nuclei
     early_techs: list[str] = []
     if smart_mode:
@@ -3778,6 +4231,11 @@ async def build_report(target: str,
     # Merge API endpoints discovered via Playwright network capture into crawl_urls
     browser_api_endpoints = browser_res.get("api_endpoints", []) if browser_res else []
     if browser_api_endpoints:
+        browser_api_endpoints = [
+            ep for ep in browser_api_endpoints
+            if is_in_scope_url(ep.get("url", ""), base_url)
+        ]
+    if browser_api_endpoints:
         existing_urls = set(crawl_urls)
         added_count = 0
         for endpoint in browser_api_endpoints:
@@ -3791,6 +4249,11 @@ async def build_report(target: str,
 
     browser_page_urls = browser_res.get("page_urls", []) if browser_res else []
     if browser_page_urls:
+        browser_page_urls = [
+            u for u in browser_page_urls
+            if is_in_scope_url(u, base_url)
+        ]
+    if browser_page_urls:
         existing_urls = set(crawl_urls)
         added_pages = 0
         for page_url in browser_page_urls:
@@ -3800,6 +4263,19 @@ async def build_report(target: str,
                 added_pages += 1
         if added_pages > 0:
             print(f"[scanner] Added {added_pages} browser-crawled pages to discovery pool (total: {len(crawl_urls)})", file=sys.stderr)
+
+    # Add HAR-prioritized endpoints to crawl_urls for active testing
+    if har_test_targets:
+        existing_urls = set(crawl_urls)
+        har_added = 0
+        for target in har_test_targets:
+            target_url = target.get("url", "")
+            if target_url and target_url not in existing_urls:
+                crawl_urls.append(target_url)
+                existing_urls.add(target_url)
+                har_added += 1
+        if har_added > 0:
+            print(f"[scanner] Added {har_added} HAR-prioritized endpoints to discovery pool (total: {len(crawl_urls)})", file=sys.stderr)
 
     manual_urls = [ep.get("url") for ep in manual_endpoints_norm if ep.get("url")] if manual_endpoints_norm else []
     if manual_urls:
@@ -3890,6 +4366,36 @@ async def build_report(target: str,
             max_urls=options_limit,
         )
 
+    # Record discovery coverage
+    if coverage_tracker:
+        # Record discovered endpoints
+        for url in crawl_urls:
+            coverage_tracker.record_endpoint_discovered("GET")
+        # Record browser-captured endpoints (may have POST/PUT methods)
+        for ep in browser_api_endpoints:
+            if isinstance(ep, dict):
+                coverage_tracker.record_endpoint_discovered(ep.get("method", "GET"))
+        # Record discovery sources
+        if crawl_urls:
+            coverage_tracker.record_discovery_source("url_crawl")
+        if browser_api_endpoints:
+            coverage_tracker.record_discovery_source("browser_api_capture")
+        if manual_endpoints_norm:
+            coverage_tracker.record_discovery_source("manual_endpoints")
+        if js_bundle_analysis and js_bundle_analysis.get("api_endpoints"):
+            coverage_tracker.record_discovery_source("js_bundle_analysis")
+        if json_link_results and json_link_results.get("links"):
+            coverage_tracker.record_discovery_source("json_link_following")
+        if options_method_results:
+            coverage_tracker.record_discovery_source("options_method_discovery")
+        # Record auth state
+        if auth_session:
+            coverage_tracker.record_auth_state("user1")
+        else:
+            coverage_tracker.record_auth_state("anonymous")
+        if user2_session:
+            coverage_tracker.record_auth_state("user2")
+
     # Start nuclei once discovery has populated targets and auth is ready
     if nuclei_task is None and not public_only:
         nuclei_target_limits = {
@@ -3907,13 +4413,14 @@ async def build_report(target: str,
 
         if smart_mode:
             print(
-                f"[scanner] Smart mode: Starting staged nuclei with {len(early_techs)} detected technologies",
+                f"[scanner] Smart mode: Starting staged nuclei with {len(early_techs)} detected technologies"
+                f"{' (early stopping disabled)' if no_early_stop else ''}",
                 file=sys.stderr,
             )
             nuclei_task = asyncio.create_task(staged_nuclei_scan(
                 base_url,
                 detected_tech=early_techs,
-                early_stopping=True,
+                early_stopping=not no_early_stop,  # Disable early stopping if --no-early-stop flag is set
                 targets=crawl_urls,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
@@ -3988,6 +4495,29 @@ async def build_report(target: str,
 
     # Extract signals from nuclei for smart mode phase coordination
     nuclei_signals = extract_signals_from_nuclei(nuclei_results) if smart_mode else {}
+
+    if coverage_tracker and isinstance(nuclei_results, dict):
+        templates_run = 0
+        templates_matched = 0
+        stats = nuclei_results.get("statistics")
+        if isinstance(stats, dict):
+            templates_run = stats.get("templates_executed") or stats.get("templates_loaded") or 0
+        if not templates_run:
+            templates_run = nuclei_results.get("templates_executed") or nuclei_results.get("templates_used") or 0
+        templates_matched = nuclei_results.get("templates_matched", 0) or 0
+        if not templates_matched:
+            vulns = nuclei_results.get("vulnerabilities")
+            if isinstance(vulns, dict):
+                templates_matched += sum(len(v) for v in vulns.values() if isinstance(v, list))
+            elif isinstance(vulns, list):
+                templates_matched += len(vulns)
+            info = nuclei_results.get("info")
+            if isinstance(info, list):
+                templates_matched += len(info)
+        if templates_run == 0 and templates_matched:
+            templates_run = templates_matched
+        if templates_run or templates_matched:
+            coverage_tracker.record_templates(run=templates_run, matched=templates_matched)
 
     # Await new vulnerability tests
     nosql_results = await nosql_task
@@ -4338,7 +4868,8 @@ async def build_report(target: str,
     if not cert or not cert.get("not_after"):
         openssl_cert = parse_openssl_cert(ocsp.get("raw"))
         for k, v in openssl_cert.items():
-            cert.setdefault(k, v)
+            if k not in cert or cert.get(k) in (None, "", [], {}):
+                cert[k] = v
     cert["days_remaining"] = days_until(cert.get("not_after"))
 
     # Discovery summary - combine tech detection from multiple sources
@@ -4440,14 +4971,51 @@ async def build_report(target: str,
     # Add smart mode results if available
     if smart_mode:
         if smart_discovery_data:
+            # Helper to redact query params from URLs (avoid leaking tokens/PII)
+            def redact_url(url: str) -> str:
+                if "?" not in url:
+                    return url
+                base, _ = url.split("?", 1)
+                return base + "?<redacted>"
+
+            # Cap lists to avoid bloating report size
+            max_urls_in_report = 200
+            max_endpoints_in_report = 100
+
+            raw_all_urls = smart_discovery_data.get("all_urls", []) or []
+            raw_api_endpoints = smart_discovery_data.get("api_endpoints", []) or []
+            raw_recursive = smart_discovery_data.get("recursive_paths", []) or []
+            raw_probed = smart_discovery_data.get("probed_endpoints", []) or []
+            raw_with_params = smart_discovery_data.get("endpoints_with_params", []) or []
+
             discovery["smart_discovery"] = {
-                "recursive_paths": smart_discovery_data.get("recursive_paths", []),
                 "stats": smart_discovery_data.get("stats", {}),
+                "total_urls_discovered": len(raw_all_urls),
+                "total_api_endpoints": len(raw_api_endpoints),
+                "total_recursive_paths": len(raw_recursive),
+                "total_probed_endpoints": len(raw_probed),
+                "total_endpoints_with_params": len(raw_with_params),
+                # Capped and redacted samples
+                "all_urls_sample": [redact_url(u) for u in raw_all_urls[:max_urls_in_report]],
+                "api_endpoints_sample": [redact_url(u) for u in raw_api_endpoints[:max_endpoints_in_report]],
+                "recursive_paths_sample": [redact_url(u) for u in raw_recursive[:max_urls_in_report]],
+                "probed_endpoints_sample": [
+                    {"path": p.get("path", ""), "status": p.get("status"), "params": p.get("params", [])}
+                    for p in raw_probed[:max_endpoints_in_report]
+                ],
             }
         if js_bundle_analysis:
             discovery["js_bundle_analysis"] = js_bundle_analysis
+        # HAR-first discovery results
+        if har_discovery_result:
+            discovery["har_discovery"] = har_discovery_result.to_dict()
+            # Add BOLA candidates for targeted testing
+            bola_candidates = get_bola_candidates(har_discovery_result)
+            if bola_candidates:
+                discovery["bola_candidates"] = bola_candidates[:20]
         if nuclei_signals:
-            discovery["nuclei_signals"] = nuclei_signals
+            # Serialize SignalSet to dict for JSON output
+            discovery["nuclei_signals"] = nuclei_signals.to_dict() if hasattr(nuclei_signals, "to_dict") else nuclei_signals
 
     # Discovery summary with warnings for API-only targets
     discovery_summary: dict[str, Any] = {
@@ -4493,6 +5061,13 @@ async def build_report(target: str,
     report = {
         "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
         "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
+        "scan_config": {
+            "active_enforced": active_enforced,
+            "active_checks": active_checks,
+            "smart_mode": smart_mode,
+            "no_early_stop": no_early_stop,
+            "thorough_params": thorough_params,
+        },
         "timestamp_utc": now_utc_iso(),
         "dns": {
             "a": dns.get("A"), "aaaa": dns.get("AAAA"), "cname": dns.get("CNAME"), "mx": dns.get("MX"),
@@ -5300,12 +5875,12 @@ async def build_report(target: str,
 
     # Phase 2 Access Control & Auth Findings
     if rate_limiting_results.get("vulnerable"):
-        # Rate limiting findings - high severity
+        # Rate limiting findings - low severity
         for vuln_endpoint in rate_limiting_results.get("vulnerable_endpoints", []):
             report["findings"].append(normalize_finding(
                 "rate_limiting",
                 f"No rate limiting detected on {vuln_endpoint.get('endpoint')}",
-                "high",
+                "low",
                 vuln_endpoint,
                 "CWE-307"
             ))
@@ -5988,9 +6563,10 @@ async def build_report(target: str,
             return any(p in url_lower for p in doc_patterns)
 
         # Filter out external URLs and documentation
-        functional_urls = [u for u in all_discovered
-                          if base_url.split('://')[1].split('/')[0] in u  # Same host
-                          and not is_documentation_url(u)]
+        functional_urls = [
+            u for u in all_discovered
+            if is_in_scope_url(u, base_url) and not is_documentation_url(u)
+        ]
 
         # Build URL categories from functional endpoints only
         parameterized_urls = [u for u in functional_urls if "?" in u]
@@ -6065,6 +6641,9 @@ async def build_report(target: str,
         for form_url in form_urls[:max_active//4]:
             candidates.extend(add_smart_params(form_url))
 
+        # Track discovered URLs before adding synthetic (discovered wins over synthetic)
+        discovered_urls = set(candidates)
+
         # If still need more URLs, create synthetic high-value endpoints
         if len(candidates) < max_active:
             synthetic_endpoints = [
@@ -6081,17 +6660,21 @@ async def build_report(target: str,
             ]
             for endpoint in synthetic_endpoints:
                 test_url = urllib.parse.urljoin(base_url, endpoint)
-                candidates.extend(add_smart_params(test_url))
+                synthetic_params = add_smart_params(test_url)
+                candidates.extend(synthetic_params)
                 if len(candidates) >= max_active * 2:  # Generate more, will dedupe
                     break
 
-        # de-dup and cap
+        # de-dup and cap; mark as synthetic only if not already discovered
         seen = set()
         cand = []
+        cand_synthetic = set()
         for u in candidates:
             if u not in seen:
                 seen.add(u)
                 cand.append(u)
+                if u not in discovered_urls:
+                    cand_synthetic.add(u)
             if len(cand) >= max_active:
                 break
 
@@ -6162,6 +6745,19 @@ async def build_report(target: str,
                             file=sys.stderr
                         )
 
+                # Source priority for endpoint testing (lower = higher priority)
+                # Real discovered endpoints should be tested before synthetic/inferred
+                _SOURCE_PRIORITY = {
+                    "har_discovery": 1,  # Actually observed in browser network
+                    "manual": 2,         # User-specified endpoints
+                    "openapi": 3,        # From OpenAPI/Swagger spec
+                    "form": 4,           # Discovered from HTML forms
+                    "common": 5,         # Well-known endpoints like /rest/user/login
+                    "options": 6,        # Discovered via OPTIONS method
+                    "inferred": 7,       # Synthetic endpoints guessed from patterns
+                }
+                _DEFAULT_SOURCE_PRIORITY = 6
+
                 def _merge_endpoint(new_ep):
                     url = new_ep.get("url")
                     if not url:
@@ -6202,6 +6798,13 @@ async def build_report(target: str,
                         existing["allowed_methods"] = _dedupe_list(
                             (existing.get("allowed_methods") or []) + list(new_ep.get("allowed_methods"))
                         )
+                    # Keep the highest-priority source (lower number = higher priority)
+                    new_source = new_ep.get("source", "")
+                    existing_source = existing.get("source", "")
+                    new_priority = _SOURCE_PRIORITY.get(new_source, _DEFAULT_SOURCE_PRIORITY)
+                    existing_priority = _SOURCE_PRIORITY.get(existing_source, _DEFAULT_SOURCE_PRIORITY)
+                    if new_priority < existing_priority:
+                        existing["source"] = new_source
                     return False
 
                 manual_get_count = 0
@@ -6249,7 +6852,9 @@ async def build_report(target: str,
                 for u in cand:
                     parsed = urllib.parse.urlparse(u)
                     params = list(urllib.parse.parse_qs(parsed.query).keys())
-                    _merge_endpoint({"url": u, "method": "GET", "params": params})
+                    # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
+                    source = "inferred" if u in cand_synthetic else "har_discovery"
+                    _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
 
                 # Add inferred parameter endpoints from smart discovery (even if no query string)
                 if smart_discovery_data:
@@ -6259,10 +6864,10 @@ async def build_report(target: str,
                         ep_url = endpoint.get("url")
                         params = endpoint.get("params") or []
                         if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params})
+                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "har_discovery"})
                     for ep_url, params in (smart_discovery_data.get("discovered_params") or {}).items():
                         if ep_url and params:
-                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params})
+                            _merge_endpoint({"url": ep_url, "method": "GET", "params": params, "source": "har_discovery"})
 
                 # Add form-discovered endpoints (POST/GET) from discovery
                 def _is_token_param(name: str) -> bool:
@@ -6375,7 +6980,7 @@ async def build_report(target: str,
                         if not params:
                             continue
                         if method == "GET":
-                            _merge_endpoint({"url": form_url, "method": "GET", "params": params})
+                            _merge_endpoint({"url": form_url, "method": "GET", "params": params, "source": "form"})
                             form_get_count += 1
                         elif method in ("POST", "PUT", "PATCH"):
                             _merge_endpoint({
@@ -6599,6 +7204,7 @@ async def build_report(target: str,
                             "body_required_params": params,
                             "body_param_defaults": {},
                             "content_type": "application/json",
+                            "source": "common",
                         }):
                             added_common += 1
                     if added_common > 0:
@@ -6647,7 +7253,7 @@ async def build_report(target: str,
                             if not params:
                                 params = _infer_params_from_path(parsed.path or "/", method_u)
                             if method_u == "GET":
-                                if _merge_endpoint({"url": opt_url, "method": "GET", "params": params}):
+                                if _merge_endpoint({"url": opt_url, "method": "GET", "params": params, "source": "options"}):
                                     options_added += 1
                             else:
                                 if _merge_endpoint({
@@ -6663,6 +7269,51 @@ async def build_report(target: str,
 
                     if options_added > 0:
                         print(f"[scanner] Added {options_added} endpoints from OPTIONS method discovery", file=sys.stderr)
+
+                # Add HAR-discovered endpoints with method/body params preserved
+                if har_test_targets:
+                    har_get_count = 0
+                    har_post_count = 0
+                    for har_target in har_test_targets:
+                        har_url = har_target.get("url")
+                        if not har_url:
+                            continue
+                        har_method = (har_target.get("method") or "GET").upper()
+                        har_params = har_target.get("params", {})
+                        har_param_values = har_target.get("param_values", {})
+                        har_content_type = har_target.get("content_type") or "application/json"
+                        har_body_template = har_target.get("body_template")
+
+                        if har_method == "GET":
+                            # params.query is now a list of param names from get_testable_endpoints
+                            query_params = har_params.get("query", [])
+                            query_defaults = har_param_values.get("query", {})
+                            if query_params and _merge_endpoint({
+                                "url": har_url,
+                                "method": "GET",
+                                "params": query_params,
+                                "param_defaults": query_defaults,
+                                "source": "har_discovery",
+                            }):
+                                har_get_count += 1
+                        elif har_method in ("POST", "PUT", "PATCH"):
+                            # params.body is now a list of param names from get_testable_endpoints
+                            body_params = har_params.get("body", [])
+                            body_defaults = har_param_values.get("body", {})
+                            if body_params and _merge_endpoint({
+                                "url": har_url,
+                                "method": har_method,
+                                "body_params": body_params,
+                                "body_required_params": body_params[:5] if len(body_params) > 5 else body_params,
+                                "body_param_defaults": body_defaults,
+                                "content_type": har_content_type,
+                                "body_template": har_body_template,
+                                "source": "har_discovery",
+                            }):
+                                har_post_count += 1
+
+                    if har_get_count or har_post_count:
+                        print(f"[scanner] Added {har_get_count} GET and {har_post_count} POST endpoints from HAR discovery", file=sys.stderr)
 
                 if endpoints:
                     get_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() == "GET")
@@ -6684,6 +7335,24 @@ async def build_report(target: str,
                 # Get tech stack from discovery for DBMS hints
                 tech_stack = smart_discovery_data.get("tech_stack_guess", []) if smart_discovery_data else []
 
+                # Prioritize endpoints: real discovered endpoints before synthetic/inferred
+                # Uses _SOURCE_PRIORITY defined in _merge_endpoint (lower = higher priority)
+                def _endpoint_priority(ep: dict) -> tuple[int, str]:
+                    """Return (priority, url) for stable sorting."""
+                    source = ep.get("source", "")
+                    priority = _SOURCE_PRIORITY.get(source, _DEFAULT_SOURCE_PRIORITY)
+                    return (priority, ep.get("url", ""))
+
+                endpoints = sorted(endpoints, key=_endpoint_priority)
+
+                # Log prioritization stats
+                source_counts = {}
+                for ep in endpoints[:100]:  # Sample first 100
+                    src = ep.get("source", "unknown")
+                    source_counts[src] = source_counts.get(src, 0) + 1
+                if source_counts:
+                    print(f"[scanner] Endpoint prioritization (first 100): {source_counts}", file=sys.stderr)
+
                 # Run smart active tests with DBMS detection and context-aware payloads
                 smart_results = await run_smart_active_tests(
                     url=base_url,
@@ -6694,6 +7363,7 @@ async def build_report(target: str,
                     auth_session=auth_session,  # Pass auth session for authenticated testing
                     run_xss=run_xss,
                     run_sqli=run_sqli,
+                    thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
                 )
 
                 smart_sqli_findings = []
@@ -6713,24 +7383,101 @@ async def build_report(target: str,
                             title = f"SQL Injection ({f.get('dbms', 'unknown')} - {f.get('technique', 'unknown')})"
                             if method != "GET":
                                 title = f"{method} {title}"  # e.g., "POST SQL Injection (...)"
+                            evidence_dict = {
+                                "type": f.get("type", "SQLi"),
+                                "url": f.get("url"),
+                                "method": method,
+                                "param": f.get("param"),
+                                "payload": f.get("payload"),
+                                "technique": f.get("technique"),
+                                "evidence": f.get("evidence"),
+                                "dbms": f.get("dbms"),
+                            }
+                            if f.get("request_headers"):
+                                evidence_dict["request_headers"] = f.get("request_headers")
+                            # Include content_type and body for POST verification
+                            if f.get("content_type"):
+                                evidence_dict["content_type"] = f.get("content_type")
+                            if f.get("body"):
+                                evidence_dict["body"] = f.get("body")
                             report["findings"].append(normalize_finding(
                                 "smart_sqli",
                                 title,
                                 f.get("severity", "critical"),
-                                {
-                                    "url": f.get("url"),
-                                    "method": method,
-                                    "param": f.get("param"),
-                                    "payload": f.get("payload"),
-                                    "evidence": f.get("evidence"),
-                                    "dbms": f.get("dbms"),
-                                },
+                                evidence_dict,
                                 "CWE-89"
                             ))
 
                     # Store DBMS detection info
                     if smart_results.get("dbms_detected"):
                         active_block["dbms_detected"] = smart_results["dbms_detected"]
+
+                    # SQLi Data Extraction - chain from confirmed SQLi to extract actual data
+                    # This provides proof of exploitation and upgrades severity
+                    if smart_sqli_findings:
+                        extraction_results = []
+                        for sqli_finding in smart_sqli_findings[:sqli_extract_max]:
+                            try:
+                                extraction = await sqli_data_extraction(
+                                    sqli_finding=sqli_finding,
+                                    auth_session=auth_session,
+                                    max_extractions=5
+                                )
+                                if extraction.get("extraction_successful"):
+                                    extraction_results.append({
+                                        "url": sqli_finding.get("url"),
+                                        "param": sqli_finding.get("param"),
+                                        **extraction
+                                    })
+                                    # Update the finding with extraction evidence
+                                    sqli_finding["extraction_evidence"] = extraction.get("evidence", [])
+                                    sqli_finding["extracted_data"] = extraction.get("extracted_data", {})
+                                    # Severity upgrade is automatic (already critical, but add flag)
+                                    sqli_finding["proof_of_exploitation"] = True
+                                    print(f"[scanner] SQLi data extraction successful for {sqli_finding.get('url')}", file=sys.stderr)
+                            except Exception as e:
+                                print(f"[scanner] SQLi extraction error: {e}", file=sys.stderr)
+
+                        if extraction_results:
+                            active_block["sqli_extraction"] = extraction_results
+
+                    # OOB SQLi Test - for blind SQLi detection via external callbacks
+                    # Requires a callback URL (e.g., Burp Collaborator) for verification
+                    if oob_callback_url and smart_sqli_findings:
+                        oob_results = []
+                        for sqli_finding in smart_sqli_findings[:oob_max_findings]:
+                            try:
+                                oob_result = await oob_sqli_test(
+                                    url=sqli_finding.get("url", ""),
+                                    param=sqli_finding.get("param", ""),
+                                    dbms=sqli_finding.get("dbms"),
+                                    callback_url=oob_callback_url,
+                                    auth_session=auth_session
+                                )
+                                if oob_result.get("payloads_sent"):
+                                    oob_results.append({
+                                        "url": sqli_finding.get("url"),
+                                        "param": sqli_finding.get("param"),
+                                        **oob_result
+                                    })
+                            except Exception as e:
+                                print(f"[scanner] OOB SQLi test error: {e}", file=sys.stderr)
+
+                        if oob_results:
+                            active_block["oob_sqli"] = oob_results
+                            # Add a finding that requires callback verification
+                            report["findings"].append(normalize_finding(
+                                "oob_sqli",
+                                "Potential Out-of-Band SQL Injection (requires callback verification)",
+                                "medium",  # Medium until callback confirms
+                                {
+                                    "payloads_sent": len(oob_results),
+                                    "callback_url": oob_callback_url,
+                                    "note": "Check callback server for DNS/HTTP requests to confirm exploitation",
+                                    "endpoints_tested": [r.get("url") for r in oob_results],
+                                },
+                                "CWE-89"
+                            ))
 
                 if run_xss:
                     smart_xss_findings = smart_results.get("xss", {}).get("findings", [])
@@ -6745,6 +7492,7 @@ async def build_report(target: str,
                                 f"Cross-Site Scripting ({f.get('context', 'unknown')})",
                                 f.get("severity", "high"),
                                 {
+                                    "type": f.get("type", "XSS"),
                                     "url": f.get("url"),
                                     "param": f.get("param"),
                                     "payload": f.get("payload"),
@@ -6753,6 +7501,23 @@ async def build_report(target: str,
                                 },
                                 "CWE-79"
                             ))
+
+                # Record coverage for smart active tests
+                if coverage_tracker:
+                    sqli_stats = smart_results.get("sqli", {})
+                    xss_stats = smart_results.get("xss", {})
+                    total_endpoints = (
+                        sqli_stats.get("endpoints_tested", 0) +
+                        xss_stats.get("endpoints_tested", 0)
+                    )
+                    total_params = (
+                        sqli_stats.get("params_tested", 0) +
+                        xss_stats.get("params_tested", 0)
+                    )
+                    if total_endpoints > 0:
+                        coverage_tracker.record_endpoint_tested(count=total_endpoints)
+                    if total_params > 0:
+                        coverage_tracker.record_param_tested(count=total_params)
 
                 if run_sqli:
                     # Heuristic sqlmap verification on high-signal endpoints
@@ -7095,6 +7860,117 @@ async def build_report(target: str,
         # Track if smart mode ran successfully (no error)
         smart_succeeded = smart_mode and "smart_error" not in active_block
 
+        # DOM XSS Analysis - run in smart mode after smart active tests
+        # Analyzes JavaScript files for source-to-sink flows that could lead to DOM-based XSS
+        # Note: Always runs in smart mode regardless of --xss/--sqli filters (smart-mode feature)
+        if smart_mode and smart_succeeded:
+            try:
+                # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
+                js_urls_for_dom_xss = []
+                if smart_discovery_data:
+                    js_urls_for_dom_xss = [
+                        u for u in smart_discovery_data.get("all_urls", [])
+                        if u and (u.endswith(".js") or ".js?" in u)
+                    ]
+                if not js_urls_for_dom_xss and crawl_urls:
+                    js_urls_for_dom_xss = [
+                        u for u in crawl_urls
+                        if u and (u.endswith(".js") or ".js?" in u)
+                    ]
+
+                # Always run DOM XSS analysis - function will self-discover JS if none provided
+                if js_urls_for_dom_xss:
+                    print(f"[scanner] Smart mode: Running DOM XSS analysis on {min(len(js_urls_for_dom_xss), dom_xss_max_files)} JS files (max: {dom_xss_max_files})", file=sys.stderr)
+                else:
+                    print(f"[scanner] Smart mode: Running DOM XSS analysis (self-discovering JS files, max: {dom_xss_max_files})", file=sys.stderr)
+
+                dom_xss_results = await dom_xss_analysis(
+                    url=base_url,
+                    js_urls=js_urls_for_dom_xss[:dom_xss_max_files] if js_urls_for_dom_xss else None,
+                    auth_session=auth_session,
+                    max_files=dom_xss_max_files
+                )
+
+                active_block["dom_xss"] = dom_xss_results
+
+                # Add normalized findings for DOM XSS vulnerabilities
+                if dom_xss_results.get("findings"):
+                    for f in dom_xss_results["findings"]:
+                        # Only report findings with source nearby (higher confidence)
+                        if f.get("source_nearby"):
+                            severity = f.get("severity", "medium")
+                            report["findings"].append(normalize_finding(
+                                "dom_xss",
+                                f"DOM-Based XSS ({f.get('sink_type', 'unknown sink')})",
+                                severity,
+                                {
+                                    "file": f.get("file"),
+                                    "line": f.get("line"),
+                                    "snippet": f.get("snippet"),
+                                    "sink_type": f.get("sink_type"),
+                                    "source_pattern": f.get("source_pattern"),
+                                    "evidence": f.get("evidence"),
+                                    "confidence": f.get("confidence", 0.7),
+                                },
+                                "CWE-79"
+                            ))
+                    print(f"[scanner] DOM XSS analysis: found {len(dom_xss_results['findings'])} potential vulnerabilities", file=sys.stderr)
+            except Exception as e:
+                active_block["dom_xss_error"] = str(e)
+                print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
+
+        # Smart BOLA Testing - run in smart mode to detect authorization issues
+        # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
+        if smart_mode and smart_succeeded and not public_only:
+            try:
+                # Get discovered URLs from crawl data for BOLA pattern analysis
+                bola_urls = []
+                if smart_discovery_data:
+                    bola_urls = smart_discovery_data.get("all_urls", [])[:500]
+                if not bola_urls and crawl_urls:
+                    bola_urls = crawl_urls[:500]
+
+                if bola_urls:
+                    print(f"[scanner] Smart mode: Running BOLA/IDOR testing on {len(bola_urls)} discovered URLs", file=sys.stderr)
+                    if user2_session:
+                        print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
+                    else:
+                        print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
+
+                    bola_results = await smart_bola_test(
+                        base_url=base_url,
+                        discovered_urls=bola_urls,
+                        user1_session=auth_session,
+                        user2_session=user2_session,  # Only runs cross-user tests if provided
+                        max_endpoints=smart_bola_max_endpoints,
+                        timeout=10
+                    )
+
+                    active_block["smart_bola"] = bola_results
+
+                    # Add findings to report
+                    if bola_results.get("findings"):
+                        for f in bola_results["findings"]:
+                            report["findings"].append(normalize_finding(
+                                "smart_bola",
+                                f.get("title", "BOLA/IDOR Vulnerability"),
+                                f.get("severity", "high"),
+                                {
+                                    "url": f.get("evidence", {}).get("url"),
+                                    "test_id": f.get("evidence", {}).get("test_id"),
+                                    "pattern_type": f.get("evidence", {}).get("pattern_type"),
+                                    "description": f.get("description"),
+                                    "response_snippet": f.get("evidence", {}).get("response_snippet", "")[:300],
+                                },
+                                f.get("cwe", "CWE-639")
+                            ))
+                        print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
+                    else:
+                        print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
+            except Exception as e:
+                active_block["smart_bola_error"] = str(e)
+                print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
+
         # Run active checks with a global timeout (standard mode or smart fallback on error)
         async def run_active_checks():
             for u in cand:
@@ -7335,6 +8211,30 @@ async def build_report(target: str,
     )
     report["coverage"] = coverage
 
+    # =========================================================================
+    # VERIFICATION PHASE: Verify high-severity findings before grading
+    # =========================================================================
+    # Run verification BEFORE grading so downgraded severities are reflected
+    # in the final grade. Only run in smart mode to avoid slowing down standard scans.
+    if smart_mode:
+        pre_verification_findings = report.get("findings", [])
+        high_sev_count = sum(1 for f in pre_verification_findings if f.get("severity") in ("high", "critical"))
+
+        if high_sev_count > 0:
+            print(f"[verification] Verifying {high_sev_count} high-severity findings...", file=sys.stderr)
+            try:
+                verified_findings = await verify_high_severity_findings(
+                    findings=pre_verification_findings,
+                    auth_session=auth_session,
+                    verify_xss=True,
+                    verify_sqli=True,
+                    max_verification_attempts=3,
+                )
+                report["findings"] = verified_findings
+            except Exception as e:
+                print(f"[verification] Warning: Verification phase failed: {e}", file=sys.stderr)
+                # Continue with unverified findings
+
     # Calculate grade
     grade_result = grade(report)
 
@@ -7509,6 +8409,21 @@ async def build_report(target: str,
         report["quality_metrics"]["reliability_notes"].append(
             f"{len(checks_skipped)} check(s) were skipped due to scan configuration"
         )
+
+    # Redact request bodies from findings before returning/saving reports.
+    if report.get("findings"):
+        for finding in report["findings"]:
+            if "body" in finding:
+                finding["body"] = _redact_body_for_report(
+                    finding.get("body"),
+                    finding.get("content_type"),
+                )
+
+    # Add smart coverage metrics without overwriting completeness coverage
+    # report["coverage"] contains grade_reliable, issues, status from assess_scan_completeness
+    # report["smart_coverage"] contains endpoints/params discovered/tested from CoverageTracker
+    if coverage_tracker:
+        report["smart_coverage"] = coverage_tracker.to_dict()
 
     # Cleanup PoE session to prevent memory leaks in long-lived workers
     try:
@@ -8037,6 +8952,56 @@ def _redact_sensitive(text: str) -> str:
     text = re.sub(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)", r"\1=***", text)
     return text
 
+
+def _redact_body_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return 0
+    if isinstance(value, float):
+        return 0.0
+    if isinstance(value, str):
+        return "[REDACTED]"
+    return "[REDACTED]"
+
+
+def _redact_body_structure(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _redact_body_structure(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_body_structure(v) for v in value]
+    return _redact_body_value(value)
+
+
+def _redact_body_for_report(body: Any, content_type: str | None = None) -> Any:
+    if body is None:
+        return None
+    if isinstance(body, (dict, list)):
+        return _redact_body_structure(body)
+    if not isinstance(body, str):
+        return "[REDACTED]"
+
+    stripped = body.strip()
+    content_type_l = (content_type or "").lower()
+    if "json" in content_type_l or stripped.startswith(("{", "[")):
+        try:
+            parsed = json.loads(body)
+            return json.dumps(_redact_body_structure(parsed))
+        except (json.JSONDecodeError, TypeError):
+            return "[REDACTED]"
+
+    if "application/x-www-form-urlencoded" in content_type_l:
+        try:
+            pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
+            redacted_pairs = [(key, "[REDACTED]") for key, _ in pairs]
+            return urllib.parse.urlencode(redacted_pairs)
+        except Exception:
+            return "[REDACTED]"
+
+    return "[REDACTED]"
+
 def _mask_structure(obj: Any, host: str, replacement_host: str, scheme: str | None) -> Any:
     if isinstance(obj, dict):
         return {k: _mask_structure(v, host, replacement_host, scheme) for k, v in obj.items()}
@@ -8561,8 +9526,28 @@ async def cli_main():
     ap.add_argument("--smart", action="store_true", help="Smart scan - adaptive scanning with staged templates, recursive discovery, and context-aware attacks")
     ap.add_argument("--standard", action="store_true", help="Standard scan - balanced passive coverage (5-10 min)")
     ap.add_argument("--deep", action="store_true", help="Deep scan - thorough passive assessment (30-60 min, alias for --complete)")
+    # Smart scan tuning options
+    ap.add_argument("--no-early-stop", action="store_true", help="Disable early stopping in smart scan (continue even after finding many vulns)")
+    ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
+    ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
+    # Safety/performance limits
+    ap.add_argument("--smart-bola-max-endpoints", type=int, default=30, dest="smart_bola_max_endpoints", help="Max endpoints for smart BOLA testing (default: 30)")
+    ap.add_argument("--dom-xss-max-files", type=int, default=20, dest="dom_xss_max_files", help="Max JS files for DOM XSS analysis (default: 20)")
+    ap.add_argument("--sqli-extract-max", type=int, default=3, dest="sqli_extract_max", help="Max SQLi findings to attempt data extraction (default: 3)")
+    ap.add_argument("--oob-max-findings", type=int, default=None, dest="oob_max_findings", help="Max SQLi findings to test with OOB payloads (default: 3)")
+    # Deprecated alias for backward compatibility (hidden from help)
+    ap.add_argument("--oob-max-payloads", type=int, default=None, dest="oob_max_payloads_deprecated", help=argparse.SUPPRESS)
 
     args = ap.parse_args()
+
+    # Handle deprecated --oob-max-payloads alias (only if new flag not explicitly set)
+    if args.oob_max_findings is None and args.oob_max_payloads_deprecated is not None:
+        print("[scanner] Warning: --oob-max-payloads is deprecated, use --oob-max-findings instead", file=sys.stderr)
+        args.oob_max_findings = args.oob_max_payloads_deprecated
+
+    # Apply default if neither was set
+    if args.oob_max_findings is None:
+        args.oob_max_findings = 3
 
     # Auto-enable AI when environment variables are set
     if not args.ai_url:
@@ -9274,6 +10259,28 @@ async def cli_main():
         args.grpc_discovery = True
         args.max_active = 50
 
+    # Enforce active checks for smart/full/aggressive scan types
+    # These scan types require active testing - public-only mode is incompatible
+    active_enforced_scan_type = None
+    if args.smart:
+        active_enforced_scan_type = "smart"
+    elif args.aggressive:
+        active_enforced_scan_type = "aggressive"
+    elif args.full:
+        active_enforced_scan_type = "full"
+
+    if active_enforced_scan_type:
+        if args.public:
+            print(f"Error: --public is incompatible with --{active_enforced_scan_type} scan type.", file=sys.stderr)
+            print(f"  {active_enforced_scan_type.capitalize()} scans require active testing (XSS/SQLi probes).", file=sys.stderr)
+            print("  Use --deep for passive-only comprehensive scanning, or remove --public.", file=sys.stderr)
+            sys.exit(1)
+        # Force active=True (redundant since already set, but explicit for safety)
+        args.active = True
+        args.active_enforced = True  # Metadata flag for reporting
+    else:
+        args.active_enforced = False
+
     # Active check filters
     if args.xss or args.sqli:
         args.active = True
@@ -9443,6 +10450,17 @@ async def cli_main():
         options_method_discovery=args.options_method_discovery,
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
+        # Smart scan tuning
+        no_early_stop=getattr(args, 'no_early_stop', False),
+        thorough_params=getattr(args, 'thorough_params', False),
+        oob_callback_url=getattr(args, 'oob_callback_url', None),
+        # Safety/performance limits
+        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', 30),
+        dom_xss_max_files=getattr(args, 'dom_xss_max_files', 20),
+        sqli_extract_max=getattr(args, 'sqli_extract_max', 3),
+        oob_max_findings=getattr(args, 'oob_max_findings', 3),
+        # Active enforcement metadata
+        active_enforced=getattr(args, 'active_enforced', False),
     )
     # Optional AI review attachment (batch classification + executive summary)
     if args.ai:

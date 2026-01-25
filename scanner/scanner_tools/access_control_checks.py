@@ -1131,6 +1131,253 @@ async def check_bola(
     return results
 
 
+# ID patterns commonly used in URLs
+ID_PATTERNS = [
+    (r'/(\d+)(?:/|$|\?)', 'numeric_id'),      # /123, /users/123
+    (r'/([a-f0-9]{24})(?:/|$|\?)', 'mongodb_id'),  # MongoDB ObjectID
+    (r'/([a-f0-9-]{36})(?:/|$|\?)', 'uuid'),       # UUID v4
+    (r'/([a-zA-Z0-9]{20,})(?:/|$|\?)', 'base64_id'),  # Base64-like IDs
+    (r'\?.*?id=(\d+)', 'query_numeric_id'),   # ?id=123
+    (r'\?.*?id=([a-f0-9-]+)', 'query_uuid'),  # ?id=uuid
+]
+
+
+async def smart_bola_test(
+    base_url: str,
+    discovered_urls: list[str],
+    user1_session: Any | None = None,
+    user2_session: Any | None = None,
+    max_endpoints: int = 30,
+    timeout: int = 10
+) -> dict[str, Any]:
+    """
+    Smart BOLA/IDOR testing that auto-discovers endpoints with ID patterns.
+
+    This function:
+    1. Analyzes discovered URLs to find endpoints with ID parameters
+    2. Groups similar endpoints by pattern
+    3. Tests ID manipulation (sequential IDs, random IDs)
+    4. Compares responses between two authenticated users
+    5. Detects unauthorized access based on response analysis
+
+    Args:
+        base_url: Target base URL
+        discovered_urls: List of discovered URLs from crawling
+        user1_session: First user's authenticated session
+        user2_session: Second user's authenticated session
+        max_endpoints: Maximum unique endpoints to test
+        timeout: Request timeout
+
+    Returns:
+        Dictionary with findings and statistics
+    """
+    import re
+    import random
+    from .proof_of_exploit import fetch_with_capture
+
+    results = {
+        "vulnerable": False,
+        "findings": [],
+        "endpoints_analyzed": 0,
+        "id_patterns_found": 0,
+        "access_violations": 0,
+        "cross_user_violations": 0,
+        "method_variations_tested": 0,
+    }
+
+    def build_headers(session):
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)"}
+        if session and hasattr(session, 'config'):
+            headers.update(session.config.headers or {})
+            if session.config.cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in session.config.cookies.items())
+                headers["Cookie"] = cookie_str
+        return headers
+
+    user1_headers = build_headers(user1_session)
+    user2_headers = build_headers(user2_session)
+
+    # Extract endpoints with ID patterns from discovered URLs
+    id_endpoints = {}  # path_template -> {pattern_type, original_ids, base_url}
+
+    for url in discovered_urls:
+        for pattern, pattern_type in ID_PATTERNS:
+            match = re.search(pattern, url)
+            if match:
+                original_id = match.group(1)
+                # Create a template by replacing the ID with {id}
+                template = re.sub(pattern, lambda m: m.group(0).replace(m.group(1), '{id}'), url)
+
+                if template not in id_endpoints:
+                    id_endpoints[template] = {
+                        'pattern_type': pattern_type,
+                        'original_ids': set(),
+                        'example_url': url,
+                    }
+                id_endpoints[template]['original_ids'].add(original_id)
+                results["id_patterns_found"] += 1
+                break
+
+    print(f"[bola] Found {len(id_endpoints)} unique endpoint templates with ID patterns", file=__import__('sys').stderr)
+
+    # Test each unique endpoint template
+    for template, info in list(id_endpoints.items())[:max_endpoints]:
+        results["endpoints_analyzed"] += 1
+        pattern_type = info['pattern_type']
+        original_ids = list(info['original_ids'])
+
+        # Generate test IDs based on pattern type
+        test_ids = list(original_ids[:3])  # Start with discovered IDs
+
+        if pattern_type == 'numeric_id' or pattern_type == 'query_numeric_id':
+            # Add sequential IDs around the discovered ones
+            for orig_id in original_ids[:2]:
+                try:
+                    orig_int = int(orig_id)
+                    test_ids.extend([str(orig_int - 1), str(orig_int + 1), str(orig_int + 10)])
+                except ValueError:
+                    pass
+            # Add common test IDs
+            test_ids.extend(['1', '0', '2', '100', '999', '9999'])
+        elif pattern_type == 'uuid':
+            # For UUIDs, we can only test with known UUIDs (can't easily enumerate)
+            pass
+        elif pattern_type == 'mongodb_id':
+            # For MongoDB IDs, we can try some manipulation
+            pass
+
+        # Deduplicate test IDs
+        test_ids = list(dict.fromkeys(test_ids))[:10]
+
+        # Test each ID
+        for test_id in test_ids:
+            # Replace {id} with test ID
+            test_url = template.replace('{id}', test_id)
+
+            # Test with user1
+            user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout)
+            user1_status = user1_resp.get("status_code", 0)
+            user1_body = user1_resp.get("body", "")
+
+            # Test with user2 if user2_session is actually provided
+            # (cross-user comparison only makes sense with two authenticated users)
+            if user2_session is not None:
+                user2_resp = await fetch_with_capture(test_url, headers=user2_headers, timeout=timeout)
+                user2_status = user2_resp.get("status_code", 0)
+                user2_body = user2_resp.get("body", "")
+
+                # Check for cross-user access
+                if user1_status == 200 and user2_status == 200:
+                    # Both users can access - check if data is user-specific
+                    if len(user1_body) > 50 and len(user2_body) > 50:
+                        # Compare responses
+                        if user1_body == user2_body:
+                            # Identical responses - might be public data or BOLA
+                            # Look for user-specific indicators
+                            user_indicators = ['user_id', 'userId', 'email', 'name', 'profile', 'account']
+                            has_user_data = any(ind in user1_body.lower() for ind in user_indicators)
+
+                            if has_user_data:
+                                results["vulnerable"] = True
+                                results["cross_user_violations"] += 1
+                                path_hash = hashlib.sha256(f"{test_url}:crossuser".encode()).hexdigest()[:8]
+                                results["findings"].append({
+                                    "id": f"smart_bola:{path_hash}",
+                                    "tool": "smart_bola",
+                                    "title": f"BOLA: Cross-user data access at {template}",
+                                    "severity": "high",
+                                    "evidence": {
+                                        "url": test_url,
+                                        "test_id": test_id,
+                                        "pattern_type": pattern_type,
+                                        "user1_status": user1_status,
+                                        "user2_status": user2_status,
+                                        "responses_identical": True,
+                                        "response_snippet": user1_body[:300],
+                                    },
+                                    "description": f"Both test users can access resource with ID {test_id}. "
+                                                 "If this is user-specific data, this indicates missing authorization.",
+                                    "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
+                                    "cwe": "CWE-639",
+                                    "owasp": "API1:2023 - Broken Object Level Authorization",
+                                })
+
+            # Test without auth
+            no_auth_resp = await fetch_with_capture(test_url, timeout=timeout)
+            no_auth_status = no_auth_resp.get("status_code", 0)
+            no_auth_body = no_auth_resp.get("body", "")
+
+            # If unauthenticated access returns data
+            if no_auth_status == 200 and len(no_auth_body) > 50:
+                # Check if it looks like actual data
+                exclude_patterns = ['login', 'sign in', 'authenticate', 'unauthorized', '<!doctype', '<html']
+                if not any(p in no_auth_body.lower() for p in exclude_patterns):
+                    results["vulnerable"] = True
+                    results["access_violations"] += 1
+                    path_hash = hashlib.sha256(f"{test_url}:noauth".encode()).hexdigest()[:8]
+                    results["findings"].append({
+                        "id": f"smart_bola:{path_hash}",
+                        "tool": "smart_bola",
+                        "title": f"BOLA: Unauthenticated access to {template}",
+                        "severity": "critical",
+                        "evidence": {
+                            "url": test_url,
+                            "test_id": test_id,
+                            "pattern_type": pattern_type,
+                            "status_code": no_auth_status,
+                            "response_length": len(no_auth_body),
+                            "response_snippet": no_auth_body[:300],
+                        },
+                        "description": f"Resource with ID {test_id} is accessible without authentication.",
+                        "remediation": "Require authentication for all resource access. Implement proper authorization.",
+                        "cwe": "CWE-639",
+                        "owasp": "API1:2023 - Broken Object Level Authorization",
+                    })
+
+        # Test method variations (PUT, DELETE, PATCH on GET endpoints)
+        if user1_headers and results["endpoints_analyzed"] <= 10:  # Limit method testing
+            for method in ["PUT", "DELETE", "PATCH"]:
+                results["method_variations_tested"] += 1
+                # Use the first discovered URL for method testing
+                method_url = info['example_url']
+                cmd = ["curl", "-sS", "-X", method, "-k", "--max-time", str(timeout)]
+                for k, v in user1_headers.items():
+                    cmd.extend(["-H", f"{k}: {v}"])
+                cmd.extend(["-w", "\n%{http_code}", method_url])
+
+                out, _, rc = await run(cmd, timeout=timeout + 5)
+                if rc == 0 and out:
+                    lines = out.rsplit("\n", 1)
+                    body = lines[0] if len(lines) > 1 else ""
+                    try:
+                        status = int(lines[-1]) if lines else 0
+                    except ValueError:
+                        status = 0
+
+                    # If method succeeds when it shouldn't (200 on DELETE/PUT)
+                    if status == 200 and method in ["DELETE", "PUT"]:
+                        results["vulnerable"] = True
+                        path_hash = hashlib.sha256(f"{method_url}:{method}".encode()).hexdigest()[:8]
+                        results["findings"].append({
+                            "id": f"smart_bola:{path_hash}",
+                            "tool": "smart_bola",
+                            "title": f"BOLA: Unexpected {method} success at {method_url}",
+                            "severity": "high",
+                            "evidence": {
+                                "url": method_url,
+                                "method": method,
+                                "status_code": status,
+                                "response_snippet": body[:200],
+                            },
+                            "description": f"HTTP {method} method succeeds. This may allow unauthorized modification/deletion.",
+                            "remediation": "Implement proper authorization for all HTTP methods.",
+                            "cwe": "CWE-639",
+                            "owasp": "API1:2023 - Broken Object Level Authorization",
+                        })
+
+    return results
+
+
 async def check_vertical_privilege_escalation(
     base_url: str,
     admin_endpoints: list[str] | None = None,

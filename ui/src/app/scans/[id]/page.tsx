@@ -1,16 +1,32 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
+import { useEffect, useState, Suspense } from 'react'
+import { useParams, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { getScan } from '@/lib/api'
 import ReportView from '@/components/ReportView'
 
-export default function ScanDetailPage() {
+function ScanDetailContent() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const scanId = params.id as string
   const [scan, setScan] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Build back URL with preserved filters
+  const buildBackUrl = () => {
+    const returnParams = new URLSearchParams()
+    searchParams.forEach((value, key) => {
+      if (key.startsWith('return_')) {
+        returnParams.set(key.replace('return_', ''), value)
+      }
+    })
+    const queryString = returnParams.toString()
+    return queryString ? `/scans?${queryString}` : '/scans'
+  }
+
+  const backUrl = buildBackUrl()
 
   useEffect(() => {
     async function fetchScan() {
@@ -55,11 +71,11 @@ export default function ScanDetailPage() {
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-3">
-          <a href="/scans" className="text-gray-400 hover:text-white">
+          <Link href={backUrl} className="text-gray-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-          </a>
+          </Link>
           <h1 className="text-2xl font-bold text-white">{scan.target_url}</h1>
         </div>
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-6">
@@ -88,11 +104,11 @@ export default function ScanDetailPage() {
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-3">
-          <a href="/scans" className="text-gray-400 hover:text-white">
+          <Link href={backUrl} className="text-gray-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-          </a>
+          </Link>
           <h1 className="text-2xl font-bold text-white">{scan.target_url}</h1>
         </div>
         <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-6 text-red-400">
@@ -107,11 +123,11 @@ export default function ScanDetailPage() {
   return (
     <div>
       <div className="flex items-center gap-3 mb-4">
-        <a href="/scans" className="text-gray-400 hover:text-white">
+        <Link href={backUrl} className="text-gray-400 hover:text-white">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-        </a>
+        </Link>
         <span className="text-gray-500">Back to scans</span>
       </div>
       <ReportView
@@ -120,5 +136,17 @@ export default function ScanDetailPage() {
         enableRemediationTracking={true}
       />
     </div>
+  )
+}
+
+export default function ScanDetailPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    }>
+      <ScanDetailContent />
+    </Suspense>
   )
 }

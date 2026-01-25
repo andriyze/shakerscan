@@ -6,6 +6,7 @@ import re
 import secrets
 import sys
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -200,6 +201,15 @@ def _normalize_candidate_path(path: str) -> str | None:
     return cleaned
 
 
+@dataclass(frozen=True)
+class ResponseSignature:
+    status: int | None
+    content_type: str
+    body_hash: str
+    redirect_status: int | None
+    redirect_location: str
+
+
 def _is_api_candidate_path(target_url: str) -> bool:
     if not target_url:
         return False
@@ -245,6 +255,168 @@ def _is_json_response(body: str, content_type: str) -> bool:
         return False
     sample = body.lstrip()
     return sample.startswith("{") or sample.startswith("[")
+
+
+def _normalize_content_type(content_type: str) -> str:
+    return content_type.split(";", 1)[0].strip().lower() if content_type else ""
+
+
+def _normalize_location(location: str) -> str:
+    if not location:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(location)
+    except Exception:
+        return location.strip().lower()
+    path = parsed.path or ""
+    query = parsed.query or ""
+    if query:
+        return f"{path}?{query}".strip().lower()
+    return path.strip().lower()
+
+
+def _body_hash(body: str) -> str:
+    sample = body[:4000] if body else ""
+    return hashlib.sha256(sample.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _extract_redirect_info(resp: httpx.Response) -> tuple[int | None, str]:
+    if resp.history:
+        last = resp.history[-1]
+        return last.status_code, last.headers.get("location", "")
+    return None, resp.headers.get("location", "")
+
+
+def build_response_signature(
+    status: int | None,
+    content_type: str,
+    body: str,
+    redirect_status: int | None = None,
+    redirect_location: str = ""
+) -> ResponseSignature:
+    return ResponseSignature(
+        status=status,
+        content_type=_normalize_content_type(content_type),
+        body_hash=_body_hash(body),
+        redirect_status=redirect_status,
+        redirect_location=_normalize_location(redirect_location),
+    )
+
+
+_BASELINE_SIGNATURE_CACHE: dict[str, ResponseSignature] = {}
+
+
+async def get_baseline_signature(
+    base_url: str,
+    client: httpx.AsyncClient,
+    timeout: float = 5.0
+) -> ResponseSignature | None:
+    cache_key = base_url.rstrip("/")
+    cached = _BASELINE_SIGNATURE_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    baseline_path = f"/__probe_{secrets.token_hex(4)}"
+    baseline_url = urllib.parse.urljoin(base_url, baseline_path)
+    try:
+        resp = await client.get(baseline_url, timeout=timeout)
+    except Exception:
+        return None
+
+    redirect_status, redirect_location = _extract_redirect_info(resp)
+    signature = build_response_signature(
+        status=resp.status_code,
+        content_type=resp.headers.get("content-type", ""),
+        body=resp.text or "",
+        redirect_status=redirect_status,
+        redirect_location=redirect_location,
+    )
+    _BASELINE_SIGNATURE_CACHE[cache_key] = signature
+    return signature
+
+
+def _looks_like_login_redirect(location: str) -> bool:
+    path = _normalize_location(location)
+    if not path:
+        return False
+    return bool(re.search(r"(^|/)(login|signin|sign-in|authenticate|auth)(/|\?|$)", path))
+
+
+def path_exists(
+    *,
+    status: int | None,
+    content_type: str,
+    body: str,
+    redirect_status: int | None,
+    redirect_location: str,
+    allow: str,
+    www_auth: str,
+    target_url: str,
+    baseline_signature: ResponseSignature | None,
+    require_api_style: bool = False
+) -> tuple[bool, str, bool]:
+    """
+    Determine if a probed path likely exists.
+
+    Returns: (exists, reason, protected)
+    """
+    if status is None:
+        return False, "no_status", False
+
+    # Check login redirect FIRST - before baseline matching
+    # Auth-protected endpoints that redirect to login should not be dropped as baseline matches
+    login_redirect = (
+        redirect_status in (301, 302, 303, 307, 308)
+        and _looks_like_login_redirect(redirect_location)
+    )
+    if login_redirect:
+        return True, "login_redirect", True
+
+    signature = build_response_signature(
+        status=status,
+        content_type=content_type,
+        body=body,
+        redirect_status=redirect_status,
+        redirect_location=redirect_location,
+    )
+    if baseline_signature and signature == baseline_signature:
+        if status in (401, 403, 405):
+            if not (www_auth or allow or _is_api_candidate_path(target_url)):
+                return False, "baseline_match", False
+        else:
+            return False, "baseline_match", False
+
+    if status in (404, 410):
+        return False, f"status_{status}", False
+
+    is_html = _is_html_response(body, content_type)
+    is_json = _is_json_response(body, content_type)
+    protected = status in (401, 403)
+
+    if status in (200, 201, 202, 204):
+        if require_api_style and is_html:
+            return False, "html_success", False
+        return True, "success", protected
+
+    if status in (301, 302, 303, 307, 308):
+        if redirect_location or is_json:
+            return True, "redirect", protected
+        return False, "redirect_no_location", False
+
+    if status == 405:
+        if allow or is_json or (not is_html and _looks_like_api_error(body)):
+            return True, "method_not_allowed", protected
+        return False, "method_not_allowed_no_signal", False
+
+    if status in (400, 401, 403, 409, 422, 429, 500):
+        if www_auth:
+            return True, "auth_required", True
+        if is_json or (not is_html and _looks_like_api_error(body)):
+            return True, "api_error", protected
+        if not require_api_style and not is_html:
+            return True, "non_html_error", protected
+
+    return False, f"status_{status}", protected
 
 
 def _normalize_json_link(link: str, base_url: str, current_url: str | None = None) -> str | None:
@@ -537,24 +709,7 @@ async def _probe_api_candidates(
             "Accept": "application/json, */*;q=0.1",
         }
     ) as client:
-        baseline_path = f"/__probe_{secrets.token_hex(4)}"
-        baseline_url = urllib.parse.urljoin(base_url, baseline_path)
-        baseline_body = ""
-        baseline_status = None
-        baseline_signature = None
-        try:
-            baseline_resp = await client.get(baseline_url)
-            baseline_body = baseline_resp.text or ""
-            baseline_ct = baseline_resp.headers.get("content-type", "")
-            baseline_status = baseline_resp.status_code
-            baseline_signature = (
-                baseline_status,
-                baseline_ct.split(";")[0].strip().lower(),
-                hashlib.sha256(baseline_body[:4000].encode("utf-8", errors="ignore")).hexdigest()[:12],
-            )
-        except Exception:
-            baseline_ct = ""
-            baseline_signature = None
+        baseline_signature = await get_baseline_signature(base_url, client, timeout=timeout)
 
         sem = asyncio.Semaphore(concurrency)
         discovered: list[str] = []
@@ -575,41 +730,22 @@ async def _probe_api_candidates(
             content_type = resp.headers.get("content-type", "")
             allow = resp.headers.get("allow", "")
             www_auth = resp.headers.get("www-authenticate", "")
-            location = resp.headers.get("location", "")
+            redirect_status, redirect_location = _extract_redirect_info(resp)
 
-            is_html = _is_html_response(body, content_type)
-            is_json = _is_json_response(body, content_type)
-            signature = (
-                status,
-                content_type.split(";")[0].strip().lower(),
-                hashlib.sha256(body[:4000].encode("utf-8", errors="ignore")).hexdigest()[:12],
+            exists, _reason, _protected = path_exists(
+                status=status,
+                content_type=content_type,
+                body=body,
+                redirect_status=redirect_status,
+                redirect_location=redirect_location,
+                allow=allow,
+                www_auth=www_auth,
+                target_url=target_url,
+                baseline_signature=baseline_signature,
+                require_api_style=True,
             )
-            matches_baseline = baseline_signature and signature == baseline_signature and status == baseline_status
-            if matches_baseline and status in (401, 403, 405):
-                if not (www_auth or allow or _is_api_candidate_path(target_url)):
-                    return
-            elif matches_baseline:
-                return
-
-            if status in (200, 201, 202, 204):
-                if is_json or not is_html:
-                    discovered.append(target_url)
-                return
-
-            if status in (301, 302, 307, 308):
-                if location or is_json:
-                    discovered.append(target_url)
-                return
-
-            if status == 405:
-                if allow or is_json or (not is_html and _looks_like_api_error(body)):
-                    discovered.append(target_url)
-                return
-
-            if status in (400, 401, 403, 409, 422, 429, 500):
-                if is_json or (not is_html and _looks_like_api_error(body)) or www_auth:
-                    discovered.append(target_url)
-                return
+            if exists:
+                discovered.append(target_url)
 
         tasks = [fetch(candidate) for candidate in candidates]
         if tasks:
@@ -2071,6 +2207,191 @@ def _is_interesting_path(path: str) -> bool:
     return path.endswith("/") or any(x in path.lower() for x in interesting)
 
 
+# Path-to-parameter inference mapping
+PATH_TO_PARAMS = {
+    "mechanic": ["mechanic_code", "mechanic_id", "id", "code"],
+    "user": ["user_id", "id", "uid", "username"],
+    "users": ["user_id", "id", "uid", "username"],
+    "order": ["order_id", "id", "oid"],
+    "orders": ["order_id", "id", "oid"],
+    "product": ["product_id", "id", "pid", "sku"],
+    "products": ["product_id", "id", "pid", "sku"],
+    "vehicle": ["vehicle_id", "id", "vin", "vehicleid"],
+    "vehicles": ["vehicle_id", "id", "vin", "vehicleid"],
+    "contact": ["contact_id", "id"],
+    "location": ["location_id", "id", "lat", "lon"],
+    "report": ["report_id", "id", "type"],
+    "service": ["service_id", "id"],
+    "booking": ["booking_id", "id", "ref"],
+    "post": ["post_id", "id"],
+    "posts": ["post_id", "id"],
+    "comment": ["comment_id", "id"],
+    "comments": ["comment_id", "id"],
+    "coupon": ["coupon_code", "code", "id"],
+    "coupons": ["coupon_code", "code", "id"],
+    "search": ["q", "query", "search", "keyword"],
+    "login": ["username", "email", "password"],
+    "auth": ["token", "code", "redirect_uri"],
+    "token": ["token", "refresh_token", "code"],
+    "file": ["file", "filename", "path", "id"],
+    "files": ["file", "filename", "path", "id"],
+    "download": ["file", "filename", "path", "id"],
+    "upload": ["file", "filename"],
+    "image": ["image_id", "id", "file"],
+    "video": ["video_id", "id", "file"],
+    "category": ["category_id", "id", "cat"],
+    "categories": ["category_id", "id", "cat"],
+}
+
+
+def infer_params_from_path(path: str) -> list[str]:
+    """
+    Infer likely parameter names from a URL path.
+
+    For example:
+    - /mechanic → ["mechanic_code", "mechanic_id", "id", "code"]
+    - /user/profile → ["user_id", "id", "uid", "username"]
+    """
+    params: list[str] = []
+    path_lower = path.lower().rstrip("/")
+    segments = [s for s in path_lower.split("/") if s]
+
+    for segment in segments:
+        # Direct match
+        if segment in PATH_TO_PARAMS:
+            params.extend(PATH_TO_PARAMS[segment])
+        # Partial match (e.g., "user-details" matches "user")
+        else:
+            for key, key_params in PATH_TO_PARAMS.items():
+                if key in segment:
+                    params.extend(key_params)
+                    break
+
+    # Add generic params for API paths
+    if "/api/" in path_lower or "/rest/" in path_lower:
+        params.extend(["id", "token", "limit", "offset", "page"])
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_params = []
+    for p in params:
+        if p not in seen:
+            seen.add(p)
+            unique_params.append(p)
+
+    return unique_params[:10]  # Limit to 10 params
+
+
+async def probe_api_base(
+    base_url: str,
+    api_path: str,
+    auth_session: Any | None = None,
+    limit: int = 50,
+    concurrency: int = 10
+) -> list[dict[str, Any]]:
+    """
+    Probe common API resources at a discovered API base path.
+
+    When we find an API base like /workshop/api/, probe for common resources:
+    - /workshop/api/mechanic
+    - /workshop/api/users
+    - /workshop/api/vehicles
+    etc.
+
+    Args:
+        base_url: Target base URL
+        api_path: API base path (e.g., "/workshop/api/")
+        auth_session: Optional auth session for authenticated probing
+        limit: Max resources to probe
+        concurrency: Max concurrent requests
+
+    Returns:
+        List of discovered endpoints with their params
+    """
+    discovered: list[dict[str, Any]] = []
+    api_path = api_path.rstrip("/")
+
+    # Read resources from wordlist
+    resources_file = WORDLIST_PATHS.get("api_resources")
+    resources = _read_wordlist(resources_file, limit=limit) if resources_file else []
+
+    # Add high-priority resources at the top
+    priority_resources = [
+        "mechanic", "users", "vehicles", "orders", "products",
+        "posts", "comments", "contact", "location", "service",
+        "otp", "validate", "verify", "check", "report"
+    ]
+    resources = priority_resources + [r for r in resources if r not in priority_resources]
+    resources = resources[:limit]
+
+    headers = {}
+    if auth_session:
+        try:
+            exported = auth_session.export_session()
+            headers = exported.get("headers", {}) or {}
+        except Exception:
+            pass
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def probe_resource(client: httpx.AsyncClient, resource: str) -> dict[str, Any] | None:
+        async with semaphore:
+            endpoint = f"{api_path}/{resource}"
+            url = urllib.parse.urljoin(base_url, endpoint)
+
+            try:
+                resp = await client.get(url, headers=headers)
+                status = resp.status_code
+                content_type = resp.headers.get("content-type", "")
+                body = resp.text[:2000] if resp.text else ""
+                allow = resp.headers.get("allow", "")
+                www_auth = resp.headers.get("www-authenticate", "")
+                redirect_status, redirect_location = _extract_redirect_info(resp)
+
+                # Consider it found if not 404 or if it returns API-like response
+                exists, reason, protected = path_exists(
+                    status=status,
+                    content_type=content_type,
+                    body=body,
+                    redirect_status=redirect_status,
+                    redirect_location=redirect_location,
+                    allow=allow,
+                    www_auth=www_auth,
+                    target_url=url,
+                    baseline_signature=baseline_signature,
+                    require_api_style=True,
+                )
+
+                if exists:
+                    # Infer parameters from this endpoint
+                    inferred_params = infer_params_from_path(endpoint)
+
+                    print(f"[discovery] Found API resource: {endpoint} ({status})", file=sys.stderr)
+                    return {
+                        "url": url,
+                        "path": endpoint,
+                        "status": status,
+                        "is_json": _is_json_response(body, content_type),
+                        "params": inferred_params,
+                        "needs_auth": protected,
+                        "decision_reason": reason,
+                    }
+            except Exception:
+                pass
+            return None
+
+    async with httpx.AsyncClient(verify=False, timeout=8.0, follow_redirects=True) as client:
+        baseline_signature = await get_baseline_signature(base_url, client, timeout=8.0)
+        tasks = [probe_resource(client, resource) for resource in resources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, dict):
+                discovered.append(result)
+
+    return discovered
+
+
 async def recursive_directory_discovery(
     base_url: str,
     initial_paths: list[str],
@@ -2490,8 +2811,28 @@ async def smart_discovery(
         ]
     directories = list(set(directories))
 
-    # Phase 2: Recursive fuzzing
-    print(f"[discovery] Phase 2: Recursive directory fuzzing ({len(directories)} base directories)", file=sys.stderr)
+    # Phase 2: Probe API bases for common resources
+    probed_endpoints: list[dict[str, Any]] = []
+    config = initial_discovery.get("config", {})
+    api_probe_limit = config.get("api_probe_limit", 600)
+
+    if api_bases:
+        print(f"[discovery] Phase 2a: Probing {len(api_bases)} API bases for common resources", file=sys.stderr)
+        per_base_limit = max(20, api_probe_limit // max(len(api_bases), 1))
+        for api_base in list(api_bases)[:5]:  # Limit to 5 bases
+            probed = await probe_api_base(url, api_base, limit=per_base_limit)
+            probed_endpoints.extend(probed)
+            # Add probed paths to directories for recursive fuzzing
+            for p in probed:
+                path = p.get("path", "")
+                if path and not path.endswith("/"):
+                    directories.append(path + "/")
+
+        if probed_endpoints:
+            print(f"[discovery] Probed {len(probed_endpoints)} API resources from bases", file=sys.stderr)
+
+    # Phase 2b: Recursive fuzzing
+    print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories)", file=sys.stderr)
     recursive_result = await recursive_directory_discovery(
         url,
         directories,
@@ -2518,9 +2859,39 @@ async def smart_discovery(
             return (0 if is_api else 1, 0 if has_params else 1, url)
         all_paths = sorted(all_paths, key=url_priority)[:max_urls]
 
+    # Add probed endpoints to all_urls and re-apply cap
+    probed_urls = [p.get("url", "") for p in probed_endpoints if p.get("url")]
+    all_paths = list(set(all_paths + probed_urls))
+
+    # Re-apply URL cap after merging probed URLs
+    if len(all_paths) > max_urls:
+        def url_priority_final(url: str) -> tuple:
+            has_params = "?" in url
+            is_api = any(p in url.lower() for p in ["/api/", "/rest/", "/graphql", "/v1/", "/v2/"])
+            is_probed = url in probed_urls
+            return (0 if is_probed else 1, 0 if is_api else 1, 0 if has_params else 1, url)
+        all_paths = sorted(all_paths, key=url_priority_final)[:max_urls]
+
     # Extract endpoints with params
     endpoints_with_params = []
+
+    # First, add probed endpoints (they have params from probing)
+    for probed in probed_endpoints:
+        if probed.get("url") and probed.get("params"):
+            endpoints_with_params.append({
+                "url": probed["url"],
+                "params": probed["params"],
+                "inferred": True,
+                "probed": True,
+            })
+
+    # Then process discovered paths
+    probed_url_set = set(probed_urls)
     for path in all_paths:
+        # Skip if already added from probed endpoints
+        if path in probed_url_set:
+            continue
+
         if "?" in path:
             parsed = urllib.parse.urlparse(path)
             params = list(urllib.parse.parse_qs(parsed.query).keys())
@@ -2529,17 +2900,8 @@ async def smart_discovery(
                 "params": params,
             })
         else:
-            # Infer params from path pattern
-            inferred_params = []
-            path_lower = path.lower()
-            if any(x in path_lower for x in ["/search", "/query"]):
-                inferred_params = ["q", "query", "search"]
-            elif any(x in path_lower for x in ["/user", "/profile"]):
-                inferred_params = ["id", "user", "username"]
-            elif any(x in path_lower for x in ["/product", "/item"]):
-                inferred_params = ["id", "product_id", "sku"]
-            elif "/api/" in path_lower:
-                inferred_params = ["id", "token", "limit", "offset"]
+            # Use the new infer_params_from_path function
+            inferred_params = infer_params_from_path(path)
 
             if inferred_params:
                 endpoints_with_params.append({
@@ -2548,11 +2910,19 @@ async def smart_discovery(
                     "inferred": True,
                 })
 
+    # Collect all discovered API endpoints
+    all_api_endpoints = list(set(
+        api_endpoints +
+        [p for p in all_paths if "/api/" in p or "/rest/" in p] +
+        probed_urls
+    ))
+
     return {
         "all_urls": all_paths,
-        "api_endpoints": list(set(api_endpoints + [p for p in all_paths if "/api/" in p or "/rest/" in p])),
+        "api_endpoints": all_api_endpoints,
         "parameterized_urls": initial_discovery.get("parameterized_urls", []),
         "endpoints_with_params": endpoints_with_params,
+        "probed_endpoints": probed_endpoints,  # New: include probed endpoints
         "forms": initial_discovery.get("forms", []),
         "discovered_params": initial_discovery.get("discovered_params", {}),
         "recursive_paths": recursive_paths,

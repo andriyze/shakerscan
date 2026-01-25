@@ -328,10 +328,26 @@ curl -X POST http://localhost:8080/scans \
     "target": "https://api.example.com",
     "options": {
       "scan_type": "smart",
-      "custom_endpoints": ["/api/v1/users", "/api/v1/admin", "/graphql"]
+      "custom_endpoints": [
+        "GET /api/v1/users?id=1&name=test",
+        "POST /api/v1/login json:{\"username\":\"test\",\"password\":\"test\"}",
+        "POST /api/v1/search form:query=test&limit=10",
+        "/graphql"
+      ]
     }
   }'
 ```
+
+**Custom Endpoint Format:**
+Each endpoint string follows the format: `[METHOD] /path [params]`
+- **METHOD** (optional): GET, POST, PUT, PATCH, DELETE (default: GET)
+- **params** (optional but recommended): Parameters to test for injection
+  - Query params: `?key=value` or `query:key=value`
+  - JSON body: `json:{"key":"value"}`
+  - Form body: `form:key=value&key2=value2`
+  - Simple params: `param1 param2 param3`
+
+**Important**: Endpoints without parameters will only be crawled, not tested for SQLi/XSS. Always include parameters you want tested.
 
 **Advanced Options:**
 | Option | Description |
@@ -339,7 +355,35 @@ curl -X POST http://localhost:8080/scans \
 | `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
-| `custom_endpoints` | Array of specific endpoints to include in testing |
+| `custom_endpoints` | Array of endpoints with params to test (see format above) |
+| `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
+| `thorough_params` | Test more parameters: 100 endpoints × 10 params instead of default 50×5 |
+
+### Smart Scan Tuning
+
+For thorough penetration testing, you can disable early stopping and increase parameter coverage:
+
+```bash
+# Thorough smart scan (disable early stopping, test more params)
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "options": {
+      "scan_type": "smart",
+      "no_early_stop": true,
+      "thorough_params": true
+    }
+  }'
+```
+
+By default, smart scan:
+- **Stops early** when 3+ critical or 5+ high severity findings are found
+- **Tests 25 endpoints × 5 params** for SQLi/XSS
+
+With `no_early_stop` and `thorough_params`:
+- **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
+- **Tests 50 endpoints × 10 params** for more complete coverage
 
 ## Scan Types Explained
 

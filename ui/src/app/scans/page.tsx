@@ -1,30 +1,117 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { getScans, cancelScan, getGradeColor, formatDate, formatDuration, type Scan } from '@/lib/api'
+import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
+import Link from 'next/link'
+import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
+import { useUrlFilters } from '@/lib/useUrlFilters'
+import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
 
-export default function ScansPage() {
+const PAGE_SIZE = 50
+const SEARCH_DEBOUNCE_MS = 300
+
+interface ScansFilters {
+  [key: string]: string | number | undefined
+  status?: string
+  domain?: string
+  search?: string
+  page?: number
+}
+
+function ScansContent() {
+  const { filters, setFilter, setFilters, buildUrl } = useUrlFilters<ScansFilters>({
+    defaults: { page: 1 }
+  })
+
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<string>('')
+  const [searchInput, setSearchInput] = useState<string>(filters.search || '')
+  const [domains, setDomains] = useState<string[]>([])
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
+  const [total, setTotal] = useState(0)
+  const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
+  const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const scanMenuRef = useRef<HTMLDivElement>(null)
 
-  async function fetchScans() {
+  const statusFilter = filters.status || ''
+  const domainFilter = filters.domain || ''
+  const searchQuery = filters.search || ''
+  // Page is 1-based in URL (page=1 is first page), clamped to valid range
+  const rawPage = Math.max(1, filters.page || 1)
+
+  useEffect(() => {
+    getDomains().then(data => setDomains(data.domains || [])).catch(() => {})
+  }, [])
+
+  // Close scan menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (scanMenuRef.current && !scanMenuRef.current.contains(event.target as Node)) {
+        setOpenScanMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Sync searchInput with URL when filters change externally (e.g., browser back)
+  useEffect(() => {
+    setSearchInput(searchQuery)
+  }, [searchQuery])
+
+  // Debounce search input → URL update
+  useEffect(() => {
+    if (searchTimeout.current) {
+      clearTimeout(searchTimeout.current)
+    }
+    searchTimeout.current = setTimeout(() => {
+      if (searchInput !== searchQuery) {
+        setFilter('search', searchInput || undefined)
+      }
+    }, SEARCH_DEBOUNCE_MS)
+    return () => {
+      if (searchTimeout.current) {
+        clearTimeout(searchTimeout.current)
+      }
+    }
+  }, [searchInput, searchQuery, setFilter])
+
+  const fetchScans = useCallback(async (isPolling = false) => {
+    // Only show loading spinner on initial load, not polling refreshes
+    if (!isPolling) {
+      setLoading(true)
+    }
     try {
-      const data = await getScans({ limit: 100 })
+      const data = await getScans({
+        status: statusFilter || undefined,
+        root_domain: domainFilter || undefined,
+        target: searchQuery || undefined,
+        limit: PAGE_SIZE,
+        offset: (rawPage - 1) * PAGE_SIZE
+      })
+      const fetchedTotal = data.total || 0
+      const maxPage = Math.max(1, Math.ceil(fetchedTotal / PAGE_SIZE))
+
+      // If page is out of range and there are results, redirect to last valid page
+      if (rawPage > maxPage && fetchedTotal > 0) {
+        // Don't update state - keep loading while redirecting
+        setFilter('page', maxPage > 1 ? maxPage : undefined)
+        return
+      }
+
       setScans(data.scans || [])
+      setTotal(fetchedTotal)
+      setLoading(false)
     } catch (err) {
       console.error('Failed to fetch scans:', err)
-    } finally {
       setLoading(false)
     }
-  }
+  }, [statusFilter, domainFilter, searchQuery, rawPage, setFilter])
 
   useEffect(() => {
     fetchScans()
-    const interval = setInterval(fetchScans, 5000)
+    const interval = setInterval(() => fetchScans(true), 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [fetchScans])
 
   async function handleCancel(scanId: string) {
     setCancelling(prev => new Set(prev).add(scanId))
@@ -42,8 +129,45 @@ export default function ScansPage() {
     }
   }
 
-  const filteredScans = scans.filter(scan =>
-    scan.target_url.toLowerCase().includes(filter.toLowerCase())
+  async function handleScan(targetUrl: string, scanType: string) {
+    const type = SCAN_TYPES.find(t => t.value === scanType)
+    if (!type) return
+    try {
+      await submitScan(targetUrl, { ...type.options, scan_type: scanType })
+      setOpenScanMenu(null)
+      fetchScans()
+    } catch (err) {
+      console.error('Failed to start scan:', err)
+    }
+  }
+
+  const totalPages = Math.ceil(total / PAGE_SIZE)
+
+  // Clamp page to valid range for display
+  const page = Math.min(rawPage, Math.max(1, totalPages))
+
+  const PaginationControls = () => (
+    totalPages > 1 ? (
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setFilter('page', page > 1 ? page - 1 : undefined)}
+          disabled={page <= 1}
+          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Previous
+        </button>
+        <span className="px-3 py-1.5 text-sm text-gray-400">
+          Page {page} of {totalPages}
+        </span>
+        <button
+          onClick={() => setFilter('page', page + 1)}
+          disabled={page >= totalPages}
+          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Next
+        </button>
+      </div>
+    ) : null
   )
 
   return (
@@ -53,7 +177,7 @@ export default function ScansPage() {
           <h1 className="text-2xl font-bold text-white">Scans</h1>
           <p className="text-gray-400 mt-1">View all security scans</p>
         </div>
-        <a
+        <Link
           href="/scan/new"
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
         >
@@ -61,22 +185,70 @@ export default function ScansPage() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
           New Scan
-        </a>
+        </Link>
       </div>
 
-      {/* Search */}
-      <div className="relative">
-        <input
-          type="text"
-          placeholder="Search scans..."
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-        />
-        <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-        </svg>
+      {/* Filters */}
+      <div className="flex gap-4 flex-wrap">
+        {/* Status Filter */}
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-gray-400">Status:</label>
+          <select
+            value={statusFilter}
+            onChange={(e) => setFilter('status', e.target.value || undefined)}
+            className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All statuses</option>
+            {SCAN_STATUSES.map((status) => (
+              <option key={status} value={status}>{status}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Domain Filter */}
+        {domains.length > 0 && (
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-gray-400">Domain:</label>
+            <select
+              value={domainFilter}
+              onChange={(e) => setFilter('domain', e.target.value || undefined)}
+              className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+            >
+              <option value="">All domains</option>
+              {domains.map((domain) => (
+                <option key={domain} value={domain}>{domain}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Search */}
+        <div className="relative flex-1 min-w-[200px]">
+          <input
+            type="text"
+            placeholder="Search by target URL..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+          />
+          <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
       </div>
+
+      {/* Top Pagination */}
+      {total > 0 && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-gray-400">
+            {total <= PAGE_SIZE
+              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
+              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
+            }
+          </span>
+          <PaginationControls />
+        </div>
+      )}
 
       {/* Scans Table */}
       <div className="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
@@ -84,9 +256,9 @@ export default function ScansPage() {
           <div className="flex items-center justify-center h-32">
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
           </div>
-        ) : filteredScans.length === 0 ? (
+        ) : scans.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
-            No scans found. Start a new scan to get started.
+            {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
           </div>
         ) : (
           <table className="w-full">
@@ -103,12 +275,20 @@ export default function ScansPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {filteredScans.map((scan) => (
+              {scans.map((scan) => (
                 <tr key={scan.id} className="hover:bg-gray-800/50 transition-colors">
                   <td className="px-4 py-3">
-                    <a href={`/scans/${scan.id}`} className="text-sm text-blue-400 hover:text-blue-300">
+                    <Link
+                      href={buildUrl(`/scans/${scan.id}`, {
+                        return_status: statusFilter,
+                        return_domain: domainFilter,
+                        return_search: searchQuery,
+                        return_page: page > 1 ? page : undefined
+                      })}
+                      className="text-sm text-blue-400 hover:text-blue-300"
+                    >
                       {scan.target_url}
-                    </a>
+                    </Link>
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm text-gray-400 capitalize">{scan.scan_type}</span>
@@ -127,7 +307,16 @@ export default function ScansPage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <span className="text-sm text-gray-400">{scan.findings_count || 0}</span>
+                    {(scan.findings_count || 0) > 0 ? (
+                      <Link
+                        href={`/findings?scan_id=${scan.id}`}
+                        className="text-sm text-blue-400 hover:text-blue-300"
+                      >
+                        {scan.findings_count}
+                      </Link>
+                    ) : (
+                      <span className="text-sm text-gray-400">0</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm text-gray-400">
@@ -138,7 +327,7 @@ export default function ScansPage() {
                     <span className="text-sm text-gray-500">{formatDate(scan.created_at)}</span>
                   </td>
                   <td className="px-4 py-3">
-                    {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') && (
+                    {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
                       <button
                         onClick={() => handleCancel(scan.id)}
                         disabled={cancelling.has(scan.id)}
@@ -146,6 +335,39 @@ export default function ScansPage() {
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                       </button>
+                    ) : (
+                      <div className={`relative ${openScanMenu === scan.id ? 'z-[100]' : ''}`} ref={openScanMenu === scan.id ? scanMenuRef : null}>
+                        <button
+                          onClick={() => setOpenScanMenu(openScanMenu === scan.id ? null : scan.id)}
+                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        >
+                          Scan
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openScanMenu === scan.id && (
+                          <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                            {SCAN_TYPES.map((type) => (
+                              <button
+                                key={type.value}
+                                onClick={() => handleScan(scan.target_url, type.value)}
+                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm text-white font-medium">{type.label}</span>
+                                  {type.requiresPermission && (
+                                    <span className="text-xs text-yellow-500">Active</span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
+                                </p>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -154,6 +376,19 @@ export default function ScansPage() {
           </table>
         )}
       </div>
+
+      {/* Bottom Pagination */}
+      {total > 0 && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-gray-400">
+            {total <= PAGE_SIZE
+              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
+              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
+            }
+          </span>
+          <PaginationControls />
+        </div>
+      )}
     </div>
   )
 }
@@ -175,5 +410,17 @@ function StatusBadge({ status }: { status: string }) {
       )}
       {status}
     </span>
+  )
+}
+
+export default function ScansPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-32">
+        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+      </div>
+    }>
+      <ScansContent />
+    </Suspense>
   )
 }

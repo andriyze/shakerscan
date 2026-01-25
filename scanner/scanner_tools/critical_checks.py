@@ -22,7 +22,286 @@ import re
 import urllib.parse
 from typing import Any
 
+from dataclasses import dataclass
+
 from .common import detect_spa_catch_all, get_auth_curl_args, run
+
+
+# =============================================================================
+# AUTH RESPONSE PARSING (for default credential detection)
+# =============================================================================
+
+
+@dataclass
+class AuthResponse:
+    """Parsed HTTP response for auth detection."""
+
+    status_code: int | None
+    content_type: str
+    location: str | None  # Redirect location
+    set_cookies: list[str]  # Session cookies
+    body: str
+    is_json: bool  # Content-Type is application/json
+
+    @property
+    def has_session_cookie(self) -> bool:
+        """
+        Check if response sets a session-like cookie.
+
+        Parses cookie name (before '=') and checks against session patterns,
+        excluding CSRF/XSRF tokens which are not session indicators.
+        """
+        session_patterns = ["session", "auth", "token", "jwt", "sid", "ssid"]
+        csrf_patterns = ["csrf", "xsrf", "_csrf", "_xsrf"]
+
+        for cookie in self.set_cookies:
+            # Parse cookie name (everything before '=')
+            if "=" not in cookie:
+                continue
+            cookie_name = cookie.split("=", 1)[0].strip().lower()
+
+            # Skip CSRF/XSRF tokens - these are not session indicators
+            if any(p in cookie_name for p in csrf_patterns):
+                continue
+
+            # Check if cookie name matches session patterns
+            if any(p in cookie_name for p in session_patterns):
+                return True
+        return False
+
+
+_AUTH_META_PATTERN = re.compile(r"__SHAKERSCAN_AUTH__(\d{3})__SHAKERSCAN_AUTH__$")
+
+
+def _parse_auth_response(raw: str) -> AuthResponse:
+    """
+    Parse curl output with -i (headers) and -w (status) flags.
+
+    Expected format:
+    - Headers (including HTTP status line)
+    - Blank line separator
+    - Body content
+    - __SHAKERSCAN_AUTH__<status_code>__SHAKERSCAN_AUTH__ marker at end
+
+    Handles HTTP 100 Continue and multi-block headers by parsing the final
+    header block (the one before the actual body).
+    """
+    if not raw:
+        return AuthResponse(None, "", None, [], "", False)
+
+    # Extract status from marker
+    status_code = None
+    if "__SHAKERSCAN_AUTH__" in raw:
+        match = _AUTH_META_PATTERN.search(raw.strip())
+        if match:
+            status_code = int(match.group(1))
+            raw = raw[: match.start()]
+
+    # Handle HTTP 100 Continue and multi-block headers
+    # Split all header/body blocks, then find the final headers
+    # Pattern: headers are separated from body/next-headers by blank line
+    sep = "\r\n\r\n" if "\r\n\r\n" in raw else "\n\n"
+    parts = raw.split(sep)
+
+    # Find the final header block (skip 100 Continue responses)
+    headers = ""
+    body = ""
+    for i, part in enumerate(parts):
+        first_line = part.split("\n", 1)[0].strip()
+        # Check if this looks like HTTP headers (starts with HTTP/ or has : in first few lines)
+        is_http_status = first_line.startswith("HTTP/")
+        is_100_continue = is_http_status and " 100 " in first_line
+
+        if is_100_continue:
+            # Skip 100 Continue blocks
+            continue
+        elif is_http_status:
+            # This is the final response headers
+            headers = part
+            # Everything after is the body
+            body = sep.join(parts[i + 1 :]) if i + 1 < len(parts) else ""
+            break
+        else:
+            # Not headers, must be body from earlier split
+            if not headers:
+                # No headers found yet, treat whole thing as body
+                body = raw
+            break
+
+    # If we didn't find HTTP headers, fall back to simple split
+    if not headers and sep in raw:
+        headers, body = raw.split(sep, 1)
+
+    # Parse headers
+    content_type = ""
+    location = None
+    set_cookies: list[str] = []
+
+    for line in headers.split("\n"):
+        line_lower = line.lower().strip()
+        if line_lower.startswith("content-type:"):
+            content_type = line.split(":", 1)[1].strip()
+        elif line_lower.startswith("location:"):
+            location = line.split(":", 1)[1].strip()
+        elif line_lower.startswith("set-cookie:"):
+            set_cookies.append(line.split(":", 1)[1].strip())
+
+    is_json = "application/json" in content_type.lower()
+
+    return AuthResponse(status_code, content_type, location, set_cookies, body, is_json)
+
+
+def _strip_xssi_prefix(body: str) -> str:
+    """Strip common XSSI/anti-hijacking prefixes from JSON responses."""
+    stripped = body.lstrip()
+    # Common prefixes used by Google, Facebook, Angular, etc.
+    prefixes = [
+        ")]}'\n", ")]}',\n", ")]}'", ")]}\n", ")]}",
+        "while(1);", "for(;;);", "while(true);",
+        "])}while(1);</x>",
+    ]
+    for prefix in prefixes:
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].lstrip()
+    return stripped
+
+
+def _looks_like_json(body: str) -> bool:
+    """Check if body looks like JSON (starts with { or [), handling XSSI prefixes."""
+    stripped = _strip_xssi_prefix(body)
+    return stripped.startswith("{") or stripped.startswith("[")
+
+
+def _is_valid_json_auth_success(resp: AuthResponse) -> tuple[bool, str]:
+    """
+    Validate JSON authentication response.
+
+    Returns (is_success, reason).
+    Requires: status < 400, JSON content-type (or JSON-like body), parsed JSON with token field.
+    """
+    # Gate 1: Status code must be success (2xx/3xx)
+    if resp.status_code is not None and resp.status_code >= 400:
+        return False, f"status_{resp.status_code}"
+
+    # Gate 2: Must be JSON content-type OR body that looks like JSON
+    # Some APIs return JSON with text/plain or no content-type
+    is_json_body = resp.is_json or _looks_like_json(resp.body)
+    if not is_json_body:
+        return False, "not_json_content_type"
+
+    # Gate 3: Must parse as valid JSON with token-like field
+    # Strip XSSI prefix before parsing (e.g., ")]}'" or "while(1);")
+    body_to_parse = _strip_xssi_prefix(resp.body)
+    try:
+        data = json.loads(body_to_parse)
+        if not isinstance(data, dict):
+            return False, "json_not_object"
+    except json.JSONDecodeError:
+        return False, "invalid_json"
+
+    # Gate 4: Check for token field in parsed JSON (not substring match!)
+    token_fields = ["token", "access_token", "jwt", "session_id", "id_token", "auth_token"]
+    has_token_field = any(
+        field in data and data[field] for field in token_fields  # Field exists and is truthy
+    )
+
+    # Also accept explicit success indicators
+    success_fields = [
+        ("success", True),
+        ("authenticated", True),
+        ("loggedIn", True),
+        ("status", "ok"),
+    ]
+    has_success_field = any(data.get(field) == value for field, value in success_fields)
+
+    if has_token_field or has_success_field:
+        return True, "json_auth_success"
+
+    return False, "no_token_or_success_field"
+
+
+def _is_valid_form_auth_success(resp: AuthResponse, login_path: str) -> tuple[bool, str]:
+    """
+    Validate form-based authentication response.
+
+    Returns (is_success, reason).
+    Requires: redirect away from login OR session cookie, no error signals.
+
+    Args:
+        resp: Parsed auth response
+        login_path: The original login URL/path (used to detect redirect back to login)
+    """
+    # Gate 1: Status code check
+    if resp.status_code is not None and resp.status_code >= 400:
+        return False, f"status_{resp.status_code}"
+
+    # Gate 2: Check for error signals in body
+    body_lower = resp.body.lower()
+    error_signals = [
+        "invalid",
+        "incorrect",
+        "failed",
+        "error",
+        "unauthorized",
+        "not found",
+        "404",
+        "forbidden",
+        "denied",
+        "wrong password",
+        "bad credentials",
+        "login failed",
+        "authentication failed",
+    ]
+    if any(sig in body_lower for sig in error_signals):
+        return False, "error_signal_found"
+
+    # Success criteria: redirect away from login OR session cookie
+    has_redirect_away = False
+    if resp.location:
+        loc_lower = resp.location.lower()
+
+        # Extract path from login_path for comparison
+        login_path_lower = login_path.lower()
+        # Remove protocol and host if present
+        if "://" in login_path_lower:
+            login_path_lower = "/" + login_path_lower.split("://", 1)[1].split("/", 1)[-1]
+        # Remove query string for comparison
+        login_path_base = login_path_lower.split("?")[0].rstrip("/")
+
+        # Extract path from redirect location
+        redirect_path = loc_lower
+        if "://" in redirect_path:
+            redirect_path = "/" + redirect_path.split("://", 1)[1].split("/", 1)[-1]
+        redirect_path_base = redirect_path.split("?")[0].rstrip("/")
+
+        # Redirect is "away" if it goes to a different path than the login path
+        is_same_path = redirect_path_base == login_path_base
+
+        # Detect redirects to other login/auth pages (also a failure signal)
+        # Match paths that end with login markers or have them as path segments
+        # e.g., /signin, /user/login, /auth/login but NOT /login-success, /login-complete
+        login_page_pattern = r"(^|/)(login|signin|sign-in|auth|authenticate)(/|$|\?)"
+        is_redirect_to_login = bool(re.search(login_page_pattern, redirect_path_base))
+
+        # Fix: is_success_path must NOT override same-path check
+        # A redirect to /admin/login?error=1 should NOT be treated as success
+        # Redirects to other login pages (/signin) are also failures
+        has_redirect_away = not is_same_path and not is_redirect_to_login
+
+    has_session = resp.has_session_cookie
+
+    # Session cookie alone is weak evidence - many apps set anonymous session
+    # cookies on failed logins. Require positive body signals as confirmation.
+    success_signals = ["welcome", "logged in", "success", "hello", "authenticated"]
+    has_positive_body = any(sig in body_lower for sig in success_signals)
+
+    if has_redirect_away:
+        return True, "form_auth_redirect"
+
+    if has_session and has_positive_body:
+        return True, "form_auth_session"
+
+    return False, "no_redirect_or_confirmed_session"
 
 
 def _shannon_entropy(value: str) -> float:
@@ -782,6 +1061,8 @@ async def test_default_credentials(
                 "-H", "Content-Type: application/json",
                 "-d", json_payload,
                 "-k", "--max-time", "10",
+                "-i",  # Include headers for parsing
+                "-w", "__SHAKERSCAN_AUTH__%{http_code}__SHAKERSCAN_AUTH__",
                 "-H", "User-Agent: Mozilla/5.0"
             ] + auth_args + [endpoint], timeout=15)
 
@@ -789,18 +1070,10 @@ async def test_default_credentials(
             auth_method = "json"
 
             if auth_rc == 0 and auth_out:
-                # Check for successful login indicators
-                success_indicators = [
-                    "token", "jwt", "session", '"success":true',
-                    '"success": true', "dashboard", "welcome",
-                    "logged in", "authentication successful"
-                ]
-
-                if any(indicator in auth_out.lower() for indicator in success_indicators):
-                    # Also check it's not an error message
-                    error_indicators = ["invalid", "incorrect", "failed", "error", "unauthorized"]
-                    if not any(err in auth_out.lower() for err in error_indicators):
-                        success = True
+                # Use structured response parsing to avoid false positives
+                resp = _parse_auth_response(auth_out)
+                is_success, _reason = _is_valid_json_auth_success(resp)
+                success = is_success
 
             # If JSON failed, try form data
             if not success:
@@ -811,20 +1084,18 @@ async def test_default_credentials(
                     "-H", "Content-Type: application/x-www-form-urlencoded",
                     "-d", form_payload,
                     "-k", "--max-time", "10",
+                    "-i",  # Include headers for parsing
+                    "-w", "__SHAKERSCAN_AUTH__%{http_code}__SHAKERSCAN_AUTH__",
                     "-H", "User-Agent: Mozilla/5.0"
                 ] + auth_args + [endpoint], timeout=15)
 
                 if form_rc == 0 and form_out:
-                    success_indicators = [
-                        "dashboard", "welcome", "logged in",
-                        "authentication successful", "login successful"
-                    ]
-
-                    if any(indicator in form_out.lower() for indicator in success_indicators):
-                        error_indicators = ["invalid", "incorrect", "failed", "error"]
-                        if not any(err in form_out.lower() for err in error_indicators):
-                            success = True
-                            auth_method = "form"
+                    # Use structured response parsing to avoid false positives
+                    resp = _parse_auth_response(form_out)
+                    is_success, _reason = _is_valid_form_auth_success(resp, endpoint)
+                    if is_success:
+                        success = True
+                        auth_method = "form"
 
             if success:
                 # SECURITY: Never store actual credentials - only hash

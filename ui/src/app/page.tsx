@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
 import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getGungnirStatus, startGungnir, stopGungnir, getSeverityBg, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type GungnirStatus } from '@/lib/api'
 
 interface DashboardData {
@@ -168,6 +169,7 @@ export default function Dashboard() {
   const queuePending = queue ? queue.pending : '--'
   const queueRunning = queue ? queue.running : '--'
   const queueCompleted = queue ? queue.completed : '--'
+  const queueFailed = queue ? queue.failed : '--'
   const workerCount = workers?.count
   const workersKnown = workerCount !== undefined && workerCount >= 0
   const workerLabel = workersError
@@ -196,12 +198,14 @@ export default function Dashboard() {
           value={totalTargets}
           icon={<TargetIcon />}
           color="blue"
+          href="/targets"
         />
         <StatCard
           title="Total Scans"
           value={totalScans}
           icon={<ScanIcon />}
           color="green"
+          href="/scans"
         />
         <StatCard
           title="Active Findings"
@@ -209,6 +213,7 @@ export default function Dashboard() {
           icon={<AlertIcon />}
           color="yellow"
           subtitle={metricsReady ? `${criticalFindings} critical, ${highFindings} high` : '--'}
+          href="/findings?status=active"
         />
         <StatCard
           title="Avg Score"
@@ -224,18 +229,22 @@ export default function Dashboard() {
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <h2 className="text-sm font-medium text-gray-400 mb-3">Queue Status</h2>
           <div className="flex flex-wrap gap-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
+            <Link href="/scans?status=pending" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+              <div className={`w-2 h-2 rounded-full bg-yellow-500 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`}></div>
               <span className="text-sm">{queuePending} pending</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+            </Link>
+            <Link href="/scans?status=running" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+              <div className={`w-2 h-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`}></div>
               <span className="text-sm">{queueRunning} running</span>
-            </div>
-            <div className="flex items-center gap-2">
+            </Link>
+            <Link href="/scans?status=completed" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
               <div className="w-2 h-2 rounded-full bg-green-500"></div>
               <span className="text-sm">{queueCompleted} completed</span>
-            </div>
+            </Link>
+            <Link href="/scans?status=failed" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+              <div className="w-2 h-2 rounded-full bg-red-500"></div>
+              <span className="text-sm">{queueFailed} failed</span>
+            </Link>
           </div>
           {queueError && (
             <p className="text-xs text-red-400 mt-3">{queueError}</p>
@@ -302,7 +311,7 @@ export default function Dashboard() {
               </div>
               {gungnir?.running && (
                 <p className="text-xs text-gray-500 mt-1">
-                  {gungnir.domains_monitored} domains • {gungnir.session_found} found this session
+                  {gungnir.domains_monitored} domains - {gungnir.session_found} found this session
                 </p>
               )}
             </div>
@@ -349,7 +358,7 @@ export default function Dashboard() {
           <div className="divide-y divide-gray-800">
             {data?.recent_scans?.length ? (
               data.recent_scans.slice(0, 5).map((scan) => (
-                <a
+                <Link
                   key={scan.id}
                   href={`/scans/${scan.id}`}
                   className="flex items-center justify-between p-4 hover:bg-gray-800/50 transition-colors"
@@ -366,7 +375,7 @@ export default function Dashboard() {
                     )}
                     <StatusBadge status={scan.status} />
                   </div>
-                </a>
+                </Link>
               ))
             ) : dashboardLoading ? (
               <p className="p-4 text-sm text-gray-500">Loading scans...</p>
@@ -375,9 +384,9 @@ export default function Dashboard() {
             )}
           </div>
           <div className="p-3 border-t border-gray-800">
-            <a href="/scans" className="text-sm text-blue-400 hover:text-blue-300">
-              View all scans →
-            </a>
+            <Link href="/scans" className="text-sm text-blue-400 hover:text-blue-300">
+              View all scans &rarr;
+            </Link>
           </div>
         </div>
 
@@ -389,7 +398,7 @@ export default function Dashboard() {
           <div className="divide-y divide-gray-800">
             {data?.recent_findings?.length ? (
               data.recent_findings.slice(0, 5).map((finding) => (
-                <a
+                <Link
                   key={finding.id}
                   href={`/findings/${finding.id}`}
                   className="flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors"
@@ -401,7 +410,7 @@ export default function Dashboard() {
                     <p className="text-sm text-white truncate">{finding.title}</p>
                     <p className="text-xs text-gray-500 truncate">{finding.tool}</p>
                   </div>
-                </a>
+                </Link>
               ))
             ) : dashboardLoading ? (
               <p className="p-4 text-sm text-gray-500">Loading findings...</p>
@@ -410,9 +419,9 @@ export default function Dashboard() {
             )}
           </div>
           <div className="p-3 border-t border-gray-800">
-            <a href="/findings" className="text-sm text-blue-400 hover:text-blue-300">
-              View all findings →
-            </a>
+            <Link href="/findings" className="text-sm text-blue-400 hover:text-blue-300">
+              View all findings &rarr;
+            </Link>
           </div>
         </div>
       </div>
@@ -425,13 +434,15 @@ function StatCard({
   value,
   icon,
   color,
-  subtitle
+  subtitle,
+  href
 }: {
   title: string
   value: number | string
   icon: React.ReactNode
   color: 'blue' | 'green' | 'yellow' | 'purple'
   subtitle?: string
+  href?: string
 }) {
   const colors = {
     blue: 'bg-blue-500/10 text-blue-400',
@@ -440,18 +451,33 @@ function StatCard({
     purple: 'bg-purple-500/10 text-purple-400'
   }
 
+  const content = (
+    <div className="flex items-center gap-3">
+      <div className={`p-2 rounded-lg ${colors[color]}`}>
+        {icon}
+      </div>
+      <div>
+        <p className="text-sm text-gray-400">{title}</p>
+        <p className="text-2xl font-bold text-white">{value}</p>
+        {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
+      </div>
+    </div>
+  )
+
+  if (href) {
+    return (
+      <Link
+        href={href}
+        className="bg-gray-900 rounded-lg border border-gray-800 p-4 hover:bg-gray-800/50 transition-colors"
+      >
+        {content}
+      </Link>
+    )
+  }
+
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-      <div className="flex items-center gap-3">
-        <div className={`p-2 rounded-lg ${colors[color]}`}>
-          {icon}
-        </div>
-        <div>
-          <p className="text-sm text-gray-400">{title}</p>
-          <p className="text-2xl font-bold text-white">{value}</p>
-          {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
-        </div>
-      </div>
+      {content}
     </div>
   )
 }
