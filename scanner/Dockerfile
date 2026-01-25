@@ -5,9 +5,9 @@
 FROM golang:latest AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner)
-RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.1.5 \
- && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9 \
- && go install github.com/projectdiscovery/katana/cmd/katana@v1.3.0 \
+RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.1 \
+ && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.8.1 \
+ && go install github.com/projectdiscovery/katana/cmd/katana@v1.4.0 \
  && go install github.com/hahwul/dalfox/v2@v2.12.0 \
  && go install github.com/ffuf/ffuf/v2@latest \
  && go install github.com/tomnomnom/meg@latest \
@@ -17,7 +17,7 @@ RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.1.5 \
 FROM alpine:latest AS subfinder-downloader
 RUN apk add --no-cache curl unzip
 WORKDIR /tmp
-RUN curl -L "https://github.com/projectdiscovery/subfinder/releases/download/v2.11.0/subfinder_2.11.0_linux_amd64.zip" -o subfinder.zip && \
+RUN curl -L "https://github.com/projectdiscovery/subfinder/releases/download/v2.12.0/subfinder_2.12.0_linux_amd64.zip" -o subfinder.zip && \
     unzip subfinder.zip && \
     chmod +x subfinder
 
@@ -31,7 +31,7 @@ RUN ARCH=$(uname -m) && \
     else \
         NUCLEI_ARCH="amd64"; \
     fi && \
-    curl -L "https://github.com/projectdiscovery/nuclei/releases/download/v3.6.1/nuclei_3.6.1_linux_${NUCLEI_ARCH}.zip" -o nuclei.zip && \
+    curl -L "https://github.com/projectdiscovery/nuclei/releases/download/v3.6.2/nuclei_3.6.2_linux_${NUCLEI_ARCH}.zip" -o nuclei.zip && \
     unzip nuclei.zip && \
     chmod +x nuclei
 
@@ -42,7 +42,7 @@ FROM mcr.microsoft.com/playwright/python:v1.57.0-noble
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc \
     iputils-ping dnsutils procps coreutils \
-    sqlmap nikto masscan python3-pip \
+    nikto masscan python3-pip \
     whois netcat-openbsd traceroute \
     dirb gobuster hydra medusa \
     dnsrecon \
@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python-based security tools
 RUN pip3 install --no-cache-dir --break-system-packages \
+    sqlmap \
     sslyze commix XSStrike \
     certifi cryptography \
     dnspython pyOpenSSL \
