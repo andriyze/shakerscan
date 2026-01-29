@@ -107,7 +107,7 @@ def _parse_crtsh_date(date_str: str) -> datetime | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed
-    except:
+    except Exception:
         pass
 
     return None

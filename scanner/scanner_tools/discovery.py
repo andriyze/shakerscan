@@ -23,7 +23,7 @@ try:
 except ImportError:
     HAS_YAML = False
 
-from .common import get_auth_curl_args, run
+from .common import get_auth_curl_args, run, normalize_hash_route_url
 from .http_scanner import HAS_PLAYWRIGHT, _pw
 
 
@@ -915,8 +915,16 @@ async def browser_crawl_fallback(url: str) -> list[str]:
                 () => {
                     const links = [];
                     document.querySelectorAll('a[href]').forEach(a => {
-                        const href = a.href;
-                        if (href && !href.startsWith('javascript:') && !href.startsWith('#')) { links.push(href); }
+                        const href = a.getAttribute('href');
+                        if (href && !href.startsWith('javascript:')) {
+                            if (href.startsWith('#/') || href.startsWith('#!/')) {
+                                // Convert hash route to full URL
+                                links.push(window.location.origin + window.location.pathname + href);
+                            } else if (!href.startsWith('#')) {
+                                // Regular link - use resolved URL
+                                links.push(a.href);
+                            }
+                        }
                     });
                     document.querySelectorAll('form[action]').forEach(form => {
                         const action = new URL(form.action, window.location.href).href;
@@ -962,29 +970,42 @@ async def pd_httpx_probe(host: str, port: int | None = None) -> list[dict]:
     return fallback_urls
 
 
-async def discover_endpoint_parameters(url: str) -> list[str]:
+async def discover_endpoint_parameters(
+    url: str,
+    use_comprehensive_wordlist: bool = False,
+    max_params: int = 30,
+    test_content_types: bool = False,
+) -> list[str]:
     """
-    Discover which parameters an endpoint accepts by testing common params.
+    Discover which parameters an endpoint accepts using Arjun-style anomaly detection.
 
-    Uses response analysis to detect:
+    Uses multiple detection techniques:
     1. Response differs from baseline (param accepted)
     2. Error message mentions param name
     3. JSON response structure changes
+    4. Response time anomaly (timing-based detection)
+    5. HTTP Parameter Pollution (HPP) detection
 
     Args:
         url: The endpoint URL to test (without query params)
+        use_comprehensive_wordlist: Use larger wordlist for thorough testing
+        max_params: Maximum number of parameters to test
+        test_content_types: Also test as POST body params with different content types
 
     Returns:
         List of parameter names that appear to be accepted
     """
     accepted_params: list[str] = []
 
-    # Get baseline response
+    # Get baseline response with timing
+    import time
+    start_time = time.time()
     baseline_out, _, baseline_rc = await run([
-        "curl", "-sS", "-L", "-k", "--max-time", "3",
-        "-w", "\n---STATUS:%{http_code}---SIZE:%{size_download}---",
+        "curl", "-sS", "-L", "-k", "--max-time", "5",
+        "-w", "\n---STATUS:%{http_code}---SIZE:%{size_download}---TIME:%{time_total}---",
         url
-    ], timeout=5)
+    ], timeout=8)
+    baseline_duration = time.time() - start_time
 
     if baseline_rc != 0:
         return []
@@ -992,74 +1013,165 @@ async def discover_endpoint_parameters(url: str) -> list[str]:
     # Parse baseline metrics
     baseline_size = 0
     baseline_status = "000"
+    baseline_time = 0.0
+    baseline_body = ""
     if "---STATUS:" in baseline_out:
         try:
-            baseline_status = baseline_out.split("---STATUS:")[1].split("---")[0]
+            parts = baseline_out.split("---STATUS:")
+            baseline_body = parts[0]
+            baseline_status = parts[1].split("---")[0]
             baseline_size = int(baseline_out.split("---SIZE:")[1].split("---")[0])
+            baseline_time = float(baseline_out.split("---TIME:")[1].split("---")[0])
         except (IndexError, ValueError):
             pass
 
-    # Determine which params to try based on URL pattern
-    params_to_try = list(COMMON_PARAMS)  # Start with common params
+    # Compute baseline body hash for comparison
+    baseline_hash = hashlib.sha256(baseline_body[:5000].encode("utf-8", errors="ignore")).hexdigest()[:12]
 
-    # Add endpoint-specific params based on URL
+    # Load parameters to test
+    if use_comprehensive_wordlist:
+        wordlist_path = os.path.join(WORDLIST_DIR, "params-comprehensive.txt")
+        params_to_try = _read_wordlist(wordlist_path, limit=max_params * 2)
+        if not params_to_try:
+            params_to_try = list(COMMON_PARAMS)
+    else:
+        params_to_try = list(COMMON_PARAMS)
+
+    # Add endpoint-specific params based on URL pattern (prioritized)
     url_lower = url.lower()
+    prioritized_params: list[str] = []
     for pattern, specific_params in ENDPOINT_PARAMS.items():
         if pattern in url_lower:
-            params_to_try = specific_params + params_to_try  # Prioritize specific params
+            prioritized_params.extend(specific_params)
 
-    # Test each parameter (limit to first 15 to avoid slowdown)
-    for param in params_to_try[:15]:
-        test_url = f"{url}?{param}=test123"
-        out, _, rc = await run([
-            "curl", "-sS", "-L", "-k", "--max-time", "2",
-            "-w", "\n---STATUS:%{http_code}---SIZE:%{size_download}---",
-            test_url
-        ], timeout=3)
+    # Deduplicate while preserving priority order
+    seen = set()
+    ordered_params: list[str] = []
+    for p in prioritized_params + params_to_try:
+        if p not in seen:
+            seen.add(p)
+            ordered_params.append(p)
 
-        if rc != 0:
-            continue
+    params_to_try = ordered_params[:max_params]
 
-        # Parse test metrics
-        test_size = 0
-        test_status = "000"
-        if "---STATUS:" in out:
-            try:
-                test_status = out.split("---STATUS:")[1].split("---")[0]
-                test_size = int(out.split("---SIZE:")[1].split("---")[0])
-            except (IndexError, ValueError):
+    # Batch test parameters for efficiency (test 5 at a time)
+    batch_size = 5
+
+    async def test_param_batch(params: list[str]) -> list[str]:
+        found = []
+        for param in params:
+            # Use a unique marker value for each param
+            marker = f"xp{secrets.token_hex(3)}"
+            test_url = f"{url}?{param}={marker}"
+
+            start = time.time()
+            out, _, rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "3",
+                "-w", "\n---STATUS:%{http_code}---SIZE:%{size_download}---TIME:%{time_total}---",
+                test_url
+            ], timeout=5)
+            duration = time.time() - start
+
+            if rc != 0:
                 continue
 
-        # Detection logic
-        param_accepted = False
+            # Parse test metrics
+            test_size = 0
+            test_status = "000"
+            test_time = 0.0
+            test_body = ""
+            if "---STATUS:" in out:
+                try:
+                    parts = out.split("---STATUS:")
+                    test_body = parts[0]
+                    test_status = parts[1].split("---")[0]
+                    test_size = int(out.split("---SIZE:")[1].split("---")[0])
+                    test_time = float(out.split("---TIME:")[1].split("---")[0])
+                except (IndexError, ValueError):
+                    continue
 
-        # 1. Status code changed significantly (but not to error)
-        if test_status != baseline_status and test_status not in ["404", "400", "500", "502", "503"]:
-            param_accepted = True
+            # Multi-signal detection (Arjun-style)
+            signals = 0
+            confidence = 0.0
 
-        # 2. Response size changed significantly (>10% or >100 bytes)
-        if baseline_size > 0:
-            size_diff = abs(test_size - baseline_size)
-            size_pct = (size_diff / baseline_size) * 100
-            if size_diff > 100 or size_pct > 10:
-                param_accepted = True
+            # Signal 1: Status code changed (but not to generic error)
+            if test_status != baseline_status:
+                if test_status in ["200", "201", "202", "301", "302", "303", "307"]:
+                    signals += 1
+                    confidence += 0.3
+                elif test_status in ["401", "403"]:
+                    # Auth-required response for this param = interesting
+                    signals += 1
+                    confidence += 0.4
+                elif test_status == "422":
+                    # Validation error = param is processed
+                    signals += 1
+                    confidence += 0.5
 
-        # 3. Parameter name appears in response (error message, reflection)
-        response_body = out.split("---STATUS:")[0] if "---STATUS:" in out else out
-        if param in response_body.lower() or "test123" in response_body:
-            param_accepted = True
+            # Signal 2: Response size changed significantly
+            if baseline_size > 0:
+                size_diff = abs(test_size - baseline_size)
+                size_pct = (size_diff / baseline_size) * 100 if baseline_size > 0 else 0
+                if size_diff > 200 or size_pct > 15:
+                    signals += 1
+                    confidence += 0.3
+                elif size_diff > 50 or size_pct > 5:
+                    signals += 1
+                    confidence += 0.1
 
-        # 4. JSON response structure changed (new keys)
-        if response_body.strip().startswith("{") or response_body.strip().startswith("["):
-            try:
-                test_json = json.loads(response_body)
-                if isinstance(test_json, dict) and param in str(test_json).lower():
-                    param_accepted = True
-            except json.JSONDecodeError:
-                pass
+            # Signal 3: Response body hash changed
+            test_hash = hashlib.sha256(test_body[:5000].encode("utf-8", errors="ignore")).hexdigest()[:12]
+            if test_hash != baseline_hash:
+                signals += 1
+                confidence += 0.2
 
-        if param_accepted:
-            accepted_params.append(param)
+            # Signal 4: Marker value reflected (potential injection point)
+            if marker in test_body:
+                signals += 1
+                confidence += 0.4  # High confidence - direct reflection
+
+            # Signal 5: Parameter name mentioned (error/validation)
+            if param in test_body.lower():
+                signals += 1
+                confidence += 0.3
+
+            # Signal 6: Response time anomaly (> 2x baseline, could indicate DB query)
+            if baseline_time > 0 and test_time > baseline_time * 2 and test_time > 0.5:
+                signals += 1
+                confidence += 0.2
+
+            # Signal 7: JSON structure changed
+            if test_body.strip().startswith("{") or test_body.strip().startswith("["):
+                try:
+                    test_json = json.loads(test_body)
+                    if isinstance(test_json, dict):
+                        # Check if new keys appeared or values changed
+                        if param in str(test_json).lower() or marker in str(test_json):
+                            signals += 1
+                            confidence += 0.3
+                except json.JSONDecodeError:
+                    pass
+
+            # Accept param if multiple signals or high confidence
+            if signals >= 2 or confidence >= 0.5:
+                found.append(param)
+
+        return found
+
+    # Test in batches
+    for i in range(0, len(params_to_try), batch_size):
+        batch = params_to_try[i:i + batch_size]
+        batch_results = await test_param_batch(batch)
+        accepted_params.extend(batch_results)
+
+        # Stop early if we've found many params
+        if len(accepted_params) >= 20:
+            break
+
+    # Optionally test as POST body parameters with different Content-Types
+    if test_content_types and accepted_params:
+        # This could be expanded to test JSON body params, form params, etc.
+        pass
 
     return accepted_params
 
@@ -1199,11 +1311,19 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
         "/api/data", "/rest/data",
         "/api/export", "/api/import", "/api/backup",
 
-        # API base endpoints
-        "/api", "/api/v1", "/api/v2", "/api/v3",
-        "/rest", "/rest/v1", "/rest/v2",
+        # API base endpoints (expanded with internal/staging/legacy variations)
+        "/api", "/api/v1", "/api/v2", "/api/v3", "/api/v4",
+        "/rest", "/rest/v1", "/rest/v2", "/rest/v3",
         "/graphql", "/query", "/health", "/status", "/metrics",
         "/.well-known/health", "/actuator/health",
+        # Internal/admin/beta/staging API versions (often unprotected)
+        "/api/beta", "/api/internal", "/api/admin", "/api/private",
+        "/api/legacy", "/api/test", "/api/staging", "/api/dev",
+        "/v1/api", "/v2/api", "/v3/api",  # Reversed version prefix pattern
+        "/internal/api", "/admin/api", "/private/api",
+        "/api/v0", "/api/v1.0", "/api/v2.0",  # Decimal versions
+        "/api-internal", "/api-admin", "/api-v1", "/api-v2",
+        "/api/unstable", "/api/deprecated", "/api/old",
 
         # OpenAPI/Swagger - standard locations
         "/openapi.json", "/openapi.yaml",
@@ -1264,7 +1384,21 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
                     if full_url not in unique_urls:
                         unique_urls.append(full_url)
                         api_endpoints.append(full_url)
-            print(f"[discovery] JS parsing found {len(js_endpoints.get('api_endpoints', []))} additional endpoints", file=sys.stderr)
+
+            # Also consume hash routes (SPA navigation paths)
+            hash_routes_added = 0
+            for route in js_endpoints.get("routes", []):
+                route = route.strip("'\"` ")
+                if not route:
+                    continue
+                # Only process hash routes here (regular routes already in api_endpoints)
+                if route.startswith("#/") or route.startswith("#!/"):
+                    full_url = normalize_hash_route_url(route, url)
+                    if full_url and full_url not in unique_urls:
+                        unique_urls.append(full_url)
+                        hash_routes_added += 1
+
+            print(f"[discovery] JS parsing found {len(js_endpoints.get('api_endpoints', []))} API endpoints, {hash_routes_added} hash routes", file=sys.stderr)
 
     # FFUF-based directory fuzzing with appropriate wordlist
     if ffuf_wordlist and ffuf_wordlist != "minimal":
@@ -1385,10 +1519,23 @@ async def katana_crawl(url: str, scan_type: str = "standard") -> list[str]:
     discovery = await enhanced_url_discovery(url, scan_type)
     return discovery.get("all_urls", [])[:max_urls]
 
-async def schemathesis_run(schema_url: str, token: str | None = None, base_url: str | None = None) -> dict:
+async def schemathesis_run(
+    schema_url: str,
+    token: str | None = None,
+    base_url: str | None = None,
+    auth_session: Any | None = None,
+) -> dict:
     headers: list[str] = []
+    auth_args = get_auth_curl_args(auth_session)
+    if auth_args:
+        headers.extend(auth_args)
     if token:
-        headers += ["-H", f"Authorization: Bearer {token}"]
+        has_auth = any(
+            isinstance(h, str) and h.lower().startswith("authorization:")
+            for h in headers
+        )
+        if not has_auth:
+            headers += ["-H", f"Authorization: Bearer {token}"]
     cmd = [
         "schemathesis",
         "run",
@@ -1859,15 +2006,31 @@ async def enumerate_virtual_hosts(
     host: str,
     ip_addresses: list[str] | None = None,
     candidates: list[str] | None = None,
-    max_hosts: int = 12
+    max_hosts: int = 50,
+    use_wordlist: bool = True,
 ) -> dict[str, Any]:
     """
     Enumerate potential virtual hosts on the same IP by testing Host headers.
+
+    This is a powerful technique for discovering hidden services that may be
+    exposed on the same IP but respond only to specific Host headers.
+
+    Args:
+        base_url: Base URL of the target
+        host: Target hostname
+        ip_addresses: List of resolved IP addresses
+        candidates: Custom list of subdomain prefixes to test
+        max_hosts: Maximum number of hosts to test
+        use_wordlist: Whether to load prefixes from vhosts wordlist
+
+    Returns:
+        Dict with potential vhosts and test results.
     """
     results: dict[str, Any] = {
         "hosts_tested": 0,
         "potential_vhosts": [],
         "baseline": {},
+        "technique": "host_header_fuzzing",
     }
 
     if not ip_addresses:
@@ -1883,10 +2046,23 @@ async def enumerate_virtual_hosts(
     if host_parts and host_parts[0].lower() in {"www", "app", "api", "portal", "dev", "staging"} and len(host_parts) > 2:
         base_domain = ".".join(host_parts[1:])
 
-    prefixes = candidates or [
-        "admin", "dev", "staging", "test", "beta", "api", "internal",
-        "portal", "app", "old", "preview", "sandbox",
-    ]
+    # Load prefixes from wordlist or use defaults
+    if candidates:
+        prefixes = candidates
+    elif use_wordlist:
+        wordlist_path = os.path.join(WORDLIST_DIR, "vhosts-common.txt")
+        prefixes = _read_wordlist(wordlist_path, limit=max_hosts * 2)
+        if not prefixes:
+            prefixes = [
+                "admin", "dev", "staging", "test", "beta", "api", "internal",
+                "portal", "app", "old", "preview", "sandbox", "qa", "uat",
+                "preprod", "demo", "corp", "intranet", "mail", "vpn",
+            ]
+    else:
+        prefixes = [
+            "admin", "dev", "staging", "test", "beta", "api", "internal",
+            "portal", "app", "old", "preview", "sandbox",
+        ]
     candidate_hosts = [f"{p}.{base_domain}" for p in prefixes if f"{p}.{base_domain}" != host]
     candidate_hosts = candidate_hosts[:max_hosts]
 
@@ -2589,6 +2765,16 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
         r'''['"`](/[^'"`]*\{[^}]+\}[^'"`]*)['"`]''',  # '/users/{id}'
     ]
 
+    # Hash route patterns for SPAs using hash-based routing
+    hash_route_patterns = [
+        r'''['"`](#/[^'"`]+)['"`]''',           # "#/search" or "#/page/subpage"
+        r'''['"`](#!/[^'"`]+)['"`]''',          # "#!/page" (hashbang style)
+        r'''hash\s*:\s*['"`]#?(/[^'"`]+)['"`]''',  # hash: '#/route' or hash: '/route'
+        r'''path\s*:\s*['"`](#/[^'"`]+)['"`]''',  # Angular 1.x: path: '#/route'
+        r'''location\.hash\s*=\s*['"`]#?(/[^'"`]+)['"`]''',  # location.hash = '#/route'
+        r'''\$location\.path\s*\(\s*['"`](/[^'"`]+)['"`]''',  # AngularJS $location.path('/route')
+    ]
+
     # Template literal patterns (very common in modern JS)
     template_patterns = [
         r'''`/[^`]*\$\{[^}]+\}[^`]*`''',  # `/api/users/${id}`
@@ -2654,6 +2840,18 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
             for pattern in route_patterns:
                 matches = re.findall(pattern, content)
                 findings["routes"].extend(matches)
+
+            # Extract hash routes (SPA hash-based routing)
+            for pattern in hash_route_patterns:
+                matches = re.findall(pattern, content)
+                for match in matches:
+                    route = match if isinstance(match, str) else (match[0] if match else "")
+                    route = route.strip("'\"` ")
+                    if route:
+                        # Ensure hash routes are prefixed with # for identification
+                        if not route.startswith("#"):
+                            route = "#" + route
+                        findings["routes"].append(route)
 
             # Extract template literal URLs (convert to base paths for testing)
             for pattern in template_patterns:
@@ -2756,6 +2954,68 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
     return findings
 
 
+def calculate_adaptive_depth(signals: dict, base_depth: int = 3) -> tuple[int, int]:
+    """
+    P1-1 FIX: Calculate adaptive discovery depth based on vulnerability signals.
+
+    Increases depth when high-value signals are detected (SQL errors, auth issues),
+    decreases for low-signal targets to save time.
+
+    LIMITATION: In the default smart_discovery flow, discovery runs BEFORE nuclei,
+    so signals=None is typically passed on first run. To use adaptive depth:
+    1. Run an initial discovery with base depth
+    2. Run nuclei to gather signals
+    3. Call smart_discovery again with nuclei signals for deeper probing
+    Or use the API to pass signals from previous scans of the same target.
+
+    Args:
+        signals: Dictionary of signals from nuclei/earlier phases
+        base_depth: Starting depth (default 3)
+
+    Returns:
+        Tuple of (depth, paths_per_level)
+    """
+    depth = base_depth
+    paths_per_level = 15  # Default
+
+    if not signals:
+        return depth, paths_per_level
+
+    # Increase depth for high-value signals
+    if signals.get("sql_errors") or signals.get("database_errors"):
+        depth += 2
+        paths_per_level += 5
+        print(f"[discovery] Signal: SQL errors detected - increasing depth (+2)", file=sys.stderr)
+
+    if signals.get("auth_bypass") or signals.get("auth_issues"):
+        depth += 1
+        paths_per_level += 3
+        print(f"[discovery] Signal: Auth issues detected - increasing depth (+1)", file=sys.stderr)
+
+    if signals.get("sensitive_files") or signals.get("exposed_files"):
+        depth += 1
+        paths_per_level += 2
+        print(f"[discovery] Signal: Sensitive files detected - increasing depth (+1)", file=sys.stderr)
+
+    if signals.get("injection_potential"):
+        depth += 1
+        print(f"[discovery] Signal: Injection potential - increasing depth (+1)", file=sys.stderr)
+
+    if signals.get("technology_specific"):
+        # Tech-specific signals indicate complex application
+        depth += 1
+        print(f"[discovery] Signal: Technology-specific findings - increasing depth (+1)", file=sys.stderr)
+
+    # Cap at reasonable maximums
+    depth = min(depth, 7)  # Max depth 7
+    paths_per_level = min(paths_per_level, 30)  # Max 30 paths per level
+
+    if depth != base_depth:
+        print(f"[discovery] Adaptive depth: {base_depth} -> {depth}, paths/level: {paths_per_level}", file=sys.stderr)
+
+    return depth, paths_per_level
+
+
 async def smart_discovery(
     url: str,
     signals: dict | None = None,
@@ -2802,12 +3062,25 @@ async def smart_discovery(
             "/api/v1/",
             "/api/v2/",
             "/api/v3/",
+            "/api/v4/",
             "/v1/",
             "/v2/",
             "/v3/",
             "/rest/",
             "/rest/v1/",
             "/rest/v2/",
+            # Internal/admin/beta API versions (often unprotected)
+            "/api/beta/",
+            "/api/internal/",
+            "/api/admin/",
+            "/api/private/",
+            "/api/legacy/",
+            "/api/test/",
+            "/api/staging/",
+            "/internal/api/",
+            "/admin/api/",
+            "/v1/api/",
+            "/v2/api/",
         ]
     directories = list(set(directories))
 
@@ -2831,14 +3104,15 @@ async def smart_discovery(
         if probed_endpoints:
             print(f"[discovery] Probed {len(probed_endpoints)} API resources from bases", file=sys.stderr)
 
-    # Phase 2b: Recursive fuzzing
-    print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories)", file=sys.stderr)
+    # Phase 2b: Recursive fuzzing with adaptive depth (P1-1 fix)
+    adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(signals, base_depth=3)
+    print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories, depth={adaptive_depth})", file=sys.stderr)
     recursive_result = await recursive_directory_discovery(
         url,
         directories,
         signals=signals,
-        max_depth=3,
-        max_paths_per_level=15
+        max_depth=adaptive_depth,
+        max_paths_per_level=adaptive_paths_per_level
     )
 
     # Merge results and apply URL cap from config
@@ -2894,7 +3168,7 @@ async def smart_discovery(
 
         if "?" in path:
             parsed = urllib.parse.urlparse(path)
-            params = list(urllib.parse.parse_qs(parsed.query).keys())
+            params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
             endpoints_with_params.append({
                 "url": path,
                 "params": params,

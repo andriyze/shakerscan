@@ -44,6 +44,7 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
 
   const isActive = (href: string) => {
     if (href === '/') {
@@ -62,6 +63,9 @@ export default function Sidebar() {
           Shaker Scan
         </h1>
         <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
+        {appVersion && (
+          <p className="text-[10px] text-gray-600 mt-1">Build {appVersion}</p>
+        )}
       </div>
 
       <nav className="flex-1 space-y-1">

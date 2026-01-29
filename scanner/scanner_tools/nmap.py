@@ -135,8 +135,20 @@ async def nmap_ciphers(host: str, port: int) -> dict[str, Any]:
     return {"raw": out[:4000] if out else (err or "")[:4000], "weak_indicators": weak, "ciphers_by_protocol": ciphers_by_protocol}
 
 
-async def nmap_full_scan(host: str, quick_mode: bool = False) -> dict[str, Any]:
-    """Comprehensive port and service scanning with Nmap."""
+async def nmap_full_scan(
+    host: str,
+    quick_mode: bool = False,
+    top_ports: int | None = None,
+    scripts: bool = False,
+) -> dict[str, Any]:
+    """Comprehensive port and service scanning with Nmap.
+
+    Args:
+        host: Target host
+        quick_mode: Legacy quick scan profile (top 33 ports)
+        top_ports: If set, scan top N ports instead of full port range
+        scripts: If True, enable nmap scripts for top-port scans
+    """
     results: dict[str, Any] = {
         "open_ports": [],
         "services": [],
@@ -145,7 +157,35 @@ async def nmap_full_scan(host: str, quick_mode: bool = False) -> dict[str, Any]:
         "scan_completed": False
     }
 
-    if quick_mode:
+    if top_ports is not None:
+        # Scale timeout based on port count
+        if top_ports <= 50:
+            host_timeout = "120s"
+            timeout = 180
+        elif top_ports <= 200:
+            host_timeout = "180s"
+            timeout = 300
+        elif top_ports <= 1000:
+            host_timeout = "300s"
+            timeout = 600
+        elif top_ports <= 5000:
+            host_timeout = "600s"
+            timeout = 1200
+        else:
+            host_timeout = "1200s"
+            timeout = 1800
+
+        cmd = [
+            "nmap", "-Pn", "--host-timeout", host_timeout, "-sT", "-sV", "-T3",
+            "--top-ports", str(top_ports),
+            "-oX", "-",
+            host,
+        ]
+        if scripts:
+            cmd.extend(["--script", "vuln,discovery,auth"])
+        else:
+            cmd.extend(["--version-intensity", "5"])
+    elif quick_mode:
         cmd = [
             "nmap", "-Pn", "--host-timeout", "120s", "-sT", "-sV", "-T4",
             "--top-ports", "33",  # Fast: top 33 ports only for smart/quick scans
@@ -246,8 +286,17 @@ async def comprehensive_port_scan(host: str, max_ports: int = 1000) -> dict[str,
     else:
         port_args = ["--top-ports", str(max_ports)]
 
+    # Scale timeout based on port count
+    # ~3s per 1000 ports minimum for TCP connect + service detection
+    if max_ports >= 65535:
+        host_timeout = "1800s"  # 30 min for full port scan
+    elif max_ports >= 10000:
+        host_timeout = "600s"   # 10 min
+    else:
+        host_timeout = "120s"   # 2 min for top-1000 (default)
+
     cmd = [
-        "nmap", "-Pn", "--host-timeout", "120s", "-sT", "-sV", "-T3",
+        "nmap", "-Pn", "--host-timeout", host_timeout, "-sT", "-sV", "-T3",
         *port_args,
         "--version-light",  # Faster than --version-all
         "-oX", "-",

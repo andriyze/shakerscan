@@ -214,6 +214,16 @@ def _write_targets_file(targets: list[str]) -> str:
     return path
 
 
+async def _refresh_auth_session(auth_session: Any | None, context: str) -> None:
+    """Best-effort auth refresh before running a Nuclei command."""
+    if not auth_session:
+        return
+    try:
+        await auth_session.refresh_if_needed(force=False)
+    except Exception as e:
+        print(f"[nuclei] Auth refresh failed ({context}): {e}", file=sys.stderr)
+
+
 # ============================================================================
 # NUCLEI TEMPLATE DEDUPLICATION
 # ============================================================================
@@ -496,6 +506,8 @@ async def nuclei_scan(
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
 
+    await _refresh_auth_session(auth_session, "smart_nuclei_scan")
+
     cmd = [
         nuclei_cmd,
         *target_args,
@@ -652,6 +664,8 @@ async def nuclei_comprehensive_scan(
         target_args = ["-l", target_file]
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
+
+    await _refresh_auth_session(auth_session, "nuclei_scan")
 
     cmd = [
         nuclei_cmd,
@@ -1002,6 +1016,8 @@ async def smart_nuclei_scan(
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
 
+    await _refresh_auth_session(auth_session, "nuclei_comprehensive_scan")
+
     cmd = [
         nuclei_cmd,
         *target_args,
@@ -1168,6 +1184,8 @@ async def _run_nuclei_wave(
         target_args = ["-l", target_file]
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
+
+    await _refresh_auth_session(auth_session, "nuclei_wave")
 
     cmd = [
         nuclei_cmd,

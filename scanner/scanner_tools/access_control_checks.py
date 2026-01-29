@@ -13,10 +13,13 @@ All functions follow async patterns and return structured dictionaries.
 
 import asyncio
 import hashlib
+import time
 from typing import Any
 from urllib.parse import urljoin
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
+
+FORCED_BROWSING_MAX_BODY_BYTES = 262_144
 
 # =============================================================================
 # CONTENT VALIDATION PATTERNS - Validate that responses match expected content
@@ -175,7 +178,7 @@ def _is_generic_html_page(body: str) -> bool:
     if not body:
         return False
 
-    body_lower = body.lower()[:5000]
+    body_lower = body[:5000].lower()
 
     # Count HTML structural indicators
     html_matches = sum(1 for ind in HTML_GENERIC_INDICATORS if ind.lower() in body_lower)
@@ -212,7 +215,7 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
         # No validator defined - assume valid
         return True, "no_validator"
 
-    body_lower = body.lower()[:5000]
+    body_lower = body[:5000].lower()
     ct_lower = (content_type or "").lower()
 
     # Check if HTML should always be rejected for this category
@@ -432,7 +435,8 @@ async def test_single_path(
     base_url: str,
     path: str,
     timeout: int = 10,
-    homepage_hash: str | None = None
+    homepage_hash: str | None = None,
+    max_body_bytes: int = FORCED_BROWSING_MAX_BODY_BYTES
 ) -> dict[str, Any] | None:
     """
     Test a single path for accessibility.
@@ -498,10 +502,13 @@ async def test_single_path(
             # For 200 responses, get more details and validate content
             if status_code == 200:
                 # Do a quick GET to check content type, HTTP status, and content for false positive detection
+                range_end = max(0, max_body_bytes - 1)
                 get_out, get_err, get_rc = await run(
                     [
                         "curl", "-sS", "-k", "-L",
                         "--max-time", str(timeout),
+                        "--range", f"0-{range_end}",
+                        "--max-filesize", str(max_body_bytes),
                         "-w", "\n---CURL_METADATA---\n%{http_code}|%{content_type}|%{size_download}",
                         "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         full_url
@@ -509,11 +516,17 @@ async def test_single_path(
                     timeout=timeout + 5
                 )
 
-                if get_rc == 0 and get_out:
+                if get_out:
                     # Split response body from metadata
                     parts = get_out.split("---CURL_METADATA---")
                     body = parts[0] if len(parts) > 0 else ""
                     metadata = parts[1].strip() if len(parts) > 1 else ""
+
+                    if max_body_bytes and len(body) > max_body_bytes:
+                        body = body[:max_body_bytes]
+                        finding["content_truncated"] = True
+                    if get_rc != 0:
+                        finding["content_fetch_error"] = get_err or f"curl_exit_{get_rc}"
 
                     # Parse metadata (now includes http_code)
                     meta_parts = metadata.split('|')
@@ -548,7 +561,7 @@ async def test_single_path(
                             pass
 
                     # False positive detection: check for error indicators in body
-                    body_lower = body.lower()[:3000]  # Check first 3KB
+                    body_lower = body[:3000].lower()  # Check first 3KB
                     false_positive_indicators = [
                         "404", "not found", "page not found", "file not found",
                         "does not exist", "doesn't exist", "cannot be found",
@@ -562,7 +575,7 @@ async def test_single_path(
                     # ENHANCED: Homepage comparison for catch-all detection
                     # If response is same as homepage, it's a catch-all route (false positive)
                     if homepage_hash and body:
-                        response_hash = _compute_content_hash(body)
+                        response_hash = _compute_content_hash(body[:max_body_bytes] if max_body_bytes else body)
                         if response_hash == homepage_hash:
                             is_soft_404 = True
                             finding["same_as_homepage"] = True
@@ -610,7 +623,8 @@ async def check_forced_browsing(
     url: str,
     max_concurrent: int = 10,
     categories: list[str] | None = None,
-    timeout_per_request: int = 10
+    timeout_per_request: int = 10,
+    max_total_time: int | None = None,
 ) -> dict[str, Any]:
     """
     Test for forced browsing / direct request vulnerabilities.
@@ -622,6 +636,7 @@ async def check_forced_browsing(
         max_concurrent: Maximum concurrent requests (default 10)
         categories: Optional list of categories to test (default all)
         timeout_per_request: Timeout per request in seconds
+        max_total_time: Optional total time budget in seconds for all tests
 
     Returns:
         Dict containing:
@@ -644,7 +659,9 @@ async def check_forced_browsing(
         "accessible_count": 0,
         "protected_count": 0,
         "spa_detected": False,
+        "time_budget_exceeded": False,
     }
+    start_time = time.monotonic()
 
     # SPA DETECTION: Check if site uses catch-all routing (returns same page for all paths)
     # This causes massive false positives since every path returns HTTP 200
@@ -683,12 +700,18 @@ async def check_forced_browsing(
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def test_with_semaphore(path: str) -> dict[str, Any] | None:
+        if max_total_time is not None and (time.monotonic() - start_time) >= max_total_time:
+            return None
         async with semaphore:
+            if max_total_time is not None and (time.monotonic() - start_time) >= max_total_time:
+                return None
             return await test_single_path(url, path, timeout_per_request, homepage_hash)
 
     # Run all tests concurrently with rate limiting
     tasks = [test_with_semaphore(path) for path in paths_to_test]
     findings = await asyncio.gather(*tasks, return_exceptions=True)
+    if max_total_time is not None and (time.monotonic() - start_time) >= max_total_time:
+        results["time_budget_exceeded"] = True
 
     # Process results
     for finding in findings:
@@ -1374,6 +1397,341 @@ async def smart_bola_test(
                             "cwe": "CWE-639",
                             "owasp": "API1:2023 - Broken Object Level Authorization",
                         })
+
+    return results
+
+
+# =============================================================================
+# N-USER BOLA/IDOR TESTING
+# =============================================================================
+
+async def check_bola_multi_user(
+    base_url: str,
+    resource_endpoints: list[dict[str, Any]] | None = None,
+    user_sessions: list[Any] | None = None,
+    user_owned_resources: dict[int, list[str]] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Check for Broken Object Level Authorization with N users.
+
+    Enhanced BOLA testing that supports multiple user sessions for
+    comprehensive access control testing across different roles.
+
+    OWASP API Security: API1:2023 - Broken Object Level Authorization
+
+    Args:
+        base_url: Target base URL
+        resource_endpoints: List of endpoints with ID parameters to test
+            Format: [{"path": "/api/users/{id}", "ids": ["1", "2", "3"]}]
+        user_sessions: List of authenticated sessions for different users
+            Example: [admin_session, manager_session, user_session, guest_session]
+        user_owned_resources: Optional mapping of user index to their owned resource IDs
+            Example: {0: ["1", "2"], 1: ["3", "4"], 2: ["5", "6"]}
+        timeout: Request timeout
+
+    Returns:
+        Dictionary with detailed findings including access matrix
+    """
+    from .proof_of_exploit import fetch_with_capture
+
+    results = {
+        "vulnerable": False,
+        "findings": [],
+        "endpoints_tested": 0,
+        "access_violations": 0,
+        "users_tested": len(user_sessions) if user_sessions else 0,
+        "access_matrix": {},  # endpoint -> {user_idx -> access_result}
+    }
+
+    if not user_sessions or len(user_sessions) < 2:
+        # Fall back to basic BOLA if not enough users
+        results["error"] = "At least 2 user sessions required for multi-user BOLA testing"
+        return results
+
+    # Default endpoints to test
+    if not resource_endpoints:
+        resource_endpoints = [
+            {"path": "/api/users/{id}", "ids": ["1", "2", "3", "4", "5"]},
+            {"path": "/api/user/{id}", "ids": ["1", "2", "3"]},
+            {"path": "/api/user/{id}/profile", "ids": ["1", "2", "3"]},
+            {"path": "/api/orders/{id}", "ids": ["1", "2", "3"]},
+            {"path": "/api/documents/{id}", "ids": ["1", "2", "3"]},
+            {"path": "/api/accounts/{id}", "ids": ["1", "2", "3"]},
+            {"path": "/api/messages/{id}", "ids": ["1", "2", "3"]},
+            {"path": "/api/payments/{id}", "ids": ["1", "2", "3"]},
+        ]
+
+    def build_headers(session):
+        headers = {}
+        if session is None:
+            return headers
+        if hasattr(session, 'config'):
+            headers.update(session.config.headers or {})
+            if session.config.cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in session.config.cookies.items())
+                headers["Cookie"] = cookie_str
+        elif hasattr(session, 'export_session'):
+            exported = session.export_session()
+            headers.update(exported.get("headers", {}))
+            cookies = exported.get("cookies", {})
+            if cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        elif isinstance(session, dict):
+            # Direct header dict
+            headers.update(session.get("headers", {}))
+            if session.get("cookies"):
+                headers["Cookie"] = session["cookies"]
+        return headers
+
+    # Build headers for each user
+    user_headers_list = [build_headers(session) for session in user_sessions]
+
+    # Add unauthenticated as user index -1
+    user_headers_list.insert(0, {})  # Index 0 is now unauthenticated
+    # Original users are now at indices 1, 2, 3, ...
+
+    for endpoint_config in resource_endpoints:
+        path_template = endpoint_config.get("path", "")
+        ids_to_test = endpoint_config.get("ids", ["1", "2", "3"])
+
+        for resource_id in ids_to_test:
+            path = path_template.replace("{id}", str(resource_id))
+            url = urljoin(base_url, path)
+            results["endpoints_tested"] += 1
+
+            # Initialize access matrix entry
+            matrix_key = f"{path_template}:{resource_id}"
+            results["access_matrix"][matrix_key] = {}
+
+            # Test with each user (including unauthenticated at index 0)
+            user_responses = []
+            for user_idx, headers in enumerate(user_headers_list):
+                response = await fetch_with_capture(url, headers=headers, timeout=timeout)
+                user_responses.append(response)
+
+                status = response.get("status_code", 0)
+                body = response.get("body", "")
+                body_len = len(body)
+
+                # Record in access matrix
+                user_label = "unauthenticated" if user_idx == 0 else f"user_{user_idx}"
+                results["access_matrix"][matrix_key][user_label] = {
+                    "status": status,
+                    "body_length": body_len,
+                    "has_data": status == 200 and body_len > 50,
+                }
+
+            # Analyze responses for BOLA
+            # Check 1: Unauthenticated access to protected resource
+            unauth_response = user_responses[0]
+            unauth_status = unauth_response.get("status_code", 0)
+            unauth_body = unauth_response.get("body", "")
+
+            if unauth_status == 200 and len(unauth_body) > 50:
+                if not any(x in unauth_body.lower() for x in ["login", "sign in", "authenticate", "unauthorized"]):
+                    results["vulnerable"] = True
+                    results["access_violations"] += 1
+                    path_hash = hashlib.sha256(f"{path}:noauth:multi".encode()).hexdigest()[:8]
+                    results["findings"].append({
+                        "id": f"bola_multi:{path_hash}",
+                        "tool": "bola_multi_user",
+                        "title": f"BOLA: Unauthenticated access to {path}",
+                        "severity": "critical",
+                        "evidence": {
+                            "url": url,
+                            "resource_id": resource_id,
+                            "status_code": unauth_status,
+                            "response_length": len(unauth_body),
+                        },
+                        "description": f"Resource at {path} accessible without authentication.",
+                        "remediation": "Implement authentication and object-level authorization.",
+                        "cwe": "CWE-639",
+                        "owasp": "API1:2023 - Broken Object Level Authorization",
+                    })
+
+            # Check 2: Cross-user access (any authenticated user accessing another's resources)
+            authenticated_responses = user_responses[1:]  # Skip unauthenticated
+
+            # Get responses that returned data
+            successful_users = []
+            for i, resp in enumerate(authenticated_responses):
+                status = resp.get("status_code", 0)
+                body = resp.get("body", "")
+                if status == 200 and len(body) > 50:
+                    successful_users.append((i + 1, body))  # i+1 because we skipped unauth
+
+            # If multiple users can access the same resource with same data
+            if len(successful_users) > 1:
+                # Check if user_owned_resources is defined to determine ownership
+                expected_owner = None
+                if user_owned_resources:
+                    for owner_idx, owned_ids in user_owned_resources.items():
+                        if resource_id in owned_ids:
+                            expected_owner = owner_idx
+                            break
+
+                # Compare bodies
+                bodies = [body for _, body in successful_users]
+                if len(set(bodies)) == 1:  # All identical responses
+                    accessing_users = [uid for uid, _ in successful_users]
+
+                    # If we know the owner and others can access
+                    if expected_owner is not None:
+                        unauthorized_users = [u for u in accessing_users if u != expected_owner]
+                        if unauthorized_users:
+                            results["vulnerable"] = True
+                            results["access_violations"] += 1
+                            path_hash = hashlib.sha256(f"{path}:crossuser:multi".encode()).hexdigest()[:8]
+                            results["findings"].append({
+                                "id": f"bola_multi:{path_hash}",
+                                "tool": "bola_multi_user",
+                                "title": f"BOLA: Unauthorized cross-user access at {path}",
+                                "severity": "high",
+                                "evidence": {
+                                    "url": url,
+                                    "resource_id": resource_id,
+                                    "expected_owner": f"user_{expected_owner}",
+                                    "unauthorized_users": [f"user_{u}" for u in unauthorized_users],
+                                    "accessing_users": [f"user_{u}" for u in accessing_users],
+                                },
+                                "description": f"Users {unauthorized_users} can access resource owned by user_{expected_owner}.",
+                                "remediation": "Implement object-level authorization. Verify resource ownership.",
+                                "cwe": "CWE-639",
+                                "owasp": "API1:2023 - Broken Object Level Authorization",
+                            })
+                    else:
+                        # No ownership defined, flag as potential BOLA
+                        path_hash = hashlib.sha256(f"{path}:shared:multi".encode()).hexdigest()[:8]
+                        results["findings"].append({
+                            "id": f"bola_multi_potential:{path_hash}",
+                            "tool": "bola_multi_user",
+                            "title": f"Potential BOLA: Multiple users access same resource at {path}",
+                            "severity": "medium",
+                            "evidence": {
+                                "url": url,
+                                "resource_id": resource_id,
+                                "accessing_users": [f"user_{u}" for u in accessing_users],
+                                "responses_identical": True,
+                            },
+                            "description": f"{len(successful_users)} users can access the same resource. Verify this is intended.",
+                            "remediation": "Review access control to ensure only authorized users can access.",
+                            "cwe": "CWE-639",
+                            "owasp": "API1:2023 - Broken Object Level Authorization",
+                        })
+
+    return results
+
+
+async def check_bola_enumeration(
+    base_url: str,
+    endpoint_template: str,
+    user_session: Any,
+    id_range: tuple[int, int] = (1, 100),
+    batch_size: int = 20,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Test for BOLA via ID enumeration attack.
+
+    Systematically tests a range of resource IDs to find accessible resources
+    that may not belong to the authenticated user.
+
+    Args:
+        base_url: Target base URL
+        endpoint_template: Endpoint with {id} placeholder (e.g., "/api/users/{id}")
+        user_session: Authenticated session
+        id_range: Range of IDs to test (start, end)
+        batch_size: Number of concurrent requests per batch
+        timeout: Request timeout
+
+    Returns:
+        Dictionary with findings and enumerated resources
+    """
+    from .proof_of_exploit import fetch_with_capture
+
+    results = {
+        "vulnerable": False,
+        "findings": [],
+        "accessible_ids": [],
+        "total_tested": 0,
+        "access_rate": 0.0,
+    }
+
+    def build_headers(session):
+        headers = {}
+        if session is None:
+            return headers
+        if hasattr(session, 'config'):
+            headers.update(session.config.headers or {})
+            if session.config.cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in session.config.cookies.items())
+                headers["Cookie"] = cookie_str
+        elif hasattr(session, 'export_session'):
+            exported = session.export_session()
+            headers.update(exported.get("headers", {}))
+            cookies = exported.get("cookies", {})
+            if cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        return headers
+
+    headers = build_headers(user_session)
+    start_id, end_id = id_range
+
+    async def test_id(resource_id: int) -> tuple[int, bool, int]:
+        """Test a single ID and return (id, accessible, body_length)."""
+        path = endpoint_template.replace("{id}", str(resource_id))
+        url = urljoin(base_url, path)
+        try:
+            response = await fetch_with_capture(url, headers=headers, timeout=timeout)
+            status = response.get("status_code", 0)
+            body = response.get("body", "")
+            accessible = status == 200 and len(body) > 50
+            return resource_id, accessible, len(body)
+        except Exception:
+            return resource_id, False, 0
+
+    # Test in batches
+    for batch_start in range(start_id, end_id + 1, batch_size):
+        batch_end = min(batch_start + batch_size, end_id + 1)
+        batch_ids = range(batch_start, batch_end)
+
+        tasks = [test_id(rid) for rid in batch_ids]
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in batch_results:
+            if isinstance(result, Exception):
+                continue
+            resource_id, accessible, body_len = result
+            results["total_tested"] += 1
+            if accessible:
+                results["accessible_ids"].append(resource_id)
+
+    # Calculate access rate
+    if results["total_tested"] > 0:
+        results["access_rate"] = len(results["accessible_ids"]) / results["total_tested"]
+
+    # Report if high access rate (suggests broken authorization)
+    if len(results["accessible_ids"]) > 5 and results["access_rate"] > 0.3:
+        results["vulnerable"] = True
+        path_hash = hashlib.sha256(f"{endpoint_template}:enumeration".encode()).hexdigest()[:8]
+        results["findings"].append({
+            "id": f"bola_enum:{path_hash}",
+            "tool": "bola_enumeration",
+            "title": f"BOLA: Mass resource access via enumeration at {endpoint_template}",
+            "severity": "high",
+            "evidence": {
+                "endpoint": endpoint_template,
+                "ids_tested": results["total_tested"],
+                "ids_accessible": len(results["accessible_ids"]),
+                "access_rate": f"{results['access_rate']:.1%}",
+                "sample_accessible_ids": results["accessible_ids"][:10],
+            },
+            "description": f"User can access {len(results['accessible_ids'])} resources ({results['access_rate']:.1%} of tested). Possible missing authorization.",
+            "remediation": "Implement object-level authorization. Verify resource ownership before returning data.",
+            "cwe": "CWE-639",
+            "owasp": "API1:2023 - Broken Object Level Authorization",
+        })
 
     return results
 

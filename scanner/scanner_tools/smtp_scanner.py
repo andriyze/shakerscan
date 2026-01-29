@@ -71,6 +71,7 @@ STRONG_CIPHERS = [
 
 async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]:
     """Run a command asynchronously with timeout."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -87,11 +88,21 @@ async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int
             proc.returncode or 0
         )
     except TimeoutError:
-        try:
-            proc.kill()
-        except:
-            pass
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
         return "", "Command timed out", -1
+    except asyncio.CancelledError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except Exception as e:
         return "", str(e), -1
 
@@ -653,7 +664,7 @@ async def check_smtp_security(
 
                 results["banner_analysis"][mx_host] = _analyze_banner(banner_text)
                 break
-            except:
+            except Exception:
                 continue
 
         # Open relay test (safe mode only)

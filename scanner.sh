@@ -17,6 +17,27 @@ NC='\033[0m' # No Color
 # Default workers
 WORKERS=${WORKERS:-5}
 
+get_build_version() {
+    if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+        local commit
+        commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+            commit="${commit}-dirty"
+        fi
+        echo "$commit"
+    else
+        echo "dev"
+    fi
+}
+
+set_build_env() {
+    local version
+    version=$(get_build_version)
+    export SCANNER_VERSION="$version"
+    export GIT_COMMIT="$version"
+    export NEXT_PUBLIC_APP_VERSION="$version"
+}
+
 print_banner() {
     echo -e "${BLUE}"
     echo "╔══════════════════════════════════════════╗"
@@ -41,7 +62,10 @@ print_help() {
     echo "  scan-smart <target> Smart adaptive scan"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
-    echo "  rebuild            Force rebuild Docker images"
+    echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
+echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
+echo "                       scanner     Rebuild scanner/worker only"
+echo "                       ui          Rebuild UI only"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -73,6 +97,7 @@ check_docker() {
 }
 
 start_services() {
+    set_build_env
     echo -e "${GREEN}Starting Shaker Scan with $WORKERS workers...${NC}"
     docker compose up -d --scale worker=$WORKERS
     echo ""
@@ -207,15 +232,63 @@ smart_scan() {
 }
 
 build_images() {
+    set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
     docker compose build
     echo -e "${GREEN}Build complete${NC}"
 }
 
 rebuild_images() {
-    echo -e "${GREEN}Rebuilding Docker images (no cache)...${NC}"
-    docker compose build --no-cache
+    set_build_env
+    local NO_CACHE=""
+    local SERVICES=""
+    local SERVICE_DESC="all services"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --no-cache)
+                NO_CACHE="--no-cache"
+                shift
+                ;;
+            scanner)
+                SERVICES="api worker"
+                SERVICE_DESC="scanner services (api, worker)"
+                shift
+                ;;
+            ui)
+                SERVICES="ui"
+                SERVICE_DESC="UI"
+                shift
+                ;;
+            all)
+                SERVICES=""
+                SERVICE_DESC="all services"
+                shift
+                ;;
+            *)
+                echo -e "${RED}Unknown rebuild option: $1${NC}"
+                echo "Usage: ./scanner.sh rebuild [--no-cache] [scanner|ui|all]"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -n "$NO_CACHE" ]; then
+        echo -e "${YELLOW}Rebuilding $SERVICE_DESC (no cache - full rebuild)...${NC}"
+    else
+        echo -e "${GREEN}Rebuilding $SERVICE_DESC (using cache)...${NC}"
+    fi
+
+    if [ -n "$SERVICES" ]; then
+        docker compose build $NO_CACHE $SERVICES
+    else
+        docker compose build $NO_CACHE
+    fi
+
     echo -e "${GREEN}Rebuild complete${NC}"
+    echo ""
+    echo -e "${BLUE}Run './scanner.sh restart' to use the new images${NC}"
 }
 
 reset_database() {
@@ -376,7 +449,7 @@ case $COMMAND in
         build_images
         ;;
     rebuild)
-        rebuild_images
+        rebuild_images "${ARGS[@]}"
         ;;
     reset)
         reset_database

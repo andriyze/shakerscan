@@ -215,7 +215,7 @@ def _parse_form_params(
 
     params = []
     try:
-        parsed = urllib.parse.parse_qs(body)
+        parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
         for key, values in parsed.items():
             sample = values[0] if values else ""
             params.append(DiscoveredParameter(
@@ -238,6 +238,10 @@ def _parse_query_params(
     endpoint_url: str
 ) -> tuple[dict[str, list[str]], list[DiscoveredParameter]]:
     """Parse query string parameters."""
+    # Fallback: extract query from URL if query_string is empty
+    if not query_string and endpoint_url:
+        parsed_url = urllib.parse.urlparse(endpoint_url)
+        query_string = parsed_url.query
     if not query_string:
         return {}, []
 
@@ -245,7 +249,7 @@ def _parse_query_params(
     discovered: list[DiscoveredParameter] = []
 
     try:
-        parsed = urllib.parse.parse_qs(query_string)
+        parsed = urllib.parse.parse_qs(query_string, keep_blank_values=True)
         for key, values in parsed.items():
             params_dict[key] = values
             sample = values[0] if values else ""
@@ -367,7 +371,7 @@ def extract_discovery_from_har(
             elif "form" in content_type.lower() or "urlencoded" in content_type.lower():
                 body_discovered = _parse_form_params(post_data, url)
                 try:
-                    body_params = dict(urllib.parse.parse_qsl(post_data))
+                    body_params = dict(urllib.parse.parse_qsl(post_data, keep_blank_values=True))
                 except Exception:
                     pass
 

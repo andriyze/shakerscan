@@ -53,6 +53,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
       - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-dev}
+      - GIT_COMMIT=${GIT_COMMIT:-dev}
     volumes:
       - ./api/api.py:/app/api.py:ro
       - ./results:/results
@@ -75,9 +77,12 @@ services:
       context: ./scanner
       dockerfile: Dockerfile
     environment:
+      - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
       - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-dev}
+      - GIT_COMMIT=${GIT_COMMIT:-dev}
       # AI options (optional - set in .env file)
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
@@ -139,10 +144,13 @@ services:
     build:
       context: ./ui
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
     ports:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
     depends_on:
       - api
     restart: unless-stopped

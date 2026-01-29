@@ -13,6 +13,58 @@ _ssl_context = ssl.create_default_context()
 _ssl_context.check_hostname = False
 _ssl_context.verify_mode = ssl.CERT_NONE
 
+# File extensions that indicate a file path (not a directory) for hash route normalization.
+# Used to normalize URLs like /app/index.html#/route -> /app/#/route
+HASH_ROUTE_FILE_EXTENSIONS = frozenset({
+    ".html", ".htm", ".php", ".asp", ".aspx", ".jsp", ".jspx", ".cfm", ".shtml"
+})
+
+
+def normalize_hash_route_url(hash_route: str, current_url: str) -> str | None:
+    """
+    Normalize a hash route fragment into a full URL.
+
+    Handles SPA-style hash routes (#/ or #!/) by:
+    1. Preserving the base path from current_url
+    2. Normalizing file paths (e.g., index.html) to their parent directory
+    3. Building a complete URL with the hash route appended
+
+    Args:
+        hash_route: The hash route fragment (e.g., "#/search" or "#!/page")
+        current_url: The current page URL to use as base
+
+    Returns:
+        Full URL with hash route, or None if not a valid hash route
+
+    Examples:
+        >>> normalize_hash_route_url("#/search", "https://host/app/")
+        "https://host/app/#/search"
+        >>> normalize_hash_route_url("#/page", "https://host/app/index.html")
+        "https://host/app/#/page"
+        >>> normalize_hash_route_url("#top", "https://host/")  # anchor-only
+        None
+    """
+    import os
+
+    if not hash_route.startswith("#"):
+        return None
+    if not (hash_route.startswith("#/") or hash_route.startswith("#!/")):
+        return None  # Skip anchor-only fragments like #top
+
+    parsed = urllib.parse.urlparse(current_url)
+    base_path = parsed.path or ""
+
+    # If path looks like a file (not ending in / and has common file extension),
+    # use parent directory. Be conservative to avoid stripping version paths like /v1.2/
+    if not base_path.endswith("/"):
+        basename = os.path.basename(base_path)
+        ext = os.path.splitext(basename)[1].lower()
+        if ext in HASH_ROUTE_FILE_EXTENSIONS:
+            base_path = os.path.dirname(base_path)
+
+    base_path = base_path.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}{base_path}/{hash_route}"
+
 # Limit concurrent subprocess executions to prevent resource exhaustion
 # Default: 15 concurrent subprocesses (tunable via SCANNER_MAX_CONCURRENT env var)
 _MAX_CONCURRENT_SUBPROCESSES = int(os.environ.get("SCANNER_MAX_CONCURRENT", "15"))
@@ -45,6 +97,7 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
     """
     async with _get_semaphore():
         for attempt in range(retry + 1):
+            proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -57,6 +110,14 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
                         proc.communicate(input=input_text.encode() if input_text is not None else None),
                         timeout=timeout,
                     )
+                except asyncio.CancelledError:
+                    if proc is not None:
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except Exception:
+                            pass
+                    raise
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()  # Reap zombie process
@@ -67,6 +128,14 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
                 out = out_b.decode(errors="ignore")
                 err = err_b.decode(errors="ignore")
                 return out.strip(), err.strip(), proc.returncode
+            except asyncio.CancelledError:
+                if proc is not None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                raise
             except Exception as e:
                 if attempt < retry:
                     await asyncio.sleep(2 ** attempt)
@@ -186,7 +255,10 @@ _SPA_TEST_PATHS = [
 ]
 
 
-async def _fetch_url_simple(url: str, timeout: int = 10) -> tuple[int, str, str]:
+MAX_SIMPLE_FETCH_BYTES = 262_144
+
+
+async def _fetch_url_simple(url: str, timeout: int = 10, max_bytes: int = MAX_SIMPLE_FETCH_BYTES) -> tuple[int, str, str]:
     """
     Simple URL fetch using urllib (for SPA detection).
 
@@ -198,9 +270,11 @@ async def _fetch_url_simple(url: str, timeout: int = 10) -> tuple[int, str, str]
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
+            if max_bytes:
+                req.add_header("Range", f"bytes=0-{max_bytes - 1}")
             with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context) as response:
                 status_code = response.getcode()
-                body = response.read().decode('utf-8', errors='ignore')
+                body = response.read(max_bytes).decode('utf-8', errors='ignore') if max_bytes else response.read().decode('utf-8', errors='ignore')
                 content_type = response.headers.get('Content-Type', '')
                 return (status_code, body, content_type)
         except urllib.error.HTTPError as e:

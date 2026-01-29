@@ -274,7 +274,7 @@ async def check_log_injection(
         if not parsed.query:
             continue
 
-        params = urllib.parse.parse_qs(parsed.query)
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         if not params:
             continue
 

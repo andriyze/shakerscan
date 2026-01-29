@@ -19,6 +19,9 @@ from scanner_tools.active_checks import (
     CONTEXT_XSS_PAYLOADS,
     DBMS_SQLI_PAYLOADS,
     SQLI_EXTRACTION_PAYLOADS,
+    _parse_fragment_params,
+    _build_fragment_url,
+    _is_hash_route,
 )
 
 
@@ -188,6 +191,112 @@ class TestActiveEnforcement:
         for scan_type in enforced_types:
             # The scan type should enable active checks
             assert scan_type in ['smart', 'full', 'aggressive']
+
+
+class TestFragmentParamParsing:
+    """Tests for SPA hash route fragment parameter parsing."""
+
+    def test_parse_fragment_with_params(self):
+        """Test parsing URL with fragment parameters."""
+        url = "http://example.com/#/search?q=test&page=1"
+        base_url, frag_path, frag_params = _parse_fragment_params(url)
+        assert base_url == "http://example.com/"
+        assert frag_path == "/search"
+        assert frag_params == {"q": ["test"], "page": ["1"]}
+
+    def test_parse_hashbang_with_params(self):
+        """Test parsing hashbang URL with parameters."""
+        url = "http://example.com/#!/user?id=123"
+        base_url, frag_path, frag_params = _parse_fragment_params(url)
+        assert base_url == "http://example.com/"
+        assert frag_path == "!/user"
+        assert frag_params == {"id": ["123"]}
+
+    def test_parse_fragment_without_params(self):
+        """Test parsing hash route without query parameters."""
+        url = "http://example.com/#/home"
+        base_url, frag_path, frag_params = _parse_fragment_params(url)
+        assert base_url == "http://example.com/"
+        assert frag_path == "/home"
+        assert frag_params == {}
+
+    def test_parse_no_fragment(self):
+        """Test parsing URL without fragment."""
+        url = "http://example.com/"
+        base_url, frag_path, frag_params = _parse_fragment_params(url)
+        assert base_url == "http://example.com/"
+        assert frag_path == ""
+        assert frag_params == {}
+
+    def test_parse_subpath_with_fragment(self):
+        """Test parsing URL with subpath and fragment."""
+        url = "http://example.com/app/#/dashboard?tab=overview"
+        base_url, frag_path, frag_params = _parse_fragment_params(url)
+        assert base_url == "http://example.com/app/"
+        assert frag_path == "/dashboard"
+        assert frag_params == {"tab": ["overview"]}
+
+
+class TestFragmentUrlBuilding:
+    """Tests for SPA hash route URL reconstruction."""
+
+    def test_build_with_params(self):
+        """Test building URL with fragment parameters."""
+        result = _build_fragment_url("http://example.com/", "/search", {"q": ["test"]})
+        assert result == "http://example.com/#/search?q=test"
+
+    def test_build_without_params(self):
+        """Test building URL without fragment parameters."""
+        result = _build_fragment_url("http://example.com/", "/home", {})
+        assert result == "http://example.com/#/home"
+
+    def test_build_empty_path(self):
+        """Test building URL with empty fragment path."""
+        result = _build_fragment_url("http://example.com/", "", {})
+        assert result == "http://example.com/"
+
+    def test_build_multiple_params(self):
+        """Test building URL with multiple fragment parameters."""
+        result = _build_fragment_url(
+            "http://example.com/app/",
+            "/search",
+            {"q": ["hello"], "page": ["2"], "sort": ["desc"]}
+        )
+        assert "http://example.com/app/#/search?" in result
+        assert "q=hello" in result
+        assert "page=2" in result
+        assert "sort=desc" in result
+
+    def test_build_hashbang(self):
+        """Test building hashbang URL."""
+        result = _build_fragment_url("http://example.com/", "!/page", {"id": ["42"]})
+        assert result == "http://example.com/#!/page?id=42"
+
+
+class TestIsHashRoute:
+    """Tests for hash route detection."""
+
+    def test_standard_hash_route(self):
+        """Test detection of standard hash route."""
+        assert _is_hash_route("http://example.com/#/search?q=test") is True
+
+    def test_hashbang_route(self):
+        """Test detection of hashbang route."""
+        assert _is_hash_route("http://example.com/#!/page") is True
+
+    def test_anchor_only(self):
+        """Test that anchor-only fragments are not hash routes."""
+        assert _is_hash_route("http://example.com/#top") is False
+        assert _is_hash_route("http://example.com/#section-1") is False
+
+    def test_no_fragment(self):
+        """Test URL without fragment is not a hash route."""
+        assert _is_hash_route("http://example.com/?q=test") is False
+        assert _is_hash_route("http://example.com/page") is False
+
+    def test_empty_fragment(self):
+        """Test URL with empty fragment is not a hash route."""
+        assert _is_hash_route("http://example.com/#") is False
 
 
 if __name__ == "__main__":

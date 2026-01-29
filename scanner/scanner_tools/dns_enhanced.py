@@ -505,7 +505,7 @@ async def test_zone_transfer(
                 if result.returncode == 0:
                     return [ns.strip().rstrip('.') for ns in result.stdout.strip().split('\n') if ns.strip()]
                 return []
-            except:
+            except Exception:
                 return []
 
         nameservers = await asyncio.to_thread(_get_ns)
@@ -802,7 +802,7 @@ async def check_dangling_dns(
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip().rstrip('.')
                     return None
-                except:
+                except Exception:
                     return None
 
             cname = await asyncio.to_thread(_get_cname)
@@ -836,9 +836,9 @@ async def check_dangling_dns(
                                     content = e.read().decode('utf-8', errors='ignore')
                                     if info["fingerprint"].lower() in content.lower():
                                         return True
-                                except:
+                                except Exception:
                                     pass
-                            except:
+                            except Exception:
                                 pass
                         return False
 

@@ -111,6 +111,12 @@ curl -X POST http://localhost:8080/scans \
 | `user2_header` | Second user auth for BOLA/IDOR testing |
 | `user2_cookies` | Second user cookies for BOLA/IDOR testing |
 
+### Reporting Options
+
+| Option | Description |
+|--------|-------------|
+| `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains always appear in `result.attack_chains.chains`. |
+
 ### Check Scan Status
 
 ```bash
@@ -177,6 +183,7 @@ The `/scans/{id}` endpoint returns detailed data in the `result` object:
 - `waf_detection` - WAF product detection
 - `cors` - CORS misconfiguration
 - `nuclei` - Nuclei vulnerability findings
+- `attack_chains` - attack chain analysis (complete + optional partial chains)
 
 ## Example Report Format
 

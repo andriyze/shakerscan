@@ -1313,7 +1313,7 @@ async def test_container_registry_exposure(
                     results["severity"] = "critical"
                     repos = catalog_data.get("repositories", [])
                     results["repositories"] = repos[:20]  # Limit to 20
-            except:
+            except Exception:
                 pass
 
     elif status_code == 401:

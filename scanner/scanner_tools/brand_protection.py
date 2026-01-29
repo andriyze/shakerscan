@@ -302,7 +302,7 @@ async def _resolve_domain(domain: str, timeout: int = 5) -> dict[str, Any] | Non
                 )
                 if mx_result.stdout.strip():
                     result["has_mx"] = True
-            except:
+            except Exception:
                 pass
 
             # Try to check HTTPS (certificate)
@@ -315,7 +315,7 @@ async def _resolve_domain(domain: str, timeout: int = 5) -> dict[str, Any] | Non
                         # Extract CN from certificate
                         subject = dict(x[0] for x in cert.get('subject', []))
                         result["certificate_cn"] = subject.get('commonName')
-            except:
+            except Exception:
                 pass
 
             return result
@@ -524,7 +524,7 @@ async def check_domain_expiration(domain: str) -> dict[str, Any]:
                         break
                     except ValueError:
                         continue
-            except:
+            except Exception:
                 pass
             break
 

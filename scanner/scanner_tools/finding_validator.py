@@ -209,6 +209,19 @@ def validate_xss(
             reason="Dalfox reported XSS (tool has built-in verification)"
         )
 
+    # DOM-based XSS is static analysis (source-to-sink) and may not have a payload
+    if tool == "dom_xss":
+        source_nearby = bool(evidence.get("source_nearby") or evidence.get("source_pattern"))
+        # Higher confidence to ensure DOM XSS findings pass validation filters
+        # Static analysis with source_nearby is reliable enough to report
+        confidence = 0.70 if source_nearby else 0.50
+        return ValidationResult(
+            verified=False,
+            confidence=confidence,
+            evidence=evidence.get("sink_type") or evidence.get("file") or "dom-xss",
+            reason="DOM XSS static analysis (source-to-sink)"
+        )
+
     # If no payload from non-dalfox tools, can't validate
     if not payload:
         return ValidationResult(
@@ -1816,7 +1829,7 @@ def validate_finding(
     # ==========================================================================
 
     # XSS validation
-    if "xss" in title_lower or "cross-site scripting" in title_lower or tool == "dalfox":
+    if "xss" in title_lower or "cross-site scripting" in title_lower or tool in ("dalfox", "dom_xss"):
         return validate_xss(finding, response_body)
 
     # SQLi validation
@@ -2016,6 +2029,10 @@ async def validate_with_poe(
 
     # Only run PoE for high-severity findings with confidence below threshold
     if severity not in ("critical", "high"):
+        return finding
+
+    # Skip PoE for DOM XSS static analysis (no payload to execute)
+    if finding.get("tool", "").lower() == "dom_xss":
         return finding
 
     # If already high confidence, skip PoE
@@ -2328,11 +2345,24 @@ async def validate_findings_pipeline(
     # Stage 5: Filter low-confidence findings
     if config.filter_low_confidence:
         before_filter = len(validated)
-        validated = [
-            f for f in validated
-            if f.get("confidence", 0.5) >= config.min_confidence_to_report
-            or f.get("severity", "").lower() == "info"  # Always keep info
-        ]
+        filtered_out = []
+        kept = []
+        for f in validated:
+            conf = f.get("confidence", 0.5)
+            sev = f.get("severity", "").lower()
+            tool = f.get("tool", "")
+            passes = conf >= config.min_confidence_to_report or sev == "info"
+            if passes:
+                kept.append(f)
+            else:
+                filtered_out.append(f)
+                # Debug: Log filtered DOM XSS findings to help diagnose
+                if tool == "dom_xss":
+                    logger.warning(
+                        f"[filter] DROPPED DOM XSS: {f.get('title', '')[:50]} "
+                        f"conf={conf} threshold={config.min_confidence_to_report}"
+                    )
+        validated = kept
         stats["filtered"] = before_filter - len(validated)
 
     stats["output_count"] = len(validated)

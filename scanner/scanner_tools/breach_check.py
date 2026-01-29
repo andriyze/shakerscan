@@ -163,6 +163,14 @@ async def _http_get(url: str, headers: dict[str, str] | None = None, timeout: in
             except Exception:
                 pass
         return {"status": 0, "body": "", "error": "timeout"}
+    except asyncio.CancelledError:
+        if proc:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
 

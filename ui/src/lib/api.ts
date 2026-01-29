@@ -27,6 +27,8 @@ export interface Scan {
   target_name?: string
   status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   scan_type: string
+  progress?: number
+  current_phase?: string
   score?: number
   grade?: string
   findings_count: number
@@ -144,6 +146,12 @@ export async function getScans(params?: {
 export async function getScan(id: string) {
   const res = await fetch(`${API_URL}/scans/${id}`)
   if (!res.ok) throw new Error('Failed to fetch scan')
+  return res.json()
+}
+
+export async function getScanLogs(id: string, limit: number = 200) {
+  const res = await fetch(`${API_URL}/scans/${id}/logs?limit=${limit}`)
+  if (!res.ok) throw new Error('Failed to fetch scan logs')
   return res.json()
 }
 

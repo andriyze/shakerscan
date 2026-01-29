@@ -893,7 +893,7 @@ async def test_path_traversal(url: str, discovered_urls: list[str] | None = None
         # Parse URL to get parameters
         try:
             parsed = urllib.parse.urlparse(test_url)
-            params = urllib.parse.parse_qs(parsed.query)
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         except Exception:
             continue
 

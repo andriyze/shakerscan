@@ -127,6 +127,11 @@ RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head 
 
 # Copy application files
 COPY scanner.py /app/scanner.py
+COPY constants.py /app/constants.py
+COPY grading.py /app/grading.py
+COPY findings.py /app/findings.py
+COPY signals.py /app/signals.py
+COPY reporting.py /app/reporting.py
 COPY gungnir_worker.py /app/gungnir_worker.py
 COPY scanner_tools /app/scanner_tools
 COPY wordlists /app/wordlists
