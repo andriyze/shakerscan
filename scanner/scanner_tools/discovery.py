@@ -1838,7 +1838,7 @@ async def deep_discovery_scan(base_url: str) -> dict[str, Any]:
                 ffuf_data = json.load(f)
                 for result in ffuf_data.get("results", [])[:50]:  # Limit results
                     results["directories"].append({
-                        "path": result.get("input", {}).get("FUZZ", ""),
+                        "path": (result.get("input") or {}).get("FUZZ", ""),
                         "status": result.get("status"),
                         "size": result.get("length"),
                     })
@@ -2314,7 +2314,7 @@ async def _run_ffuf_on_path(
             with open(output_file) as f:
                 ffuf_data = json.load(f)
                 for result in ffuf_data.get("results", []):
-                    found_path = result.get("input", {}).get("FUZZ", "")
+                    found_path = (result.get("input") or {}).get("FUZZ", "")
                     if found_path:
                         full_path = f"{path.rstrip('/')}/{found_path}"
                         discovered.append(full_path)
