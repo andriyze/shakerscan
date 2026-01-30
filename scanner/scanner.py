@@ -9175,7 +9175,7 @@ async def cli_main():
                 active_sqli=active_sqli,
                 max_active=max_active,
                 quick_mode=quick,
-                no_browser=no_browser,
+                no_browser=no_browser or quick,  # Quick mode skips browser for speed
                 public_only=public,
                 complete_mode=complete,
                 max_ports=max_ports,
@@ -9667,7 +9667,7 @@ async def cli_main():
         active_sqli=active_sqli,
         max_active=args.max_active,
         quick_mode=args.quick,
-        no_browser=args.no_browser,
+        no_browser=args.no_browser or args.quick,  # Quick mode skips browser for speed
         public_only=args.public,
         complete_mode=args.complete,
         max_ports=args.max_ports,

@@ -90,6 +90,8 @@ services:
       - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
     volumes:
       - ./api/worker.py:/app/worker.py:ro
+      - ./scanner/scanner.py:/app/scanner.py:ro
+      - ./scanner/scanner_tools:/app/scanner_tools:ro
       - ./results:/results
     command: ["python3", "/app/worker.py"]
     deploy:

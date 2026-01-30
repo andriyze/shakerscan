@@ -311,8 +311,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         watchdog_task.cancel()
         try:
             await watchdog_task
-        except Exception:
-            pass
+        except BaseException:
+            pass  # CancelledError is BaseException in Python 3.8+
     await stdout_task
     await stderr_task
 
@@ -589,8 +589,8 @@ async def process_scan_job(job_data: dict):
         stop_heartbeat.set()
         try:
             await heartbeat_task
-        except Exception:
-            pass
+        except BaseException:
+            pass  # CancelledError is BaseException in Python 3.8+
 
     result['job_id'] = job_id
     result['scan_id'] = scan_id
@@ -773,20 +773,33 @@ async def async_main():
 
     loop = asyncio.get_event_loop()
 
-    while True:
-        try:
-            # Use run_in_executor for blocking Redis pop
-            result = await loop.run_in_executor(None, lambda: r.blpop(QUEUE_NAME, timeout=30))
-            if result is None:
-                continue  # Timeout, continue polling
+    try:
+        while True:
+            try:
+                # Use run_in_executor for blocking Redis pop
+                result = await loop.run_in_executor(None, lambda: r.blpop(QUEUE_NAME, timeout=30))
+                if result is None:
+                    continue  # Timeout, continue polling
 
-            _, job_json = result
-            job_data = json.loads(job_json)
-            await process_job(job_data)
-        except Exception as e:
-            print(f"Error processing job: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+                _, job_json = result
+                job_data = json.loads(job_json)
+                await process_job(job_data)
+            except asyncio.CancelledError:
+                # Graceful shutdown requested (SIGTERM/SIGINT)
+                print("Worker received shutdown signal, exiting...", flush=True)
+                raise
+            except Exception as e:
+                print(f"Error processing job: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+    except asyncio.CancelledError:
+        # Clean shutdown
+        pass
+    finally:
+        # Close database pool
+        if db_pool:
+            await db_pool.close()
+        print("Worker shutdown complete", flush=True)
 
 
 def main():
