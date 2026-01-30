@@ -9946,10 +9946,21 @@ def _run_cli_with_shutdown_guard() -> int:
                         default_executor.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
+        # Shutdown async generators to properly clean up subprocess transports
+        # before closing the event loop (prevents "Event loop is closed" errors
+        # during garbage collection of BaseSubprocessTransport objects)
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
         try:
             loop.stop()
         except Exception:
             pass
+        # Force garbage collection while loop is still technically available
+        # to allow subprocess transport __del__ methods to run cleanly
+        import gc
+        gc.collect()
         try:
             loop.close()
         except Exception:
