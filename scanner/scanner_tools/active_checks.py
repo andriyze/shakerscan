@@ -183,10 +183,17 @@ def _is_hash_route(url: str) -> bool:
     return fragment.startswith("/") or fragment.startswith("!/")
 
 
-async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | None = None) -> dict[str, Any]:
+async def dalfox_one(
+    url: str,
+    quick_mode: bool = False,
+    auth_session: Any | None = None,
+    deep_domxss: bool | None = None
+) -> dict[str, Any]:
     """Run Dalfox XSS scanner on a single URL. Returns dict with findings and execution status."""
     dalfox_cmd = "/opt/tools/dalfox" if os.path.exists("/opt/tools/dalfox") else "dalfox"
     cmd = [dalfox_cmd, "url", url, "--silence", "--no-spinner", "--format", "json"]
+    if deep_domxss is None:
+        deep_domxss = os.environ.get("SCANNER_DALFOX_DEEP_DOMXSS", "").lower() in ("1", "true", "yes")
     cookie_str, header_lines = get_auth_sqlmap_context(auth_session)
     if cookie_str:
         cmd.extend(["--cookie", cookie_str])
@@ -200,12 +207,13 @@ async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | Non
         cmd.extend([
             "--timeout", "60",
             "--delay", "50",
-            "--deep-domxss",  # Check for DOM-based XSS
             "--follow-redirects",
             "--skip-mining-all",  # Skip mining to speed up
         ])
+        if deep_domxss:
+            cmd.append("--deep-domxss")  # Check for DOM-based XSS (spawns headless browser)
         timeout = 180
-    out, err, rc = await run(cmd, timeout=timeout)
+    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=bool(deep_domxss))
     findings: list[dict] = []
     scan_completed = rc == 0  # Tool executed successfully
     error = None

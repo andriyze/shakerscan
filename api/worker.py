@@ -97,6 +97,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.append('--xss')
     if options.get('sqli'):
         cmd.append('--sqli')
+    if options.get('deep_domxss'):
+        cmd.append('--deep-domxss')
     if options.get('nuclei') and scan_type not in ['full', 'aggressive', 'deep']:
         cmd.append('--nuclei')
     if options.get('enhanced_dns'):

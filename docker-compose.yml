@@ -73,6 +73,7 @@ services:
   # Scanner Workers (scale with --scale worker=N)
   # ============================================================
   worker:
+    init: true  # Use tini as PID 1 to reap zombie processes
     build:
       context: ./scanner
       dockerfile: Dockerfile

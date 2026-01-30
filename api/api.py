@@ -354,6 +354,7 @@ class ScanOptions(BaseModel):
     xss: bool = False
     sqli: bool = False
     thorough: bool = False
+    deep_domxss: Optional[bool] = None
 
     # Additional options
     nuclei: bool = False

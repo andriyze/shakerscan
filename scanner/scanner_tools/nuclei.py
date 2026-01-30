@@ -1450,6 +1450,7 @@ async def staged_nuclei_scan(
         "total_duration_seconds": 0,
         "templates_executed": 0,
         "templates_matched": 0,
+        "scan_completed": False,
     }
 
     # Initialize wave budgets (will be adjusted based on yield)
@@ -1484,6 +1485,10 @@ async def staged_nuclei_scan(
     def _finalize_template_metrics() -> None:
         results["templates_executed"] = templates_executed_total
         results["templates_matched"] = len(matched_templates)
+
+    def _finalize_and_return() -> dict[str, Any]:
+        results["scan_completed"] = True
+        return results
 
     # =========================================================================
     # WAVE 1: Critical CVEs + Tech-Specific (fast, targeted)
@@ -1543,14 +1548,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 2:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 2: Misconfig + Exposure + Signal-Based Expansion
@@ -1613,14 +1618,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 3:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 3: Injection Templates (if signals suggest vulnerabilities)
@@ -1689,14 +1694,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 4:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 4: Deep Scan (only if promising signals)
@@ -1754,6 +1759,7 @@ async def staged_nuclei_scan(
     results["signals"] = signals
     results["total_duration_seconds"] = int(time.time() - total_start)
     _finalize_template_metrics()
+    results["scan_completed"] = True
 
     # Separate info findings
     vuln_findings = []

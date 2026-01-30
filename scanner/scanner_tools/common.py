@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import signal
 import ssl
 import urllib.error
 import urllib.parse
@@ -90,7 +91,13 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _subprocess_semaphore
 
 
-async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, retry: int = 0) -> tuple[str, str, int]:
+async def run(
+    cmd: list[str],
+    timeout: int = 60,
+    input_text: str | None = None,
+    retry: int = 0,
+    kill_process_group: bool = False
+) -> tuple[str, str, int]:
     """Execute command with optional retry logic (shared across modules).
 
     Uses a semaphore to limit concurrent subprocess executions and prevent resource exhaustion.
@@ -98,12 +105,14 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
     async with _get_semaphore():
         for attempt in range(retry + 1):
             proc = None
+            use_process_group = kill_process_group and os.name == "posix"
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdin=asyncio.subprocess.PIPE if input_text is not None else None,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=use_process_group,
                 )
                 try:
                     out_b, err_b = await asyncio.wait_for(
@@ -113,13 +122,22 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
                 except asyncio.CancelledError:
                     if proc is not None:
                         try:
-                            proc.kill()
+                            if use_process_group:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            else:
+                                proc.kill()
                             await proc.wait()
                         except Exception:
                             pass
                     raise
                 except TimeoutError:
-                    proc.kill()
+                    if use_process_group:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        proc.kill()
                     await proc.wait()  # Reap zombie process
                     if attempt < retry:
                         await asyncio.sleep(2 ** attempt)
@@ -131,12 +149,24 @@ async def run(cmd: list[str], timeout: int = 60, input_text: str | None = None, 
             except asyncio.CancelledError:
                 if proc is not None:
                     try:
-                        proc.kill()
+                        if use_process_group:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        else:
+                            proc.kill()
                         await proc.wait()
                     except Exception:
                         pass
                 raise
             except Exception as e:
+                if proc is not None:
+                    try:
+                        if use_process_group:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        else:
+                            proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
                 if attempt < retry:
                     await asyncio.sleep(2 ** attempt)
                     continue

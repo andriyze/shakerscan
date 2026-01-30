@@ -920,8 +920,13 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
 
 # ---------- Active checks (dalfox/sqlmap, optional) ----------
 
-async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | None = None) -> list[dict]:
-    return await _dalfox_one_mod(url, quick_mode, auth_session=auth_session)
+async def dalfox_one(
+    url: str,
+    quick_mode: bool = False,
+    auth_session: Any | None = None,
+    deep_domxss: bool | None = None
+) -> list[dict]:
+    return await _dalfox_one_mod(url, quick_mode, auth_session=auth_session, deep_domxss=deep_domxss)
 
 async def sqlmap_test(url: str, quick_mode: bool = False, aggressive: bool = False, **kwargs) -> dict:
     return await _sqlmap_test_mod(url, quick_mode, aggressive=aggressive, **kwargs)
@@ -1803,6 +1808,7 @@ async def build_report(target: str,
                        active_checks: bool=False,
                        active_xss: bool=True,
                        active_sqli: bool=True,
+                       deep_domxss: bool | None = None,
                        max_active: int=10,
                        quick_mode: bool=False,
                        no_browser: bool=False,
@@ -5917,6 +5923,9 @@ async def build_report(target: str,
 
     # Optional: active checks (sampled outside of smart/complete mode)
     if active_checks and not public_only:
+        dalfox_deep_domxss = deep_domxss
+        if dalfox_deep_domxss is None and (exploit_level == "aggressive" or complete_tier == "aggressive"):
+            dalfox_deep_domxss = True
         if auth_session:
             await auth_session.refresh_if_needed()
         # Reuse already-discovered URLs from main discovery phase (avoid duplicate katana call)
@@ -6910,8 +6919,8 @@ async def build_report(target: str,
 
                     # OOB SQLi Test - for blind SQLi detection via external callbacks
                     # Requires a callback URL (e.g., Burp Collaborator) for verification
+                    oob_results = []
                     if oob_callback_url and smart_sqli_findings:
-                        oob_results = []
                         for sqli_finding in smart_sqli_findings[:oob_max_findings]:
                             try:
                                 oob_result = await oob_sqli_test(
@@ -7884,7 +7893,9 @@ async def build_report(target: str,
                     # Run selected tools concurrently for each URL
                     tasks: dict[str, asyncio.Task] = {}
                     if run_xss:
-                        tasks["dalfox"] = asyncio.create_task(dalfox_one(u, quick_mode, auth_session=auth_session))
+                        tasks["dalfox"] = asyncio.create_task(
+                            dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
+                        )
                         tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
                     if run_sqli:
                         tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
@@ -8652,6 +8663,7 @@ async def cli_main():
     ap.add_argument("--active", action="store_true", help="Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs")
     ap.add_argument("--xss", action="store_true", help="Run only XSS active checks (implies --active)")
     ap.add_argument("--sqli", action="store_true", help="Run only SQLi active checks (implies --active)")
+    ap.add_argument("--deep-domxss", action="store_true", default=None, help="Enable dalfox deep DOM XSS (spawns headless browser; heavy)")
     ap.add_argument("--max-active", type=int, default=10, help="Max URLs for active checks (default 10)")
     ap.add_argument("--quick", action="store_true", help="Quick scan mode - faster but less thorough (affects active checks)")
     ap.add_argument("--no-browser", action="store_true", help="Disable browser-based scanning, use curl only (faster but less data)")
@@ -8935,6 +8947,7 @@ async def cli_main():
                        active: bool = False,
                        xss: bool = False,
                        sqli: bool = False,
+                       deep_domxss: bool | None = None,
                        max_active: int = 10,
                        quick: bool = False,
                        no_browser: bool = False,
@@ -9173,6 +9186,7 @@ async def cli_main():
                 active_checks=active,
                 active_xss=active_xss,
                 active_sqli=active_sqli,
+                deep_domxss=deep_domxss,
                 max_active=max_active,
                 quick_mode=quick,
                 no_browser=no_browser or quick,  # Quick mode skips browser for speed
@@ -9665,6 +9679,7 @@ async def cli_main():
         active_checks=args.active,
         active_xss=active_xss,
         active_sqli=active_sqli,
+        deep_domxss=args.deep_domxss,
         max_active=args.max_active,
         quick_mode=args.quick,
         no_browser=args.no_browser or args.quick,  # Quick mode skips browser for speed
