@@ -298,15 +298,36 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                 await update_scan_progress(scan_id, phase, pct, job_id=job_id)
                 last_progress = (phase, pct)
 
-    async def _read_stream(stream: asyncio.StreamReader, handler) -> None:
+    async def _read_stream_lines(stream: asyncio.StreamReader, handler) -> None:
+        """Read stream line-by-line (for stderr progress messages)."""
         while True:
-            line = await stream.readline()
+            try:
+                line = await stream.readline()
+            except asyncio.LimitOverrunError:
+                # Line exceeds buffer limit - read what we can and continue
+                partial = await stream.read(65536)
+                if partial:
+                    await handler(partial)
+                continue
             if not line:
                 break
             await handler(line)
 
-    stdout_task = asyncio.create_task(_read_stream(proc.stdout, _handle_stdout))
-    stderr_task = asyncio.create_task(_read_stream(proc.stderr, _handle_stderr))
+    async def _read_stream_full(stream: asyncio.StreamReader, handler) -> None:
+        """Read entire stream (for stdout JSON output that may exceed line buffer)."""
+        chunks = []
+        while True:
+            chunk = await stream.read(65536)  # Read in 64KB chunks
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if chunks:
+            await handler(b''.join(chunks))
+
+    # Use full read for stdout (JSON output can exceed 64KB line buffer)
+    # Use line-by-line for stderr (progress messages are always short lines)
+    stdout_task = asyncio.create_task(_read_stream_full(proc.stdout, _handle_stdout))
+    stderr_task = asyncio.create_task(_read_stream_lines(proc.stderr, _handle_stderr))
 
     await proc.wait()
     if watchdog_task:
