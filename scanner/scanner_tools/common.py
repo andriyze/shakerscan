@@ -3,6 +3,7 @@ import hashlib
 import os
 import signal
 import ssl
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -106,6 +107,7 @@ async def run(
         for attempt in range(retry + 1):
             proc = None
             use_process_group = kill_process_group and os.name == "posix"
+            tool_name = cmd[0] if cmd else "subprocess"
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -124,6 +126,7 @@ async def run(
                         try:
                             if use_process_group:
                                 os.killpg(proc.pid, signal.SIGKILL)
+                                print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
                             else:
                                 proc.kill()
                             await proc.wait()
@@ -134,6 +137,7 @@ async def run(
                     if use_process_group:
                         try:
                             os.killpg(proc.pid, signal.SIGKILL)
+                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
                         except ProcessLookupError:
                             pass
                     else:
@@ -151,6 +155,7 @@ async def run(
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
+                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()
@@ -162,6 +167,7 @@ async def run(
                     try:
                         if use_process_group:
                             os.killpg(proc.pid, signal.SIGKILL)
+                            print(f"[run] Killed process group for {tool_name} (pid {proc.pid})", file=sys.stderr)
                         else:
                             proc.kill()
                         await proc.wait()
