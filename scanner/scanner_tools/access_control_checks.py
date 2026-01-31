@@ -95,10 +95,25 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Kubernetes health (JSON)
             '"healthy":', '"ready":', '"live":',
         ],
-        # Patterns that are valid even in HTML context (phpinfo outputs HTML)
+        # Patterns that are valid even in HTML context (these are real debug findings)
         "html_safe_patterns": [
+            # phpinfo specific (outputs HTML by design)
             "php version", "php variables", "php credits", "phpinfo()",
             "<td class=\"e\">", "configuration file (php.ini) path",
+            # Django debug page (HTML with stack traces)
+            "you're seeing this error because", "debug = true",
+            "request method:", "django version:", "exception type:",
+            # Rails error page
+            "rails.root:", "application trace", "framework trace",
+            "full trace", "rails version:",
+            # ASP.NET error page
+            "server error in", "[sqlexception", "[httpexception",
+            "stack trace:", "source error:", "aspnetcore",
+            # Java/Spring HTML error pages
+            "java.lang.", "javax.", "org.springframework.",
+            "at com.", "caused by:", "exception in thread",
+            # Node.js error pages
+            "error: ", "    at ", "node_modules/",
         ],
         "min_matches": 1,
         "reject_if_html_generic": True,
@@ -285,9 +300,8 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
             # Pattern matched and not HTML (or HTML already handled above)
             # Still reject if it's a SPA shell with common words
             if is_generic_html:
-                spa_indicators = ["<div id=\"root\"", "<div id=\"app\"", "window.__initial",
-                                  "window.__nuxt__", "window.__next_data__", "<script src=\"/static/js/"]
-                if any(ind.lower() in body_lower for ind in spa_indicators):
+                # Use the same SPA indicators as _is_generic_html_page for consistency
+                if any(ind.lower() in body_lower for ind in SPA_FRAMEWORK_INDICATORS):
                     return False, "spa_shell_with_common_word"
             return True, f"pattern_match_{pattern_matches}"
 

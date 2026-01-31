@@ -1644,16 +1644,47 @@ async def test_2fa_bypass(
                 if http_code == 200:
                     # Check if response is generic HTML (SPA catch-all route)
                     body_lower = body[:5000].lower()
+                    is_html = "<!doctype html" in body_lower or "<html" in body_lower
 
-                    # SPA shell indicators - if these exist, it's likely a catch-all route
+                    # Skip non-HTML responses (APIs return JSON)
+                    if not is_html:
+                        # JSON responses without auth are likely vulnerable
+                        results["vulnerable"] = True
+                        results["bypass_methods_detected"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "http_code": http_code,
+                            "description": "Post-2FA endpoint accessible without authentication"
+                        })
+                        results["evidence"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "issue": f"HTTP {http_code} - Accessible without authentication",
+                            "severity": "critical"
+                        })
+                        continue
+
+                    # For HTML responses, require positive evidence of authenticated content
+                    # to avoid false positives from catch-all pages
+
+                    # SPA shell indicators - definitely a catch-all route
                     spa_shell_indicators = [
-                        '<div id="root"', '<div id="app"', "window.__initial",
-                        "window.__nuxt__", "window.__next_data__", "__webpack_require__",
+                        'id="root"', 'id="app"', 'id="__next"', "ng-app",
+                        "window.__initial", "window.__nuxt__", "__next_data__",
+                        "__webpack_require__", "data-reactroot",
                         '<script src="/static/js/', '<script src="/_next/',
                     ]
                     has_spa_shell = any(ind in body_lower for ind in spa_shell_indicators)
 
-                    # Actual account/dashboard content indicators
+                    # Login/unauthenticated page indicators - not a bypass
+                    login_indicators = [
+                        "sign in", "log in", "login", "forgot password",
+                        "create account", "register", "sign up", "signup",
+                        "reset password", "don't have an account",
+                    ]
+                    is_login_page = any(ind in body_lower for ind in login_indicators)
+
+                    # Actual account/dashboard content indicators - positive evidence
                     content_indicators = [
                         # User identification
                         "user_id", "userid", "user-id", "account_id", "accountid",
@@ -1661,7 +1692,7 @@ async def test_2fa_bypass(
                         # Account data
                         "balance", "credit", "subscription", "billing",
                         "order history", "purchase", "transaction",
-                        # Session indicators
+                        # Session indicators (logout implies logged in)
                         "logout", "sign out", "signout", "log out",
                         "my profile", "my account", "my settings", "my dashboard",
                         "your profile", "your account", "your settings",
@@ -1676,14 +1707,11 @@ async def test_2fa_bypass(
                     ]
                     has_content = any(ind in body_lower for ind in content_indicators)
 
-                    is_html = "<!doctype html" in body_lower or "<html" in body_lower
+                    # Only flag if we have POSITIVE evidence of authenticated content
+                    # Skip if: SPA shell, login page, or no content indicators
+                    should_skip = has_spa_shell or is_login_page or not has_content
 
-                    # Only skip if it's positively identified as SPA shell
-                    # (has SPA indicators AND no real content)
-                    # Server-rendered dashboards without content keywords should still be flagged
-                    is_spa_shell = is_html and has_spa_shell and not has_content
-
-                    if not is_spa_shell:
+                    if not should_skip:
                         results["vulnerable"] = True
                         results["bypass_methods_detected"].append({
                             "method": "direct_access",

@@ -2045,10 +2045,11 @@ async def nosql_injection_test_json_body(
             # Skip if response contains SQL database errors (not NoSQL)
             # This prevents misclassifying SQL errors as NoSQL injection
             # Note: patterns must be specific to SQL to avoid false negatives
+            test_out_lower = test_out.lower() if test_out else ""
             sql_error_patterns = [
                 # Database product names
                 "sqlite", "mysql", "postgresql", "pg_query", "psql",
-                "oracle", "ora-0", "ora-1", "mssql", "sql server",
+                "mssql", "sql server",
                 # SQL-specific error codes/states
                 "sqlstate", "sqlexception",
                 # SQL syntax errors (must include SQL context)
@@ -2059,7 +2060,11 @@ async def nosql_injection_test_json_body(
                 "no such column", "unknown column", "no such table",
                 "ambiguous column", "datatype mismatch",
             ]
-            if test_out and any(pattern in test_out.lower() for pattern in sql_error_patterns):
+            # Oracle errors: ORA-xxxxx format (e.g., ORA-00942, ORA-01017)
+            has_oracle_error = "ora-" in test_out_lower and any(
+                f"ora-{d}" in test_out_lower for d in "0123456789"
+            )
+            if test_out_lower and (has_oracle_error or any(p in test_out_lower for p in sql_error_patterns)):
                 continue  # This is a SQL database, not NoSQL
 
             # Check for behavioral differences
