@@ -1642,13 +1642,30 @@ async def test_2fa_bypass(
 
                 # If we get 200 without authentication, verify it's not just SPA shell
                 if http_code == 200:
-                    # Check if response is generic HTML (SPA catch-all route)
                     body_lower = body[:5000].lower()
                     is_html = "<!doctype html" in body_lower or "<html" in body_lower
 
-                    # Skip non-HTML responses (APIs return JSON)
+                    # For non-HTML responses (JSON APIs), check for error indicators
                     if not is_html:
-                        # JSON responses without auth are likely vulnerable
+                        # Skip if response indicates auth failure/error
+                        # Note: '"error"' alone is too broad - catches {"error": null, "data": {...}}
+                        # Use specific patterns that indicate actual auth errors
+                        json_error_indicators = [
+                            '"error":"', '"error":{',  # error with string/object value
+                            '"unauthorized"', '"forbidden"',
+                            '"unauthenticated"', '"login required"',
+                            '"access denied"', '"not authenticated"',
+                            '"invalid token"', '"session expired"',
+                            '"authentication required"', '"not authorized"',
+                            '"status":401', '"status":403', '"status": 401', '"status": 403',
+                            '"code":401', '"code":403', '"code": 401', '"code": 403',
+                            '"statuscode":401', '"statuscode":403',
+                        ]
+                        is_json_error = any(ind in body_lower for ind in json_error_indicators)
+                        if is_json_error:
+                            continue  # Not a bypass - API returned auth error
+
+                        # JSON responses without auth error are likely vulnerable
                         results["vulnerable"] = True
                         results["bypass_methods_detected"].append({
                             "method": "direct_access",
@@ -1676,42 +1693,40 @@ async def test_2fa_bypass(
                     ]
                     has_spa_shell = any(ind in body_lower for ind in spa_shell_indicators)
 
-                    # Login/unauthenticated page indicators - not a bypass
-                    login_indicators = [
-                        "sign in", "log in", "login", "forgot password",
-                        "create account", "register", "sign up", "signup",
-                        "reset password", "don't have an account",
-                    ]
-                    is_login_page = any(ind in body_lower for ind in login_indicators)
-
                     # Actual account/dashboard content indicators - positive evidence
+                    # These must be specific to authenticated content, not generic pages
                     content_indicators = [
-                        # User identification
+                        # User identification (specific)
                         "user_id", "userid", "user-id", "account_id", "accountid",
                         "customer_id", "customerid", "member_id",
-                        # Account data
+                        # Account data (specific)
                         "balance", "credit", "subscription", "billing",
-                        "order history", "purchase", "transaction",
-                        # Session indicators (logout implies logged in)
+                        "order history", "purchase history", "transaction",
+                        # Session indicators (logout/signout implies logged in)
                         "logout", "sign out", "signout", "log out",
+                        # Personal content markers (specific)
                         "my profile", "my account", "my settings", "my dashboard",
+                        "my orders", "my purchases", "my subscriptions",
                         "your profile", "your account", "your settings",
-                        # Welcome messages
-                        "welcome,", "hello,", "hi,", "logged in as", "signed in as",
-                        # JSON data markers
+                        # Personalized greetings (must include user context)
+                        "logged in as", "signed in as", "welcome back,",
+                        # JSON data markers (user-specific fields)
                         '"email":', '"username":', '"user":', '"profile":',
-                        '"firstName":', '"lastName":', '"phone":',
-                        # Server-rendered dashboard elements
+                        '"firstname":', '"lastname":', '"phone":',
+                        '"accountid":', '"userid":', '"customerid":',
+                        # Server-rendered dashboard elements (specific class/id names)
                         "dashboard-header", "user-avatar", "account-nav",
                         "profile-menu", "user-dropdown", "settings-link",
+                        "account-balance", "user-info", "member-since",
                     ]
                     has_content = any(ind in body_lower for ind in content_indicators)
 
-                    # Only flag if we have POSITIVE evidence of authenticated content
-                    # Skip if: SPA shell, login page, or no content indicators
-                    should_skip = has_spa_shell or is_login_page or not has_content
+                    # Flag if: has authenticated content AND no SPA shell
+                    # Requires positive evidence - pages without content indicators are skipped
+                    # (this avoids FPs from generic catch-all pages, login pages, 404s)
+                    should_flag = has_content and not has_spa_shell
 
-                    if not should_skip:
+                    if should_flag:
                         results["vulnerable"] = True
                         results["bypass_methods_detected"].append({
                             "method": "direct_access",

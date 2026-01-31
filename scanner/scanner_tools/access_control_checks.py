@@ -95,25 +95,32 @@ CATEGORY_CONTENT_VALIDATORS = {
             # Kubernetes health (JSON)
             '"healthy":', '"ready":', '"live":',
         ],
-        # Patterns that are valid even in HTML context (these are real debug findings)
-        "html_safe_patterns": [
-            # phpinfo specific (outputs HTML by design)
+        # Highly specific patterns valid in HTML (1 match sufficient)
+        "html_safe_patterns_unique": [
+            # phpinfo specific (outputs HTML by design) - very unique markers
             "php version", "php variables", "php credits", "phpinfo()",
             "<td class=\"e\">", "configuration file (php.ini) path",
-            # Django debug page (HTML with stack traces)
-            "you're seeing this error because", "debug = true",
-            "request method:", "django version:", "exception type:",
-            # Rails error page
+            # Django debug page - unique markers
+            "you're seeing this error because", "debug = true in your django settings",
+            # Rails error page - unique markers
             "rails.root:", "application trace", "framework trace",
-            "full trace", "rails version:",
-            # ASP.NET error page
+        ],
+        # Stack trace patterns that need 2+ matches to confirm (more generic)
+        "html_safe_patterns_stacktrace": [
+            # Django (need multiple)
+            "request method:", "django version:", "exception type:",
+            "exception value:", "python path:",
+            # Rails (need multiple)
+            "full trace", "rails version:", "backtrace",
+            # ASP.NET (need multiple)
             "server error in", "[sqlexception", "[httpexception",
             "stack trace:", "source error:", "aspnetcore",
-            # Java/Spring HTML error pages
+            "version information:", "microsoft .net",
+            # Java/Spring (need multiple)
             "java.lang.", "javax.", "org.springframework.",
             "at com.", "caused by:", "exception in thread",
-            # Node.js error pages
-            "error: ", "    at ", "node_modules/",
+            # Node.js (need multiple)
+            "    at ", "node_modules/", "internal/modules",
         ],
         "min_matches": 1,
         "reject_if_html_generic": True,
@@ -278,14 +285,23 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
             return False, "html_rejected_for_category"
 
     patterns = validator.get("required_patterns", [])
-    html_safe_patterns = validator.get("html_safe_patterns", [])
     min_matches = validator.get("min_matches", 1)
 
-    # Check for html_safe_patterns FIRST - these are valid even in HTML (e.g., phpinfo)
-    if html_safe_patterns and is_html:
-        safe_matches = sum(1 for p in html_safe_patterns if p.lower() in body_lower)
-        if safe_matches >= 1:
-            return True, f"html_safe_pattern_match_{safe_matches}"
+    # Check for html_safe_patterns FIRST - these are valid even in HTML
+    if is_html:
+        # Unique patterns (1 match sufficient) - phpinfo, Django debug banner, etc.
+        unique_patterns = validator.get("html_safe_patterns_unique", [])
+        if unique_patterns:
+            unique_matches = sum(1 for p in unique_patterns if p.lower() in body_lower)
+            if unique_matches >= 1:
+                return True, f"html_safe_unique_match_{unique_matches}"
+
+        # Stack trace patterns (2+ matches required) - more generic markers
+        stacktrace_patterns = validator.get("html_safe_patterns_stacktrace", [])
+        if stacktrace_patterns:
+            stack_matches = sum(1 for p in stacktrace_patterns if p.lower() in body_lower)
+            if stack_matches >= 2:
+                return True, f"html_safe_stacktrace_match_{stack_matches}"
 
     # For HTML responses, check if category rejects HTML content-type
     # (patterns like "stack trace" in HTML error pages are not valid debug endpoints)
