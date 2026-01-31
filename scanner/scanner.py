@@ -3555,9 +3555,10 @@ async def build_report(target: str,
     if default_creds_testing and not public_only:
         # Use aggressive credential checker for full/aggressive scans
         if exploit_level in ("aggressive", "moderate"):
+            # Note: all_techs computed later; pass empty list for now (generic credential testing)
             default_creds_task = asyncio.create_task(test_default_credentials_aggressive(
                 base_url,
-                detected_tech=all_techs,
+                detected_tech=[],
                 max_attempts=20 if exploit_level == "aggressive" else 10,
                 delay_ms=300 if exploit_level == "aggressive" else 500
             ))
