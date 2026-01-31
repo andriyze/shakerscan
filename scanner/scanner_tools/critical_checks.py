@@ -25,6 +25,7 @@ from typing import Any
 from dataclasses import dataclass
 
 from .common import detect_spa_catch_all, get_auth_curl_args, run
+from .access_control_checks import SPA_FRAMEWORK_INDICATORS
 
 
 # =============================================================================
@@ -1685,13 +1686,8 @@ async def test_2fa_bypass(
                     # to avoid false positives from catch-all pages
 
                     # SPA shell indicators - definitely a catch-all route
-                    spa_shell_indicators = [
-                        'id="root"', 'id="app"', 'id="__next"', "ng-app",
-                        "window.__initial", "window.__nuxt__", "__next_data__",
-                        "__webpack_require__", "data-reactroot",
-                        '<script src="/static/js/', '<script src="/_next/',
-                    ]
-                    has_spa_shell = any(ind in body_lower for ind in spa_shell_indicators)
+                    # Use same indicators as access_control_checks for consistency
+                    has_spa_shell = any(ind.lower() in body_lower for ind in SPA_FRAMEWORK_INDICATORS)
 
                     # Actual account/dashboard content indicators - positive evidence
                     # These must be specific to authenticated content, not generic pages
