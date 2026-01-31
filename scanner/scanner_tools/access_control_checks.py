@@ -253,24 +253,50 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
     body_lower = body[:5000].lower()
     ct_lower = (content_type or "").lower()
 
-    # EARLY CHECK: If category explicitly rejects HTML content-type, check first
-    # This catches SPA catch-all routes that return text/html for all paths
-    if validator.get("reject_html_content_type", False):
-        if "text/html" in ct_lower:
-            return False, "html_content_type_rejected"
+    # Check for required patterns FIRST - they can override content-type rejections
+    # This ensures phpinfo.php (text/html with valid patterns) isn't falsely rejected
+    patterns = validator.get("required_patterns", [])
+    min_matches = validator.get("min_matches", 1)
+    pattern_matches = 0
 
-    # Check if HTML should always be rejected for this category
+    if patterns:
+        pattern_matches = sum(1 for p in patterns if p.lower() in body_lower)
+        if pattern_matches >= min_matches:
+            # Pattern matched - this is likely a real finding
+            # Exception: still reject if it's generic HTML with SPA indicators
+            if "text/html" in ct_lower and _is_generic_html_page(body):
+                # Check for SPA-specific indicators that suggest catch-all route
+                spa_indicators = ["<div id=\"root\"", "<div id=\"app\"", "window.__INITIAL_STATE__",
+                                  "window.__NUXT__", "window.__NEXT_DATA__", "<script src=\"/static/js/"]
+                if any(ind.lower() in body_lower for ind in spa_indicators):
+                    return False, "spa_shell_with_common_word"
+            return True, f"pattern_match_{pattern_matches}"
+
+    # Check if HTML should always be rejected for this category (e.g., .env files)
     if validator.get("reject_html_always", False):
         if _is_generic_html_page(body):
             return False, "html_rejected_for_category"
 
-    # EARLY CHECK: For categories with always_validate, reject generic HTML before pattern matching
-    # This prevents false positives from SPA pages that contain common words like "status", "health"
+    # For categories with always_validate, require pattern matches OR valid content-type
     if validator.get("always_validate", False):
+        # If we have patterns defined but didn't match, reject
+        if patterns and pattern_matches < min_matches:
+            # Exception: allow if content-type matches expected and not generic HTML
+            expected_cts = validator.get("expected_content_types", [])
+            ct_match = expected_cts and any(ect in ct_lower for ect in expected_cts)
+            if ct_match and not _is_generic_html_page(body):
+                return True, "content_type_match_strict"
+            return False, "required_patterns_missing"
+        # Reject generic HTML for strict categories
         if _is_generic_html_page(body):
             return False, "generic_html_rejected_for_strict_category"
 
-    # Check expected content types
+    # Reject HTML content-type for categories that explicitly disallow it (after pattern check)
+    if validator.get("reject_html_content_type", False):
+        if "text/html" in ct_lower:
+            return False, "html_content_type_rejected"
+
+    # Check expected content types (for non-strict categories)
     expected_cts = validator.get("expected_content_types", [])
     if expected_cts:
         ct_match = any(ect in ct_lower for ect in expected_cts)
@@ -281,23 +307,10 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
             if _is_generic_html_page(body):
                 return False, "html_generic_rejected"
 
-    # Check for required patterns
-    patterns = validator.get("required_patterns", [])
-    min_matches = validator.get("min_matches", 1)
-
-    if patterns:
-        matches = sum(1 for p in patterns if p.lower() in body_lower)
-        if matches >= min_matches:
-            return True, f"pattern_match_{matches}"
-
-        # No pattern matches - check if it's generic HTML
-        if validator.get("reject_if_html_generic", False):
-            if _is_generic_html_page(body):
-                return False, "no_patterns_and_generic_html"
-
-    # If we have patterns defined but didn't match any, it's likely a false positive
-    if patterns and validator.get("always_validate", False):
-        return False, "required_patterns_missing"
+    # No pattern matches and reject_if_html_generic - check for generic HTML
+    if validator.get("reject_if_html_generic", False):
+        if _is_generic_html_page(body):
+            return False, "no_patterns_and_generic_html"
 
     return True, "default_pass"
 

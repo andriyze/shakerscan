@@ -2044,10 +2044,14 @@ async def nosql_injection_test_json_body(
 
             # Skip if response contains SQL database errors (not NoSQL)
             # This prevents misclassifying SQL errors as NoSQL injection
+            # Note: patterns must be specific to SQL to avoid false negatives
             sql_error_patterns = [
                 "sqlite", "mysql", "postgresql", "pg_query", "psql",
                 "oracle", "ora-", "mssql", "sql server", "sqlstate",
-                "syntax error", "sql syntax", "datatype mismatch",
+                "sql syntax", "near \"select\"", "near \"insert\"",
+                "near \"update\"", "near \"delete\"", "near \"from\"",
+                "datatype mismatch", "no such column", "unknown column",
+                "ambiguous column", "sql error", "odbc driver",
             ]
             if test_out and any(pattern in test_out.lower() for pattern in sql_error_patterns):
                 continue  # This is a SQL database, not NoSQL
@@ -5198,6 +5202,41 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
     return body
 
 
+def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
+    """Apply a parameter value to a body template, handling nested keys.
+
+    Args:
+        base_body: The body template (dict, list, or None)
+        param: Parameter name (supports nested keys like "user.name" or "data[0].id")
+        value: Value to set for the parameter
+
+    Returns:
+        A copy of the body with the parameter set to the value
+    """
+    if base_body is None:
+        return {param: value}
+    if isinstance(base_body, list):
+        new_body = copy.deepcopy(base_body)
+        if not new_body:
+            new_body = [{}] if param != "__item__" else [value]
+        if param == "__item__":
+            new_body[0] = value
+        elif isinstance(new_body[0], dict):
+            if "." in param or "[" in param:
+                _set_nested_value(new_body[0], param, value, overwrite=True)
+            else:
+                new_body[0][param] = value
+        return new_body
+    if not isinstance(base_body, dict):
+        base_body = {}
+    new_body = copy.deepcopy(base_body)
+    if "." in param or "[" in param:
+        _set_nested_value(new_body, param, value, overwrite=True)
+    else:
+        new_body[param] = value
+    return new_body
+
+
 _CURL_STATUS_MARKER = "__CURL_STATUS__:"
 
 
@@ -5302,21 +5341,6 @@ async def smart_sqli_test(
     }
 
     auth_args = get_auth_curl_args(auth_session)
-
-    def _apply_body_param(body: Any, param: str, value: Any) -> Any:
-        """Return a copy of body with param injected (supports dict or list bodies)."""
-        if isinstance(body, list):
-            new_body = copy.deepcopy(body)
-            if not new_body:
-                new_body = [{}] if param != "__item__" else [value]
-            if isinstance(new_body[0], dict):
-                new_body[0][param] = value
-            else:
-                new_body[0] = value
-            return new_body
-        new_body = dict(body) if body else {}
-        new_body[param] = value
-        return new_body
 
     # Separate GET and POST endpoints to ensure both get tested
     def _method_allowed(endpoint: dict[str, Any], method: str) -> bool:
@@ -6103,28 +6127,6 @@ async def smart_xss_test(
     def _is_file_param(name: str) -> bool:
         name_l = name.lower()
         return any(tok in name_l for tok in ("file", "upload", "attachment", "image", "avatar", "photo"))
-
-    def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
-        if isinstance(base_body, list):
-            new_body = copy.deepcopy(base_body)
-            if not new_body:
-                new_body = [{}] if param != "__item__" else [value]
-            if param == "__item__":
-                new_body[0] = value
-            elif isinstance(new_body[0], dict):
-                if "." in param or "[" in param:
-                    _set_nested_value(new_body[0], param, value, overwrite=True)
-                else:
-                    new_body[0][param] = value
-            return new_body
-        if not isinstance(base_body, dict):
-            base_body = {}
-        new_body = dict(base_body)
-        if "." in param or "[" in param:
-            _set_nested_value(new_body, param, value, overwrite=True)
-        else:
-            new_body[param] = value
-        return new_body
 
     # Separate GET and POST endpoints to ensure both get tested
     get_endpoints = [

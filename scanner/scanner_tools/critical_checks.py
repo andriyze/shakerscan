@@ -1643,17 +1643,43 @@ async def test_2fa_bypass(
                 # If we get 200 without authentication, verify it's not just SPA shell
                 if http_code == 200:
                     # Check if response is generic HTML (SPA catch-all route)
-                    body_lower = body[:3000].lower()
+                    body_lower = body[:5000].lower()
+
+                    # SPA shell indicators - if these exist, it's likely a catch-all route
+                    spa_shell_indicators = [
+                        '<div id="root"', '<div id="app"', "window.__initial",
+                        "window.__nuxt__", "window.__next_data__", "__webpack_require__",
+                        '<script src="/static/js/', '<script src="/_next/',
+                    ]
+                    has_spa_shell = any(ind in body_lower for ind in spa_shell_indicators)
+
+                    # Actual account/dashboard content indicators
+                    content_indicators = [
+                        # User identification
+                        "user_id", "userid", "user-id", "account_id", "accountid",
+                        "customer_id", "customerid", "member_id",
+                        # Account data
+                        "balance", "credit", "subscription", "billing",
+                        "order history", "purchase", "transaction",
+                        # Session indicators
+                        "logout", "sign out", "signout", "log out",
+                        "my profile", "my account", "my settings", "my dashboard",
+                        "your profile", "your account", "your settings",
+                        # Welcome messages
+                        "welcome,", "hello,", "hi,", "logged in as", "signed in as",
+                        # JSON data markers
+                        '"email":', '"username":', '"user":', '"profile":',
+                        '"firstName":', '"lastName":', '"phone":',
+                        # Server-rendered dashboard elements
+                        "dashboard-header", "user-avatar", "account-nav",
+                        "profile-menu", "user-dropdown", "settings-link",
+                    ]
+                    has_content = any(ind in body_lower for ind in content_indicators)
+
                     is_generic_html = (
                         "<!doctype html" in body_lower or
                         "<html" in body_lower
-                    ) and not any(indicator in body_lower for indicator in [
-                        # Actual account/dashboard content indicators
-                        "user_id", "userid", "account_id", "balance",
-                        "logout", "sign out", "my profile", "my account",
-                        "welcome,", "hello,", "logged in as",
-                        '"email":', '"username":', '"user":',
-                    ])
+                    ) and (has_spa_shell or not has_content)
 
                     if not is_generic_html:
                         results["vulnerable"] = True
