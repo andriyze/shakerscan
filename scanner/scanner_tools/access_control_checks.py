@@ -29,56 +29,82 @@ FORCED_BROWSING_MAX_BODY_BYTES = 262_144
 CATEGORY_CONTENT_VALIDATORS = {
     "admin_panels": {
         # Admin panels should contain admin-specific UI elements
+        # NOTE: These patterns are intentionally more specific to avoid matching
+        # generic SPA pages that just mention "login" or "admin" in navigation
         "required_patterns": [
-            "admin", "dashboard", "panel", "login", "sign in", "password",
-            "username", "email", "authentication", "logout", "user", "settings",
-            "configuration", "manage", "control", "admin panel", "cpanel",
+            "admin panel", "admin dashboard", "administrator login",
+            "control panel", "cpanel", "webadmin", "site administration",
+            "backend login", "admin area", "management console",
+            # Specific admin CMS patterns
+            "wp-admin", "wp-login", "django admin", "laravel nova",
+            "rails admin", "activeadmin", "administrate",
         ],
         "min_matches": 1,
-        "reject_if_html_generic": True,  # Reject if it's just a generic homepage
+        "reject_if_html_generic": True,
+        # Use homepage hash comparison - if response is same as homepage, it's a catch-all
+        "compare_to_homepage": True,
     },
     "api_endpoints": {
         # API endpoints should return JSON or contain API-specific content
         "expected_content_types": ["application/json", "application/xml", "text/xml"],
         "required_patterns": [
-            '"', "{", "[", "swagger", "openapi", "graphql", "query", "mutation",
-            "api", "endpoint", "docs", '"type":', '"data":', '"error":',
+            # JSON structure (need multiple matches)
+            '"type":', '"data":', '"error":', '"status":',
+            '"message":', '"result":', '"response":',
+            # API documentation
+            "swagger", "openapi", "graphql", "query", "mutation",
         ],
-        "min_matches": 1,
+        "min_matches": 2,  # Require at least 2 matches to avoid FPs
         "reject_if_html_generic": True,
+        "always_validate": True,
+        "reject_html_content_type": True,
     },
     "management_consoles": {
+        # Management console patterns - more specific
         "required_patterns": [
-            "console", "dashboard", "management", "admin", "login", "sign in",
-            "authentication", "phpmyadmin", "database", "mysql", "postgres",
-            "mongodb", "redis", "adminer", "pgadmin",
+            "management console", "admin console", "database console",
+            "phpmyadmin", "adminer", "pgadmin", "mongodb compass",
+            "redis commander", "kibana", "grafana", "prometheus",
+            "jenkins", "hudson", "bamboo", "teamcity",
         ],
         "min_matches": 1,
         "reject_if_html_generic": True,
+        "compare_to_homepage": True,
     },
     "debug_dev": {
-        # Debug/dev endpoints should contain debug-specific content
+        # Debug/dev endpoints should NEVER return generic HTML
+        # They return JSON (actuator), text/plain (metrics), or specific debug output
+        "expected_content_types": [
+            "application/json",
+            "text/plain",
+            "application/vnd.spring-boot.actuator",
+            "text/event-stream",  # webpack HMR
+        ],
         "required_patterns": [
-            # Spring Boot Actuator specific
-            "actuator", "health", "status", "beans", "mappings", "env",
-            "configprops", "metrics", "prometheus", "heapdump",
+            # Spring Boot Actuator specific (JSON responses)
+            '"status":', '"health":', '"beans":', '"mappings":', '"configprops":',
+            '"metrics":', '"details":', '"components":',
+            # Prometheus metrics format
+            "# HELP", "# TYPE", "_total", "_count", "_bucket",
             # phpinfo specific
             "php version", "configuration", "php variables", "php credits",
-            # Generic debug
-            "debug", "trace", "stack", "error", "exception", "log", "dump",
-            # Vite/webpack dev server specific
-            "@fs", "vite", "webpack", "hmr", "hot module", "socket",
+            # Generic debug (must be in non-HTML context)
+            "stack trace", "exception:", "traceback",
+            # Vite/webpack dev server specific (event-stream or JS)
+            "hot module", "__webpack_hmr", "webpackHotUpdate",
             # Next.js dev
-            "__nextjs", "__next",
-            # Node.js debug
-            "node", "process", "v8",
-            # Kubernetes health
-            '"healthy"', '"ready"', '"live"', "ok", "up",
+            "__nextjs_original-stack-frame", "next-router-state-tree",
+            # Node.js/V8 debug
+            "heapTotal", "heapUsed", "v8.serialize",
+            # Kubernetes health (JSON)
+            '"healthy":', '"ready":', '"live":',
         ],
         "min_matches": 1,
         "reject_if_html_generic": True,
         # These paths should NEVER return generic HTML app content
         "always_validate": True,
+        # Explicitly reject text/html - debug endpoints don't return HTML pages
+        "reject_html_content_type": True,
     },
     "sensitive_files": {
         # Sensitive files should NOT be HTML
@@ -113,13 +139,22 @@ CATEGORY_CONTENT_VALIDATORS = {
         "min_matches": 1,
     },
     "user_management": {
+        # User management endpoints return JSON data, not HTML pages
+        "expected_content_types": ["application/json", "text/json"],
         "required_patterns": [
-            "user", "account", "profile", "member", "customer",
-            "email", "name", "id", "password", "role",
-            '"users"', '"accounts"', '"profiles"',
+            # JSON API response patterns (more specific than single words)
+            '"user_id":', '"userId":', '"user":', '"account_id":',
+            '"email":', '"username":', '"password":', '"role":',
+            '"users":', '"accounts":', '"profiles":',
+            '"member":', '"customer":', '"total_users":',
+            # Admin panel specific
+            "user management", "account management", "list users",
         ],
         "min_matches": 1,
         "reject_if_html_generic": True,
+        # These endpoints should NEVER return generic HTML app content
+        "always_validate": True,
+        "reject_html_content_type": True,
     },
     "logs_monitoring": {
         "reject_html_always": True,
@@ -218,10 +253,22 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
     body_lower = body[:5000].lower()
     ct_lower = (content_type or "").lower()
 
+    # EARLY CHECK: If category explicitly rejects HTML content-type, check first
+    # This catches SPA catch-all routes that return text/html for all paths
+    if validator.get("reject_html_content_type", False):
+        if "text/html" in ct_lower:
+            return False, "html_content_type_rejected"
+
     # Check if HTML should always be rejected for this category
     if validator.get("reject_html_always", False):
         if _is_generic_html_page(body):
             return False, "html_rejected_for_category"
+
+    # EARLY CHECK: For categories with always_validate, reject generic HTML before pattern matching
+    # This prevents false positives from SPA pages that contain common words like "status", "health"
+    if validator.get("always_validate", False):
+        if _is_generic_html_page(body):
+            return False, "generic_html_rejected_for_strict_category"
 
     # Check expected content types
     expected_cts = validator.get("expected_content_types", [])
@@ -244,7 +291,7 @@ def _has_category_content(body: str, content_type: str, category: str) -> tuple[
             return True, f"pattern_match_{matches}"
 
         # No pattern matches - check if it's generic HTML
-        if validator.get("reject_if_html_generic", False) or validator.get("always_validate", False):
+        if validator.get("reject_if_html_generic", False):
             if _is_generic_html_page(body):
                 return False, "no_patterns_and_generic_html"
 

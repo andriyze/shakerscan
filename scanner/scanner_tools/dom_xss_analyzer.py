@@ -34,7 +34,9 @@ DOM_XSS_SOURCES = {
         "description": "URL components are directly controllable by attackers",
     },
     "document.URL": {
-        "patterns": [r"document\.URL", r"document\.documentURI", r"document\.baseURI"],
+        # Note: document.baseURI is NOT user-controllable (set by <base> tag or page URL)
+        # so it's excluded from sources to reduce false positives in framework code
+        "patterns": [r"document\.URL", r"document\.documentURI"],
         "risk": "high",
         "description": "Document URL properties reflect the current page URL",
     },
@@ -217,6 +219,32 @@ class DOMXSSFinding:
     description: str
 
 
+# Files to skip - known libraries/frameworks that produce false positives
+LIBRARY_FILE_PATTERNS = [
+    "vendor.", "vendor-", "vendors.",
+    "angular.", "angular-", "angular/",
+    "react.", "react-", "react/",
+    "vue.", "vue-", "vue/",
+    "jquery.", "jquery-", "jquery/",
+    "lodash.", "lodash-",
+    "moment.", "moment-",
+    "rxjs.", "rxjs-", "rxjs/",
+    "zone.", "zone-",
+    "polyfill", "polyfills",
+    "runtime.", "runtime-",
+    "webpack-", "__webpack",
+    "node_modules/",
+    ".min.js",
+    "chunk.", "chunks/",
+]
+
+
+def _is_library_file(filename: str) -> bool:
+    """Check if file is a known library/framework that should be skipped."""
+    filename_lower = filename.lower()
+    return any(pattern in filename_lower for pattern in LIBRARY_FILE_PATTERNS)
+
+
 def analyze_js_for_dom_xss(
     js_code: str,
     filename: str = "unknown",
@@ -244,6 +272,13 @@ def analyze_js_for_dom_xss(
         "high_risk_findings": [],
         "summary": {},
     }
+
+    # Skip known library/framework files to reduce false positives
+    # These files contain framework code that uses DOM APIs safely
+    if _is_library_file(filename):
+        results["skipped"] = True
+        results["skip_reason"] = "library_file"
+        return results
 
     lines = js_code.split("\n")
 

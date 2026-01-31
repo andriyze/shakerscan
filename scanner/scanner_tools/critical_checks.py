@@ -1627,30 +1627,48 @@ async def test_2fa_bypass(
     ]
 
     for endpoint in post_2fa_endpoints[:3]:  # Test first 3
+        # Fetch with body to validate it's actual account content (not SPA shell)
         out, err, rc = await run([
             "curl", "-sS", "-k", "--max-time", "5",
-            "-w", "%{http_code}",
-            "-o", "/dev/null"
+            "-w", "\n---HTTP_CODE---%{http_code}",
         ] + auth_args + [endpoint], timeout=8)
 
         if rc == 0 and out:
             try:
-                http_code = int(out.strip())
-                # If we get 200 without authentication, that's a problem
+                # Split body from status code
+                parts = out.rsplit("---HTTP_CODE---", 1)
+                body = parts[0] if len(parts) > 1 else ""
+                http_code = int(parts[-1].strip()) if parts else 0
+
+                # If we get 200 without authentication, verify it's not just SPA shell
                 if http_code == 200:
-                    results["vulnerable"] = True
-                    results["bypass_methods_detected"].append({
-                        "method": "direct_access",
-                        "endpoint": endpoint,
-                        "http_code": http_code,
-                        "description": "Post-2FA endpoint accessible without authentication"
-                    })
-                    results["evidence"].append({
-                        "method": "direct_access",
-                        "endpoint": endpoint,
-                        "issue": f"HTTP {http_code} - Accessible without authentication",
-                        "severity": "critical"
-                    })
+                    # Check if response is generic HTML (SPA catch-all route)
+                    body_lower = body[:3000].lower()
+                    is_generic_html = (
+                        "<!doctype html" in body_lower or
+                        "<html" in body_lower
+                    ) and not any(indicator in body_lower for indicator in [
+                        # Actual account/dashboard content indicators
+                        "user_id", "userid", "account_id", "balance",
+                        "logout", "sign out", "my profile", "my account",
+                        "welcome,", "hello,", "logged in as",
+                        '"email":', '"username":', '"user":',
+                    ])
+
+                    if not is_generic_html:
+                        results["vulnerable"] = True
+                        results["bypass_methods_detected"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "http_code": http_code,
+                            "description": "Post-2FA endpoint accessible without authentication"
+                        })
+                        results["evidence"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "issue": f"HTTP {http_code} - Accessible without authentication",
+                            "severity": "critical"
+                        })
             except ValueError:
                 pass
 

@@ -2042,6 +2042,16 @@ async def nosql_injection_test_json_body(
             if test_out and ("<!DOCTYPE" in test_out[:200] or "<html" in test_out[:200].lower()):
                 continue
 
+            # Skip if response contains SQL database errors (not NoSQL)
+            # This prevents misclassifying SQL errors as NoSQL injection
+            sql_error_patterns = [
+                "sqlite", "mysql", "postgresql", "pg_query", "psql",
+                "oracle", "ora-", "mssql", "sql server", "sqlstate",
+                "syntax error", "sql syntax", "datatype mismatch",
+            ]
+            if test_out and any(pattern in test_out.lower() for pattern in sql_error_patterns):
+                continue  # This is a SQL database, not NoSQL
+
             # Check for behavioral differences
             is_vulnerable = False
             evidence_type = ""
@@ -6713,6 +6723,23 @@ def _analyze_js_content(js_content: str, source_url: str) -> list[dict]:
 
     Returns list of potential vulnerability findings.
     """
+    # Skip known library/framework files to reduce false positives
+    library_patterns = [
+        "vendor.", "vendor-", "vendors.",
+        "angular.", "angular-", "angular/",
+        "react.", "react-", "react/",
+        "vue.", "vue-", "vue/",
+        "jquery.", "jquery-",
+        "lodash.", "moment.", "rxjs.",
+        "zone.", "polyfill",
+        "runtime.", "webpack",
+        "node_modules/", ".min.js",
+        "chunk.", "chunks/",
+    ]
+    url_lower = source_url.lower()
+    if any(pattern in url_lower for pattern in library_patterns):
+        return []  # Skip library files
+
     findings = []
 
     # Split into lines for line number tracking

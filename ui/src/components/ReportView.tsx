@@ -853,7 +853,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* CSP Evaluation */}
-      {http?.csp_evaluation?.present && (
+      {http?.csp_evaluation && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-bold">Content Security Policy</h2>
