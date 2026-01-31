@@ -2046,12 +2046,18 @@ async def nosql_injection_test_json_body(
             # This prevents misclassifying SQL errors as NoSQL injection
             # Note: patterns must be specific to SQL to avoid false negatives
             sql_error_patterns = [
+                # Database product names
                 "sqlite", "mysql", "postgresql", "pg_query", "psql",
-                "oracle", "ora-", "mssql", "sql server", "sqlstate",
-                "sql syntax", "near \"select\"", "near \"insert\"",
-                "near \"update\"", "near \"delete\"", "near \"from\"",
-                "datatype mismatch", "no such column", "unknown column",
-                "ambiguous column", "sql error", "odbc driver",
+                "oracle", "ora-0", "ora-1", "mssql", "sql server",
+                # SQL-specific error codes/states
+                "sqlstate", "sqlexception",
+                # SQL syntax errors (must include SQL context)
+                "sql syntax", "sql statement", "sql query",
+                "near \"select\"", "near \"insert\"", "near \"update\"",
+                "near \"delete\"", "near \"from\"", "near \"where\"",
+                # Column/table errors (SQL-specific phrasing)
+                "no such column", "unknown column", "no such table",
+                "ambiguous column", "datatype mismatch",
             ]
             if test_out and any(pattern in test_out.lower() for pattern in sql_error_patterns):
                 continue  # This is a SQL database, not NoSQL
@@ -5226,6 +5232,9 @@ def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
                 _set_nested_value(new_body[0], param, value, overwrite=True)
             else:
                 new_body[0][param] = value
+        else:
+            # For array-of-primitives (e.g., ["string"]), inject value directly
+            new_body[0] = value
         return new_body
     if not isinstance(base_body, dict):
         base_body = {}

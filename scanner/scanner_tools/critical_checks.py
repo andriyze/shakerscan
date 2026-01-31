@@ -1676,12 +1676,14 @@ async def test_2fa_bypass(
                     ]
                     has_content = any(ind in body_lower for ind in content_indicators)
 
-                    is_generic_html = (
-                        "<!doctype html" in body_lower or
-                        "<html" in body_lower
-                    ) and (has_spa_shell or not has_content)
+                    is_html = "<!doctype html" in body_lower or "<html" in body_lower
 
-                    if not is_generic_html:
+                    # Only skip if it's positively identified as SPA shell
+                    # (has SPA indicators AND no real content)
+                    # Server-rendered dashboards without content keywords should still be flagged
+                    is_spa_shell = is_html and has_spa_shell and not has_content
+
+                    if not is_spa_shell:
                         results["vulnerable"] = True
                         results["bypass_methods_detected"].append({
                             "method": "direct_access",
