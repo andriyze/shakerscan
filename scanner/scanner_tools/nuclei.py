@@ -214,6 +214,16 @@ def _write_targets_file(targets: list[str]) -> str:
     return path
 
 
+async def _refresh_auth_session(auth_session: Any | None, context: str) -> None:
+    """Best-effort auth refresh before running a Nuclei command."""
+    if not auth_session:
+        return
+    try:
+        await auth_session.refresh_if_needed(force=False)
+    except Exception as e:
+        print(f"[nuclei] Auth refresh failed ({context}): {e}", file=sys.stderr)
+
+
 # ============================================================================
 # NUCLEI TEMPLATE DEDUPLICATION
 # ============================================================================
@@ -496,6 +506,8 @@ async def nuclei_scan(
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
 
+    await _refresh_auth_session(auth_session, "smart_nuclei_scan")
+
     cmd = [
         nuclei_cmd,
         *target_args,
@@ -652,6 +664,8 @@ async def nuclei_comprehensive_scan(
         target_args = ["-l", target_file]
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
+
+    await _refresh_auth_session(auth_session, "nuclei_scan")
 
     cmd = [
         nuclei_cmd,
@@ -1002,6 +1016,8 @@ async def smart_nuclei_scan(
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
 
+    await _refresh_auth_session(auth_session, "nuclei_comprehensive_scan")
+
     cmd = [
         nuclei_cmd,
         *target_args,
@@ -1168,6 +1184,8 @@ async def _run_nuclei_wave(
         target_args = ["-l", target_file]
     else:
         target_args = ["-u", targets_to_scan[0] if targets_to_scan else url]
+
+    await _refresh_auth_session(auth_session, "nuclei_wave")
 
     cmd = [
         nuclei_cmd,
@@ -1432,6 +1450,7 @@ async def staged_nuclei_scan(
         "total_duration_seconds": 0,
         "templates_executed": 0,
         "templates_matched": 0,
+        "scan_completed": False,
     }
 
     # Initialize wave budgets (will be adjusted based on yield)
@@ -1466,6 +1485,10 @@ async def staged_nuclei_scan(
     def _finalize_template_metrics() -> None:
         results["templates_executed"] = templates_executed_total
         results["templates_matched"] = len(matched_templates)
+
+    def _finalize_and_return() -> dict[str, Any]:
+        results["scan_completed"] = True
+        return results
 
     # =========================================================================
     # WAVE 1: Critical CVEs + Tech-Specific (fast, targeted)
@@ -1525,14 +1548,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 2:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 2: Misconfig + Exposure + Signal-Based Expansion
@@ -1595,14 +1618,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 3:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 3: Injection Templates (if signals suggest vulnerabilities)
@@ -1671,14 +1694,14 @@ async def staged_nuclei_scan(
             results["signals"] = signals
             results["total_duration_seconds"] = int(time.time() - total_start)
             _finalize_template_metrics()
-            return results
+            return _finalize_and_return()
 
     if max_waves < 4:
         results["vulnerabilities"] = deduplicate_nuclei_findings(all_findings)
         results["signals"] = signals
         results["total_duration_seconds"] = int(time.time() - total_start)
         _finalize_template_metrics()
-        return results
+        return _finalize_and_return()
 
     # =========================================================================
     # WAVE 4: Deep Scan (only if promising signals)
@@ -1736,6 +1759,7 @@ async def staged_nuclei_scan(
     results["signals"] = signals
     results["total_duration_seconds"] = int(time.time() - total_start)
     _finalize_template_metrics()
+    results["scan_completed"] = True
 
     # Separate info findings
     vuln_findings = []

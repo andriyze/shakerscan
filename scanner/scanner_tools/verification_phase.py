@@ -305,7 +305,7 @@ async def _verify_sqli_timing(
         if method == "GET":
             # GET: inject into query params
             parsed = urllib.parse.urlparse(url)
-            query_params = dict(urllib.parse.parse_qsl(parsed.query))
+            query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
             if inject_payload:
                 query_params[param] = payload
             test_url = urllib.parse.urlunparse(
@@ -332,7 +332,7 @@ async def _verify_sqli_timing(
                 # Form-encoded body injection
                 headers.setdefault("content-type", ("Content-Type", "application/x-www-form-urlencoded"))
                 if original_body:
-                    body_params = dict(urllib.parse.parse_qsl(original_body))
+                    body_params = dict(urllib.parse.parse_qsl(original_body, keep_blank_values=True))
                 else:
                     body_params = {}
                 if inject_payload:
@@ -478,7 +478,7 @@ async def _verify_sqli_extraction(
     if method == "GET":
         # GET: inject into query params
         parsed = urllib.parse.urlparse(url)
-        query_params = dict(urllib.parse.parse_qsl(parsed.query))
+        query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
         query_params[param] = payload
         test_url = urllib.parse.urlunparse(
             parsed._replace(query=urllib.parse.urlencode(query_params))
@@ -502,7 +502,7 @@ async def _verify_sqli_extraction(
             # Form-encoded body injection
             header_map.setdefault("content-type", ("Content-Type", "application/x-www-form-urlencoded"))
             if original_body:
-                body_params = dict(urllib.parse.parse_qsl(original_body))
+                body_params = dict(urllib.parse.parse_qsl(original_body, keep_blank_values=True))
             else:
                 body_params = {}
             body_params[param] = payload

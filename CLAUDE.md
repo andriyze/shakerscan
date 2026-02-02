@@ -58,7 +58,7 @@ curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "standard"}}'
 
-# Deep scan (30-60 min) - + full Nuclei, port scan
+# Deep scan (30-60 min) - + full Nuclei, top-ports scan (1000)
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "deep"}}'
@@ -357,7 +357,8 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `grpc_discovery` | Use gRPC reflection to discover services |
 | `custom_endpoints` | Array of endpoints with params to test (see format above) |
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
-| `thorough_params` | Test more parameters: 100 endpoints × 10 params instead of default 50×5 |
+| `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
+| `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
 
 ### Smart Scan Tuning
 
@@ -379,19 +380,19 @@ curl -X POST http://localhost:8080/scans \
 
 By default, smart scan:
 - **Stops early** when 3+ critical or 5+ high severity findings are found
-- **Tests 25 endpoints × 5 params** for SQLi/XSS
+- **Tests 50 endpoints × 5 params per method (GET + POST)** for SQLi/XSS
 
 With `no_early_stop` and `thorough_params`:
 - **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
-- **Tests 50 endpoints × 10 params** for more complete coverage
+- **Tests 100 endpoints × 10 params per method (GET + POST)** for more complete coverage
 
 ## Scan Types Explained
 
 | Type | API Option | Time | What It Does |
 |------|------------|------|--------------|
 | **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
-| **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies |
-| **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, port scan, deep discovery, JS secrets |
+| **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies (no port scan by default) |
+| **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
 | **full** | `"scan_type": "full"` | 1-2 hrs | + Active XSS/SQLi, all security tests, WebSocket |
 | **aggressive** | `"scan_type": "aggressive"` | 2+ hrs | + Aggressive exploits, extended ports, threat intel |
 | **smart** | `"scan_type": "smart"` | Variable | Adaptive: staged templates, DBMS-aware SQLi, context-aware XSS |
@@ -410,12 +411,13 @@ With `no_early_stop` and `thorough_params`:
 - Cookie security analysis
 - CORS misconfiguration checks
 - JS dependency vulnerability scanning
+- No port scan by default (enable gRPC discovery or use deep/full/aggressive)
 
 **deep** - Thorough passive scan:
 - Everything in standard
 - Full Nuclei template scan
 - Port scanning (top 1000 ports)
-- Deep directory/file discovery
+- Deep directory/file discovery (opt-in via `--deep-discovery`, enabled in aggressive)
 - JS secret scanning
 - Enhanced DNS checks
 
@@ -427,6 +429,7 @@ With `no_early_stop` and `thorough_params`:
 - Auth/session vulnerability tests
 - File upload, open redirect, CSRF tests
 - API security testing
+- Advanced probes (SSRF/command injection) only run with non-safe exploit level and parameterized endpoints
 
 **aggressive** - Maximum coverage:
 - Everything in full
@@ -437,15 +440,27 @@ With `no_early_stop` and `thorough_params`:
 
 **smart** - Adaptive intelligent scan:
 - Staged Nuclei template scanning (4 waves based on tech + signals)
-- Early stopping when high-confidence findings detected
+  - Wave 1: Critical CVEs + tech-specific (~60s budget)
+  - Wave 2: Signal-based expansion (~120s budget)
+  - Wave 3: Injection-focused (~300s budget, conditional)
+  - Wave 4: Deep scan (~480s budget, conditional)
+  - Yield-based budget adjustment (high-yield waves extend next budget)
+- Early stopping when confidence-weighted score ≥ 12 (3+ critical or 5+ high findings)
+- Verification phase for high-severity findings (browser proofs, timing analysis)
 - DBMS fingerprinting (SQLite, MySQL, PostgreSQL, MSSQL, Oracle)
-- DBMS-specific SQLi payloads
+- DBMS-specific SQLi payloads with data extraction chaining
 - Context-aware XSS (detects reflection context: in_script, in_attribute, etc.)
+- DOM XSS static analysis (source-to-sink flow detection)
 - Recursive directory discovery (adapts depth based on findings)
+- Light port scan (top 33) for service hints and gRPC discovery
+- Post-nuclei discovery refinement based on signals
 - Authenticated Playwright crawl (multi-page) with API capture
 - Adaptive rate limiting (backs off on 429/503, speeds up on success)
 - JS bundle analysis for hidden endpoints
 - Auth-aware tool routing (Nuclei/Dalfox use discovered endpoints + auth headers)
+- Synthetic endpoints only generated when API hints exist (or `--thorough-params`)
+- Attack chain analysis (correlates findings into exploitable attack paths)
+- Coverage tracking (endpoint/parameter/template metrics)
 
 ## Response Interpretation
 
@@ -472,8 +487,91 @@ The `/scans/{id}` endpoint returns detailed data you should report:
 | `result.discovery.browser_api_endpoints` | Discovered API endpoints |
 | `result.discovery.browser_crawl` | Headless crawl stats + sampled page URLs |
 | `result.discovery.waf_detection` | WAF product detection |
+| `result.attack_chains` | Attack chain analysis (null if no chains detected) |
+| `result.smart_coverage` | Endpoint/parameter/template coverage metrics |
 
 When AI is enabled, the report also includes `ai_correlations` (cross-finding correlations and an overall risk assessment) plus `ai_logs.summary.cross_finding_correlations`.
+
+### Attack Chain Analysis
+
+Smart scans analyze findings to identify exploitable attack chains - multi-step vulnerability combinations that demonstrate real-world attack scenarios:
+
+**Chain Types:**
+| Chain | Findings Required | Business Impact |
+|-------|-------------------|-----------------|
+| `xss_to_account_takeover` | XSS + weak cookie flags | Session theft, account compromise |
+| `sqli_to_privilege_escalation` | SQLi + admin panel access | Database compromise, admin access |
+| `ssrf_to_cloud_breach` | SSRF + cloud metadata access | Cloud IAM credential theft |
+| `idor_to_data_breach` | BOLA + predictable IDs | Mass user data exfiltration |
+| `lfi_to_credential_theft` | LFI + sensitive file access | Credential file exposure |
+| `auth_bypass_to_admin_access` | Auth bypass + admin functions | Unauthorized admin access |
+| `cors_to_data_theft` | CORS misconfig + sensitive endpoints | Cross-origin data theft |
+| `weak_jwt_to_impersonation` | JWT weakness + user endpoints | User impersonation |
+| `open_redirect_to_phishing` | Open redirect + auth pages | Credential phishing |
+| `info_disclosure_to_exploitation` | Info leak + known CVE | Targeted exploitation |
+
+**Enable partial chains in report:**
+```bash
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {"scan_type": "smart", "include_partial_attack_chains": true}}'
+```
+
+**Result structure (`result.attack_chains`):**
+```json
+{
+  "chains": [...],           // Complete chains (always included)
+  "partial_chains": [...],   // Incomplete chains (in JSON; in human report only with option above)
+  "report": "...",           // Human-readable report text
+  "summary": {
+    "total_chains": 2,
+    "total_partial_chains": 3,
+    "critical_chains": 1,
+    "high_chains": 1,
+    "chain_types": ["xss_to_account_takeover", "sqli_to_privilege_escalation"],
+    "partial_chain_types": ["ssrf_to_cloud_breach"],
+    "partial_chains_included": false
+  }
+}
+```
+
+### Smart Coverage Metrics
+
+The `smart_coverage` field tracks discovery vs testing coverage:
+
+| Path | Description |
+|------|-------------|
+| `result.smart_coverage.endpoints` | Discovered/tested counts, coverage ratio, by_method breakdown |
+| `result.smart_coverage.parameters` | By location (query, body, path) with discovered/tested counts |
+| `result.smart_coverage.nuclei_templates` | Templates run vs matched, hit_rate, by_category |
+| `result.smart_coverage.discovery_sources` | Array of discovery methods used (har_network_capture, url_crawl, etc.) |
+| `result.smart_coverage.auth_states_tested` | Array of auth states tested (anonymous, user1, user2) |
+
+**Example:**
+```json
+{
+  "endpoints": {
+    "discovered": 127,
+    "tested": 89,
+    "coverage": 0.701,
+    "by_method": {"GET": 85, "POST": 35, "PUT": 5, "DELETE": 2}
+  },
+  "parameters": {
+    "discovered": 234,
+    "tested": 156,
+    "coverage": 0.667,
+    "by_location": {"query": 120, "body": 95, "path": 19}
+  },
+  "nuclei_templates": {
+    "run": 1847,
+    "matched": 23,
+    "hit_rate": 0.012,
+    "by_category": {}
+  },
+  "discovery_sources": ["har_network_capture", "url_crawl", "js_bundle_analysis"],
+  "auth_states_tested": ["anonymous"]
+}
+```
 
 ### Example Rich Report Output
 
@@ -536,6 +634,8 @@ Users can also use the CLI directly:
 ./scanner.sh status                          # Check status
 ./scanner.sh scale 5                         # Scale to 5 workers
 ./scanner.sh logs -f                         # Follow logs
+./scanner.sh rebuild                         # Full rebuild (code changes)
+./scanner.sh restart                         # Restart services
 ```
 
 ## Files Structure
@@ -548,7 +648,7 @@ scanner-oss/
 ├── AGENTS.md            # Cross-tool AI agent instructions
 ├── scanner/             # Core scanner engine
 │   ├── scanner.py       # Main orchestrator
-│   ├── scanner_tools/   # 44 specialized security modules
+│   ├── scanner_tools/   # 61 specialized security modules
 │   │   ├── nuclei.py    # Nuclei vulnerability scanning
 │   │   ├── active_checks.py  # XSS/SQLi testing
 │   │   ├── discovery.py # Endpoint discovery

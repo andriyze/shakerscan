@@ -92,6 +92,7 @@ RDAP_SERVERS = {
 
 async def _run_whois(domain: str, timeout: int = 30) -> tuple[str, str, int]:
     """Execute whois command and return output."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "whois", domain,
@@ -104,8 +105,19 @@ async def _run_whois(domain: str, timeout: int = 30) -> tuple[str, str, int]:
                 timeout=timeout,
             )
         except TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
             return "", f"timeout after {timeout}s", 124
+        except asyncio.CancelledError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            raise
 
         return out_b.decode(errors="ignore"), err_b.decode(errors="ignore"), proc.returncode
     except FileNotFoundError:

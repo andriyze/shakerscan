@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import sys
@@ -5,7 +6,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Any
 
-from .common import run
+from .common import run, normalize_hash_route_url
 
 # Optional Playwright
 try:
@@ -431,14 +432,21 @@ async def browser_fetch(
                 if not raw or not isinstance(raw, str):
                     return None
                 cleaned = raw.strip().strip('"').strip("'")
-                if not cleaned or cleaned.startswith(("#", "javascript:", "mailto:", "data:")):
+                if not cleaned or cleaned.startswith(("javascript:", "mailto:", "data:")):
                     return None
+                # Preserve hash routes that look like SPA paths (#/ or #!/)
+                if cleaned.startswith("#"):
+                    return normalize_hash_route_url(cleaned, current_url)
                 resolved = urllib.parse.urljoin(current_url, cleaned)
                 parsed = urllib.parse.urlparse(resolved)
                 if parsed.netloc and parsed.netloc != base_netloc:
                     return None
                 if os.path.splitext(parsed.path.lower())[1] in _BROWSER_CRAWL_STATIC_EXTS:
                     return None
+                # Preserve fragment for hash routes
+                frag = parsed.fragment
+                if frag and (frag.startswith("/") or frag.startswith("!/")):
+                    return urllib.parse.urlunparse(parsed)  # Keep fragment
                 return urllib.parse.urlunparse(parsed._replace(fragment=""))
 
             async def interactive_crawl(max_interactions: int = 40) -> int:
@@ -603,9 +611,12 @@ async def browser_fetch(
                     # Only do this on first few pages to avoid excessive time
                     if len(visited) <= 5:
                         try:
-                            interactions = await interactive_crawl(max_interactions=20)
+                            interactions = await asyncio.wait_for(
+                                interactive_crawl(max_interactions=20),
+                                timeout=50  # 50s timeout per page interactive crawl
+                            )
                             total_interactions += interactions
-                        except Exception:
+                        except (asyncio.TimeoutError, Exception):
                             pass
 
                     if depth >= max_depth:
@@ -1005,12 +1016,17 @@ async def browser_fetch(
 
             # Interactive crawl on initial page to trigger SPA API calls
             try:
-                initial_interactions = await interactive_crawl(max_interactions=40)
+                initial_interactions = await asyncio.wait_for(
+                    interactive_crawl(max_interactions=40),
+                    timeout=50  # 50s timeout for initial interactive crawl
+                )
                 if initial_interactions > 0:
                     print(
                         f"[browser_fetch] Interactive crawl: {initial_interactions} element interactions",
                         file=sys.stderr
                     )
+            except asyncio.TimeoutError:
+                print("[browser_fetch] Interactive crawl timed out (50s), continuing", file=sys.stderr)
             except Exception:
                 pass
 
@@ -1019,7 +1035,41 @@ async def browser_fetch(
                     f"[browser_fetch] Headless crawl enabled: max_pages={max_pages} depth={max_depth}",
                     file=sys.stderr
                 )
-                page_urls, crawl_stats = await crawl_pages(url, extra_seed_urls=seed_urls)
+                try:
+                    page_urls, crawl_stats = await asyncio.wait_for(
+                        crawl_pages(url, extra_seed_urls=seed_urls),
+                        timeout=180  # 180s timeout for entire crawl
+                    )
+                except asyncio.TimeoutError:
+                    # On timeout, infer visited pages from captured network requests
+                    # Document requests indicate pages that were navigated to
+                    # Filter to same-origin only to avoid inflating metrics with cross-origin navigations
+                    def normalize_origin(u: str) -> str:
+                        """Normalize origin (scheme+host+port) per same-origin policy."""
+                        parsed = urllib.parse.urlparse(u)
+                        scheme = parsed.scheme.lower()
+                        host = (parsed.hostname or "").lower()
+                        port = parsed.port
+                        # Strip default port only for matching scheme
+                        if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+                            return f"{scheme}://{host}"
+                        return f"{scheme}://{host}:{port}"
+
+                    start_origin = normalize_origin(url)
+                    visited_from_requests = {url}  # Always include start URL
+                    for req in captured_requests:
+                        req_url = req.get("url", "")
+                        if req_url and req.get("resource_type") == "document":
+                            if normalize_origin(req_url) == start_origin:
+                                visited_from_requests.add(req_url.split("?")[0])
+                    page_urls = list(visited_from_requests)
+                    print(f"[browser_fetch] Crawl timed out (180s), recovered {len(page_urls)} pages from {len(captured_requests)} requests", file=sys.stderr)
+                    crawl_stats = {
+                        "pages_visited": len(page_urls),
+                        "depth_reached": 0,  # Unknown on timeout
+                        "timed_out": True,
+                        "requests_captured": len(captured_requests)
+                    }
                 if crawl_stats:
                     crawl_stats["initial_interactions"] = initial_interactions
 
@@ -1073,3 +1123,751 @@ async def browser_fetch(
     except Exception as e:
         print(f"[browser_fetch] Exception occurred, falling back to curl: {type(e).__name__}: {e}", file=sys.stderr)
         return await curl_fallback(f"exception: {type(e).__name__}")
+
+
+# =============================================================================
+# RATE LIMIT DETECTION
+# =============================================================================
+
+RATE_LIMIT_HEADERS = [
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-rate-limit-limit",
+    "x-rate-limit-remaining",
+    "x-rate-limit-reset",
+    "ratelimit-limit",
+    "ratelimit-remaining",
+    "ratelimit-reset",
+    "retry-after",
+    "x-retry-after",
+]
+
+
+async def detect_rate_limits(
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    requests_count: int = 30,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Detect and report API rate limiting configuration.
+
+    Sends a burst of requests to identify:
+    1. Presence of rate limit headers
+    2. Rate limit thresholds
+    3. Missing rate limiting (security concern)
+
+    Args:
+        url: Target URL to test
+        method: HTTP method
+        headers: Request headers (including auth)
+        requests_count: Number of requests to send
+        timeout: Request timeout
+
+    Returns:
+        Dict with rate limit detection results:
+        - detected: bool - whether rate limiting was detected
+        - headers: dict - rate limit headers found
+        - limit: int|None - detected request limit
+        - remaining: int|None - remaining requests
+        - reset: int|None - reset time (seconds or epoch)
+        - rate_limited_count: int - number of 429 responses
+        - findings: list - security findings
+    """
+    results = {
+        "detected": False,
+        "headers": {},
+        "limit": None,
+        "remaining": None,
+        "reset": None,
+        "window": None,
+        "rate_limited_count": 0,
+        "total_requests": requests_count,
+        "findings": [],
+    }
+
+    request_headers = headers.copy() if headers else {}
+
+    async def single_request(request_id: int) -> dict:
+        """Send a single request and capture rate limit info."""
+        import aiohttp
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.request(method, url, headers=request_headers, ssl=False) as response:
+                    resp_headers = {k.lower(): v for k, v in response.headers.items()}
+                    return {
+                        "status": response.status,
+                        "headers": resp_headers,
+                        "request_id": request_id,
+                    }
+        except Exception as e:
+            return {"status": None, "headers": {}, "error": str(e), "request_id": request_id}
+
+    # Send burst of requests
+    tasks = [single_request(i) for i in range(requests_count)]
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Analyze responses
+    for resp in responses:
+        if isinstance(resp, Exception):
+            continue
+
+        status = resp.get("status")
+        resp_headers = resp.get("headers", {})
+
+        # Count 429 responses
+        if status == 429:
+            results["rate_limited_count"] += 1
+
+        # Extract rate limit headers
+        for header in RATE_LIMIT_HEADERS:
+            if header in resp_headers:
+                results["detected"] = True
+                results["headers"][header] = resp_headers[header]
+
+                # Parse specific header values
+                if "limit" in header and results["limit"] is None:
+                    try:
+                        results["limit"] = int(resp_headers[header])
+                    except (ValueError, TypeError):
+                        pass
+                elif "remaining" in header and results["remaining"] is None:
+                    try:
+                        results["remaining"] = int(resp_headers[header])
+                    except (ValueError, TypeError):
+                        pass
+                elif "reset" in header and results["reset"] is None:
+                    try:
+                        results["reset"] = int(resp_headers[header])
+                    except (ValueError, TypeError):
+                        pass
+                elif header == "retry-after" or header == "x-retry-after":
+                    try:
+                        results["window"] = int(resp_headers[header])
+                    except (ValueError, TypeError):
+                        pass
+
+    # Calculate window from limit and remaining if not directly available
+    if results["limit"] and results["remaining"] is not None and results["window"] is None:
+        # Estimate window based on requests sent vs remaining
+        requests_consumed = results["limit"] - results["remaining"]
+        if requests_consumed > 0:
+            # Rough estimate: if we consumed X requests in our burst, window might be ~60s
+            results["window"] = 60  # Default assumption
+
+    # Generate findings
+    if results["rate_limited_count"] > 0:
+        # Rate limiting is working
+        results["findings"].append({
+            "type": "rate_limit_active",
+            "severity": "info",
+            "endpoint": url,
+            "method": method,
+            "evidence": {
+                "rate_limited_responses": results["rate_limited_count"],
+                "limit": results["limit"],
+                "headers": results["headers"],
+            },
+            "description": f"Rate limiting is active. {results['rate_limited_count']}/{requests_count} requests were rate limited.",
+        })
+    elif not results["detected"]:
+        # No rate limiting detected - security concern
+        results["findings"].append({
+            "type": "missing_rate_limiting",
+            "severity": "medium",
+            "endpoint": url,
+            "method": method,
+            "evidence": {
+                "requests_sent": requests_count,
+                "all_succeeded": True,
+                "no_rate_limit_headers": True,
+            },
+            "description": f"No rate limiting detected. Sent {requests_count} requests without throttling.",
+            "remediation": "Implement rate limiting to prevent brute-force and DoS attacks.",
+            "cwe": "CWE-770",
+        })
+    elif results["detected"] and results["rate_limited_count"] == 0:
+        # Headers present but no actual limiting
+        results["findings"].append({
+            "type": "rate_limit_headers_only",
+            "severity": "low",
+            "endpoint": url,
+            "method": method,
+            "evidence": {
+                "headers": results["headers"],
+                "limit": results["limit"],
+                "requests_sent": requests_count,
+            },
+            "description": f"Rate limit headers present (limit={results['limit']}) but not enforced after {requests_count} requests.",
+            "remediation": "Ensure rate limiting is actively enforced, not just headers.",
+        })
+
+    return results
+
+
+async def detect_rate_limits_per_endpoint(
+    base_url: str,
+    endpoints: list[str],
+    headers: dict[str, str] | None = None,
+    requests_per_endpoint: int = 20,
+) -> dict[str, Any]:
+    """
+    Test rate limiting across multiple endpoints.
+
+    Some APIs have per-endpoint rate limits that differ from global limits.
+
+    Args:
+        base_url: Base URL
+        endpoints: List of endpoint paths to test
+        headers: Request headers
+        requests_per_endpoint: Requests per endpoint
+
+    Returns:
+        Dict with per-endpoint rate limit results
+    """
+    from urllib.parse import urljoin
+
+    results = {
+        "endpoints_tested": len(endpoints),
+        "endpoints_with_rate_limiting": 0,
+        "endpoints_without_rate_limiting": [],
+        "per_endpoint_results": {},
+        "findings": [],
+    }
+
+    for endpoint in endpoints:
+        url = urljoin(base_url, endpoint)
+        endpoint_result = await detect_rate_limits(
+            url=url,
+            headers=headers,
+            requests_count=requests_per_endpoint,
+        )
+
+        results["per_endpoint_results"][endpoint] = {
+            "detected": endpoint_result["detected"],
+            "rate_limited_count": endpoint_result["rate_limited_count"],
+            "limit": endpoint_result["limit"],
+        }
+
+        if endpoint_result["detected"] or endpoint_result["rate_limited_count"] > 0:
+            results["endpoints_with_rate_limiting"] += 1
+        else:
+            results["endpoints_without_rate_limiting"].append(endpoint)
+
+        results["findings"].extend(endpoint_result["findings"])
+
+    return results
+
+
+# =============================================================================
+# HTTP VERB TAMPERING TESTS
+# =============================================================================
+
+async def test_verb_tampering(
+    url: str,
+    expected_allowed_methods: list[str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Test HTTP method/verb access control bypass.
+
+    Tests if the application properly restricts HTTP methods:
+    1. Tests unusual methods (TRACE, OPTIONS, HEAD, PATCH)
+    2. Tests method override headers
+    3. Identifies methods allowed without proper authorization
+
+    Args:
+        url: Target URL to test
+        expected_allowed_methods: Methods that should be allowed (for comparison)
+        headers: Request headers (including auth)
+        timeout: Request timeout
+
+    Returns:
+        Dict with verb tampering test results
+    """
+    import aiohttp
+
+    results = {
+        "vulnerable": False,
+        "findings": [],
+        "methods_tested": [],
+        "methods_allowed": [],
+        "methods_denied": [],
+        "override_headers_work": [],
+    }
+
+    request_headers = headers.copy() if headers else {}
+
+    # Methods to test
+    test_methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD", "TRACE"]
+
+    # Method override headers (for bypassing method restrictions)
+    override_headers = [
+        ("X-HTTP-Method-Override", "DELETE"),
+        ("X-HTTP-Method-Override", "PUT"),
+        ("X-HTTP-Method", "DELETE"),
+        ("X-HTTP-Method", "PUT"),
+        ("X-Method-Override", "DELETE"),
+        ("X-Method-Override", "PUT"),
+    ]
+
+    async def test_method(method: str) -> dict:
+        """Test a single HTTP method."""
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.request(method, url, headers=request_headers, ssl=False) as response:
+                    body = ""
+                    try:
+                        body = await response.text()
+                    except Exception:
+                        pass
+                    return {
+                        "method": method,
+                        "status": response.status,
+                        "allowed": response.status < 400,
+                        "body_length": len(body),
+                    }
+        except Exception as e:
+            return {"method": method, "status": None, "allowed": False, "error": str(e)}
+
+    # Test each method
+    for method in test_methods:
+        result = await test_method(method)
+        results["methods_tested"].append(result["method"])
+
+        if result["allowed"]:
+            results["methods_allowed"].append(result["method"])
+        else:
+            results["methods_denied"].append(result["method"])
+
+        # Check for sensitive methods allowed without proper response
+        if method in ["DELETE", "PUT", "PATCH", "TRACE"] and result["allowed"]:
+            if method == "TRACE":
+                # TRACE should always be disabled
+                results["vulnerable"] = True
+                results["findings"].append({
+                    "type": "trace_method_enabled",
+                    "severity": "medium",
+                    "endpoint": url,
+                    "method": method,
+                    "status": result["status"],
+                    "description": "HTTP TRACE method is enabled. May allow XST (Cross-Site Tracing) attacks.",
+                    "remediation": "Disable TRACE method on the server.",
+                    "cwe": "CWE-693",
+                })
+            elif expected_allowed_methods and method not in expected_allowed_methods:
+                # Method allowed but not expected
+                results["vulnerable"] = True
+                results["findings"].append({
+                    "type": "unexpected_method_allowed",
+                    "severity": "medium",
+                    "endpoint": url,
+                    "method": method,
+                    "status": result["status"],
+                    "description": f"HTTP {method} method is allowed but may not be intended.",
+                    "remediation": f"Restrict {method} method if not needed for this endpoint.",
+                    "cwe": "CWE-650",
+                })
+
+    # Test method override headers
+    for header_name, override_value in override_headers:
+        override_request_headers = request_headers.copy()
+        override_request_headers[header_name] = override_value
+
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                # Send POST with override header to simulate DELETE/PUT
+                async with session.post(url, headers=override_request_headers, ssl=False) as response:
+                    if response.status < 400:
+                        results["override_headers_work"].append({
+                            "header": header_name,
+                            "value": override_value,
+                            "status": response.status,
+                        })
+
+                        # Check if this is exploitable
+                        if override_value in ["DELETE", "PUT"]:
+                            # If DELETE/PUT via override works, it's a bypass
+                            if "DELETE" in results["methods_denied"] or "PUT" in results["methods_denied"]:
+                                results["vulnerable"] = True
+                                results["findings"].append({
+                                    "type": "method_override_bypass",
+                                    "severity": "high",
+                                    "endpoint": url,
+                                    "header": header_name,
+                                    "override_value": override_value,
+                                    "status": response.status,
+                                    "description": f"Method restriction bypass via {header_name}: {override_value}",
+                                    "remediation": "Ignore method override headers or ensure they respect authorization.",
+                                    "cwe": "CWE-650",
+                                })
+        except Exception:
+            pass
+
+    return results
+
+
+async def test_verb_tampering_authenticated(
+    url: str,
+    authenticated_headers: dict[str, str],
+    unauthenticated_headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """
+    Test if authentication is properly enforced across all HTTP methods.
+
+    Some endpoints may check auth for GET but not for DELETE/PUT.
+
+    Args:
+        url: Target URL
+        authenticated_headers: Headers with valid authentication
+        unauthenticated_headers: Headers without authentication
+        timeout: Request timeout
+
+    Returns:
+        Dict with findings about per-method auth enforcement
+    """
+    results = {
+        "vulnerable": False,
+        "findings": [],
+        "auth_required_methods": [],
+        "auth_not_required_methods": [],
+    }
+
+    methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+
+    for method in methods:
+        # Test with auth
+        auth_result = await test_verb_tampering(
+            url=url,
+            headers=authenticated_headers,
+            timeout=timeout,
+        )
+
+        # Test without auth
+        noauth_result = await test_verb_tampering(
+            url=url,
+            headers=unauthenticated_headers,
+            timeout=timeout,
+        )
+
+        # Check if method requires auth
+        auth_allowed = method in auth_result["methods_allowed"]
+        noauth_allowed = method in noauth_result["methods_allowed"]
+
+        if auth_allowed and not noauth_allowed:
+            results["auth_required_methods"].append(method)
+        elif noauth_allowed:
+            results["auth_not_required_methods"].append(method)
+
+            # Check for auth bypass on sensitive methods
+            if method in ["DELETE", "PUT", "PATCH", "POST"]:
+                results["vulnerable"] = True
+                results["findings"].append({
+                    "type": "auth_bypass_method",
+                    "severity": "high",
+                    "endpoint": url,
+                    "method": method,
+                    "description": f"HTTP {method} does not require authentication.",
+                    "remediation": f"Require authentication for {method} method on this endpoint.",
+                    "cwe": "CWE-306",
+                })
+
+    return results
+
+
+# =============================================================================
+# INTERACTIVE BROWSER CRAWL
+# =============================================================================
+
+async def interactive_browser_crawl(
+    url: str,
+    auth_session: Any | None = None,
+    max_pages: int = 20,
+    interaction_level: str = "medium",
+    screenshot_dir: str = "/tmp",
+) -> dict[str, Any]:
+    """
+    Enhanced browser crawl with automatic interaction.
+
+    Goes beyond passive network capture to actively interact with the page:
+    1. Clicks buttons and links
+    2. Fills and submits forms
+    3. Scrolls to trigger lazy loading
+    4. Opens dropdowns and modals
+    5. Captures all network traffic during interactions
+
+    Interaction Levels:
+    - low: Navigate and capture network only
+    - medium: Click buttons, scroll, fill forms
+    - high: Full interaction including dropdowns, modals, tabs
+
+    Args:
+        url: Target URL
+        auth_session: AuthSession for authenticated crawling
+        max_pages: Maximum pages to visit
+        interaction_level: Level of interaction (low, medium, high)
+        screenshot_dir: Directory for screenshots
+
+    Returns:
+        Dict with discovered endpoints and interaction results
+    """
+    if not HAS_PLAYWRIGHT:
+        return {
+            "error": "Playwright not installed",
+            "endpoints": [],
+            "interactions": [],
+            "forms_found": [],
+        }
+
+    results = {
+        "endpoints": [],
+        "interactions": [],
+        "forms_found": [],
+        "buttons_clicked": 0,
+        "forms_submitted": 0,
+        "scroll_events": 0,
+        "pages_visited": 0,
+        "api_endpoints": [],
+        "captured_requests": [],
+    }
+
+    seen_endpoints = set()
+    captured_requests = []
+
+    try:
+        async with _pw() as browser:
+            if browser is None:
+                return {"error": "Browser launch failed", **results}
+
+            # Set up browser context
+            ctx_kwargs = {
+                "ignore_https_errors": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            }
+
+            auth_cookies = []
+            if auth_session:
+                try:
+                    exported = auth_session.export_session()
+                    headers = exported.get("headers", {}) or {}
+                    headers = {k: v for k, v in headers.items() if str(k).lower() != "cookie"}
+                    if headers:
+                        ctx_kwargs["extra_http_headers"] = headers
+                    cookie_map = exported.get("cookies", {}) or {}
+                    if cookie_map:
+                        base_domain = urllib.parse.urlparse(url).hostname
+                        if base_domain:
+                            for name, value in cookie_map.items():
+                                auth_cookies.append({
+                                    "name": name,
+                                    "value": value,
+                                    "domain": base_domain,
+                                    "path": "/",
+                                })
+                except Exception:
+                    pass
+
+            ctx = await browser.new_context(**ctx_kwargs)
+            if auth_cookies:
+                try:
+                    await ctx.add_cookies(auth_cookies)
+                except Exception:
+                    pass
+
+            page = await ctx.new_page()
+
+            # Set up network capture
+            def handle_request(request):
+                try:
+                    req_url = request.url
+                    if req_url not in seen_endpoints:
+                        seen_endpoints.add(req_url)
+                        parsed = urllib.parse.urlparse(req_url)
+                        is_api = (
+                            request.resource_type in ("xhr", "fetch") or
+                            "/api/" in parsed.path.lower() or
+                            parsed.path.endswith((".json", ".graphql"))
+                        )
+                        captured_requests.append({
+                            "url": req_url,
+                            "method": request.method,
+                            "path": parsed.path,
+                            "is_api": is_api,
+                            "resource_type": request.resource_type,
+                        })
+                except Exception:
+                    pass
+
+            page.on("request", handle_request)
+
+            # Navigate to URL
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                results["pages_visited"] += 1
+            except Exception as e:
+                print(f"[interactive_crawl] Navigation error: {e}", file=sys.stderr)
+
+            # Interaction based on level
+            if interaction_level in ["medium", "high"]:
+                # Scroll to trigger lazy loading
+                try:
+                    await page.evaluate("""
+                        async () => {
+                            await new Promise(resolve => {
+                                let totalHeight = 0;
+                                const distance = 300;
+                                const timer = setInterval(() => {
+                                    window.scrollBy(0, distance);
+                                    totalHeight += distance;
+                                    if (totalHeight >= document.body.scrollHeight || totalHeight > 5000) {
+                                        clearInterval(timer);
+                                        resolve();
+                                    }
+                                }, 100);
+                            });
+                        }
+                    """)
+                    results["scroll_events"] += 1
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+                # Find and click visible buttons (non-submit)
+                try:
+                    buttons = await page.query_selector_all("button:not([type='submit']), [role='button']")
+                    for btn in buttons[:5]:  # Limit to prevent infinite loops
+                        try:
+                            if await btn.is_visible():
+                                await btn.click()
+                                results["buttons_clicked"] += 1
+                                await page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Find forms and extract information
+                try:
+                    forms = await page.query_selector_all("form")
+                    for form in forms[:10]:
+                        try:
+                            action = await form.get_attribute("action") or ""
+                            method = await form.get_attribute("method") or "GET"
+
+                            # Get input fields
+                            inputs = await form.query_selector_all("input, select, textarea")
+                            fields = []
+                            for inp in inputs:
+                                inp_name = await inp.get_attribute("name") or ""
+                                inp_type = await inp.get_attribute("type") or "text"
+                                fields.append({"name": inp_name, "type": inp_type})
+
+                            results["forms_found"].append({
+                                "action": action,
+                                "method": method.upper(),
+                                "fields": fields,
+                            })
+
+                            # Auto-fill form fields for discovery (medium level)
+                            for inp in inputs[:10]:
+                                try:
+                                    inp_type = await inp.get_attribute("type") or "text"
+                                    inp_name = (await inp.get_attribute("name") or "").lower()
+
+                                    if inp_type == "hidden":
+                                        continue
+
+                                    if await inp.is_visible():
+                                        if inp_type == "email" or "email" in inp_name:
+                                            await inp.fill("test@example.com")
+                                        elif inp_type == "password" or "password" in inp_name:
+                                            await inp.fill("TestPassword123!")
+                                        elif inp_type in ["text", "search"]:
+                                            await inp.fill("test")
+                                        elif inp_type == "tel":
+                                            await inp.fill("1234567890")
+                                        elif inp_type == "number":
+                                            await inp.fill("42")
+                                except Exception:
+                                    pass
+
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            if interaction_level == "high":
+                # Click dropdown menus
+                try:
+                    dropdowns = await page.query_selector_all("select, [role='listbox'], [role='combobox']")
+                    for dd in dropdowns[:5]:
+                        try:
+                            if await dd.is_visible():
+                                await dd.click()
+                                await page.wait_for_timeout(200)
+                                # Try to select first option
+                                options = await dd.query_selector_all("option")
+                                if options and len(options) > 1:
+                                    await options[1].click()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Click tabs and navigation items
+                try:
+                    tabs = await page.query_selector_all("[role='tab'], .tab, .nav-tab, .nav-link")
+                    for tab in tabs[:5]:
+                        try:
+                            if await tab.is_visible():
+                                await tab.click()
+                                results["interactions"].append({"type": "tab_click"})
+                                await page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Try to open modals
+                try:
+                    modal_triggers = await page.query_selector_all("[data-toggle='modal'], [data-bs-toggle='modal']")
+                    for trigger in modal_triggers[:3]:
+                        try:
+                            if await trigger.is_visible():
+                                await trigger.click()
+                                results["interactions"].append({"type": "modal_open"})
+                                await page.wait_for_timeout(500)
+                                # Try to close modal
+                                close_btn = await page.query_selector(".modal .close, .modal [data-dismiss='modal']")
+                                if close_btn and await close_btn.is_visible():
+                                    await close_btn.click()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # Final wait for any pending requests
+            await page.wait_for_timeout(1000)
+
+            await ctx.close()
+
+    except Exception as e:
+        results["error"] = str(e)
+
+    # Process captured requests
+    results["captured_requests"] = captured_requests
+    results["api_endpoints"] = [r for r in captured_requests if r.get("is_api")]
+    results["endpoints"] = list(seen_endpoints)
+
+    print(f"[interactive_crawl] Completed: {len(results['endpoints'])} endpoints, "
+          f"{results['buttons_clicked']} buttons clicked, {len(results['forms_found'])} forms found",
+          file=sys.stderr)
+
+    return results

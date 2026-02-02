@@ -121,7 +121,36 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const delta = scanData.delta || {}
   const ssh = scanData.ssh || {}
   const noise_reduction_stats = scanData.noise_reduction_stats || {}
-  const network_scan = scanData.network_scan || {}
+  // Get raw network_scan data from various paths
+  const network_scan_raw =
+    scanData.network_scan ||
+    discovery.network_scan ||
+    scanData.result?.network_scan ||
+    scanData.result?.discovery?.network_scan ||
+    {}
+
+  // Get complete_ports data (from nmap scans)
+  const complete_ports =
+    discovery.complete_ports ||
+    scanData.result?.discovery?.complete_ports ||
+    {}
+
+  // Merge network_scan and complete_ports - use complete_ports as fallback when network_scan is empty
+  const network_scan = {
+    ...network_scan_raw,
+    open_ports: network_scan_raw.open_ports?.length > 0
+      ? network_scan_raw.open_ports
+      : complete_ports.open_ports || [],
+    services: network_scan_raw.services?.length > 0
+      ? network_scan_raw.services
+      : complete_ports.services || [],
+    os_detection: network_scan_raw.os_detection || complete_ports.os_detection || {},
+    vulnerabilities: network_scan_raw.vulnerabilities?.length > 0
+      ? network_scan_raw.vulnerabilities
+      : complete_ports.vulnerabilities || [],
+    scan_completed: network_scan_raw.scan_completed ?? complete_ports.scan_completed,
+    errors: network_scan_raw.errors || complete_ports.errors
+  }
   const network_services = scanData.network_services || {}
   const active_checks = scanData.active_checks || {}
   const access_control = scanData.access_control || {}
@@ -131,12 +160,24 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const scan_metadata = scanData.scan_metadata || {}
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
+  const attack_chains = scanData.attack_chains || scanData.result?.attack_chains || null
+  const client_side_vulns = scanData.client_side_vulns || {}
+  const auth_checks = scanData.auth_checks || {}
+  const websocket_security = discovery.websocket_security || {}
+  const api_security_web = scanData.api_security_web || {}
+  const business_logic = scanData.business_logic || {}
+  const file_upload = scanData.file_upload || {}
+  const host_header_injection = scanData.host_header_injection || {}
+  const open_redirect = scanData.open_redirect || {}
+  const directory_listing = scanData.directory_listing || {}
   const ai_logs = scanData.ai_logs || null
   const ai_summary = ai_logs?.summary || null
   const ai_executive = ai_summary?.executive_summary || null
 
   const [expandedAI, setExpandedAI] = useState<Set<string>>(new Set())
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set(['critical', 'high', 'medium', 'low', 'info']))
+  const [minChainConfidence, setMinChainConfidence] = useState<number>(0.5)
+  const [showPartialChains, setShowPartialChains] = useState<boolean>(false)
 
   const toggleAIDetails = (id: string) => {
     setExpandedAI(prev => {
@@ -154,7 +195,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     })
   }
 
+  const getChainConfidence = (chain: any) => {
+    const value = chain?.confidence ?? chain?.completeness ?? 0
+    return typeof value === 'number' && !Number.isNaN(value) ? value : 0
+  }
+
   const filteredFindings = findings.filter((f: any) => severityFilter.has(f.severity?.toLowerCase() || 'info'))
+  const completeChains = attack_chains?.chains || []
+  const partialChains = attack_chains?.partial_chains || []
+  const filteredChains = completeChains.filter((chain: any) => getChainConfidence(chain) >= minChainConfidence)
+  const filteredPartialChains = showPartialChains
+    ? partialChains.filter((chain: any) => getChainConfidence(chain) >= minChainConfidence)
+    : []
+  const attackChainsAvailable = !!attack_chains
+  const attackChainsError = attack_chains?.error
 
   const handleDownloadJson = () => {
     const dataStr = JSON.stringify(scanData, null, 2)
@@ -184,6 +238,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {input.normalized_host && (
               <p className="text-sm text-gray-500 mt-1">
                 Host: {input.normalized_host} | Port: {input.port || 443} | Scheme: {input.scheme || 'https'}
+              </p>
+            )}
+            {(scan.warning || scan.options?._target_warning) && (
+              <p className="text-sm text-yellow-400 mt-2">
+                {scan.warning || scan.options?._target_warning}
+                {(scan.original_target || scan.options?._original_target) && (
+                  <span className="text-yellow-300">
+                    {" "}Original: {scan.original_target || scan.options?._original_target}
+                  </span>
+                )}
               </p>
             )}
           </div>
@@ -789,7 +853,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* CSP Evaluation */}
-      {http?.csp_evaluation?.present && (
+      {http?.csp_evaluation && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-bold">Content Security Policy</h2>
@@ -1131,6 +1195,195 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
+      {/* Client-Side Vulnerabilities */}
+      {client_side_vulns.vulnerable && client_side_vulns.findings?.length > 0 && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">Client-Side Vulnerabilities</h2>
+          <p className="text-gray-400 mb-4">
+            {client_side_vulns.files_scanned} JS files scanned
+          </p>
+          <div className="space-y-3">
+            {client_side_vulns.findings.map((finding: any, i: number) => (
+              <div key={i} className="bg-gray-900 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-yellow-400 font-medium">
+                    {finding.type?.replace(/_/g, ' ')}
+                  </span>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    finding.severity === 'high' ? 'bg-red-500/20 text-red-400' :
+                    finding.severity === 'medium' ? 'bg-orange-500/20 text-orange-400' :
+                    'bg-yellow-500/20 text-yellow-400'
+                  }`}>
+                    {finding.severity}
+                  </span>
+                </div>
+                <p className="text-gray-500 text-sm truncate">{finding.file}</p>
+                {finding.evidence && (
+                  <code className="text-xs text-gray-400 mt-2 block bg-gray-950 p-2 rounded overflow-x-auto">
+                    {finding.evidence.substring(0, 100)}...
+                  </code>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Authentication Security */}
+      {(auth_checks.bruteforce_protection?.vulnerable || auth_checks.session_management?.issues?.length > 0) && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">Authentication Security</h2>
+
+          {auth_checks.bruteforce_protection?.vulnerable && (
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-orange-400 mb-2">
+                Bruteforce Protection Issues
+              </h3>
+              {auth_checks.bruteforce_protection.issues?.length > 0 ? (
+                auth_checks.bruteforce_protection.issues.map((issue: any, i: number) => (
+                  <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2">
+                    <p className="text-gray-300">{issue.detail || issue.description || issue}</p>
+                    {issue.endpoint && <p className="text-gray-500 text-sm">{issue.endpoint}</p>}
+                  </div>
+                ))
+              ) : (
+                <div className="bg-gray-900 rounded-lg p-3">
+                  <p className="text-gray-300">Bruteforce protection weakness detected</p>
+                  {auth_checks.bruteforce_protection.endpoint && (
+                    <p className="text-gray-500 text-sm">{auth_checks.bruteforce_protection.endpoint}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {auth_checks.session_management?.issues?.length > 0 && (
+            <div>
+              <h3 className="text-lg font-semibold text-orange-400 mb-2">
+                Session Management Issues
+              </h3>
+              {auth_checks.session_management.issues.map((issue: any, i: number) => (
+                <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2">
+                  <p className="text-gray-300">{issue.detail || issue.description || issue}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* WebSocket Security */}
+      {websocket_security.endpoints?.length > 0 && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">WebSocket Security</h2>
+          <p className="text-gray-400 mb-4">
+            {websocket_security.endpoints_tested || websocket_security.endpoints?.length} endpoints tested
+          </p>
+          <div className="space-y-3">
+            {websocket_security.endpoints.map((ep: any, i: number) => (
+              <div key={i} className="bg-gray-900 rounded-lg p-4">
+                <p className="text-blue-400 font-mono text-sm mb-2">{ep.url}</p>
+                {ep.tests?.length > 0 && (
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {ep.tests.map((test: any, j: number) => (
+                      <div key={j} className={`text-xs p-2 rounded ${
+                        test.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                      }`}>
+                        {test.name}: {test.vulnerable ? 'VULNERABLE' : 'OK'}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {ep.vulnerable !== undefined && !ep.tests && (
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    ep.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                  }`}>
+                    {ep.vulnerable ? 'Vulnerabilities found' : 'No issues'}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Security Tests Summary */}
+      {(api_security_web.endpoints_tested > 0 || business_logic.endpoints_tested > 0 ||
+        file_upload.tested || host_header_injection.tested ||
+        open_redirect.tested || directory_listing.tested) && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">Security Tests</h2>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            {api_security_web.endpoints_tested > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">API Security</h3>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-300">{api_security_web.endpoints_tested} endpoints</span>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    api_security_web.vulnerabilities_found > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                  }`}>
+                    {api_security_web.vulnerabilities_found || 0} issues
+                  </span>
+                </div>
+              </div>
+            )}
+            {business_logic.endpoints_tested > 0 && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Business Logic</h3>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-300">{business_logic.endpoints_tested} endpoints</span>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    business_logic.vulnerabilities_found > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                  }`}>
+                    {business_logic.vulnerabilities_found || 0} issues
+                  </span>
+                </div>
+              </div>
+            )}
+            {file_upload.tested && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">File Upload</h3>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  file_upload.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {file_upload.vulnerable ? 'VULNERABLE' : 'OK'}
+                </span>
+              </div>
+            )}
+            {host_header_injection.tested && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Host Header Injection</h3>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  host_header_injection.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {host_header_injection.vulnerable ? 'VULNERABLE' : 'OK'}
+                </span>
+              </div>
+            )}
+            {open_redirect.tested && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Open Redirect</h3>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  open_redirect.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {open_redirect.vulnerable ? 'VULNERABLE' : 'OK'}
+                </span>
+              </div>
+            )}
+            {directory_listing.tested && (
+              <div className="bg-gray-900 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-400 mb-2">Directory Listing</h3>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  directory_listing.vulnerable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {directory_listing.vulnerable ? 'VULNERABLE' : 'OK'}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Discovery */}
       {discovery.katana_sample?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
@@ -1337,8 +1590,297 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
+      {/* Attack Chains Analysis */}
+      {attack_chains && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+            <h2 className="text-2xl font-bold">Attack Chain Analysis</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-sm text-gray-400">Min confidence</label>
+              <select
+                className="bg-gray-900 text-gray-200 text-sm rounded px-2 py-1 border border-gray-700"
+                value={minChainConfidence}
+                onChange={(e) => setMinChainConfidence(parseFloat(e.target.value))}
+              >
+                <option value={0}>All</option>
+                <option value={0.3}>30%+</option>
+                <option value={0.5}>50%+</option>
+                <option value={0.7}>70%+</option>
+                <option value={0.9}>90%+</option>
+              </select>
+              <label className="flex items-center gap-2 text-sm text-gray-400">
+                <input
+                  type="checkbox"
+                  className="rounded bg-gray-900 border-gray-700"
+                  checked={showPartialChains}
+                  onChange={(e) => setShowPartialChains(e.target.checked)}
+                />
+                Show partial chains
+              </label>
+            </div>
+          </div>
+
+          {attackChainsError && (
+            <div className="bg-red-900/20 border border-red-500/40 rounded-lg p-3 mb-4 text-red-300 text-sm">
+              Attack chain analysis error: {attackChainsError}
+            </div>
+          )}
+
+          {/* Summary Stats */}
+          {attack_chains.summary && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <div className="bg-gray-900 rounded-lg p-3">
+                <h3 className="text-sm text-gray-400">Total Chains</h3>
+                <p className="text-2xl font-bold text-white">{attack_chains.summary.total_chains}</p>
+              </div>
+              <div className="bg-gray-900 rounded-lg p-3">
+                <h3 className="text-sm text-gray-400">Critical</h3>
+                <p className="text-2xl font-bold text-red-400">{attack_chains.summary.critical_chains}</p>
+              </div>
+              <div className="bg-gray-900 rounded-lg p-3">
+                <h3 className="text-sm text-gray-400">High</h3>
+                <p className="text-2xl font-bold text-orange-400">{attack_chains.summary.high_chains}</p>
+              </div>
+              <div className="bg-gray-900 rounded-lg p-3">
+                <h3 className="text-sm text-gray-400">Partial</h3>
+                <p className="text-2xl font-bold text-yellow-400">{attack_chains.summary.total_partial_chains}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Complete Chains */}
+          {filteredChains.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-lg font-semibold text-gray-300 mb-3">Exploitable Attack Chains</h3>
+              <div className="space-y-4">
+                {filteredChains.map((chain: any, idx: number) => {
+                  const matchedRequiredAny = chain.matched_required_any || []
+                  const matchedRequiredAll = chain.matched_required_all || []
+                  const matchedRequiredLegacy = (!matchedRequiredAny.length && !matchedRequiredAll.length)
+                    ? (chain.matched_vulnerabilities?.required || chain.required_findings || [])
+                    : []
+                  const matchedSupporting = chain.matched_optional || chain.matched_vulnerabilities?.supporting || chain.optional_findings || []
+                  const missingRequiredAny = chain.missing_required_any || []
+                  const missingRequiredAll = chain.missing_required_all || []
+                  const missingRequiredLegacy = (!missingRequiredAny.length && !missingRequiredAll.length)
+                    ? (chain.missing_required || [])
+                    : []
+                  const evidenceFindings = chain.evidence?.supporting_findings || []
+
+                  return (
+                    <div key={idx} className={`bg-gray-900 rounded-lg p-4 border-l-4 ${
+                      chain.severity === 'critical' ? 'border-red-500' :
+                      chain.severity === 'high' ? 'border-orange-500' : 'border-yellow-500'
+                    }`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-semibold text-white">{chain.chain_type?.replace(/_/g, ' ').toUpperCase()}</h4>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-1 rounded text-xs font-bold ${
+                            chain.severity === 'critical' ? 'bg-red-900 text-red-200' :
+                            chain.severity === 'high' ? 'bg-orange-900 text-orange-200' : 'bg-yellow-900 text-yellow-200'
+                          }`}>{chain.severity?.toUpperCase()}</span>
+                          <span className="px-2 py-1 rounded text-xs bg-gray-800 text-gray-300">
+                            Confidence {Math.round(getChainConfidence(chain) * 100)}%
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-gray-400 text-sm mb-3">{chain.business_impact}</p>
+                      {chain.steps?.length > 0 && (
+                        <div className="space-y-2">
+                          {chain.steps.map((step: any, stepIdx: number) => (
+                            <div key={stepIdx} className="flex items-start gap-3 text-sm">
+                              <span className="w-6 h-6 rounded-full bg-gray-700 flex items-center justify-center text-xs font-bold">{step.step_number}</span>
+                              <div>
+                                <span className="text-gray-300">{step.description}</span>
+                                <span className="text-gray-500 ml-2">({step.finding_type})</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <p className="text-gray-500 text-xs mt-3">Completeness: {Math.round((chain.completeness || 0) * 100)}%</p>
+                      {(matchedRequiredAny.length > 0 || matchedRequiredAll.length > 0 || matchedSupporting.length > 0 || evidenceFindings.length > 0 || missingRequiredAny.length > 0 || missingRequiredAll.length > 0 || missingRequiredLegacy.length > 0) && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-sm text-blue-400">Why this chain?</summary>
+                          <div className="mt-2 space-y-2 text-sm text-gray-400">
+                            {matchedRequiredAny.length > 0 && (
+                              <div>Matched required (one-of): {matchedRequiredAny.join(', ')}</div>
+                            )}
+                            {matchedRequiredAll.length > 0 && (
+                              <div>Matched required (all-of): {matchedRequiredAll.join(', ')}</div>
+                            )}
+                            {matchedRequiredLegacy.length > 0 && (
+                              <div>Matched required: {matchedRequiredLegacy.join(', ')}</div>
+                            )}
+                            {matchedSupporting.length > 0 && (
+                              <div>Matched supporting: {matchedSupporting.join(', ')}</div>
+                            )}
+                            {missingRequiredAny.length > 0 && (
+                              <div className="text-yellow-400">Missing one-of: {missingRequiredAny.join(', ')}</div>
+                            )}
+                            {missingRequiredAll.length > 0 && (
+                              <div className="text-yellow-400">Missing required: {missingRequiredAll.join(', ')}</div>
+                            )}
+                            {missingRequiredLegacy.length > 0 && (
+                              <div className="text-yellow-400">Missing required: {missingRequiredLegacy.join(', ')}</div>
+                            )}
+                            {chain.missing_optional?.length > 0 && (
+                              <div className="text-gray-500">Missing optional: {chain.missing_optional.join(', ')}</div>
+                            )}
+                            {evidenceFindings.length > 0 && (
+                              <div>
+                                <div className="text-gray-500">Supporting findings</div>
+                                <div className="space-y-1 mt-1">
+                                  {evidenceFindings.slice(0, 5).map((finding: any, i: number) => (
+                                    <div key={i} className="flex items-center justify-between">
+                                      {finding.id ? (
+                                        <a href={`/findings/${finding.id}`} className="text-blue-400 hover:text-blue-300">
+                                          {finding.title || finding.id}
+                                        </a>
+                                      ) : (
+                                        <span className="text-gray-300">{finding.title || 'Finding'}</span>
+                                      )}
+                                      <span className="text-xs text-gray-500">{finding.severity || 'info'}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      )}
+                      {chain.remediation && (
+                        <div className="mt-3 pt-3 border-t border-gray-700">
+                          <p className="text-green-400 text-sm"><span className="font-semibold">Remediation:</span> {chain.remediation}</p>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {filteredChains.length === 0 && attack_chains.chains?.length > 0 && (
+            <p className="text-gray-500 text-sm mb-4">No complete chains match the current confidence filter.</p>
+          )}
+
+          {/* Partial Chains */}
+          {showPartialChains && (
+            <div>
+              <h3 className="text-lg font-semibold text-gray-300 mb-3">Partial Attack Chains</h3>
+              <p className="text-gray-500 text-sm mb-3">Missing components but indicate potential risk</p>
+              {filteredPartialChains.length > 0 ? (
+                <div className="space-y-3">
+                  {filteredPartialChains.map((chain: any, idx: number) => {
+                    const matchedRequiredAny = chain.matched_required_any || []
+                    const matchedRequiredAll = chain.matched_required_all || []
+                    const matchedRequiredLegacy = (!matchedRequiredAny.length && !matchedRequiredAll.length)
+                      ? (chain.matched_vulnerabilities?.required || chain.required_findings || [])
+                      : []
+                    const matchedSupporting = chain.matched_optional || chain.matched_vulnerabilities?.supporting || chain.optional_findings || []
+                    const missingRequiredAny = chain.missing_required_any || []
+                    const missingRequiredAll = chain.missing_required_all || []
+                    const missingRequiredLegacy = (!missingRequiredAny.length && !missingRequiredAll.length)
+                      ? (chain.missing_required || [])
+                      : []
+                    const evidenceFindings = chain.evidence?.supporting_findings || []
+
+                    return (
+                      <div key={idx} className="bg-gray-900/50 rounded-lg p-3 border border-gray-700">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-gray-300 font-medium">{chain.name || chain.chain_type?.replace(/_/g, ' ')}</span>
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            chain.severity === 'critical' ? 'bg-red-500/20 text-red-400' :
+                            chain.severity === 'high' ? 'bg-orange-500/20 text-orange-400' :
+                            'bg-yellow-500/20 text-yellow-400'
+                          }`}>
+                            {chain.severity} ({Math.round(getChainConfidence(chain) * 100)}% conf)
+                          </span>
+                        </div>
+                        {chain.description && (
+                          <p className="text-gray-400 text-sm mb-2">{chain.description}</p>
+                        )}
+                        <p className="text-gray-500 text-xs mb-2">Completeness: {Math.round((chain.completeness || 0) * 100)}%</p>
+                        {(matchedRequiredAny.length > 0 || matchedRequiredAll.length > 0 || matchedSupporting.length > 0 || evidenceFindings.length > 0 || missingRequiredAny.length > 0 || missingRequiredAll.length > 0 || missingRequiredLegacy.length > 0) && (
+                          <details className="mt-2">
+                            <summary className="cursor-pointer text-sm text-blue-400">Why this chain?</summary>
+                            <div className="mt-2 space-y-2 text-sm text-gray-400">
+                              {matchedRequiredAny.length > 0 && (
+                                <div>Matched required (one-of): {matchedRequiredAny.join(', ')}</div>
+                              )}
+                              {matchedRequiredAll.length > 0 && (
+                                <div>Matched required (all-of): {matchedRequiredAll.join(', ')}</div>
+                              )}
+                              {matchedRequiredLegacy.length > 0 && (
+                                <div>Matched required: {matchedRequiredLegacy.join(', ')}</div>
+                              )}
+                              {matchedSupporting.length > 0 && (
+                                <div>Matched supporting: {matchedSupporting.join(', ')}</div>
+                              )}
+                              {missingRequiredAny.length > 0 && (
+                                <div className="text-yellow-400">Missing one-of: {missingRequiredAny.join(', ')}</div>
+                              )}
+                              {missingRequiredAll.length > 0 && (
+                                <div className="text-yellow-400">Missing required: {missingRequiredAll.join(', ')}</div>
+                              )}
+                              {missingRequiredLegacy.length > 0 && (
+                                <div className="text-yellow-400">Missing required: {missingRequiredLegacy.join(', ')}</div>
+                              )}
+                              {chain.missing_optional?.length > 0 && (
+                                <div className="text-gray-500">Missing optional: {chain.missing_optional.join(', ')}</div>
+                              )}
+                              {evidenceFindings.length > 0 && (
+                                <div>
+                                  <div className="text-gray-500">Supporting findings</div>
+                                  <div className="space-y-1 mt-1">
+                                    {evidenceFindings.slice(0, 5).map((finding: any, i: number) => (
+                                      <div key={i} className="flex items-center justify-between">
+                                        {finding.id ? (
+                                          <a href={`/findings/${finding.id}`} className="text-blue-400 hover:text-blue-300">
+                                            {finding.title || finding.id}
+                                          </a>
+                                        ) : (
+                                          <span className="text-gray-300">{finding.title || 'Finding'}</span>
+                                        )}
+                                        <span className="text-xs text-gray-500">{finding.severity || 'info'}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                attack_chains.partial_chains?.length > 0 && (
+                  <p className="text-gray-500 text-sm">No partial chains match the current confidence filter.</p>
+                )
+              )}
+            </div>
+          )}
+
+          {attack_chains.chains?.length === 0 && attack_chains.partial_chains?.length === 0 && !attackChainsError && (
+            <p className="text-gray-500 text-sm">No attack chains identified for this scan.</p>
+          )}
+        </div>
+      )}
+
+      {!attack_chains && findings.length > 0 && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-2">Attack Chain Analysis</h2>
+          <p className="text-gray-400 text-sm">
+            Attack chain analysis unavailable for this scan. The scanner may not have included chain analysis or an error prevented it from running.
+          </p>
+        </div>
+      )}
+
       {/* Scan Metadata & Coverage */}
-      {(scan_metadata.completed_at || scan_metadata.scanner_version || coverage.modules_completed || Object.keys(scan_metadata).length > 2) && (
+      {(scan_metadata.completed_at || scan_metadata.scanner_version || scan_metadata.schema_version || coverage.modules_completed || Object.keys(scan_metadata).length > 2) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Scan Metadata</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1346,6 +1888,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="bg-gray-900 rounded-lg p-3">
                 <h3 className="text-sm text-gray-400 mb-1">Scanner Version</h3>
                 <p className="text-white font-mono text-sm">{scan_metadata.scanner_version}</p>
+              </div>
+            )}
+            {scan_metadata.schema_version && (
+              <div className="bg-gray-900 rounded-lg p-3">
+                <h3 className="text-sm text-gray-400 mb-1">Schema Version</h3>
+                <p className="text-white font-mono text-sm">{scan_metadata.schema_version}</p>
               </div>
             )}
             {scan_metadata.completed_at && (

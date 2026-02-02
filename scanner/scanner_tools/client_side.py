@@ -457,6 +457,448 @@ VULNERABLE_JS_LIBRARIES = {
             r'Next\.js\s+v?(\d+\.\d+\.\d+)',
         ]
     },
+    # ========================================================================
+    # EXPANDED LIBRARY COVERAGE
+    # ========================================================================
+    "axios": {
+        "vulnerabilities": [
+            {
+                "below": "1.6.0",
+                "severity": "high",
+                "cve": "CVE-2023-45857",
+                "summary": "CSRF token exposure via Cross-Site Request Forgery"
+            },
+            {
+                "below": "0.21.1",
+                "severity": "medium",
+                "cve": "CVE-2020-28168",
+                "summary": "Server-Side Request Forgery (SSRF) vulnerability"
+            },
+        ],
+        "detection_patterns": [
+            r'axios[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"axios":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "handlebars": {
+        "vulnerabilities": [
+            {
+                "below": "4.7.7",
+                "severity": "critical",
+                "cve": "CVE-2021-23369",
+                "summary": "Remote code execution via template compilation"
+            },
+            {
+                "below": "4.7.6",
+                "severity": "high",
+                "cve": "CVE-2019-19919",
+                "summary": "Prototype pollution vulnerability"
+            },
+            {
+                "below": "4.4.5",
+                "severity": "high",
+                "cve": "CVE-2019-20920",
+                "summary": "Arbitrary code execution via lookupProperty"
+            },
+        ],
+        "detection_patterns": [
+            r'handlebars[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"handlebars":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "dompurify": {
+        "vulnerabilities": [
+            {
+                "below": "2.4.1",
+                "severity": "high",
+                "cve": "CVE-2022-41720",
+                "summary": "mXSS bypass vulnerability"
+            },
+            {
+                "below": "2.3.3",
+                "severity": "medium",
+                "cve": "CVE-2021-23770",
+                "summary": "XSS bypass via mutation XSS"
+            },
+            {
+                "below": "2.0.17",
+                "severity": "medium",
+                "cve": "CVE-2020-26870",
+                "summary": "XSS vulnerability via svg/math tags"
+            },
+        ],
+        "detection_patterns": [
+            r'dompurify[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'DOMPurify\s+(\d+\.\d+\.\d+)',
+            r'"dompurify":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "marked": {
+        "vulnerabilities": [
+            {
+                "below": "4.0.10",
+                "severity": "high",
+                "cve": "CVE-2022-21680",
+                "summary": "ReDoS vulnerability in block.def regex"
+            },
+            {
+                "below": "2.0.0",
+                "severity": "medium",
+                "cve": "CVE-2021-21306",
+                "summary": "ReDoS in heading regex"
+            },
+            {
+                "below": "0.3.9",
+                "severity": "high",
+                "cve": "CVE-2017-17461",
+                "summary": "XSS vulnerability via malicious markdown"
+            },
+        ],
+        "detection_patterns": [
+            r'marked[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"marked":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "highlight.js": {
+        "vulnerabilities": [
+            {
+                "below": "10.4.1",
+                "severity": "high",
+                "cve": "CVE-2020-26237",
+                "summary": "ReDoS vulnerability in language definition"
+            },
+            {
+                "below": "9.18.2",
+                "severity": "medium",
+                "cve": "CVE-2020-8244",
+                "summary": "Prototype pollution vulnerability"
+            },
+        ],
+        "detection_patterns": [
+            r'highlight[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"highlight\.js":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "serialize-javascript": {
+        "vulnerabilities": [
+            {
+                "below": "3.1.0",
+                "severity": "critical",
+                "cve": "CVE-2020-7660",
+                "summary": "Remote code execution via crafted input"
+            },
+            {
+                "below": "2.1.1",
+                "severity": "high",
+                "cve": "CVE-2019-16769",
+                "summary": "Arbitrary code execution via object injection"
+            },
+        ],
+        "detection_patterns": [
+            r'"serialize-javascript":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "node-forge": {
+        "vulnerabilities": [
+            {
+                "below": "1.3.0",
+                "severity": "high",
+                "cve": "CVE-2022-24771",
+                "summary": "Signature verification bypass via RSA PKCS#1 v1.5"
+            },
+            {
+                "below": "1.0.0",
+                "severity": "medium",
+                "cve": "CVE-2020-7720",
+                "summary": "Prototype pollution in util.setPath"
+            },
+        ],
+        "detection_patterns": [
+            r'node-forge[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"node-forge":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "ejs": {
+        "vulnerabilities": [
+            {
+                "below": "3.1.7",
+                "severity": "critical",
+                "cve": "CVE-2022-29078",
+                "summary": "Server-side template injection (SSTI)"
+            },
+            {
+                "below": "2.7.4",
+                "severity": "high",
+                "cve": "CVE-2020-26256",
+                "summary": "Remote code execution via delimiter option"
+            },
+        ],
+        "detection_patterns": [
+            r'ejs[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"ejs":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "underscore": {
+        "vulnerabilities": [
+            {
+                "below": "1.13.6",
+                "severity": "high",
+                "cve": "CVE-2021-23358",
+                "summary": "Arbitrary code execution via template function"
+            },
+            {
+                "below": "1.12.1",
+                "severity": "medium",
+                "cve": "CVE-2021-23424",
+                "summary": "ReDoS vulnerability in escape function"
+            },
+        ],
+        "detection_patterns": [
+            r'underscore[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"underscore":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "socket.io": {
+        "vulnerabilities": [
+            {
+                "below": "4.5.4",
+                "severity": "medium",
+                "cve": "CVE-2022-44690",
+                "summary": "Memory exhaustion via crafted request"
+            },
+            {
+                "below": "2.4.0",
+                "severity": "high",
+                "cve": "CVE-2020-28481",
+                "summary": "Unauthorized access via resource exhaustion"
+            },
+        ],
+        "detection_patterns": [
+            r'socket\.io[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"socket\.io":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "crypto-js": {
+        "vulnerabilities": [
+            {
+                "below": "4.2.0",
+                "severity": "critical",
+                "cve": "CVE-2023-46233",
+                "summary": "PBKDF2 weak key derivation (1 iteration default)"
+            },
+        ],
+        "detection_patterns": [
+            r'crypto-js[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"crypto-js":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "express": {
+        "vulnerabilities": [
+            {
+                "below": "4.19.2",
+                "severity": "medium",
+                "cve": "CVE-2024-29041",
+                "summary": "Open redirect vulnerability"
+            },
+            {
+                "below": "4.17.3",
+                "severity": "medium",
+                "cve": "CVE-2022-24999",
+                "summary": "Prototype pollution via qs module"
+            },
+        ],
+        "detection_patterns": [
+            r'"express":\s*"[~^]?(\d+\.\d+\.\d+)"',
+            r'X-Powered-By:\s*Express',
+        ]
+    },
+    "jsonwebtoken": {
+        "vulnerabilities": [
+            {
+                "below": "9.0.0",
+                "severity": "high",
+                "cve": "CVE-2022-23529",
+                "summary": "Insecure key retrieval via secretOrPublicKey"
+            },
+            {
+                "below": "8.5.1",
+                "severity": "critical",
+                "cve": "CVE-2022-23539",
+                "summary": "Algorithm confusion via public key as secret"
+            },
+        ],
+        "detection_patterns": [
+            r'"jsonwebtoken":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "minimist": {
+        "vulnerabilities": [
+            {
+                "below": "1.2.6",
+                "severity": "critical",
+                "cve": "CVE-2021-44906",
+                "summary": "Prototype pollution via setKey function"
+            },
+            {
+                "below": "1.2.3",
+                "severity": "low",
+                "cve": "CVE-2020-7598",
+                "summary": "Prototype pollution vulnerability"
+            },
+        ],
+        "detection_patterns": [
+            r'"minimist":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "path-to-regexp": {
+        "vulnerabilities": [
+            {
+                "below": "6.2.2",
+                "severity": "high",
+                "cve": "CVE-2024-45296",
+                "summary": "ReDoS via unbounded backtracking"
+            },
+            {
+                "below": "0.1.10",
+                "severity": "high",
+                "cve": "CVE-2024-52798",
+                "summary": "Catastrophic backtracking in pattern matching"
+            },
+        ],
+        "detection_patterns": [
+            r'"path-to-regexp":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "semver": {
+        "vulnerabilities": [
+            {
+                "below": "7.5.2",
+                "severity": "high",
+                "cve": "CVE-2022-25883",
+                "summary": "ReDoS vulnerability in range parsing"
+            },
+        ],
+        "detection_patterns": [
+            r'"semver":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "tough-cookie": {
+        "vulnerabilities": [
+            {
+                "below": "4.1.3",
+                "severity": "medium",
+                "cve": "CVE-2023-26136",
+                "summary": "Prototype pollution vulnerability"
+            },
+        ],
+        "detection_patterns": [
+            r'"tough-cookie":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "word-wrap": {
+        "vulnerabilities": [
+            {
+                "below": "1.2.4",
+                "severity": "medium",
+                "cve": "CVE-2023-26115",
+                "summary": "ReDoS vulnerability"
+            },
+        ],
+        "detection_patterns": [
+            r'"word-wrap":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "sanitize-html": {
+        "vulnerabilities": [
+            {
+                "below": "2.7.1",
+                "severity": "medium",
+                "cve": "CVE-2022-25887",
+                "summary": "Improper sanitization of certain attributes"
+            },
+            {
+                "below": "1.27.5",
+                "severity": "medium",
+                "cve": "CVE-2021-26539",
+                "summary": "XSS bypass via SVG attributes"
+            },
+        ],
+        "detection_patterns": [
+            r'"sanitize-html":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "js-yaml": {
+        "vulnerabilities": [
+            {
+                "below": "3.13.1",
+                "severity": "high",
+                "cve": "CVE-2019-7164",
+                "summary": "Code execution via !!js/function"
+            },
+        ],
+        "detection_patterns": [
+            r'js-yaml[.-](\d+\.\d+\.\d+)(?:\.min)?\.js',
+            r'"js-yaml":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "shelljs": {
+        "vulnerabilities": [
+            {
+                "below": "0.8.5",
+                "severity": "high",
+                "cve": "CVE-2022-0144",
+                "summary": "Improper privilege management"
+            },
+        ],
+        "detection_patterns": [
+            r'"shelljs":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "tar": {
+        "vulnerabilities": [
+            {
+                "below": "6.1.11",
+                "severity": "high",
+                "cve": "CVE-2021-37701",
+                "summary": "Arbitrary file creation via symlink"
+            },
+            {
+                "below": "6.1.9",
+                "severity": "high",
+                "cve": "CVE-2021-37712",
+                "summary": "Path traversal via symlink following"
+            },
+        ],
+        "detection_patterns": [
+            r'"tar":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "async": {
+        "vulnerabilities": [
+            {
+                "below": "3.2.2",
+                "severity": "high",
+                "cve": "CVE-2021-43138",
+                "summary": "Prototype pollution in mapValues"
+            },
+        ],
+        "detection_patterns": [
+            r'"async":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
+    "json5": {
+        "vulnerabilities": [
+            {
+                "below": "2.2.2",
+                "severity": "high",
+                "cve": "CVE-2022-46175",
+                "summary": "Prototype pollution via __proto__ key"
+            },
+        ],
+        "detection_patterns": [
+            r'"json5":\s*"[~^]?(\d+\.\d+\.\d+)"',
+        ]
+    },
 }
 
 
@@ -1658,7 +2100,7 @@ async def _collect_js_files(url: str, discovered_urls: list[str] | None) -> list
                     ('/assets/' in disc_url and '.js' in disc_url)):
                     js_files.append(disc_url)
 
-    except:
+    except Exception:
         pass
 
     return list(set(js_files))  # Remove duplicates

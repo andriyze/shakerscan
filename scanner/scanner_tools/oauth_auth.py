@@ -175,6 +175,7 @@ async def _http_request(
 
     cmd.append(url)
 
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -191,6 +192,14 @@ async def _http_request(
             except Exception:
                 pass
             return {"status": 0, "body": "", "error": "timeout"}
+        except asyncio.CancelledError:
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            raise
         output = stdout.decode("utf-8", errors="replace")
 
         # Split response body and status code
@@ -209,6 +218,14 @@ async def _http_request(
         }
     except TimeoutError:
         return {"status": 0, "body": "", "error": "timeout"}
+    except asyncio.CancelledError:
+        if proc:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
 

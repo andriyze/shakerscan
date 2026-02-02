@@ -75,6 +75,7 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/findings` | List active vulnerabilities |
 | `/status` | Check scanner status |
 | `/subdomains <domain>` | Discover subdomains |
+| `/workers` | Manage scanner workers |
 
 ### Natural Language
 
@@ -93,7 +94,8 @@ Just ask Claude:
 │   ├── scan-full.md
 │   ├── findings.md
 │   ├── status.md
-│   └── subdomains.md
+│   ├── subdomains.md
+│   └── workers.md
 ├── hooks/
 │   └── session-start.sh   # Auto-detects scanner status
 └── settings.json
@@ -185,28 +187,40 @@ Examples:
 | Type | Description | Duration | Use Case |
 |------|-------------|----------|----------|
 | **Quick** | DNS, TLS, headers, basic tech detection | 1-2 min | Quick health check |
-| **Standard** | + Nuclei (safe), cookies, CORS, JS deps | 5-10 min | Regular assessment |
-| **Deep** | + Full Nuclei, port scan, JS secrets | 30-60 min | Thorough passive analysis |
+| **Standard** | + Nuclei (safe), cookies, CORS, JS deps (no port scan by default) | 5-10 min | Regular assessment |
+| **Deep** | + Full Nuclei, top-ports scan (1000), JS secrets | 30-60 min | Thorough passive analysis |
 | **Full** | + Active XSS/SQLi, all security tests | 1-2 hrs | Comprehensive audit |
 | **Aggressive** | + Bruteforce, fuzzing, full port scan | 2-5 hrs | Maximum coverage |
 | **Smart** | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS | Variable | Intelligent targeted testing |
+
+Notes:
+- Port scanning: standard skips Nmap by default; smart runs a light top-33 scan for service hints and gRPC discovery; deep/full/aggressive run port scanning (full uses top-ports, aggressive uses full range).
+- Deep discovery (ffuf-based) is opt-in via `--deep-discovery` (enabled automatically in aggressive).
+- Advanced probes (SSRF/command injection) run only for full/aggressive with non-safe exploit level and parameterized endpoints.
 
 ### Smart Scan Features
 
 The `smart` scan type uses adaptive techniques for more efficient and accurate testing:
 
 - **Staged Nuclei scanning**: 4 waves based on tech detection + signals, with early stopping on high-confidence findings
+- **Verification phase**: Browser-based XSS proofs and statistical timing analysis for SQLi confirmation
+- **Attack chain analysis**: Correlates findings into exploitable attack paths (XSS→ATO, SQLi→data exfil, SSRF→cloud breach)
 - **DBMS fingerprinting**: Detects SQLite, MySQL, PostgreSQL, MSSQL, Oracle and uses database-specific payloads
-- **Context-aware XSS**: Detects reflection context (in_script, in_attribute, in_html) and selects appropriate payloads
+- **Context-aware XSS**: Detects reflection context (in_script, in_attribute, in_html) and tests GET query params plus POST/PUT/PATCH body params (JSON/form)
+- **DOM XSS analysis**: Static source-to-sink flow detection in JavaScript bundles
 - **POST body injection**: Tests JSON/form POST parameters for SQLi (not just GET query params)
 - **Adaptive rate limiting**: Backs off on 429/503, speeds up on success
 - **Recursive discovery**: Adapts crawl depth based on findings
+- **Light port scan**: Top-33 scan for service hints and gRPC discovery
+- **Post-nuclei refinement**: Uses nuclei signals to adapt discovery after initial scan
 - **Authenticated Playwright crawl**: Multi-page headless crawl with API capture
 - **JSON/HATEOAS link following**: Follows `_links`/`href` fields in API responses to expand endpoints
 - **OPTIONS method discovery**: Enumerates allowed verbs to uncover POST/PUT/PATCH targets
 - **Auth-aware tool routing**: Nuclei/Dalfox use discovered endpoints + auth headers when provided
 - **Automated API login**: Tries JSON login endpoints when credentials are provided
 - **gRPC reflection**: Enumerates gRPC services/methods when grpcurl is available
+- **Synthetic endpoint gating**: Only generates synthetic API endpoints when API hints exist (or `--thorough-params` is set)
+- **Coverage tracking**: Monitors endpoint/parameter/template coverage metrics
 
 > **Note**: `full`, `aggressive`, and `smart` scans include active testing (XSS/SQLi probes). Only run these against targets you have permission to test.
 
@@ -314,6 +328,12 @@ Auth is propagated to discovery (Playwright crawl, JSON link following), Nuclei,
 |--------|-------------|
 | `xss` | Run only XSS active checks |
 | `sqli` | Run only SQLi active checks |
+
+**Reporting Options:**
+
+| Option | Description |
+|--------|-------------|
+| `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains are always in `result.attack_chains.chains`; partial chains are in `result.attack_chains.partial_chains`. |
 
 **Manual Endpoints (API-only targets):**
 

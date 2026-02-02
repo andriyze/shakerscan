@@ -33,8 +33,8 @@ MAX_SCAN_DURATION = {
     'quick': 15,
     'standard': 45,
     'deep': 120,
-    'full': 180,
-    'aggressive': 480,
+    'full': 600,       # 10 hours
+    'aggressive': 600,  # 10 hours
     'smart': 360,
 }
 
@@ -55,6 +55,90 @@ def get_redis():
     return redis.from_url(REDIS_URL, decode_responses=True)
 
 
+def generate_finding_fingerprint(finding: dict) -> str:
+    """Generate a unique fingerprint for deduplication."""
+    scanner_id = finding.get('id', '')
+    if scanner_id:
+        return scanner_id
+    key_parts = [
+        finding.get('title', ''),
+        finding.get('tool', ''),
+        finding.get('url', ''),
+        finding.get('cwe', '')
+    ]
+    key_string = '|'.join(str(p) for p in key_parts)
+    return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+
+
+async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.UUID, findings: list):
+    """Save findings from partial results to database with deduplication."""
+    if not findings:
+        return 0
+
+    saved_count = 0
+    for finding in findings:
+        fingerprint = generate_finding_fingerprint(finding)
+
+        # Check if this finding already exists for this target
+        existing = await conn.fetchrow("""
+            SELECT id, status, resurfaced_count
+            FROM findings
+            WHERE target_id = $1 AND fingerprint = $2
+        """, target_id, fingerprint)
+
+        if existing:
+            # Update existing finding
+            if existing['status'] == 'resolved':
+                await conn.execute("""
+                    UPDATE findings SET
+                        status = 'active',
+                        last_seen_at = NOW(),
+                        resurfaced_count = $1,
+                        scan_id = $2,
+                        updated_at = NOW()
+                    WHERE id = $3
+                """, existing['resurfaced_count'] + 1, scan_id, existing['id'])
+            else:
+                await conn.execute("""
+                    UPDATE findings SET
+                        last_seen_at = NOW(),
+                        scan_id = $1,
+                        updated_at = NOW()
+                    WHERE id = $2
+                """, scan_id, existing['id'])
+            saved_count += 1
+        else:
+            # Insert new finding
+            await conn.execute("""
+                INSERT INTO findings (
+                    scan_id, target_id, fingerprint, title, description,
+                    severity, cvss_score, tool, cwe, cwe_name, owasp,
+                    url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            """,
+                scan_id,
+                target_id,
+                fingerprint,
+                finding.get('title'),
+                finding.get('description'),
+                finding.get('severity', 'info'),
+                finding.get('cvss_score'),
+                finding.get('tool'),
+                finding.get('cwe'),
+                finding.get('cwe_name'),
+                finding.get('owasp'),
+                finding.get('url'),
+                json.dumps(finding.get('evidence')) if finding.get('evidence') else None,
+                finding.get('ai_verdict'),
+                finding.get('ai_confidence'),
+                finding.get('ai_rationale'),
+                json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+            )
+            saved_count += 1
+
+    return saved_count
+
+
 async def cleanup_stale_scans(pool: asyncpg.Pool):
     """Check for and mark stale scans as failed.
 
@@ -68,7 +152,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         # Get all running scans
         running_scans = await conn.fetch("""
-            SELECT id, scan_type, started_at
+            SELECT id, scan_type, started_at, target_id
             FROM scans
             WHERE status = 'running' AND started_at IS NOT NULL
         """)
@@ -122,13 +206,76 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             # Mark stale scan as failed
             if is_stale:
                 print(f"[cleanup] Marking scan {scan_id[:8]} as failed: {reason}", flush=True)
+
+                # Try to recover partial results from checkpoint file
+                partial_result = None
+                checkpoint_phase = None
+                checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
+                try:
+                    if checkpoint_file.exists():
+                        with open(checkpoint_file) as f:
+                            checkpoint_data = json.load(f)
+                        partial_result = checkpoint_data.get("report")
+                        checkpoint_phase = checkpoint_data.get("phase")
+                        print(f"[cleanup] Found checkpoint at phase '{checkpoint_phase}' for scan {scan_id[:8]}", flush=True)
+                        # Clean up checkpoint file
+                        checkpoint_file.unlink()
+                except Exception as e:
+                    print(f"[cleanup] Failed to read checkpoint: {e}", flush=True)
+
+                # Try to get last few log lines for debugging
+                last_logs = None
+                try:
+                    r = redis.from_url(REDIS_URL)
+                    log_lines = r.lrange(f"scan:{scan_id}:logs", -20, -1)
+                    if log_lines:
+                        last_logs = "\n".join(line.decode() if isinstance(line, bytes) else line for line in log_lines)
+                except Exception:
+                    pass
+
+                error_msg = f"Scan terminated: {reason}"
+                if checkpoint_phase:
+                    error_msg += f"\nPartial results recovered from phase: {checkpoint_phase}"
+                if last_logs:
+                    error_msg += f"\n\nLast logs:\n{last_logs}"
+
+                # Extract score/grade from partial result if available
+                partial_score = None
+                partial_grade = None
+                partial_findings_count = 0
+                if partial_result:
+                    result_section = partial_result.get("result", {})
+                    partial_score = result_section.get("score")
+                    partial_grade = result_section.get("grade")
+                    partial_findings_count = len(partial_result.get("findings", []))
+                    # Mark as partial in metadata
+                    if "scan_metadata" not in partial_result:
+                        partial_result["scan_metadata"] = {}
+                    partial_result["scan_metadata"]["partial"] = True
+                    partial_result["scan_metadata"]["terminated_reason"] = reason
+                    partial_result["scan_metadata"]["terminated_at_phase"] = checkpoint_phase
+
                 await conn.execute("""
                     UPDATE scans
                     SET status = 'failed',
                         error_message = $1,
-                        completed_at = $2
-                    WHERE id = $3
-                """, f"Scan terminated: {reason}", now, scan['id'])
+                        completed_at = $2,
+                        result = $3,
+                        score = $4,
+                        grade = $5,
+                        findings_count = $6,
+                        progress = 100,
+                        current_phase = 'terminated'
+                    WHERE id = $7
+                """, error_msg, now, json.dumps(partial_result) if partial_result else None,
+                    partial_score, partial_grade, partial_findings_count, scan['id'])
+
+                # Save partial findings to findings table so they appear in /findings
+                partial_findings = partial_result.get("findings", []) if partial_result else []
+                target_id = scan['target_id']
+                if partial_findings and target_id:
+                    saved = await save_findings_from_partial(conn, scan['id'], target_id, partial_findings)
+                    print(f"[cleanup] Saved {saved} findings from partial results for scan {scan_id[:8]}", flush=True)
 
 
 async def stale_scan_checker(pool: asyncpg.Pool):
@@ -207,11 +354,13 @@ class ScanOptions(BaseModel):
     xss: bool = False
     sqli: bool = False
     thorough: bool = False
+    deep_domxss: Optional[bool] = None
 
     # Additional options
     nuclei: bool = False
     enhanced_dns: bool = False
     subfinder: bool = False
+    include_partial_attack_chains: bool = False
     js_dependency_scanning: bool = False
     js_secret_scanning: bool = False
     grpc_discovery: bool = False
@@ -257,6 +406,7 @@ class ScanOptions(BaseModel):
     sqli_extract_max: Optional[int] = None         # Max SQLi findings for extraction (default: 3)
     oob_max_findings: Optional[int] = None         # Max findings for OOB SQLi test (default: 3)
     oob_max_payloads: Optional[int] = None         # Deprecated alias for oob_max_findings
+    target_scheme_inferred: Optional[bool] = None  # Output-only: set by API when scheme was auto-inferred (do not use as input)
 
 
 class ScanRequest(BaseModel):
@@ -375,6 +525,19 @@ async def dashboard():
 @app.post("/scans")
 async def submit_scan(request: ScanRequest):
     """Submit a new scan job."""
+    scheme_inferred = "://" not in (request.target or "")
+    try:
+        normalized_target, target_note = normalize_target_url(request.target)
+    except TargetNormalizationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not normalized_target:
+        raise HTTPException(status_code=400, detail="Invalid target URL")
+
+    # If scheme was inferred (not provided), pass scheme-less target to scanner for auto-detect
+    scan_target = normalized_target
+    if scheme_inferred:
+        scan_target = strip_target_scheme(normalized_target)
+
     r = get_redis()
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
@@ -424,7 +587,7 @@ async def submit_scan(request: ScanRequest):
     async with db_pool.acquire() as conn:
         # Check if target exists
         target = await conn.fetchrow(
-            "SELECT id FROM targets WHERE url = $1", request.target
+            "SELECT id FROM targets WHERE url = $1", normalized_target
         )
         if target:
             target_id = target['id']
@@ -434,33 +597,38 @@ async def submit_scan(request: ScanRequest):
                 INSERT INTO targets (url, name, root_domain)
                 VALUES ($1, $2, $3)
                 RETURNING id
-            """, request.target, request.name, extract_root_domain(request.target))
+            """, normalized_target, request.name, extract_root_domain(normalized_target))
 
         # Create scan record
         await conn.execute("""
             INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
             VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-        """, uuid.UUID(scan_id), target_id, request.target, job_id,
-             json.dumps(request.options.dict()), scan_type)
+        """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
+             json.dumps(_attach_target_note(request.options.dict(), request.target, target_note, scheme_inferred)), scan_type)
 
     # Queue the job
     job_data = {
         'job_id': job_id,
         'scan_id': scan_id,
-        'target': request.target,
-        'options': request.options.dict(),
+        'target': scan_target,
+        'options': _attach_target_note(request.options.dict(), request.target, target_note, scheme_inferred),
         'submitted_at': datetime.utcnow().isoformat()
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))
-    r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': request.target})
+    r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
 
-    return {
+    response = {
         'scan_id': scan_id,
         'job_id': job_id,
         'status': 'queued',
-        'target': request.target,
+        'target': normalized_target,
         'scan_type': scan_type
     }
+    # Surface warning if path/query was stripped
+    if target_note:
+        response['warning'] = target_note
+        response['original_target'] = request.target
+    return response
 
 
 @app.post("/scans/batch")
@@ -591,6 +759,24 @@ async def get_scan_result(scan_id: str):
         if not scan or not scan['result']:
             raise HTTPException(status_code=404, detail="Scan result not found")
         return scan['result']
+
+
+@app.get("/scans/{scan_id}/logs")
+async def get_scan_logs(scan_id: str, limit: int = 200):
+    """Get recent scan logs (tail)."""
+    r = get_redis()
+    log_key = f"scan:{scan_id}:logs"
+    # Return tail lines
+    try:
+        lines = r.lrange(log_key, max(-limit, -1000), -1) if limit else r.lrange(log_key, -200, -1)
+    except Exception:
+        lines = []
+    return {
+        "scan_id": scan_id,
+        "lines": lines,
+        "count": len(lines),
+        "limit": limit,
+    }
 
 
 @app.post("/scans/{scan_id}/cancel")
@@ -813,8 +999,15 @@ async def list_domains():
 @app.post("/targets")
 async def create_target(request: TargetCreate):
     """Create a new target."""
-    root_domain = extract_root_domain(request.url)
-    is_root = is_root_domain(request.url)
+    scheme_inferred = "://" not in (request.url or "")
+    try:
+        normalized_target, target_note = normalize_target_url(request.url)
+    except TargetNormalizationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not normalized_target:
+        raise HTTPException(status_code=400, detail="Invalid target URL")
+    root_domain = extract_root_domain(normalized_target)
+    is_root = is_root_domain(normalized_target)
 
     async with db_pool.acquire() as conn:
         try:
@@ -822,16 +1015,21 @@ async def create_target(request: TargetCreate):
                 INSERT INTO targets (url, name, root_domain, is_root, scan_options)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
-            """, request.url, request.name, root_domain, is_root,
-                 json.dumps(request.scan_options or {}))
+            """, normalized_target, request.name, root_domain, is_root,
+                 json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)))
 
-            return {
+            response = {
                 'id': str(target_id),
-                'url': request.url,
+                'url': normalized_target,
                 'root_domain': root_domain,
                 'is_root': is_root,
                 'status': 'created'
             }
+            # Surface warning if path/query was stripped
+            if target_note:
+                response['warning'] = target_note
+                response['original_url'] = request.url
+            return response
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Target already exists")
 
@@ -2014,11 +2212,17 @@ async def get_latest_result(target_folder: str):
 def extract_root_domain(url: str) -> str:
     """Extract root domain from URL."""
     from urllib.parse import urlparse
+    import ipaddress
     try:
         parsed = urlparse(url if '://' in url else f'https://{url}')
-        host = parsed.netloc or parsed.path.split('/')[0]
-        # Remove port
-        host = host.split(':')[0]
+        host = parsed.hostname or parsed.netloc or parsed.path.split('/')[0]
+        # Note: parsed.hostname already strips ports and IPv6 brackets
+        # Return IPs as-is (no root domain)
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+            return host.strip("[]")
+        except ValueError:
+            pass
         # Get root domain (last 2 parts)
         parts = host.split('.')
         if len(parts) >= 2:
@@ -2028,13 +2232,116 @@ def extract_root_domain(url: str) -> str:
         return url
 
 
+class TargetNormalizationError(ValueError):
+    """Raised when target URL is malformed or invalid."""
+    pass
+
+
+def normalize_target_url(target: str) -> tuple[str, str | None]:
+    """
+    Normalize target URL to canonical origin (strip path/query/fragment).
+
+    Returns:
+        tuple: (normalized_url, warning_note)
+
+    Raises:
+        TargetNormalizationError: If URL is malformed (e.g., invalid IPv6)
+    """
+    from urllib.parse import urlparse
+    raw = (target or "").strip()
+    if not raw:
+        return "", None
+
+    # Parse URL, handling missing scheme
+    has_scheme = "://" in raw
+    url_to_parse = raw if has_scheme else f"https://{raw}"
+
+    try:
+        parsed = urlparse(url_to_parse)
+        # Access port early to catch ValueError for malformed ports/IPv6
+        port = parsed.port
+        host = parsed.hostname
+    except ValueError as e:
+        # Malformed URL (e.g., IPv6 without brackets, invalid port)
+        hint = " (hint: wrap IPv6 addresses in brackets, e.g. [2001:db8::1])"
+        raise TargetNormalizationError(f"Invalid target URL: {e}{hint}")
+
+    # Extract host from path if hostname is empty (e.g., bare domain)
+    if not host:
+        host = (parsed.path.split("/")[0] if parsed.path else "")
+    if not host:
+        return "", None
+
+    # Lowercase host for consistent canonicalization
+    host = host.lower()
+
+    # Validate scheme (only http/https allowed when explicitly provided)
+    scheme = parsed.scheme.lower() if has_scheme else "https"
+    if scheme not in ("http", "https"):
+        raise TargetNormalizationError(f"Invalid scheme '{scheme}': only http/https allowed")
+
+    # Format host (bracket IPv6 addresses)
+    host_display = f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+    # Strip default ports for cleaner canonicalization when scheme is known
+    port_suffix = ""
+    if port:
+        if scheme:
+            is_default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+            if not is_default_port:
+                port_suffix = f":{port}"
+        else:
+            port_suffix = f":{port}"
+
+    normalized = f"{scheme}://{host_display}{port_suffix}"
+
+    # Track if path/query/fragment was stripped
+    had_path = bool(parsed.path and parsed.path not in ("", "/"))
+    had_query = bool(parsed.query)
+    had_fragment = bool(parsed.fragment)
+    note = None
+    if had_path or had_query or had_fragment:
+        note = "Target URL contained a path/query/fragment; scanning root origin instead."
+
+    return normalized, note
+
+
+def _attach_target_note(options: dict, original_target: str, note: str | None, scheme_inferred: bool = False) -> dict:
+    """Attach original target info to scan options for transparency."""
+    updated = dict(options) if options else {}
+    if note:
+        updated.setdefault("_original_target", original_target)
+        updated.setdefault("_target_warning", note)
+    if scheme_inferred:
+        updated.setdefault("target_scheme_inferred", True)
+    return updated
+
+
+def strip_target_scheme(target: str) -> str:
+    """Strip scheme from a normalized URL (used to trigger auto-detect)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(target)
+    host = parsed.hostname or ""
+    if not host:
+        return target
+    host_display = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{host_display}{f':{parsed.port}' if parsed.port else ''}"
+
+
 def is_root_domain(url: str) -> bool:
     """Check if URL is a root domain (not a subdomain)."""
     from urllib.parse import urlparse
+    import ipaddress
     try:
         parsed = urlparse(url if '://' in url else f'https://{url}')
-        host = parsed.netloc or parsed.path.split('/')[0]
-        host = host.split(':')[0].lower()  # Remove port
+        host = parsed.hostname or parsed.netloc or parsed.path.split('/')[0]
+        host = host.lower()  # parsed.hostname already strips port
+        # IPs are treated as root targets
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+            return True
+        except ValueError:
+            pass
         root = extract_root_domain(url).lower()
         # It's a root if host equals root_domain or www.root_domain
         return host == root or host == f'www.{root}'

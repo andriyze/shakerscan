@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,20 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 SCANNER_PATH = '/app/scanner.py'
+SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
+SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
+
+# Maximum allowed duration per scan type (minutes) - worker-side safety net
+MAX_SCAN_DURATION = {
+    'quick': 15,
+    'standard': 45,
+    'deep': 120,
+    'full': 600,        # 10 hours
+    'aggressive': 600,  # 10 hours
+    'smart': 360,
+}
+DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
+SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 
 # Database pool (initialized in main)
 db_pool = None
@@ -36,13 +51,13 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
 
-async def run_scan(target: str, options: dict) -> dict:
+async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
     cmd = ['python3', SCANNER_PATH, target]
 
     # Map scan_type to CLI flags (mutually exclusive presets)
     # Scan types: quick, standard, deep, full, aggressive, smart
-    scan_type = options.get('scan_type', '')
+    scan_type = (options.get('scan_type') or '').lower()
 
     # Scan types that require active testing (XSS/SQLi probes)
     active_enforced_types = {'smart', 'full', 'aggressive'}
@@ -70,6 +85,11 @@ async def run_scan(target: str, options: dict) -> dict:
     # If no scan_type, run standard scan (no flag needed)
 
     # Additional flags (can be combined with scan types)
+    # Pass --active when explicitly requested (even with explicit scan_type)
+    # Note: full/aggressive/smart already include active tests, so skip for those
+    if options.get('active') and scan_type not in ['full', 'aggressive', 'smart']:
+        cmd.append('--active')
+
     # Note: public is not allowed for smart/full/aggressive (validated above)
     if options.get('public'):
         cmd.append('--public')
@@ -77,6 +97,8 @@ async def run_scan(target: str, options: dict) -> dict:
         cmd.append('--xss')
     if options.get('sqli'):
         cmd.append('--sqli')
+    if options.get('deep_domxss'):
+        cmd.append('--deep-domxss')
     if options.get('nuclei') and scan_type not in ['full', 'aggressive', 'deep']:
         cmd.append('--nuclei')
     if options.get('enhanced_dns'):
@@ -95,6 +117,8 @@ async def run_scan(target: str, options: dict) -> dict:
         cmd.append('--json-link-following')
     if options.get('options_method_discovery'):
         cmd.append('--options-method-discovery')
+    if options.get('include_partial_attack_chains'):
+        cmd.append('--include-partial-attack-chains')
 
     # Smart scan tuning options
     if options.get('no_early_stop'):
@@ -175,20 +199,164 @@ async def run_scan(target: str, options: dict) -> dict:
             cmd_masked.append(c)
     print(f"  Command: {' '.join(cmd_masked)}", flush=True)
 
+    # Set up checkpoint file for partial result recovery
+    checkpoint_file = None
+    scan_env = os.environ.copy()
+    if scan_id:
+        checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
+        scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        env=scan_env
     )
-    stdout, stderr = await proc.communicate()
-    stdout_text = stdout.decode(errors="replace") if stdout else ""
-    stderr_text = stderr.decode(errors="replace") if stderr else ""
+
+    timeout_reason: str | None = None
+    max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+    override_minutes = os.environ.get("SCAN_MAX_DURATION_MINUTES")
+    if override_minutes:
+        try:
+            max_duration_minutes = int(override_minutes)
+        except Exception:
+            max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
+    else:
+        if scan_type:
+            max_duration_minutes = MAX_SCAN_DURATION.get(scan_type, DEFAULT_MAX_DURATION_MINUTES)
+
+    async def _watchdog_timeout() -> None:
+        nonlocal timeout_reason
+        if max_duration_minutes <= 0:
+            return
+        await asyncio.sleep(max_duration_minutes * 60)
+        if proc.returncode is None:
+            timeout_reason = (
+                f"Exceeded max duration ({max_duration_minutes} min for {scan_type or 'standard'} scan)"
+            )
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                return
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=SCAN_KILL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+    watchdog_task = asyncio.create_task(_watchdog_timeout())
+
+    stdout_chunks: list[bytes] = []
+    stderr_lines: list[str] = []
+    last_progress: tuple[str | None, int | None] = (None, None)
+    log_key = f"scan:{scan_id}:logs" if scan_id else None
+
+    def _parse_progress(line: str) -> tuple[str, int] | None:
+        if not line.startswith("[progress]"):
+            return None
+        phase_match = re.search(r"\bphase=([^\s]+)", line)
+        pct_match = re.search(r"\bpct=(\d{1,3})", line)
+        if not phase_match or not pct_match:
+            return None
+        phase = phase_match.group(1)
+        try:
+            pct = int(pct_match.group(1))
+        except ValueError:
+            return None
+        pct = max(0, min(100, pct))
+        return phase, pct
+
+    async def _handle_stdout(line: bytes) -> None:
+        stdout_chunks.append(line)
+
+    async def _handle_stderr(line: bytes) -> None:
+        nonlocal last_progress
+        text = line.decode(errors="replace").rstrip("\n")
+        if not text:
+            return
+        stderr_lines.append(text)
+        # Limit in-memory stderr to avoid bloat
+        if len(stderr_lines) > 2000:
+            stderr_lines.pop(0)
+
+        if log_key:
+            try:
+                r = get_redis()
+                r.rpush(log_key, text)
+                r.ltrim(log_key, -SCAN_LOG_TAIL, -1)
+                r.expire(log_key, SCAN_LOG_TTL_SECONDS)
+            except Exception:
+                pass
+
+        progress = _parse_progress(text)
+        if progress and scan_id:
+            phase, pct = progress
+            last_phase, last_pct = last_progress
+            if phase != last_phase or pct != last_pct:
+                await update_scan_progress(scan_id, phase, pct, job_id=job_id)
+                last_progress = (phase, pct)
+
+    async def _read_stream_lines(stream: asyncio.StreamReader, handler) -> None:
+        """Read stream line-by-line (for stderr progress messages)."""
+        while True:
+            try:
+                line = await stream.readline()
+            except asyncio.LimitOverrunError:
+                # Line exceeds buffer limit - read what we can and continue
+                partial = await stream.read(65536)
+                if partial:
+                    await handler(partial)
+                continue
+            if not line:
+                break
+            await handler(line)
+
+    async def _read_stream_full(stream: asyncio.StreamReader, handler) -> None:
+        """Read entire stream (for stdout JSON output that may exceed line buffer)."""
+        chunks = []
+        while True:
+            chunk = await stream.read(65536)  # Read in 64KB chunks
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if chunks:
+            await handler(b''.join(chunks))
+
+    # Use full read for stdout (JSON output can exceed 64KB line buffer)
+    # Use line-by-line for stderr (progress messages are always short lines)
+    stdout_task = asyncio.create_task(_read_stream_full(proc.stdout, _handle_stdout))
+    stderr_task = asyncio.create_task(_read_stream_lines(proc.stderr, _handle_stderr))
+
+    await proc.wait()
+    if watchdog_task:
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except BaseException:
+            pass  # CancelledError is BaseException in Python 3.8+
+    await stdout_task
+    await stderr_task
+
+    stdout_text = b"".join(stdout_chunks).decode(errors="replace") if stdout_chunks else ""
+    stderr_text = "\n".join(stderr_lines)
 
     try:
         result = json.loads(stdout_text)
     except json.JSONDecodeError:
+        if timeout_reason and checkpoint_file and checkpoint_file.exists():
+            try:
+                with open(checkpoint_file) as f:
+                    checkpoint_data = json.load(f)
+                partial = checkpoint_data.get("report")
+                if partial:
+                    partial["error"] = timeout_reason
+                    return partial
+            except Exception:
+                pass
         return {
-            'error': stderr_text,
+            'error': timeout_reason or stderr_text,
             'target': target,
             'exit_code': proc.returncode
         }
@@ -202,6 +370,13 @@ async def run_scan(target: str, options: dict) -> dict:
                 scan_metadata.setdefault("scanner_stderr", stderr_text[-20000:])
             else:
                 result["scan_metadata"] = {"scanner_stderr": stderr_text[-20000:]}
+
+    # Clean up checkpoint file on successful completion
+    if checkpoint_file and checkpoint_file.exists():
+        try:
+            checkpoint_file.unlink()
+        except Exception:
+            pass
 
     return result
 
@@ -363,13 +538,19 @@ async def send_heartbeats(job_id: str, stop_event: asyncio.Event):
             pass
 
 
-async def update_scan_progress(scan_id: str, phase: str, progress: int):
-    """Update scan progress in database."""
+async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: str | None = None):
+    """Update scan progress in database (and Redis if job_id provided)."""
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE scans SET current_phase = $1, progress = $2
             WHERE id = $3
         """, phase, progress, uuid.UUID(scan_id))
+    if job_id:
+        try:
+            r = get_redis()
+            r.hset(f"job:{job_id}", mapping={'current_phase': phase, 'progress': str(progress)})
+        except Exception:
+            pass
 
 
 async def process_scan_job(job_data: dict):
@@ -394,6 +575,7 @@ async def process_scan_job(job_data: dict):
         'started_at': now.isoformat(),
         'heartbeat': now.isoformat()
     })
+    r.delete(f"scan:{scan_id}:logs")
 
     # Update database
     target_id = None
@@ -408,12 +590,15 @@ async def process_scan_job(job_data: dict):
         if row:
             target_id = str(row['target_id'])
 
+    # Initial progress
+    await update_scan_progress(scan_id, "starting", 5, job_id=job_id)
+
     # Start heartbeat
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(send_heartbeats(job_id, stop_heartbeat))
 
     try:
-        result = await run_scan(target, options)
+        result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
     except ValueError as e:
         # Validation errors (e.g., incompatible options like public+smart)
         result = {
@@ -427,8 +612,8 @@ async def process_scan_job(job_data: dict):
         stop_heartbeat.set()
         try:
             await heartbeat_task
-        except Exception:
-            pass
+        except BaseException:
+            pass  # CancelledError is BaseException in Python 3.8+
 
     result['job_id'] = job_id
     result['scan_id'] = scan_id
@@ -446,15 +631,40 @@ async def process_scan_job(job_data: dict):
     completed_at = datetime.utcnow()
     duration = int((completed_at - now).total_seconds())
 
-    # Update database
+    # Update database - but check if scan was already marked failed by stale checker
     async with db_pool.acquire() as conn:
+        # Check current status - don't overwrite if already failed (e.g., by stale scan checker)
+        current = await conn.fetchrow(
+            "SELECT status FROM scans WHERE id = $1",
+            uuid.UUID(scan_id)
+        )
+        if current and current['status'] == 'failed':
+            print(f"[{job_id[:8]}] Scan already marked failed (stale?), not overwriting scan row", flush=True)
+            # Don't save findings - stale checker already saved partial findings from checkpoint.
+            # Saving late-completing findings would cause inconsistency between scan report and /findings.
+            # Update Redis to mark job as done so it doesn't stay "running"
+            # Don't set result_path - the late-completing output doesn't match the official partial results
+            job_key = f"job:{job_id}"
+            r.hset(job_key, mapping={
+                'status': 'failed',
+                'score': str(score) if score else 'N/A',
+                'grade': str(grade) if grade else 'N/A',
+                'completed_at': completed_at.isoformat(),
+                'progress': '100',
+                'current_phase': 'terminated'
+            })
+            r.expire(job_key, 86400)
+            return
+
         if error:
             await conn.execute("""
                 UPDATE scans SET
                     status = 'failed',
                     error_message = $1,
                     completed_at = $2,
-                    duration_seconds = $3
+                    duration_seconds = $3,
+                    progress = 100,
+                    current_phase = 'failed'
                 WHERE id = $4
             """, error, completed_at, duration, uuid.UUID(scan_id))
         else:
@@ -484,7 +694,9 @@ async def process_scan_job(job_data: dict):
         'result_path': filepath,
         'score': str(score) if score else 'N/A',
         'grade': str(grade) if grade else 'N/A',
-        'completed_at': completed_at.isoformat()
+        'completed_at': completed_at.isoformat(),
+        'progress': '100',
+        'current_phase': status
     })
     # Expire completed/failed job keys after 24 hours
     r.expire(job_key, 86400)
@@ -584,20 +796,33 @@ async def async_main():
 
     loop = asyncio.get_event_loop()
 
-    while True:
-        try:
-            # Use run_in_executor for blocking Redis pop
-            result = await loop.run_in_executor(None, lambda: r.blpop(QUEUE_NAME, timeout=30))
-            if result is None:
-                continue  # Timeout, continue polling
+    try:
+        while True:
+            try:
+                # Use run_in_executor for blocking Redis pop
+                result = await loop.run_in_executor(None, lambda: r.blpop(QUEUE_NAME, timeout=30))
+                if result is None:
+                    continue  # Timeout, continue polling
 
-            _, job_json = result
-            job_data = json.loads(job_json)
-            await process_job(job_data)
-        except Exception as e:
-            print(f"Error processing job: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+                _, job_json = result
+                job_data = json.loads(job_json)
+                await process_job(job_data)
+            except asyncio.CancelledError:
+                # Graceful shutdown requested (SIGTERM/SIGINT)
+                print("Worker received shutdown signal, exiting...", flush=True)
+                raise
+            except Exception as e:
+                print(f"Error processing job: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+    except asyncio.CancelledError:
+        # Clean shutdown
+        pass
+    finally:
+        # Close database pool
+        if db_pool:
+            await db_pool.close()
+        print("Worker shutdown complete", flush=True)
 
 
 def main():

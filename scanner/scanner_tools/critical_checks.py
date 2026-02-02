@@ -25,6 +25,7 @@ from typing import Any
 from dataclasses import dataclass
 
 from .common import detect_spa_catch_all, get_auth_curl_args, run
+from .access_control_checks import SPA_FRAMEWORK_INDICATORS
 
 
 # =============================================================================
@@ -893,7 +894,7 @@ async def test_path_traversal(url: str, discovered_urls: list[str] | None = None
         # Parse URL to get parameters
         try:
             parsed = urllib.parse.urlparse(test_url)
-            params = urllib.parse.parse_qs(parsed.query)
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         except Exception:
             continue
 
@@ -1627,30 +1628,114 @@ async def test_2fa_bypass(
     ]
 
     for endpoint in post_2fa_endpoints[:3]:  # Test first 3
+        # Fetch with body to validate it's actual account content (not SPA shell)
         out, err, rc = await run([
             "curl", "-sS", "-k", "--max-time", "5",
-            "-w", "%{http_code}",
-            "-o", "/dev/null"
+            "-w", "\n---HTTP_CODE---%{http_code}",
         ] + auth_args + [endpoint], timeout=8)
 
         if rc == 0 and out:
             try:
-                http_code = int(out.strip())
-                # If we get 200 without authentication, that's a problem
+                # Split body from status code
+                parts = out.rsplit("---HTTP_CODE---", 1)
+                body = parts[0] if len(parts) > 1 else ""
+                http_code = int(parts[-1].strip()) if parts else 0
+
+                # If we get 200 without authentication, verify it's not just SPA shell
                 if http_code == 200:
-                    results["vulnerable"] = True
-                    results["bypass_methods_detected"].append({
-                        "method": "direct_access",
-                        "endpoint": endpoint,
-                        "http_code": http_code,
-                        "description": "Post-2FA endpoint accessible without authentication"
-                    })
-                    results["evidence"].append({
-                        "method": "direct_access",
-                        "endpoint": endpoint,
-                        "issue": f"HTTP {http_code} - Accessible without authentication",
-                        "severity": "critical"
-                    })
+                    body_lower = body[:5000].lower()
+                    is_html = "<!doctype html" in body_lower or "<html" in body_lower
+
+                    # For non-HTML responses (JSON APIs), check for error indicators
+                    if not is_html:
+                        # Skip if response indicates auth failure/error
+                        # Note: '"error"' alone is too broad - catches {"error": null, "data": {...}}
+                        # Use specific patterns that indicate actual auth errors
+                        json_error_indicators = [
+                            '"error":"', '"error":{',  # error with string/object value
+                            '"unauthorized"', '"forbidden"',
+                            '"unauthenticated"', '"login required"',
+                            '"access denied"', '"not authenticated"',
+                            '"invalid token"', '"session expired"',
+                            '"authentication required"', '"not authorized"',
+                            '"status":401', '"status":403', '"status": 401', '"status": 403',
+                            '"code":401', '"code":403', '"code": 401', '"code": 403',
+                            '"statuscode":401', '"statuscode":403',
+                        ]
+                        is_json_error = any(ind in body_lower for ind in json_error_indicators)
+                        if is_json_error:
+                            continue  # Not a bypass - API returned auth error
+
+                        # JSON responses without auth error are likely vulnerable
+                        results["vulnerable"] = True
+                        results["bypass_methods_detected"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "http_code": http_code,
+                            "description": "Post-2FA endpoint accessible without authentication"
+                        })
+                        results["evidence"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "issue": f"HTTP {http_code} - Accessible without authentication",
+                            "severity": "critical"
+                        })
+                        continue
+
+                    # For HTML responses, require positive evidence of authenticated content
+                    # to avoid false positives from catch-all pages
+
+                    # SPA shell indicators - definitely a catch-all route
+                    # Use same indicators as access_control_checks for consistency
+                    has_spa_shell = any(ind.lower() in body_lower for ind in SPA_FRAMEWORK_INDICATORS)
+
+                    # Actual account/dashboard content indicators - positive evidence
+                    # These must be specific to authenticated content, not generic pages
+                    content_indicators = [
+                        # User identification (specific)
+                        "user_id", "userid", "user-id", "account_id", "accountid",
+                        "customer_id", "customerid", "member_id",
+                        # Account data (specific)
+                        "balance", "credit", "subscription", "billing",
+                        "order history", "purchase history", "transaction",
+                        # Session indicators (logout/signout implies logged in)
+                        "logout", "sign out", "signout", "log out",
+                        # Personal content markers (specific)
+                        "my profile", "my account", "my settings", "my dashboard",
+                        "my orders", "my purchases", "my subscriptions",
+                        "your profile", "your account", "your settings",
+                        # Personalized greetings (must include user context)
+                        "logged in as", "signed in as", "welcome back,",
+                        # JSON data markers (user-specific fields)
+                        '"email":', '"username":', '"user":', '"profile":',
+                        '"firstname":', '"lastname":', '"phone":',
+                        '"accountid":', '"userid":', '"customerid":',
+                        # Server-rendered dashboard elements (specific class/id names)
+                        "dashboard-header", "user-avatar", "account-nav",
+                        "profile-menu", "user-dropdown", "settings-link",
+                        "account-balance", "user-info", "member-since",
+                    ]
+                    has_content = any(ind in body_lower for ind in content_indicators)
+
+                    # Flag if: has authenticated content AND no SPA shell
+                    # Requires positive evidence - pages without content indicators are skipped
+                    # (this avoids FPs from generic catch-all pages, login pages, 404s)
+                    should_flag = has_content and not has_spa_shell
+
+                    if should_flag:
+                        results["vulnerable"] = True
+                        results["bypass_methods_detected"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "http_code": http_code,
+                            "description": "Post-2FA endpoint accessible without authentication"
+                        })
+                        results["evidence"].append({
+                            "method": "direct_access",
+                            "endpoint": endpoint,
+                            "issue": f"HTTP {http_code} - Accessible without authentication",
+                            "severity": "critical"
+                        })
             except ValueError:
                 pass
 

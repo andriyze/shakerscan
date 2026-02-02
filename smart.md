@@ -54,7 +54,7 @@ When smart mode is enabled, the following settings are applied:
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `discovery_scan_type` | `"smart"` | Enables recursive fuzzing |
-| `browser_crawl` | `max_pages=18, max_depth=3` | Multi-page authenticated crawl |
+| `browser_crawl` | `max_pages=30, max_depth=4` | Multi-page authenticated crawl |
 | `active_checks` | `enabled` | XSS/SQLi testing |
 | `nuclei` | `staged` | 4-wave adaptive scanning |
 | `max_active` | `50` | Increased active check limit |
@@ -64,7 +64,7 @@ When smart mode is enabled, the following settings are applied:
 | Option | Default | With Flag | Effect |
 |--------|---------|-----------|--------|
 | `no_early_stop` | `false` | `true` | Disables confidence-weighted early stopping in staged Nuclei |
-| `thorough_params` | `false` | `true` | Tests 50 endpoints × 10 params (vs 25×5) |
+| `thorough_params` | `false` | `true` | Tests 100 endpoints × 10 params per method (vs 50×5 per method) |
 | `oob_callback_url` | none | URL | OOB callback server for blind SQLi verification |
 
 ### Safety/Performance Limits
@@ -124,7 +124,14 @@ Multiple reconnaissance tasks run concurrently:
 └─ Permissions-Policy
 ```
 
-### 1.4 Technology Fingerprinting
+### 1.4 Light Port Scan (Service Hints)
+```
+├─ Top 200 TCP ports (no scripts)
+├─ Service/version hints for tech fingerprinting
+└─ Feeds gRPC discovery candidates
+```
+
+### 1.5 Technology Fingerprinting
 ```
 ├─ Wappalyzer-style detection
 ├─ Response header analysis
@@ -188,12 +195,13 @@ priority_paths = _prioritize_paths(current_level, signals)
 # - Paths matching SQL/XSS/auth signals
 # - Admin/internal endpoints
 ```
+Note: Initial discovery runs without nuclei signals; a post‑nuclei refinement pass uses signals to adapt recursive fuzzing depth and prioritization.
 
 ### 2.4 Browser-Based Crawl (Playwright)
 
 ```
-├─ Max pages: 18
-├─ Max depth: 3
+├─ Max pages: 30
+├─ Max depth: 4
 ├─ Captures:
 │   ├─ XHR/Fetch API calls
 │   ├─ Form submissions
@@ -269,8 +277,11 @@ class CoverageMetrics:
   "nuclei_templates": {
     "run": 1847,
     "matched": 23,
-    "hit_rate": 0.012
-  }
+    "hit_rate": 0.012,
+    "by_category": {}
+  },
+  "discovery_sources": ["har_network_capture", "url_crawl", "js_bundle_analysis"],
+  "auth_states_tested": ["anonymous"]
 }
 ```
 
@@ -435,8 +446,10 @@ if signals["file_inclusion"]:
 
 | Mode | SQLi Endpoints | SQLi Params | XSS Endpoints | XSS Params |
 |------|---------------|-------------|---------------|------------|
-| Default | 25 | 5 | 30 | 5 |
-| Thorough | 50 | 10 | 60 | 10 |
+| Default | 50 (per method) | 5 | 50 (per method) | 5 |
+| Thorough | 100 (per method) | 10 | 100 (per method) | 10 |
+
+**Note**: XSS endpoint limits apply separately to GET and POST/PUT/PATCH bodies (so totals can be ~2×).
 
 ### 4.2 Endpoint Prioritization
 
@@ -452,6 +465,11 @@ if signals.get("sql_errors") or signals.get("auth_issues"):
         reverse=True
     )
 ```
+
+**Synthetic Endpoint Policy**:
+If discovery yields too few endpoints, synthetic `/api/*` targets are generated only when API hints exist
+(HAR/API endpoints, `/api` paths, or manual endpoints) or when `--thorough-params` is set. Otherwise,
+synthetic targets are skipped to reduce noise.
 
 ### 4.3 DBMS-Aware SQLi Testing
 
@@ -566,6 +584,10 @@ oob_payloads = {
 canary = f"xss{random.randint(10000, 99999)}test"
 # Check if reflected in response
 ```
+
+**Targets**:
+- GET query params (classic reflection XSS)
+- POST/PUT/PATCH body params (JSON/form) using discovered body templates/defaults
 
 **Step 2: Context Analysis**
 ```python
@@ -819,7 +841,7 @@ If 200 response: Report potential unauthorized action
 
 ## Phase 6: Additional Smart-Mode Checks
 
-These advanced checks only run in smart mode:
+These advanced checks run in smart/full/aggressive modes (signal- and tech-gated):
 
 | Check | Description | Trigger |
 |-------|-------------|---------|
@@ -832,6 +854,8 @@ These advanced checks only run in smart mode:
 | OAuth Vulnerabilities | Redirect URI, state bypass | If OAuth detected |
 | GraphQL Vulnerabilities | Introspection, batching attacks | If GraphQL detected |
 | Cache Poisoning | Web cache poisoning | If caching headers found |
+
+Additional note: Active SSRF/command‑injection probes are **not** part of smart mode. They run only in full/aggressive scans with non‑safe exploit level **and** parameterized endpoints.
 
 ---
 
@@ -1033,10 +1057,138 @@ curl -X POST http://localhost:8080/scans \
 | Aspect | Default Smart Scan | Thorough Smart Scan |
 |--------|-------------------|---------------------|
 | Early stopping | After 3 critical / 5 high | Disabled |
-| SQLi endpoints | 25 per method | 50 per method |
+| SQLi endpoints | 50 per method | 100 per method |
 | SQLi params | 5 per endpoint | 10 per endpoint |
-| XSS endpoints | 30 | 60 |
+| XSS endpoints | 50 per method | 100 per method |
 | XSS params | 5 per endpoint | 10 per endpoint |
 | Typical duration | 15-40 min | 30-60+ min |
 | Use case | Quick assessment | Comprehensive pentest |
 | Findings | First occurrences | All occurrences |
+
+---
+
+## Attack Chain Analysis
+
+Smart scans correlate findings into attack chains - multi-step vulnerability combinations that demonstrate real-world attack scenarios.
+
+### Chain Types
+
+| Chain Type | Required Findings | Business Impact |
+|------------|-------------------|-----------------|
+| `xss_to_account_takeover` | XSS + insecure cookies | Session theft, account compromise |
+| `sqli_to_privilege_escalation` | SQLi + admin panel | Database compromise, admin access |
+| `ssrf_to_cloud_breach` | SSRF + cloud metadata | Cloud IAM credential theft |
+| `idor_to_data_breach` | BOLA + predictable IDs | Mass user data exfiltration |
+| `lfi_to_credential_theft` | LFI + sensitive files | Credential file exposure |
+| `auth_bypass_to_admin_access` | Auth bypass + admin | Unauthorized admin access |
+| `cors_to_data_theft` | CORS misconfig + sensitive data | Cross-origin data theft |
+| `weak_jwt_to_impersonation` | JWT weakness + user endpoints | User impersonation |
+| `open_redirect_to_phishing` | Open redirect + auth pages | Credential phishing |
+| `info_disclosure_to_exploitation` | Info leak + known CVE | Targeted exploitation |
+
+### JSON Output Structure
+
+**Complete Chain Example:**
+```json
+{
+  "chain_type": "xss_to_account_takeover",
+  "name": "XSS to Account Takeover",
+  "severity": "critical",
+  "confidence": 0.85,
+  "completeness": 1.0,
+  "steps": [
+    {
+      "step_number": 1,
+      "finding_type": "xss",
+      "description": "Attacker injects malicious JavaScript via reflected XSS",
+      "finding_id": "finding-uuid-1"
+    },
+    {
+      "step_number": 2,
+      "finding_type": "insecure_cookie",
+      "description": "Session cookie lacks HttpOnly flag, accessible to JavaScript",
+      "finding_id": "finding-uuid-2"
+    },
+    {
+      "step_number": 3,
+      "finding_type": "session_theft",
+      "description": "Attacker exfiltrates session token and hijacks account"
+    }
+  ],
+  "remediation": [
+    "Add HttpOnly flag to all session cookies",
+    "Implement Content Security Policy to prevent XSS",
+    "Add SameSite=Strict to cookies"
+  ]
+}
+```
+
+**Partial Chain Example:**
+```json
+{
+  "chain_type": "ssrf_to_cloud_breach",
+  "name": "SSRF to Cloud Breach",
+  "severity": "high",           // Downgraded from critical
+  "confidence": 0.60,
+  "completeness": 0.67,         // 2 of 3 required findings
+  "missing_required": ["cloud_metadata_access"],
+  "missing_optional": ["iam_role_assumption"],
+  "steps": [
+    {
+      "step_number": 1,
+      "finding_type": "ssrf",
+      "description": "Server-side request forgery allows internal requests",
+      "finding_id": "finding-uuid-3"
+    },
+    {
+      "step_number": 2,
+      "finding_type": "cloud_metadata_access",
+      "description": "MISSING: Access to cloud metadata service (169.254.169.254)"
+    }
+  ],
+  "remediation": [
+    "Block requests to internal IP ranges",
+    "Use allowlists for outbound requests",
+    "Implement IMDSv2 for AWS instances"
+  ]
+}
+```
+
+### Full Result Structure
+
+```json
+{
+  "attack_chains": {
+    "chains": [...],           // Complete chains (always populated)
+    "partial_chains": [...],   // Incomplete chains (always in JSON)
+    "report": "...",           // Human-readable text report
+    "summary": {
+      "total_chains": 2,
+      "total_partial_chains": 3,
+      "critical_chains": 1,
+      "high_chains": 1,
+      "chain_types": ["xss_to_account_takeover", "sqli_to_privilege_escalation"],
+      "partial_chain_types": ["ssrf_to_cloud_breach", "idor_to_data_breach"],
+      "partial_chains_included": false  // In human report only if option set
+    }
+  }
+}
+```
+
+### Enabling Partial Chains in Reports
+
+By default, only complete chains appear in the human-readable report. For analyst mode:
+
+```bash
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "options": {
+      "scan_type": "smart",
+      "include_partial_attack_chains": true
+    }
+  }'
+```
+
+**Note**: Partial chains are always available in `result.attack_chains.partial_chains` regardless of this option. The option only controls whether they appear in the human-readable `report` field.

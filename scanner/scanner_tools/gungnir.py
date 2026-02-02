@@ -132,7 +132,7 @@ async def gungnir_scan(
                                 san = san.lower()
                                 if san.endswith(domain.lower()) and san != domain.lower():
                                     subdomains.add(san.replace("*.", ""))
-                        except:
+                        except Exception:
                             # Not valid JSON, treat as plain domain
                             if line.endswith(domain.lower()) and line != domain.lower():
                                 subdomains.add(line.replace("*.", ""))
@@ -149,7 +149,7 @@ async def gungnir_scan(
             # Clean up temp file
             try:
                 os.unlink(roots_file)
-            except:
+            except Exception:
                 pass
 
     except Exception as e:
@@ -244,7 +244,7 @@ async def gungnir_monitor(
         finally:
             try:
                 os.unlink(roots_file)
-            except:
+            except Exception:
                 pass
 
     except Exception as e:
@@ -261,5 +261,5 @@ async def check_gungnir_available() -> bool:
     try:
         stdout, stderr, rc = await run([GUNGNIR_BIN, "-h"], timeout=5)
         return rc == 0 or "gungnir" in stdout.lower() or "gungnir" in stderr.lower()
-    except:
+    except Exception:
         return False

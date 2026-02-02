@@ -249,7 +249,7 @@ async def test_open_redirect(
     for test_url in urls_to_test:
         results["tested_urls"] += 1
         parsed = urllib.parse.urlparse(test_url)
-        query_params = urllib.parse.parse_qs(parsed.query)
+        query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
 
         # Check if URL has any redirect-like parameters
         for param_name in query_params:

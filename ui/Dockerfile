@@ -10,6 +10,10 @@ RUN npm install
 # Copy source
 COPY . .
 
+# Build-time app version (exposed to client)
+ARG NEXT_PUBLIC_APP_VERSION=dev
+ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
+
 # Build
 RUN npm run build
 

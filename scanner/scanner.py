@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import faulthandler
 import hashlib
 import json
 import logging
 import os
 import re
 import shlex
+import signal
 import socket
 import ssl
 import sys
+import time
 import urllib.parse
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +27,212 @@ from scanner_tools.har_discovery import (
 )
 from scanner_tools.signal_types import Signal, SignalSet
 from scanner_tools.verification_phase import verify_high_severity_findings
+try:
+    from scanner_tools.attack_chains import analyze_attack_chains
+except ImportError:
+    analyze_attack_chains = None
+
+REPORT_SCHEMA_VERSION = "2026-01-28"
+SCANNER_VERSION = os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
+CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
+
+# Enable stack dumps on SIGUSR1/SIGUSR2 for debugging hangs (best-effort).
+if os.environ.get("SCAN_FAULTHANDLER", "1") != "0":
+    try:
+        sig_usr1 = getattr(signal, "SIGUSR1", None)
+        if sig_usr1 is not None:
+            faulthandler.register(sig_usr1, all_threads=True, chain=False)
+        sig_usr2 = getattr(signal, "SIGUSR2", None)
+        if sig_usr2 is not None:
+            faulthandler.register(sig_usr2, all_threads=True, chain=False)
+    except Exception:
+        pass
+
+# Global reference to current report for checkpoint saving
+_current_report: dict | None = None
+
+
+def save_checkpoint(report: dict, phase: str) -> None:
+    """Save current report state to checkpoint file for recovery."""
+    global _current_report
+    _current_report = report
+
+    if not CHECKPOINT_FILE:
+        return
+
+    try:
+        checkpoint_data = {
+            "phase": phase,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "partial": True,
+            "report": report
+        }
+        # Write atomically using temp file + rename
+        temp_file = CHECKPOINT_FILE + ".tmp"
+        with open(temp_file, "w") as f:
+            json.dump(checkpoint_data, f)
+        os.replace(temp_file, CHECKPOINT_FILE)
+    except Exception as e:
+        print(f"[checkpoint] Failed to save checkpoint: {e}", file=sys.stderr)
+
+
+def emit_progress(phase: str, pct: int, message: str | None = None) -> None:
+    try:
+        pct_int = int(pct)
+    except Exception:
+        pct_int = 0
+    pct_int = max(0, min(100, pct_int))
+    parts = [f"[progress] phase={phase}", f"pct={pct_int}"]
+    if message:
+        safe_message = " ".join(str(message).split())
+        parts.append(f"message={safe_message}")
+    print(" ".join(parts), file=sys.stderr, flush=True)
+
+
+def _normalize_port_entry(entry: Any) -> dict[str, Any] | None:
+    if isinstance(entry, int):
+        return {"port": entry, "protocol": "tcp", "state": "open"}
+    if not isinstance(entry, dict):
+        return None
+    port = entry.get("port")
+    if port is None:
+        return None
+    normalized = dict(entry)
+    if "protocol" not in normalized and "transport" in normalized:
+        normalized["protocol"] = normalized.get("transport")
+    normalized.setdefault("protocol", "tcp")
+    normalized.setdefault("state", "open")
+    return normalized
+
+
+def _merge_port_list(primary: list[Any] | None, secondary: list[Any] | None) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen = set()
+    for source in (primary or []):
+        norm = _normalize_port_entry(source)
+        if not norm:
+            continue
+        key = (norm.get("port"), norm.get("protocol"), norm.get("state"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(norm)
+    for source in (secondary or []):
+        norm = _normalize_port_entry(source)
+        if not norm:
+            continue
+        key = (norm.get("port"), norm.get("protocol"), norm.get("state"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(norm)
+    return merged
+
+
+def _merge_port_scan_results(primary: dict[str, Any] | None, secondary: dict[str, Any] | None) -> dict[str, Any]:
+    primary = primary or {}
+    secondary = secondary or {}
+
+    merged = {
+        "open_ports": _merge_port_list(primary.get("open_ports"), secondary.get("open_ports")),
+        "services": primary.get("services") or secondary.get("services") or [],
+        "os_detection": primary.get("os_detection") or secondary.get("os_detection") or {},
+        "vulnerabilities": primary.get("vulnerabilities") or secondary.get("vulnerabilities") or [],
+        "scan_completed": primary.get("scan_completed") if primary.get("scan_completed") is not None else secondary.get("scan_completed"),
+    }
+    if primary.get("errors") or secondary.get("errors"):
+        merged["errors"] = primary.get("errors") or secondary.get("errors")
+
+    return merged
+
+# Architecture modules: Import from new modular structure
+# These modules extract common functionality for better maintainability
+# Support both package import (from scanner.scanner) and script import (python3 scanner.py)
+try:
+    from .constants import NUCLEI_PROMOTE_TEMPLATES
+    from .grading import grade
+    from .findings import (
+        normalize_finding,
+        deduplicate_findings,
+        now_utc_iso,
+    )
+    from .signals import extract_signals_from_nuclei
+    from .reporting import (
+        emit_config_findings,
+        _reproCurlHost,
+        _reproCurlCors,
+        _reproDig,
+        _reproDelv,
+        _reproTLS,
+        _ai_safe_commands_for_finding,
+        _ai_rule_verdict,
+        _mask_text_host,
+        _redact_sensitive,
+        _redact_body_value,
+        _redact_body_structure,
+        _redact_body_for_report,
+        _mask_structure,
+        _generate_fallback_executive_summary,
+        HONEYPOT_TEST_DOMAINS,
+    )
+except ImportError:
+    try:
+        from scanner.constants import NUCLEI_PROMOTE_TEMPLATES
+        from scanner.grading import grade
+        from scanner.findings import (
+            normalize_finding,
+            deduplicate_findings,
+            now_utc_iso,
+        )
+        from scanner.signals import extract_signals_from_nuclei
+        from scanner.reporting import (
+            emit_config_findings,
+            _reproCurlHost,
+            _reproCurlCors,
+            _reproDig,
+            _reproDelv,
+            _reproTLS,
+            _ai_safe_commands_for_finding,
+            _ai_rule_verdict,
+            _mask_text_host,
+            _redact_sensitive,
+            _redact_body_value,
+            _redact_body_structure,
+            _redact_body_for_report,
+            _mask_structure,
+            _generate_fallback_executive_summary,
+            HONEYPOT_TEST_DOMAINS,
+        )
+    except ImportError:
+        from constants import NUCLEI_PROMOTE_TEMPLATES
+        from grading import grade
+        from findings import (
+            normalize_finding,
+            deduplicate_findings,
+            now_utc_iso,
+        )
+        from signals import extract_signals_from_nuclei
+        from reporting import (
+            emit_config_findings,
+            _reproCurlHost,
+            _reproCurlCors,
+            _reproDig,
+            _reproDelv,
+            _reproTLS,
+            _ai_safe_commands_for_finding,
+            _ai_rule_verdict,
+            _mask_text_host,
+            _redact_sensitive,
+            _redact_body_value,
+            _redact_body_structure,
+            _redact_body_for_report,
+            _mask_structure,
+            _generate_fallback_executive_summary,
+            HONEYPOT_TEST_DOMAINS,
+        )
+
+# Alias for backward compatibility (inline code used different name)
+NUCLEI_PROMOTE_INFO_TEMPLATES = NUCLEI_PROMOTE_TEMPLATES
 
 # Set global socket timeout to prevent DNS hangs (critical fix for scanner.py)
 socket.setdefaulttimeout(10)
@@ -49,9 +258,6 @@ except ImportError:
     print("Warning: PyJWT not installed. JWT vulnerability testing limited.", file=sys.stderr)
 
 # ---------- utility functions ----------
-
-def now_utc_iso():
-    return datetime.now(UTC).isoformat()
 
 def normalize_host(target: str) -> tuple[str,int,str]:
     """Enhanced host normalization with protocol auto-detection"""
@@ -111,7 +317,7 @@ def auto_detect_protocol(target: str) -> tuple[str, int, str]:
         with context.wrap_socket(test_sock, server_hostname=host) as ssock:
             ssock.getpeercert()
         return host, 443, "https"
-    except:
+    except Exception:
         pass
 
     # Try HTTP (port 80)
@@ -121,7 +327,7 @@ def auto_detect_protocol(target: str) -> tuple[str, int, str]:
         test_sock.connect((host, 80))
         test_sock.close()
         return host, 80, "http"
-    except:
+    except Exception:
         pass
 
     # Try alternative ports
@@ -136,7 +342,7 @@ def auto_detect_protocol(target: str) -> tuple[str, int, str]:
                 return host, test_port, "https"
             else:
                 return host, test_port, "http"
-        except:
+        except Exception:
             continue
 
     # Default fallback
@@ -302,7 +508,7 @@ def parse_manual_endpoints(raw_lines: list[str]) -> list[dict[str, Any]]:
                 params = _split_endpoint_params(params_spec)
         else:
             parsed = urllib.parse.urlparse(url)
-            params = list(urllib.parse.parse_qs(parsed.query).keys())
+            params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
 
         if method in ("POST", "PUT", "PATCH"):
             if params:
@@ -335,7 +541,7 @@ def normalize_manual_endpoints(base_url: str, manual_endpoints: list[dict[str, A
                 params = list(param_defaults.keys())
             else:
                 parsed = urllib.parse.urlparse(url)
-                params = list(urllib.parse.parse_qs(parsed.query).keys())
+                params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
 
         normalized_ep = dict(endpoint)
         normalized_ep["url"] = url
@@ -413,7 +619,7 @@ async def dns_fallback_query(host: str, qtype: str) -> str:
             result = socket.gethostbyname(host)
             if result:
                 return result
-        except:
+        except Exception:
             pass
 
     return ""
@@ -564,8 +770,13 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict:
     return await _check_exposed_files_mod(base_url, quick_mode=quick_mode)
 
 
-async def nmap_full_scan(host: str, quick_mode: bool = False) -> dict[str, Any]:
-    return await _nmap_full_scan_mod(host, quick_mode)
+async def nmap_full_scan(
+    host: str,
+    quick_mode: bool = False,
+    top_ports: int | None = None,
+    scripts: bool = False,
+) -> dict[str, Any]:
+    return await _nmap_full_scan_mod(host, quick_mode, top_ports=top_ports, scripts=scripts)
 
 # ---------- Complete Mode Functions ----------
 
@@ -575,8 +786,18 @@ async def comprehensive_port_scan(host: str, max_ports: int = 1000) -> dict[str,
 async def deep_discovery_scan(base_url: str) -> dict[str, Any]:
     return await _deep_discovery_scan_mod(base_url)
 
-async def advanced_vuln_tests(base_url: str, exploit_level: str = "safe") -> dict[str, Any]:
-    return await _advanced_vuln_tests_mod(base_url, exploit_level)
+async def advanced_vuln_tests(
+    base_url: str,
+    exploit_level: str = "safe",
+    candidates: list[dict[str, Any]] | None = None,
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
+    return await _advanced_vuln_tests_mod(
+        base_url,
+        exploit_level=exploit_level,
+        candidates=candidates,
+        auth_session=auth_session,
+    )
 
 # ---------- Nuclei vulnerability scanning ----------
 
@@ -639,14 +860,42 @@ async def subdomain_takeover_check(host: str) -> dict[str, Any]:
 async def nosql_injection_test(url: str) -> dict[str, Any]:
     return await _nosql_injection_test_mod(url)
 
-async def ldap_injection_test(url: str) -> dict[str, Any]:
-    return await _ldap_injection_test_mod(url)
+async def ldap_injection_test(
+    url: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    param_defaults: dict[str, Any] | None = None,
+    max_params: int = 5,
+    max_payloads: int = 6,
+) -> dict[str, Any]:
+    return await _ldap_injection_test_mod(
+        url,
+        params_to_test=params_to_test,
+        auth_session=auth_session,
+        param_defaults=param_defaults,
+        max_params=max_params,
+        max_payloads=max_payloads,
+    )
 
 async def xxe_injection_test(url: str) -> dict[str, Any]:
     return await _xxe_injection_test_mod(url)
 
-async def ssti_test(url: str) -> dict[str, Any]:
-    return await _ssti_test_mod(url)
+async def ssti_test(
+    url: str,
+    params_to_test: list[str] | None = None,
+    auth_session: Any | None = None,
+    param_defaults: dict[str, Any] | None = None,
+    max_params: int = 5,
+    max_payloads: int = 6,
+) -> dict[str, Any]:
+    return await _ssti_test_mod(
+        url,
+        params_to_test=params_to_test,
+        auth_session=auth_session,
+        param_defaults=param_defaults,
+        max_params=max_params,
+        max_payloads=max_payloads,
+    )
 
 async def jwt_vulnerability_test(url: str, sample_token: str | None = None) -> dict[str, Any]:
     return await _jwt_vulnerability_test_mod(url, sample_token)
@@ -671,788 +920,21 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
 
 # ---------- Active checks (dalfox/sqlmap, optional) ----------
 
-async def dalfox_one(url: str, quick_mode: bool = False, auth_session: Any | None = None) -> list[dict]:
-    return await _dalfox_one_mod(url, quick_mode, auth_session=auth_session)
+async def dalfox_one(
+    url: str,
+    quick_mode: bool = False,
+    auth_session: Any | None = None,
+    deep_domxss: bool | None = None
+) -> list[dict]:
+    return await _dalfox_one_mod(url, quick_mode, auth_session=auth_session, deep_domxss=deep_domxss)
 
 async def sqlmap_test(url: str, quick_mode: bool = False, aggressive: bool = False, **kwargs) -> dict:
     return await _sqlmap_test_mod(url, quick_mode, aggressive=aggressive, **kwargs)
 
 # ---------- Reporting ----------
 
-def hsts_preload_readiness(hsts: str | None) -> dict[str, Any]:
-    if not hsts: return {"ready": False, "issues": ["HSTS missing."]}
-    issues = []
-    ready = True
-    m = re.search(r"max-age=(\d+)", hsts, re.I)
-    if not m or int(m.group(1)) < 31536000:
-        ready=False; issues.append("HSTS max-age < 1 year.")
-    if "includesubdomains" not in hsts.lower():
-        ready=False; issues.append("HSTS includeSubDomains missing.")
-    if "preload" not in hsts.lower():
-        ready=False; issues.append("HSTS preload token missing.")
-    return {"ready": ready, "issues": issues}
 
-# CWE to description mapping for findings
-CWE_DESCRIPTIONS = {
-    "CWE-22": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')",
-    "CWE-78": "Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')",
-    "CWE-79": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
-    "CWE-89": "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
-    "CWE-90": "Improper Neutralization of Special Elements used in an LDAP Query ('LDAP Injection')",
-    "CWE-94": "Improper Control of Generation of Code ('Code Injection')",
-    "CWE-98": "Improper Control of Filename for Include/Require Statement in PHP Program",
-    "CWE-117": "Improper Output Neutralization for Logs",
-    "CWE-200": "Exposure of Sensitive Information to an Unauthorized Actor",
-    "CWE-209": "Generation of Error Message Containing Sensitive Information",
-    "CWE-269": "Improper Privilege Management",
-    "CWE-284": "Improper Access Control",
-    "CWE-287": "Improper Authentication",
-    "CWE-295": "Improper Certificate Validation",
-    "CWE-307": "Improper Restriction of Excessive Authentication Attempts",
-    "CWE-310": "Cryptographic Issues",
-    "CWE-311": "Missing Encryption of Sensitive Data",
-    "CWE-319": "Cleartext Transmission of Sensitive Information",
-    "CWE-326": "Inadequate Encryption Strength",
-    "CWE-327": "Use of a Broken or Risky Cryptographic Algorithm",
-    "CWE-347": "Improper Verification of Cryptographic Signature",
-    "CWE-352": "Cross-Site Request Forgery (CSRF)",
-    "CWE-384": "Session Fixation",
-    "CWE-434": "Unrestricted Upload of File with Dangerous Type",
-    "CWE-521": "Weak Password Requirements",
-    "CWE-522": "Insufficiently Protected Credentials",
-    "CWE-532": "Insertion of Sensitive Information into Log File",
-    "CWE-601": "URL Redirection to Untrusted Site ('Open Redirect')",
-    "CWE-611": "Improper Restriction of XML External Entity Reference",
-    "CWE-614": "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute",
-    "CWE-639": "Authorization Bypass Through User-Controlled Key",
-    "CWE-640": "Weak Password Recovery Mechanism for Forgotten Password",
-    "CWE-643": "Improper Neutralization of Data within XPath Expressions ('XPath Injection')",
-    "CWE-644": "Improper Neutralization of HTTP Headers for Scripting Syntax",
-    "CWE-693": "Protection Mechanism Failure",
-    "CWE-778": "Insufficient Logging",
-    "CWE-798": "Use of Hard-coded Credentials",
-    "CWE-829": "Inclusion of Functionality from Untrusted Control Sphere",
-    "CWE-840": "Business Logic Errors",
-    "CWE-862": "Missing Authorization",
-    "CWE-915": "Improperly Controlled Modification of Dynamically-Determined Object Attributes",
-    "CWE-918": "Server-Side Request Forgery (SSRF)",
-    "CWE-942": "Permissive Cross-domain Policy with Untrusted Domains",
-    "CWE-943": "Improper Neutralization of Special Elements in Data Query Logic",
-    "CWE-1021": "Improper Restriction of Rendered UI Layers or Frames",
-}
 
-# Per-finding CVSS 3.1 scores based on actual vulnerability impact
-# These are pre-calculated CVSS base scores for known finding types
-FINDING_CVSS_SCORES = {
-    # A03: Injection - Critical/High
-    "sql injection": 9.8,
-    "sqli": 9.8,
-    "blind sql": 8.6,
-    "error-based sql": 9.8,
-    "union-based sql": 9.1,
-    "command injection": 9.8,
-    "os command": 9.8,
-    "rce": 9.8,
-    "remote code execution": 9.8,
-    "ssti": 8.6,
-    "template injection": 8.6,
-    "ldap injection": 8.6,
-    "nosql injection": 8.6,
-    "xpath injection": 8.6,
-    "xss stored": 8.1,
-    "stored xss": 8.1,
-    "xss reflected": 6.1,
-    "reflected xss": 6.1,
-    "xss dom": 6.5,
-    "dom-based xss": 6.5,
-    "xss": 6.1,  # Default XSS
-
-    # A01: Broken Access Control
-    "idor": 8.0,  # Increased from 7.5 - OWASP A01:2021 #1 risk
-    "bola": 8.0,  # Increased from 7.5 - OWASP A01:2021 #1 risk
-    "insecure direct object": 8.0,
-    "broken object level": 8.0,
-    "path traversal": 7.5,
-    "directory traversal": 7.5,
-    "local file inclusion": 8.6,
-    "lfi": 8.6,
-    "remote file inclusion": 9.8,
-    "rfi": 9.8,
-    # Context-dependent CSRF scoring (more specific patterns first)
-    "csrf password": 9.0,  # CSRF on password change = critical
-    "csrf account": 8.5,   # CSRF on account actions = high
-    "csrf admin": 9.0,     # CSRF on admin functions = critical
-    "csrf payment": 9.0,   # CSRF on payment = critical
-    "csrf delete": 8.5,    # CSRF on delete actions = high
-    "csrf": 8.0,           # Default CSRF score
-    "cross-site request forgery": 8.0,
-    "open redirect": 6.1,
-    "url redirect": 6.1,
-    "cors wildcard": 5.3,
-    "cors misconfiguration": 5.3,
-    "subdomain takeover": 9.0,
-
-    # A02: Cryptographic Failures
-    "tls 1.0": 7.4,
-    "tls 1.1": 6.8,
-    "ssl 3.0": 8.1,
-    "ssl 2.0": 9.1,
-    "weak cipher": 5.3,
-    "weak encryption": 5.3,
-    "certificate expired": 8.1,
-    "certificate expir": 8.1,
-    "self-signed certificate": 5.3,
-    "hsts missing": 6.1,
-    "hsts header": 6.1,
-    "heartbleed": 9.1,
-
-    # A07: Authentication Failures
-    "default credentials": 9.8,
-    "default password": 9.8,
-    "authentication bypass": 9.1,
-    "auth bypass": 9.1,
-    "session fixation": 7.5,
-    "session hijacking": 8.1,
-    "2fa bypass": 8.1,
-    "mfa bypass": 8.1,
-    "password reset": 7.5,
-    # JWT vulnerability differentiation (more specific patterns first)
-    "jwt none algorithm": 9.8,  # Critical: Authentication bypass
-    "jwt none": 9.8,            # Critical: Authentication bypass
-    "jwt alg none": 9.8,        # Critical: Authentication bypass
-    "jwt algorithm none": 9.8,  # Critical: Authentication bypass
-    "jwt weak signing": 8.0,    # High: Weak cryptographic signing
-    "jwt weak key": 8.0,        # High: Weak key
-    "jwt secret": 8.0,          # High: Weak/exposed secret
-    "jwt expired": 5.0,         # Medium: Expired token issues
-    "jwt signature": 7.5,       # High: Signature validation issues
-    "jwt": 7.5,                 # Default fallback
-    "brute force": 7.5,
-    "account lockout": 5.3,
-
-    # A05: Security Misconfiguration
-    "exposed .env": 9.1,
-    "exposed credentials": 9.8,
-    "exposed api key": 9.1,
-    "exposed secret": 9.1,
-    "exposed private key": 9.8,
-    "exposed database": 9.1,
-    "exposed backup": 7.5,
-    "directory listing": 5.3,
-    "server version": 0.0,  # Informational only - version disclosure without CVE is not a vulnerability
-    "information disclosure": 5.3,
-    "stack trace": 5.3,
-    "debug mode": 5.3,
-    "csp missing": 5.0,
-    "security header": 5.0,
-    "x-frame-options": 4.3,
-    "clickjacking": 4.3,
-
-    # A10: SSRF
-    "ssrf": 8.6,
-    "server-side request forgery": 8.6,
-    "blind ssrf": 7.5,
-
-    # A08: Software and Data Integrity
-    "deserialization": 8.1,
-    "insecure deserialization": 8.1,
-    "xxe": 7.5,
-    "xml external entity": 7.5,
-    "subresource integrity": 4.0,  # SRI missing is defense-in-depth, not critical
-    "missing sri": 4.0,            # Same as SRI
-
-    # A06: Vulnerable Components
-    "vulnerable component": 7.5,
-    "outdated": 5.3,
-    "cve-": 7.5,  # Default for CVE findings
-
-    # A04: Insecure Design
-    "race condition": 7.5,
-    "business logic": 6.5,
-    "file upload": 8.1,
-
-    # DNS/Email Security (not directly exploitable, email spoofing risk)
-    "dmarc missing": 4.0,
-    "dmarc policy": 3.0,  # Policy exists but not enforced
-    "dmarc rua": 2.0,  # Missing reporting
-    "spf missing": 4.0,
-    "spf": 3.0,  # SPF issues
-    "mta-sts": 3.0,
-    "tls-rpt": 2.0,
-    "caa record": 3.0,
-    "dns_policy": 3.0,  # Fallback for dns policy tool
-
-    # Informational
-    "waf detected": 0.0,
-    "cdn detected": 0.0,
-    "technology detected": 0.0,
-    "security.txt": 0.0,  # Not a vulnerability
-    "header reflection": 3.1,  # Non-cacheable cache poisoning
-    "cache poisoning": 7.5,  # When cacheable
-}
-
-# =============================================================================
-# NOISE REDUCTION: Patterns that are NOT vulnerabilities
-# =============================================================================
-# These findings are informational only - they don't represent exploitable
-# security issues. Force them to "info" severity regardless of tool output.
-# This reduces noise and helps engineers focus on real vulnerabilities.
-
-INFO_ONLY_PATTERNS = frozenset([
-    # Technology fingerprinting (not vulnerabilities)
-    "technology detected",
-    "tech detected",
-    "server version",
-    "version detected",
-    "waf detected",
-    "cdn detected",
-    "cms detected",
-    "framework detected",
-
-    # Security best practices (defense-in-depth, not exploitable alone)
-    "robots.txt",
-    "security.txt",
-    "sitemap.xml",
-    "missing x-frame-options",
-    "missing x-content-type-options",
-    "missing referrer-policy",
-    "missing permissions-policy",
-    "missing feature-policy",
-    "x-frame-options header",
-    "x-content-type-options header",
-    "http-missing-security-headers",
-    "strict-transport-security",
-    "content-security-policy header not",
-
-    # SSL/TLS informational (not vulnerabilities unless actively broken)
-    "ssl-issuer",
-    "ssl issuer",
-    "certificate issuer",
-    "tls 1.2 supported",  # 1.2 is acceptable
-    "self-signed certificate",  # Depends on context
-
-    # DNS informational
-    "caa record",
-    "dns-over-https",
-    "dnssec not",
-
-    # Panels/endpoints that exist (existence ≠ vulnerability)
-    "admin panel",
-    "login panel",
-    "admin login",
-    "exposed panel",
-    "panel detected",
-    "dashboard detected",
-
-    # Generic low-value findings
-    "email address found",
-    "phone number found",
-    "social media",
-])
-
-# Nuclei template IDs that are known to be noisy or informational-only
-NUCLEI_INFO_TEMPLATES = frozenset([
-    # Technology detection
-    "tech-detect",
-    "waf-detect",
-    "cdn-detect",
-    "favicon-detect",
-    "fingerprinthub",
-
-    # Headers that aren't vulnerabilities
-    "security-headers",
-    "http-missing-security-headers",
-    "strict-transport-security",
-    "x-frame-options",
-    "x-content-type-options",
-    "permissions-policy",
-    "referrer-policy",
-    "content-security-policy",
-
-    # Informational SSL
-    "ssl-issuer",
-    "weak-cipher-suites",  # Often FP, needs context
-    "tls-version",
-
-    # Files that exist (not vulns)
-    "robots-txt",
-    "security-txt",
-    "sitemap-xml",
-    "crossdomain-xml",
-    "clientaccesspolicy-xml",
-
-    # Panels (existence ≠ vulnerability)
-    "panel-detect",
-    "admin-panel",
-    "login-panel",
-    "default-login",
-])
-
-# Nuclei templates to EXCLUDE entirely (too noisy, too many FPs)
-NUCLEI_EXCLUDE_TEMPLATES = frozenset([
-    "fuzzing",
-    "brute-force",
-    "dos",
-    "rate-limit",
-])
-
-# High-value nuclei INFO templates that should be PROMOTED to findings (as low severity)
-# These are security-relevant findings that matter for posture assessment
-NUCLEI_PROMOTE_INFO_TEMPLATES = frozenset([
-    # Exposed services (sensitive protocols)
-    "ssh-detect", "openssh-detect", "ssh-password-auth",
-    "rdp-detect", "vnc-detect", "telnet-detect",
-    # Database exposure
-    "mysql-detect", "postgresql-detect", "mongodb-detect", "redis-detect",
-    "elasticsearch-detect", "memcached-detect", "couchdb-detect",
-    # Development/debug endpoints
-    "graphql-detect", "graphql-playground", "graphiql",
-    "prometheus-metrics", "actuator-health", "spring-actuator",
-    "debug-endpoint", "phpinfo", "pprof-debug",
-    # API documentation exposure
-    "swagger-ui", "swagger-api", "openapi-detect",
-    # Cloud/config exposure
-    "aws-bucket", "s3-bucket", "azure-blob",
-    "git-config", "git-directory", "exposed-git",
-    "env-file", "dotenv",
-    # Admin/sensitive panels
-    "phpmyadmin", "adminer", "kibana", "grafana",
-    "jenkins-detect", "gitlab-detect", "bitbucket-detect",
-])
-
-# OWASP category weights for risk-based scoring
-OWASP_WEIGHT = {
-    "A01:2021": 1.5,  # Broken Access Control - #1 risk
-    "A02:2021": 1.3,  # Cryptographic Failures
-    "A03:2021": 1.5,  # Injection - high impact
-    "A04:2021": 1.0,  # Insecure Design
-    "A05:2021": 1.0,  # Security Misconfiguration
-    "A06:2021": 1.2,  # Vulnerable Components
-    "A07:2021": 1.3,  # Auth Failures
-    "A08:2021": 1.0,  # Integrity Failures
-    "A09:2021": 0.8,  # Logging Failures
-    "A10:2021": 1.2,  # SSRF
-}
-
-def calculate_cvss_score(finding: dict[str, Any]) -> float:
-    """Calculate CVSS v3.1 score for a finding using per-finding lookup table"""
-    import re
-    title = finding.get("title", "").lower()
-    tool = finding.get("tool", "").lower()
-    severity = finding.get("severity", "medium").lower()
-
-    # Info-level findings should always have CVSS 0.0
-    # This prevents pattern matching from inflating scores for informational findings
-    if severity == "info":
-        return 0.0
-
-    # Short patterns that need word boundary matching to avoid false positives
-    # e.g., "rce" should not match "enforced", "xss" should not match "xxxss"
-    SHORT_PATTERNS_NEED_BOUNDARY = {
-        'rce', 'lfi', 'rfi', 'xss', 'xxe', 'jwt', 'spf', 'ssrf'
-    }
-
-    def pattern_matches(pattern: str, text: str) -> bool:
-        """Check if pattern matches text, using word boundaries for short patterns"""
-        if pattern in SHORT_PATTERNS_NEED_BOUNDARY:
-            # Use word boundary matching for short patterns
-            # Match at start/end of string or surrounded by non-word chars
-            # Note: Allow hyphens/underscores after pattern (e.g., "jwt-token" matches "jwt")
-            regex = r'(?:^|[^a-z0-9])' + re.escape(pattern) + r'(?:[^a-z0-9]|[-_]|$)'
-            return bool(re.search(regex, text))
-        else:
-            # Standard substring matching for longer, more specific patterns
-            return pattern in text
-
-    # Try to match against known finding types (most specific first)
-    for pattern, score in FINDING_CVSS_SCORES.items():
-        if pattern_matches(pattern, title) or pattern_matches(pattern, tool):
-            # Graduated exploit availability bonus based on maturity
-            evidence = finding.get("evidence", {})
-            details = finding.get("details", {})
-            exploit_maturity = evidence.get("exploit_maturity") or details.get("exploit_maturity")
-
-            if exploit_maturity == "poc":
-                return min(10.0, round(score + 0.5, 1))
-            elif exploit_maturity == "functional":
-                return min(10.0, round(score + 0.75, 1))
-            elif exploit_maturity in ("weaponized", "high"):
-                return min(10.0, round(score + 1.0, 1))
-            elif evidence.get("exploit_available") or details.get("exploit_available"):
-                return min(10.0, round(score + 0.5, 1))
-            return score
-
-    # Fallback to severity-based scoring
-    base_scores = {
-        "critical": 9.0,
-        "high": 7.5,
-        "medium": 5.0,
-        "low": 3.0,
-        "info": 0.0
-    }
-
-    return base_scores.get(severity, 5.0)
-
-
-def apply_context_modifiers(finding: dict[str, Any], cvss_score: float) -> float:
-    """
-    Apply context-aware modifiers to CVSS score based on finding location and impact.
-
-    Context factors that increase severity:
-    - Finding on authentication/login endpoints
-    - Finding on payment/checkout endpoints
-    - Finding on admin/dashboard endpoints
-    - Finding that exposes PII/sensitive data
-
-    Context factors that decrease severity:
-    - Finding on static assets
-    - Finding on public/unauthenticated endpoints (for some vuln types)
-    - Finding on development/test endpoints
-
-    Args:
-        finding: The finding dict with evidence
-        cvss_score: The base CVSS score
-
-    Returns:
-        Adjusted CVSS score
-    """
-    if cvss_score <= 0:
-        return cvss_score
-
-    evidence = finding.get("evidence", {})
-    title = finding.get("title", "").lower()
-
-    # Extract endpoint from evidence
-    endpoint = ""
-    if isinstance(evidence, dict):
-        endpoint = str(evidence.get("url", "") or evidence.get("endpoint", "") or evidence.get("path", "")).lower()
-
-    # Sensitive endpoint patterns (increase severity)
-    AUTH_ENDPOINTS = ["login", "signin", "auth", "oauth", "token", "session", "password", "forgot", "reset", "register", "signup"]
-    PAYMENT_ENDPOINTS = ["payment", "checkout", "billing", "invoice", "subscription", "cart", "order", "purchase"]
-    ADMIN_ENDPOINTS = ["admin", "dashboard", "manage", "settings", "config", "panel", "console"]
-    API_ENDPOINTS = ["/api/", "/v1/", "/v2/", "/graphql"]
-
-    # Non-sensitive endpoint patterns (decrease severity for some vulns)
-    STATIC_ENDPOINTS = [".js", ".css", ".png", ".jpg", ".gif", ".svg", ".woff", ".ico", "/static/", "/assets/", "/public/"]
-    DEV_ENDPOINTS = ["/test", "/debug", "/dev", "/staging", "localhost", "127.0.0.1"]
-
-    modifier = 0.0
-
-    # Check for sensitive endpoint matches
-    for pattern in AUTH_ENDPOINTS:
-        if pattern in endpoint:
-            modifier += 0.5
-            break
-
-    for pattern in PAYMENT_ENDPOINTS:
-        if pattern in endpoint:
-            modifier += 0.5
-            break
-
-    for pattern in ADMIN_ENDPOINTS:
-        if pattern in endpoint:
-            modifier += 0.3
-            break
-
-    for pattern in API_ENDPOINTS:
-        if pattern in endpoint:
-            modifier += 0.2
-            break
-
-    # Check for non-sensitive endpoints (only apply to certain vuln types)
-    is_static = any(pattern in endpoint for pattern in STATIC_ENDPOINTS)
-    is_dev = any(pattern in endpoint for pattern in DEV_ENDPOINTS)
-
-    # For informational findings on static assets, reduce severity
-    if is_static and finding.get("severity", "").lower() in ("low", "info"):
-        modifier -= 0.5
-
-    # Dev/test endpoints are less critical for external reports
-    if is_dev:
-        modifier -= 0.3
-
-    # Specific vulnerability type context adjustments
-    vuln_type = finding.get("tool", "").lower()
-
-    # CORS on public unauthenticated endpoints is less severe
-    if "cors" in title or "cors" in vuln_type:
-        has_auth_endpoint = any(p in endpoint for p in AUTH_ENDPOINTS + PAYMENT_ENDPOINTS)
-        if not has_auth_endpoint:
-            modifier -= 0.5  # CORS without auth context is less severe
-
-    # XSS on admin pages is more severe (admin can do more damage)
-    if "xss" in title or "xss" in vuln_type:
-        if any(p in endpoint for p in ADMIN_ENDPOINTS):
-            modifier += 0.3
-
-    # Open redirect on login pages enables phishing
-    if "redirect" in title:
-        if any(p in endpoint for p in AUTH_ENDPOINTS):
-            modifier += 0.5
-
-    # CSRF on state-changing endpoints is more severe
-    if "csrf" in title:
-        if any(p in endpoint for p in AUTH_ENDPOINTS + PAYMENT_ENDPOINTS):
-            modifier += 0.5
-
-    # Apply modifier with bounds
-    adjusted = cvss_score + modifier
-    return max(0.0, min(10.0, round(adjusted, 1)))
-
-def map_to_cwe(finding: dict[str, Any]) -> str:
-    """Map findings to CWE IDs"""
-    # If CWE already provided, use it
-    if finding.get("cwe"):
-        return finding["cwe"]
-
-    # Map based on vulnerability type (comprehensive CWE Top 25 + additional)
-    title = finding.get("title", "").lower()
-    tool = finding.get("tool", "").lower()
-    combined = f"{title} {tool}"
-
-    cwe_mapping = {
-        # A03: Injection
-        "sql injection": "CWE-89",
-        "sqli": "CWE-89",
-        "xss": "CWE-79",
-        "cross-site scripting": "CWE-79",
-        "command injection": "CWE-78",
-        "os command": "CWE-78",
-        "xxe": "CWE-611",
-        "xml external": "CWE-611",
-        "ldap injection": "CWE-90",
-        "nosql": "CWE-943",
-        "xpath": "CWE-643",
-        "ssti": "CWE-94",
-        "template injection": "CWE-94",
-
-        # A01: Broken Access Control
-        "csrf": "CWE-352",
-        "cross-site request forgery": "CWE-352",
-        "idor": "CWE-639",
-        "bola": "CWE-639",
-        "insecure direct object": "CWE-639",
-        "path traversal": "CWE-22",
-        "directory traversal": "CWE-22",
-        "lfi": "CWE-98",
-        "local file inclusion": "CWE-98",
-        "rfi": "CWE-98",
-        "remote file inclusion": "CWE-98",
-        "open redirect": "CWE-601",
-        "url redirect": "CWE-601",
-        "cors": "CWE-942",
-        "subdomain takeover": "CWE-284",
-        "privilege escalation": "CWE-269",
-        "authorization": "CWE-862",
-        "access control": "CWE-284",
-
-        # A02: Cryptographic Failures
-        "weak cipher": "CWE-326",
-        "weak encryption": "CWE-326",
-        "tls": "CWE-310",
-        "ssl": "CWE-310",
-        "certificate": "CWE-295",
-        "heartbleed": "CWE-119",
-        "hsts": "CWE-693",
-
-        # A07: Authentication Failures
-        "authentication": "CWE-287",
-        "auth bypass": "CWE-287",
-        "default credential": "CWE-798",
-        "default password": "CWE-798",
-        "hardcoded": "CWE-798",
-        "session": "CWE-384",
-        "session fixation": "CWE-384",
-        "jwt": "CWE-347",
-        "brute force": "CWE-307",
-        "rate limit": "CWE-307",
-        "2fa bypass": "CWE-287",
-        "mfa bypass": "CWE-287",
-        "password reset": "CWE-640",
-
-        # A05: Security Misconfiguration
-        "exposed": "CWE-200",
-        "information disclosure": "CWE-200",
-        "sensitive data": "CWE-200",
-        "debug": "CWE-489",
-        "stack trace": "CWE-209",
-        "error message": "CWE-209",
-        "directory listing": "CWE-548",
-        "backup file": "CWE-530",
-
-        # A10: SSRF
-        "ssrf": "CWE-918",
-        "server-side request": "CWE-918",
-
-        # A08: Integrity Failures
-        "deserialization": "CWE-502",
-        "insecure deserialization": "CWE-502",
-
-        # A06: Vulnerable Components
-        "vulnerable": "CWE-1104",
-        "outdated": "CWE-1104",
-        "cve-": "CWE-1104",
-
-        # A04: Insecure Design
-        "race condition": "CWE-362",
-        "business logic": "CWE-840",
-        "file upload": "CWE-434",
-        "unrestricted upload": "CWE-434",
-
-        # Additional important CWEs
-        "input validation": "CWE-20",
-        "improper input": "CWE-20",
-        "encoding": "CWE-116",
-        "escaping": "CWE-116",
-        "cache poisoning": "CWE-444",
-        "http smuggling": "CWE-444",
-        "host header": "CWE-644",
-        "clickjacking": "CWE-1021",
-        "x-frame": "CWE-1021",
-        "mass assignment": "CWE-915",
-        "api security": "CWE-285",
-    }
-
-    for key, cwe in cwe_mapping.items():
-        if key in combined:
-            return cwe
-
-    return "CWE-16"  # Configuration
-
-def owasp_mapping(finding: dict[str, Any]) -> str:
-    """Map findings to OWASP Top 10 2021"""
-    title = finding.get("title", "").lower()
-    tool = finding.get("tool", "").lower()
-    combined = f"{title} {tool}"
-
-    owasp_map = {
-        # A01: Broken Access Control
-        "idor": "A01:2021 - Broken Access Control",
-        "bola": "A01:2021 - Broken Access Control",
-        "path traversal": "A01:2021 - Broken Access Control",
-        "directory traversal": "A01:2021 - Broken Access Control",
-        "exposed": "A01:2021 - Broken Access Control",
-        "cors": "A01:2021 - Broken Access Control",
-        "csrf": "A01:2021 - Broken Access Control",
-        "open redirect": "A01:2021 - Broken Access Control",
-        "authorization": "A01:2021 - Broken Access Control",
-        "access control": "A01:2021 - Broken Access Control",
-
-        # A02: Cryptographic Failures
-        "tls": "A02:2021 - Cryptographic Failures",
-        "ssl": "A02:2021 - Cryptographic Failures",
-        "cipher": "A02:2021 - Cryptographic Failures",
-        "certificate": "A02:2021 - Cryptographic Failures",
-        "hsts": "A02:2021 - Cryptographic Failures",
-        "encryption": "A02:2021 - Cryptographic Failures",
-
-        # A03: Injection
-        "injection": "A03:2021 - Injection",
-        "sql": "A03:2021 - Injection",
-        "sqli": "A03:2021 - Injection",
-        "nosql": "A03:2021 - Injection",
-        "ldap": "A03:2021 - Injection",
-        "xss": "A03:2021 - Injection",
-        "command": "A03:2021 - Injection",
-        "xxe": "A03:2021 - Injection",
-        "ssti": "A03:2021 - Injection",
-
-        # A04: Insecure Design
-        "race condition": "A04:2021 - Insecure Design",
-        "business logic": "A04:2021 - Insecure Design",
-        "file upload": "A04:2021 - Insecure Design",
-
-        # A05: Security Misconfiguration
-        "misconfiguration": "A05:2021 - Security Misconfiguration",
-        "debug": "A05:2021 - Security Misconfiguration",
-        "default": "A05:2021 - Security Misconfiguration",
-        "subdomain": "A05:2021 - Security Misconfiguration",
-        "csp": "A05:2021 - Security Misconfiguration",
-        "security header": "A05:2021 - Security Misconfiguration",
-        "backup": "A05:2021 - Security Misconfiguration",
-        "cicd": "A05:2021 - Security Misconfiguration",
-
-        # A06: Vulnerable Components
-        "vulnerable": "A06:2021 - Vulnerable and Outdated Components",
-        "outdated": "A06:2021 - Vulnerable and Outdated Components",
-        "cve-": "A06:2021 - Vulnerable and Outdated Components",
-        "dependency": "A06:2021 - Vulnerable and Outdated Components",
-
-        # A07: Authentication Failures
-        "authentication": "A07:2021 - Identification and Authentication Failures",
-        "session": "A07:2021 - Identification and Authentication Failures",
-        "jwt": "A07:2021 - Identification and Authentication Failures",
-        "credential": "A07:2021 - Identification and Authentication Failures",
-        "password": "A07:2021 - Identification and Authentication Failures",
-        "2fa": "A07:2021 - Identification and Authentication Failures",
-        "mfa": "A07:2021 - Identification and Authentication Failures",
-        "brute force": "A07:2021 - Identification and Authentication Failures",
-
-        # A08: Software and Data Integrity Failures
-        "deserialization": "A08:2021 - Software and Data Integrity Failures",
-        "integrity": "A08:2021 - Software and Data Integrity Failures",
-
-        # A10: SSRF
-        "ssrf": "A10:2021 - Server-Side Request Forgery",
-    }
-
-    for key, owasp in owasp_map.items():
-        if key in combined:
-            return owasp
-
-    # More specific fallback based on keywords
-    if any(kw in combined for kw in ["log", "monitor", "audit", "trace"]):
-        return "A09:2021 - Security Logging and Monitoring Failures"
-    if any(kw in combined for kw in ["component", "library", "dependency", "version"]):
-        return "A06:2021 - Vulnerable and Outdated Components"
-
-    return "A05:2021 - Security Misconfiguration"
-
-
-# SOC 2 Trust Services Criteria mapping
-SOC2_CRITERIA_MAP = {
-    # CC6: Logical and Physical Access Controls
-    "CC6.1": ["idor", "bola", "authorization", "access control", "privilege", "path traversal"],
-    "CC6.2": ["authentication", "session", "2fa", "mfa", "credential", "password", "jwt", "brute force"],
-    "CC6.3": ["encryption", "tls", "ssl", "cipher", "certificate", "hsts"],
-    "CC6.6": ["exposed", "information disclosure", "sensitive"],
-    "CC6.7": ["input validation", "injection", "xss", "sql", "command"],
-
-    # CC7: System Operations
-    "CC7.1": ["monitoring", "logging", "audit"],
-    "CC7.2": ["vulnerability", "cve-", "outdated", "patching", "scan"],
-
-    # CC8: Change Management
-    "CC8.1": ["cicd", "deployment", "configuration"],
-}
-
-
-def soc2_mapping(finding: dict[str, Any]) -> list[str]:
-    """Map finding to SOC 2 Trust Services Criteria"""
-    title = finding.get("title", "").lower()
-    tool = finding.get("tool", "").lower()
-    combined = f"{title} {tool}"
-
-    matched_criteria = []
-    for criteria, keywords in SOC2_CRITERIA_MAP.items():
-        for keyword in keywords:
-            if keyword in combined:
-                matched_criteria.append(criteria)
-                break
-
-    if matched_criteria:
-        return matched_criteria
-
-    # More specific fallback based on keywords
-    if any(kw in combined for kw in ["log", "monitor", "audit", "trace"]):
-        return ["CC7.1"]  # System monitoring
-    if any(kw in combined for kw in ["component", "library", "dependency", "version", "cve"]):
-        return ["CC7.2"]  # Vulnerability management
-    if any(kw in combined for kw in ["cicd", "deploy", "config", "pipeline"]):
-        return ["CC8.1"]  # Change management
-
-    return ["CC6.1"]  # Default to access control
 
 
 def assess_scan_completeness(
@@ -1727,883 +1209,29 @@ def assess_scan_completeness(
     }
 
 
-def grade(report: dict[str, Any]) -> dict[str, Any]:
-    score = 100
-    notes = []
-    remediation = []
-    cvss_scores = []
-    compliance_issues = {"owasp": set(), "cwe": set(), "soc2": set()}
-    max_severity = "info"  # Track highest severity for grade adjustment
-
-    tls = report["tls"]
-    http = report["http"]
-    dns = report["dns"]
-    findings = report.get("findings", [])
-
-    # FIX: Robust TLS version extraction with comprehensive format handling
-    # Handles: "tls13", "TLS13", "tls1.3", "TLSv1.3", "TLS 1.3", etc.
-    def normalize_tls_version(v: str) -> str | None:
-        """Normalize TLS version string to canonical format (e.g., '1.3', '1.2')."""
-        if not v:
-            return None
-        s = str(v).lower().strip()
-        # Direct mappings for common formats
-        if s in ("tls13", "tls1.3", "tlsv1.3", "tls 1.3", "1.3"):
-            return "1.3"
-        if s in ("tls12", "tls1.2", "tlsv1.2", "tls 1.2", "1.2"):
-            return "1.2"
-        if s in ("tls11", "tls1.1", "tlsv1.1", "tls 1.1", "1.1"):
-            return "1.1"
-        if s in ("tls10", "tls1.0", "tlsv1.0", "tls 1.0", "tls1", "tlsv1", "1.0"):
-            return "1.0"
-        if "sslv3" in s or s == "ssl3":
-            return "ssl3"
-        if "sslv2" in s or s == "ssl2":
-            return "ssl2"
-        # Fallback: extract version number pattern
-        m = re.search(r"(\d+)\.(\d+)", s)
-        if m:
-            return f"{m.group(1)}.{m.group(2)}"
-        return None
-
-    # Extract from endpoints array
-    raw_versions = [e.get("tlsversion") for e in tls.get("endpoints", []) if e.get("tlsversion")]
-    versions = set()
-    for v in raw_versions:
-        normalized = normalize_tls_version(v)
-        if normalized:
-            versions.add(normalized)
-
-    # Also extract TLS versions from cipher_suites keys (e.g., "TLSv1.2" -> "1.2")
-    # This handles cases where endpoints array is empty but cipher_suites has data
-    cipher_suites = tls.get("cipher_suites") or {}
-    for proto_key in cipher_suites.keys():
-        normalized = normalize_tls_version(proto_key)
-        if normalized:
-            versions.add(normalized)
-
-    if any(v in versions for v in ("ssl2", "ssl3", "1.0", "1.1")):
-        score -= 25; notes.append("Legacy TLS enabled (<=1.1).")
-    # Trust endpoint data, cipher_suites keys, OR testssl validation for modern TLS detection
-    has_modern_tls = any(v in versions for v in ("1.2", "1.3")) or tls.get("testssl", {}).get("supports_tls13")
-    if not has_modern_tls:
-        score -= 30; notes.append("Modern TLS (1.2/1.3) not detected.")
-
-    exp_days = report["tls"]["certificate"].get("not_after")
-    days = None
-    if exp_days:
-        try:
-            dt = datetime.fromisoformat(exp_days.replace("Z","+00:00"))
-            days = int((dt - datetime.now(UTC)).total_seconds() // 86400)
-        except Exception:
-            pass
-    if isinstance(days,int):
-        if days < 0: score -= 40; notes.append("Certificate expired.")
-        elif days < 14: score -= 20; notes.append("Certificate expires in <14 days.")
-        elif days < 30: score -= 10; notes.append("Certificate expires in <30 days.")
-
-    if not tls.get("ocsp",{}).get("stapled"):
-        # Treat OCSP stapling as a minor optimization only
-        score -= 1; notes.append("OCSP stapling not detected.")
-
-    if tls.get("nmap",{}).get("weak_indicators"):
-        score -= 8; notes.append("Potentially weak cipher indicators found (nmap).")
-    high_issues = [i for i in tls.get("testssl",{}).get("issues",[]) if i["severity"] in ("HIGH","CRITICAL")]
-    if high_issues:
-        score -= 10; notes.append("High/critical TLS issues detected by testssl.sh.")
-
-    sec = http["security_headers"]
-    if not sec.get("hsts"): score -= 10; notes.append("HSTS missing.")
-    else:
-        pre = hsts_preload_readiness(sec["hsts"])
-        if not pre["ready"]:
-            score -= 3; notes.extend([f"HSTS: {x}" for x in pre["issues"]])
-
-    if not sec.get("x_frame_options"): score -= 4; notes.append("X-Frame-Options missing.")
-    if (sec.get("x_content_type_options") or "").lower() != "nosniff":
-        score -= 4; notes.append("X-Content-Type-Options not 'nosniff'.")
-    if not sec.get("referrer_policy"): score -= 2; notes.append("Referrer-Policy missing.")
-
-    csp_eval = http["csp_evaluation"]
-    csp_penalty = 0  # Track total CSP penalty with cap
-    if not csp_eval["present"]:
-        csp_penalty = 12
-        notes.append("CSP missing.")
-    else:
-        csp_penalty = int((100 - csp_eval["score"]) * 0.15)
-        if csp_eval["issues"]:
-            notes.extend([f"CSP: {i}" for i in csp_eval["issues"][:6]])
-        # Extra penalty if key script controls are fully absent
-        directives = csp_eval.get("directives", {}) or {}
-        missing_default = "default-src" not in directives
-        missing_script = "script-src" not in directives
-        if missing_default and missing_script:
-            csp_penalty += 8
-            notes.append("CSP critical gap: default-src and script-src both missing.")
-        elif missing_script:
-            csp_penalty += 5
-            notes.append("CSP missing script-src.")
-    score -= min(20, csp_penalty)  # Cap total CSP penalty at 20
-
-    ck = http["cookies"]
-    if ck["issues"]:
-        score -= min(8, len(ck["issues"])*2)
-        notes.extend([f"Cookie: {i}" for i in ck["issues"]])
-
-    # Email security penalties: only apply if domain has email capability (MX records)
-    # Note: SPF alone doesn't indicate email capability - domains may have SPF just for DMARC compliance
-    # FIX: More defensive check - mx can be None, [], or missing entirely
-    mx_records = dns.get("mx") or []
-    # Only consider email capability if there are actual MX records (not empty list or None)
-    has_email_capability = isinstance(mx_records, list) and len(mx_records) > 0
-
-    dmarc_f = dns.get("dmarc", {}) or {}
-    dmarc_fields = dmarc_f.get("fields", {}) or {}
-    pol = (dmarc_fields.get("p") or "").lower()
-
-    if has_email_capability:
-        # Domain sends email - apply standard penalties
-        if not dns.get("spf"):
-            score -= 6; notes.append("SPF missing.")
-        if not pol:
-            score -= 8; notes.append("DMARC missing.")
-        elif pol == "none":
-            score -= 5; notes.append("DMARC policy 'none'. Prefer 'quarantine' or 'reject'.")
-        if not dmarc_fields.get("rua"): notes.append("DMARC rua not set (optional but recommended).")
-        if dmarc_fields.get("adkim", "r").lower() != "s": notes.append("DMARC adkim not strict (optional).")
-        if dmarc_fields.get("aspf", "r").lower() != "s": notes.append("DMARC aspf not strict (optional).")
-    else:
-        # No email capability detected - informational only, no penalties
-        # This prevents penalizing subdomains and non-email services
-        if not dns.get("spf"):
-            notes.append("SPF missing (informational - no MX records detected).")
-        if not pol:
-            notes.append("DMARC missing (informational - no MX records detected).")
-
-    # Soften DNSSEC impact: only penalize explicit validation failure (bogus)
-    dnssec_status = (dns.get("dnssec",{}) or {}).get("status") or ""
-    if dnssec_status.lower() == "bogus":
-        score -= 6; notes.append("DNSSEC validation failure (bogus).")
-    elif dnssec_status.lower() == "secure":
-        pass
-    else:
-        notes.append("DNSSEC not validated (informational).")
-
-    # Only penalize when we explicitly determined there is no HTTPS redirect
-    if http.get("scheme_redirect") == "none":
-        score -= 5; notes.append("Does not redirect to HTTPS.")
-
-    # Only penalize for missing HTTP/2 or HTTP/3 when we could actually determine support
-    # http3=None means curl doesn't have HTTP/3 support, so we can't tell
-    http2_support = http.get("http2")
-    http3_support = http.get("http3")
-    http3_advertised = http.get("http3_advertised", False)
-
-    # Consider HTTP/3 as supported if either directly tested or advertised via alt-svc
-    has_modern_http = http2_support or http3_support is True or http3_advertised
-    # Only penalize if we know for sure there's no modern HTTP support
-    # (not when http3 is None/unknown)
-    if http3_support is None:
-        # Can't determine HTTP/3 - only check HTTP/2
-        if not http2_support:
-            score -= 2; notes.append("No HTTP/2 detected (HTTP/3 unknown).")
-    elif not has_modern_http:
-        score -= 3; notes.append("No HTTP/2 or HTTP/3.")
-
-    # Enhanced grading with CVSS scores and compliance mapping
-    # Separate findings by severity and AI verdict for weighted scoring
-    critical_findings = [f for f in findings if f.get("severity") == "critical"]
-    high_findings = [f for f in findings if f.get("severity") == "high"]
-    medium_findings = [f for f in findings if f.get("severity") == "medium"]
-    low_findings = [f for f in findings if f.get("severity") == "low"]
-
-    # Count false positives for reduced weight scoring
-    total_fp_count = sum(1 for f in findings if f.get("ai_verdict") == "false_positive")
-
-    # Track maximum severity for grade adjustment (only count non-FP findings for grade cap)
-    non_fp_critical = [f for f in critical_findings if f.get("ai_verdict") != "false_positive"]
-    non_fp_high = [f for f in high_findings if f.get("ai_verdict") != "false_positive"]
-    non_fp_medium = [f for f in medium_findings if f.get("ai_verdict") != "false_positive"]
-
-    if non_fp_critical:
-        max_severity = "critical"
-    elif non_fp_high:
-        max_severity = "high"
-    elif non_fp_medium:
-        max_severity = "medium"
-
-    # Collect CVSS scores and compliance data (with OWASP risk weighting)
-    raw_cvss_scores = []  # Track raw scores for customer-facing metrics
-    for finding in findings:
-        cvss = finding.get("cvss_score", 0)
-        if cvss > 0:
-            raw_cvss_scores.append(cvss)  # Raw score for display
-            # Apply OWASP category weight for risk-adjusted internal scoring
-            owasp_cat = finding.get("owasp", "")[:8] if finding.get("owasp") else ""
-            weight = OWASP_WEIGHT.get(owasp_cat, 1.0)
-            weighted_cvss = min(10.0, cvss * weight)  # Cap at 10.0
-            cvss_scores.append(weighted_cvss)
-
-        # Track compliance issues
-        if finding.get("cwe"):
-            compliance_issues["cwe"].add(finding["cwe"])
-        if finding.get("owasp"):
-            compliance_issues["owasp"].add(finding["owasp"])
-        # Add SOC 2 criteria
-        soc2_criteria = finding.get("soc2", [])
-        if isinstance(soc2_criteria, list):
-            for criteria in soc2_criteria:
-                compliance_issues["soc2"].add(criteria)
-
-    # Calculate metrics - use raw scores for customer-facing average/maximum
-    avg_cvss = round(sum(raw_cvss_scores) / len(raw_cvss_scores), 1) if raw_cvss_scores else 0
-    max_cvss = max(raw_cvss_scores) if raw_cvss_scores else 0
-
-    # Helper to calculate penalty excluding AI-confirmed false positives
-    def calc_weighted_penalty(findings_list: list, per_finding: int, max_penalty: int) -> int:
-        """Calculate penalty excluding AI-marked false positives entirely.
-
-        Rationale: If the AI classifier with high confidence determines a finding
-        is a false positive (e.g., honeypot artifacts, test fixtures), it should
-        not penalize the security score at all. Users can still see these findings
-        but they don't affect the grade.
-        """
-        # Only count true positives and unclassified findings
-        scorable_findings = [f for f in findings_list if f.get("ai_verdict") != "false_positive"]
-        return min(max_penalty, len(scorable_findings) * per_finding)
-
-    # Cumulative finding penalties with caps (scales with finding count)
-    # AI-confirmed false positives are excluded from penalty calculation
-    if critical_findings:
-        penalty = calc_weighted_penalty(critical_findings, 15, 45)  # 15 per finding, max 45
-        score -= penalty
-        fp_in_crit = sum(1 for f in critical_findings if f.get("ai_verdict") == "false_positive")
-        fp_note = f" ({fp_in_crit} likely FP)" if fp_in_crit else ""
-        notes.append(f"{len(critical_findings)} critical vulnerability(ies) found{fp_note} (max CVSS: {max_cvss}, penalty: -{penalty}).")
-        remediation.append("URGENT: Address critical vulnerabilities immediately.")
-
-    if high_findings:
-        penalty = calc_weighted_penalty(high_findings, 10, 30)  # 10 per finding, max 30
-        score -= penalty
-        fp_in_high = sum(1 for f in high_findings if f.get("ai_verdict") == "false_positive")
-        fp_note = f" ({fp_in_high} likely FP)" if fp_in_high else ""
-        notes.append(f"{len(high_findings)} high severity issue(s) found{fp_note} (penalty: -{penalty}).")
-        remediation.append("HIGH PRIORITY: Fix high severity issues.")
-
-    if medium_findings:
-        penalty = calc_weighted_penalty(medium_findings, 4, 20)  # 4 per finding, max 20
-        score -= penalty
-        fp_in_med = sum(1 for f in medium_findings if f.get("ai_verdict") == "false_positive")
-        fp_note = f" ({fp_in_med} likely FP)" if fp_in_med else ""
-        notes.append(f"{len(medium_findings)} medium severity issue(s) found{fp_note} (penalty: -{penalty}).")
-
-    # NOTE: Low severity findings are intentionally NOT penalized.
-    # They are recorded for completeness but don't affect the score.
-    # Rationale: Low findings are "nice to fix" recommendations (defense-in-depth,
-    # best practices) but not actionable security issues. Penalizing them creates
-    # noise that distracts engineers from critical/high/medium issues.
-    # The score should reflect actual exploitable risk, not compliance checklist status.
-
-    # Add remediation suggestions based on issues
-    # Targeted remediation for exposed sensitive files (only if actual sensitive files found)
-    exposed_findings = [f for f in findings if f.get("tool") == "exposed_files"]
-    sensitive_patterns = [".git", ".env", ".svn", ".hg", "wp-config", "config.php", ".htpasswd", "id_rsa", ".pem", "credentials", "secret"]
-    has_sensitive_exposure = any(
-        any(p in str(f.get("evidence", {})).lower() or p in str(f.get("title", "")).lower() for p in sensitive_patterns)
-        for f in exposed_findings
-    )
-    if has_sensitive_exposure:
-        remediation.append("Immediately remove or restrict access to exposed files (e.g., /.git, /.env, private keys).")
-        remediation.append("Rotate any credentials/keys that may have been exposed and invalidate tokens.")
-        remediation.append("Add web server rules to deny access to VCS and secret files (e.g., location ^~ /.git { deny all; }).")
-    if not tls.get("ocsp",{}).get("stapled"):
-        remediation.append("Enable OCSP stapling in your web server configuration.")
-
-    if not http["security_headers"].get("hsts"):
-        remediation.append("Add Strict-Transport-Security header with max-age=31536000; includeSubDomains; preload")
-
-    if http["csp_evaluation"]["grade"] in ["C", "D", "F"]:
-        remediation.append("Improve CSP by removing 'unsafe-inline' and using nonces/hashes for scripts.")
-
-    if not dns.get("spf"):
-        remediation.append("Add SPF record: v=spf1 include:YOUR_EMAIL_PROVIDER ~all (e.g., _spf.google.com for Google Workspace, spf.protection.outlook.com for Microsoft 365)")
-
-    if not dns.get("dmarc",{}).get("fields",{}).get("p"):
-        remediation.append("Add DMARC record: v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com")
-
-    score = max(0, min(100, score))
-
-    # Risk-adjusted grade scale: no A grades with critical/high findings
-    if max_severity == "critical":
-        # Critical findings cap grade at D
-        letter = "D" if score >= 55 else "F"
-    elif max_severity == "high":
-        # High findings cap grade at C
-        letter = "C" if score >= 70 else "D" if score >= 55 else "F"
-    else:
-        # Standard grade scale
-        letter = (
-            "A" if score >= 90 else
-            "B" if score >= 80 else
-            "C" if score >= 70 else
-            "D" if score >= 55 else
-            "F"
-        )
-
-    return {
-        "score": score,
-        "grade": letter,
-        "notes": notes,
-        "remediation": remediation[:10],  # Top 10 recommendations
-        "summary": f"Security Grade: {letter} ({score}/100) - {len(findings)} issue(s) found" + (f" ({total_fp_count} likely FP)" if total_fp_count else ""),
-        "cvss_metrics": {
-            "average": avg_cvss,
-            "maximum": max_cvss,
-            "scores": sorted(raw_cvss_scores, reverse=True)[:10]  # Top 10 raw CVSS scores (sorted)
-        },
-        "compliance": {
-            "owasp_top10": sorted(list(compliance_issues["owasp"])),
-            "cwe_ids": sorted(list(set(str(cwe).upper() for cwe in compliance_issues["cwe"] if cwe))),  # Normalize to uppercase (str() handles numeric IDs)
-            "soc2_criteria": sorted(list(compliance_issues["soc2"]))
-        }
-    }
-
-# ---------- Findings normalization ----------
-
-def validate_severity_cvss(severity: str, cvss_score: float) -> str:
-    """
-    Validate and correct severity based on CVSS score.
-    CVSS ranges: Critical (9.0-10.0), High (7.0-8.9), Medium (4.0-6.9), Low (0.1-3.9), Info (0)
-    """
-    if cvss_score >= 9.0:
-        expected = "critical"
-    elif cvss_score >= 7.0:
-        expected = "high"
-    elif cvss_score >= 4.0:
-        expected = "medium"
-    elif cvss_score > 0:
-        expected = "low"
-    else:
-        expected = "info"
-
-    # Map input severity to canonical form
-    severity_lower = severity.lower().strip()
-    severity_map = {
-        "critical": "critical",
-        "high": "high",
-        "medium": "medium",
-        "moderate": "medium",
-        "low": "low",
-        "info": "info",
-        "informational": "info",
-        "none": "info"
-    }
-    canonical_severity = severity_map.get(severity_lower, severity_lower)
-
-    # If severity doesn't match expected CVSS range, return the correct severity
-    if canonical_severity != expected:
-        logging.debug(f"Severity corrected: {severity} -> {expected} (CVSS {cvss_score})")
-        return expected
-
-    return canonical_severity
-
-
-def extract_signals_from_nuclei(nuclei_results: dict) -> SignalSet:
-    """
-    Extract vulnerability signals from nuclei findings for guiding later phases.
-
-    This function goes beyond simple keyword matching to:
-    1. Analyze template IDs, tags, and titles
-    2. Parse response patterns and evidence
-    3. Consider CVSS scores and severity
-    4. Detect technology-specific vulnerabilities
-    5. Track confidence levels for each signal
-
-    These signals inform:
-    - Discovery: Which paths to prioritize
-    - Active testing: Which attack types to focus on
-
-    Returns:
-        SignalSet with scored signals. Backward compatible with dict-like access
-        (supports .get(), [] access, and boolean checks).
-    """
-    signals = SignalSet()
-
-    findings = nuclei_results.get("findings", [])
-    if not findings:
-        findings = nuclei_results.get("vulnerabilities", [])
-
-    # Enhanced patterns for signal detection
-    sql_patterns = ["sql", "database", "query", "mysql", "postgres", "sqlite", "mssql",
-                    "oracle", "mariadb", "nosql", "mongodb", "injection"]
-    xss_patterns = ["xss", "reflect", "cross-site", "script", "dom-based", "stored-xss"]
-    auth_patterns = ["auth", "login", "jwt", "session", "token", "oauth", "saml", "credential",
-                     "password", "apikey", "api-key", "bearer", "cookie"]
-    lfi_patterns = ["lfi", "rfi", "path-traversal", "file-inclusion", "directory-traversal",
-                    "file-read", "arbitrary-file"]
-    ssrf_patterns = ["ssrf", "server-side-request", "url-fetch", "redirect", "open-redirect"]
-    rce_patterns = ["rce", "command-injection", "code-execution", "remote-code", "exec", "shell",
-                    "deserialization", "template-injection", "ssti"]
-    api_patterns = ["api", "graphql", "rest", "swagger", "openapi", "endpoint", "webhook"]
-    info_patterns = ["disclosure", "exposure", "leak", "sensitive", "debug", "stack-trace",
-                     "error-message", "verbose"]
-    misconfig_patterns = ["misconfig", "misconfiguration", "insecure", "default", "weak",
-                          "cors", "headers", "security-header"]
-    default_cred_patterns = ["default-login", "default-credential", "admin-panel",
-                             "hardcoded", "weak-password"]
-
-    for finding in findings:
-        template_id = str(finding.get("template_id", "") or finding.get("template-id", "")).lower()
-        tags = [t.lower() for t in (finding.get("tags", []) or [])]
-        title = str(finding.get("title", "") or finding.get("info", {}).get("name", "")).lower()
-        matcher_name = str(finding.get("matcher-name", "") or finding.get("matcher_name", "")).lower()
-        severity = str(finding.get("severity", "") or finding.get("info", {}).get("severity", "")).lower()
-        evidence = finding.get("evidence", {}) or {}
-        matched_at = finding.get("matched-at", "") or finding.get("matched_at", "") or ""
-        extracted_results = finding.get("extracted-results", []) or []
-
-        # Combine all text for pattern matching
-        all_text = f"{template_id} {title} {matcher_name} {' '.join(tags)}"
-
-        # Extract CVSS if available
-        cvss = 0.0
-        info = finding.get("info", {})
-        if info:
-            classification = info.get("classification", {})
-            if classification:
-                cvss = float(classification.get("cvss-score", 0) or classification.get("cvss_score", 0) or 0)
-
-        # Track severity counts
-        if severity == "critical" or cvss >= 9.0:
-            signals.critical_count += 1
-        elif severity == "high" or cvss >= 7.0:
-            signals.high_count += 1
-
-        # SQL/Database signals (enhanced with evidence analysis)
-        if any(p in all_text for p in sql_patterns):
-            confidence = 0.9 if cvss >= 7.0 else 0.7
-            if not signals.sql_errors.active or confidence > signals.sql_errors.confidence:
-                signals.sql_errors = Signal(
-                    active=True,
-                    confidence=confidence,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.sql_errors.add_evidence(f"template:{template_id}")
-
-        # Also check evidence for SQL error patterns
-        evidence_str = str(evidence).lower() if evidence else ""
-        extracted_str = " ".join(str(e) for e in extracted_results).lower()
-        sql_error_keywords = ["sql syntax", "mysql", "ora-", "pg_", "sqlite", "mssql", "syntax error"]
-        if any(err in evidence_str or err in extracted_str for err in sql_error_keywords):
-            signals.sql_errors = Signal(
-                active=True,
-                confidence=0.95,
-                evidence=signals.sql_errors.evidence + ["error_pattern_in_response"],
-                source="nuclei"
-            )
-
-        # XSS/Reflection signals
-        if any(p in all_text for p in xss_patterns):
-            confidence = 0.85 if cvss >= 6.0 else 0.6
-            if not signals.xss_reflection.active or confidence > signals.xss_reflection.confidence:
-                signals.xss_reflection = Signal(
-                    active=True,
-                    confidence=confidence,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.xss_reflection.add_evidence(f"template:{template_id}")
-
-        # Auth signals
-        if any(p in all_text for p in auth_patterns):
-            confidence = 0.9 if severity in ["critical", "high"] else 0.7
-            if not signals.auth_issues.active or confidence > signals.auth_issues.confidence:
-                signals.auth_issues = Signal(
-                    active=True,
-                    confidence=confidence,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.auth_issues.add_evidence(f"template:{template_id}")
-
-        # LFI/RFI signals
-        if any(p in all_text for p in lfi_patterns):
-            if not signals.file_inclusion.active:
-                signals.file_inclusion = Signal(
-                    active=True,
-                    confidence=0.9,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.file_inclusion.add_evidence(f"template:{template_id}")
-
-        # SSRF signals
-        if any(p in all_text for p in ssrf_patterns):
-            if not signals.ssrf_potential.active:
-                signals.ssrf_potential = Signal(
-                    active=True,
-                    confidence=0.8,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.ssrf_potential.add_evidence(f"template:{template_id}")
-
-        # RCE signals
-        if any(p in all_text for p in rce_patterns):
-            if not signals.rce_potential.active:
-                signals.rce_potential = Signal(
-                    active=True,
-                    confidence=0.95,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.rce_potential.add_evidence(f"template:{template_id}")
-
-        # API exposure signals
-        if any(p in all_text for p in api_patterns):
-            if not signals.api_exposure.active:
-                signals.api_exposure = Signal(
-                    active=True,
-                    confidence=0.7,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.api_exposure.add_evidence(f"template:{template_id}")
-
-        # Information disclosure signals
-        if any(p in all_text for p in info_patterns):
-            if not signals.information_disclosure.active:
-                signals.information_disclosure = Signal(
-                    active=True,
-                    confidence=0.7,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.information_disclosure.add_evidence(f"template:{template_id}")
-
-        # Misconfiguration signals
-        if any(p in all_text for p in misconfig_patterns):
-            if not signals.misconfig.active:
-                signals.misconfig = Signal(
-                    active=True,
-                    confidence=0.7,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.misconfig.add_evidence(f"template:{template_id}")
-
-        # Default credentials signals
-        if any(p in all_text for p in default_cred_patterns):
-            if not signals.default_creds.active:
-                signals.default_creds = Signal(
-                    active=True,
-                    confidence=0.85,
-                    evidence=[f"template:{template_id}"],
-                    source="nuclei"
-                )
-            else:
-                signals.default_creds.add_evidence(f"template:{template_id}")
-
-        # Track high-value targets (URLs where critical/high findings were found)
-        if (severity in ["critical", "high"] or cvss >= 7.0) and matched_at:
-            signals.high_value_targets.append(matched_at)
-
-        # Technology-specific signals from tags
-        tech_tags = ["wordpress", "drupal", "joomla", "spring", "struts", "rails",
-                     "django", "laravel", "express", "react", "angular", "vue",
-                     "tomcat", "nginx", "apache", "iis", "jenkins", "gitlab",
-                     "kubernetes", "docker", "aws", "azure", "gcp"]
-        for tech in tech_tags:
-            if tech in tags or tech in template_id:
-                if tech not in signals.tech_specific:
-                    signals.tech_specific[tech] = []
-                signals.tech_specific[tech].append(template_id)
-
-    # Deduplicate high-value targets
-    signals.high_value_targets = list(set(signals.high_value_targets))[:20]
-
-    return signals
-
-
-def normalize_finding(tool: str, title: str, severity: str, evidence: dict, cwe: str | None=None) -> dict:
-    # Use deterministic SHA256 hash for stable finding IDs across runs
-    # (Python's hash() is non-deterministic due to PYTHONHASHSEED randomization)
-    finding_key = (title + json.dumps(evidence, sort_keys=True)).encode()
-    finding = {
-        "id": f"{tool}:{hashlib.sha256(finding_key).hexdigest()[:16]}",
-        "tool": tool,
-        "title": title,
-        "severity": severity,
-        "cwe": cwe,
-        "evidence": evidence,
-        "first_seen": now_utc_iso()
-    }
-
-    # Promote key fields to top-level for verification phase to access
-    # These fields are needed by verify_high_severity_findings
-    for key in ("type", "url", "param", "payload", "method", "technique", "dbms", "content_type", "body", "request_headers"):
-        if key in evidence and evidence[key] is not None:
-            finding[key] = evidence[key]
-
-    # Infer type from tool name if not explicitly provided
-    if "type" not in finding:
-        if "sqli" in tool.lower():
-            finding["type"] = "SQLi"
-        elif "xss" in tool.lower():
-            finding["type"] = "XSS"
-
-    # =========================================================================
-    # NOISE REDUCTION: Force info severity for non-vulnerability findings
-    # =========================================================================
-    title_lower = title.lower()
-    is_info_only = False
-    downgrade_reason = None
-
-    # Check 1: Title matches known informational patterns
-    for pattern in INFO_ONLY_PATTERNS:
-        if pattern in title_lower:
-            is_info_only = True
-            downgrade_reason = f"Informational finding (matched: {pattern})"
-            break
-
-    # Check 2: Nuclei template is known to be informational
-    if tool == "nuclei" and not is_info_only:
-        template_id = str(evidence.get("template_id", "")).lower()
-        for info_template in NUCLEI_INFO_TEMPLATES:
-            if info_template in template_id:
-                is_info_only = True
-                downgrade_reason = f"Nuclei template is informational ({info_template})"
-                break
-
-    # Check 3: Nuclei template should be excluded entirely (too noisy/dangerous)
-    should_exclude = False
-    if tool == "nuclei":
-        template_id = str(evidence.get("template_id", "")).lower()
-        template_tags = str(evidence.get("tags", "")).lower()
-        for exclude_pattern in NUCLEI_EXCLUDE_TEMPLATES:
-            if exclude_pattern in template_id or exclude_pattern in template_tags:
-                should_exclude = True
-                finding["excluded"] = True
-                finding["exclude_reason"] = f"Template excluded (matched: {exclude_pattern})"
-                break
-
-    # Apply info-only downgrade
-    if is_info_only:
-        severity = "info"
-        finding["severity"] = "info"
-        finding["cvss_score"] = 0.0
-        finding["noise_reduction"] = {
-            "downgraded": True,
-            "reason": downgrade_reason,
-            "original_severity": finding.get("severity", severity)
-        }
-    else:
-        # Add CVSS score - prefer evidence.cvss_score if already calculated (e.g., by nuclei caps)
-        passed_cvss = evidence.get("cvss_score")
-        if passed_cvss and isinstance(passed_cvss, (int, float)) and passed_cvss > 0:
-            base_cvss = float(passed_cvss)
-        else:
-            base_cvss = calculate_cvss_score(finding)
-
-        # Apply context-aware modifiers based on endpoint sensitivity
-        adjusted_cvss = apply_context_modifiers(finding, base_cvss)
-        finding["cvss_score"] = adjusted_cvss
-
-        # Track if context adjustment was applied
-        if adjusted_cvss != base_cvss:
-            finding["cvss_context_adjusted"] = True
-            finding["cvss_base_score"] = base_cvss
-
-        # Validate and correct severity based on CVSS score
-        finding["severity"] = validate_severity_cvss(severity, finding["cvss_score"])
-
-    # Add compliance mappings
-    finding["cwe"] = map_to_cwe(finding) if not cwe else cwe
-    finding["owasp"] = owasp_mapping(finding)
-    finding["soc2"] = soc2_mapping(finding)
-
-    # Add CWE description and URL for better context
-    if finding["cwe"]:
-        finding["cwe_name"] = CWE_DESCRIPTIONS.get(finding["cwe"], "")
-        cwe_id = finding["cwe"].replace("CWE-", "")
-        finding["cwe_url"] = f"https://cwe.mitre.org/data/definitions/{cwe_id}.html"
-    else:
-        finding["cwe_name"] = ""
-        finding["cwe_url"] = ""
-
-    # =========================================================================
-    # CONFIDENCE SCORING: Apply confidence tier based on tool and evidence
-    # =========================================================================
-    # Confidence tiers help filter findings and prioritize AI validation.
-    # Higher confidence = more likely to be a real vulnerability.
-    #
-    # Tier reference:
-    #   CONFIRMED (0.95) - Exploit succeeded, data extracted
-    #   VERIFIED (0.90)  - Trusted tool confirmed
-    #   HIGH (0.85)      - Multiple strong indicators
-    #   MEDIUM_HIGH (0.75) - Good evidence, minor uncertainty
-    #   MEDIUM (0.65)    - Pattern match + corroboration
-    #   LOW (0.50)       - Single indicator, unconfirmed
-    #   UNCERTAIN (0.35) - Possible vuln, weak evidence
-    #   LIKELY_FP (0.20) - Evidence suggests false positive
-    # =========================================================================
-
-    # Tool-based confidence (trusted tools get higher base confidence)
-    TOOL_CONFIDENCE = {
-        # Exploitation tools - very high confidence when they report vulns
-        "dalfox": 0.90,      # XSS exploitation tool
-        "sqlmap": 0.90,      # SQLi exploitation tool
-        # Specialized scanners - high confidence
-        "nuclei": 0.75,      # Template-based, depends on template quality
-        "testssl": 0.85,     # SSL/TLS analysis
-        "sslyze": 0.85,      # SSL/TLS analysis
-        # Custom checks - medium-high confidence
-        "exposed_files": 0.80,
-        "nosql_injection": 0.70,
-        "graphql_vulnerability": 0.75,
-        "api_security": 0.70,
-        "cors_check": 0.75,
-        "subdomain_takeover": 0.85,
-        # Discovery/fingerprinting - lower confidence (informational)
-        "tech_detect": 0.50,
-        "waf_detect": 0.50,
-        "dns_policy": 0.70,
-        "csp_evaluation": 0.80,
-    }
-
-    # Evidence-based confidence modifiers
-    def calculate_confidence(tool: str, evidence: dict, severity: str) -> float:
-        """Calculate finding confidence based on tool, evidence, and severity."""
-        # Start with tool base confidence
-        base = TOOL_CONFIDENCE.get(tool, 0.60)
-
-        # Evidence quality modifiers
-        evidence_str = str(evidence).lower()
-
-        # Strong positive indicators (increase confidence)
-        if "exploit" in evidence_str or "payload executed" in evidence_str:
-            base = min(0.95, base + 0.15)  # Exploit succeeded
-        if "data extracted" in evidence_str or "sensitive data" in evidence_str:
-            base = min(0.95, base + 0.10)  # Data exfiltration confirmed
-        if evidence.get("verified") or evidence.get("confirmed"):
-            base = min(0.95, base + 0.10)  # Tool verified
-        if evidence.get("response_diff") or evidence.get("behavior_change"):
-            base = min(0.95, base + 0.05)  # Observable behavior change
-
-        # Weak indicators (decrease confidence)
-        if "possible" in evidence_str or "potential" in evidence_str:
-            base = max(0.30, base - 0.10)  # Speculative finding
-        if "error-based" in evidence_str and "time-based" not in evidence_str:
-            base = max(0.40, base - 0.05)  # Error-based only (less reliable)
-        if evidence.get("heuristic_only"):
-            base = max(0.35, base - 0.15)  # Pure heuristic, no verification
-
-        # Severity-based adjustments (critical findings need higher bar)
-        if severity == "critical" and base < 0.70:
-            # Critical findings with low confidence should be flagged
-            base = max(0.35, base - 0.10)
-        elif severity == "info":
-            # Info findings don't need high confidence
-            base = min(0.60, base)
-
-        return round(base, 2)
-
-    # Calculate and assign confidence
-    confidence = calculate_confidence(tool, evidence, finding["severity"])
-    finding["confidence"] = confidence
-
-    # Add confidence tier label for human readability
-    if confidence >= 0.90:
-        finding["confidence_tier"] = "verified"
-    elif confidence >= 0.80:
-        finding["confidence_tier"] = "high"
-    elif confidence >= 0.65:
-        finding["confidence_tier"] = "medium"
-    elif confidence >= 0.50:
-        finding["confidence_tier"] = "low"
-    else:
-        finding["confidence_tier"] = "uncertain"
-
-    # Add description and remediation from knowledge base (if available)
-    # Uses late binding - get_remediation_for_finding is assigned after module imports
-    try:
-        kb_entry = get_remediation_for_finding(finding)
-        if kb_entry:
-            if kb_entry.get("description") and "description" not in finding:
-                finding["description"] = kb_entry["description"]
-            if kb_entry.get("remediation_steps") and "remediation" not in finding:
-                finding["remediation"] = kb_entry["remediation_steps"]
-    except NameError:
-        pass  # get_remediation_for_finding not yet assigned during early module loading
-
-    return finding
-
-def deduplicate_findings(findings: list, aggressive: bool = False) -> list:
-    """
-    Deduplicate findings using the comprehensive deduplication engine.
-
-    This function consolidates related findings from multiple tools into
-    unified, evidence-rich reports. It eliminates noise while preserving
-    actionable signal.
-
-    Features:
-    - Cross-tool deduplication (dalfox + nuclei XSS → single finding)
-    - Same-endpoint consolidation (GraphQL issues → one finding)
-    - Evidence merging (all payloads, URLs preserved)
-    - Severity promotion (keeps highest severity)
-
-    Args:
-        findings: List of raw findings
-        aggressive: If True, use more aggressive deduplication
-
-    Returns:
-        Deduplicated list of findings
-    """
-    if not findings:
-        return []
-
-    try:
-        # Use the new deduplication engine
-        from scanner_tools.deduplication_engine import run_deduplication_pipeline
-        return run_deduplication_pipeline(findings, aggressive=aggressive)
-    except ImportError:
-        # Fallback to basic deduplication if engine not available
-        # CORS dedup: cors_check and cors_scanner often find the same issues
-        # Keep only the finding with the most evidence
-        cors_findings = [f for f in findings if 'cors' in f.get('tool', '').lower()]
-        if len(cors_findings) > 1:
-            # Sort by evidence richness (more evidence = keep it)
-            cors_findings.sort(key=lambda x: len(str(x.get('evidence', {}))), reverse=True)
-            # Keep the first (most evidence), remove the rest
-            cors_to_keep = cors_findings[0]
-            findings = [f for f in findings if 'cors' not in f.get('tool', '').lower() or f is cors_to_keep]
-
-        return findings
-
-# ---------- Modular tool bindings ----------
-# Rebind selected tool functions to modular implementations to reduce scanner.py complexity
+# ARCHITECTURE NOTE: This function is now available from scanner.grading module.
+# To migrate: replace calls to grade() with _grade_imported() or import directly.
+# The inline version is kept for backward compatibility during migration.
 try:
     # Import modular implementations
     from scanner_tools.access_control_checks import (
         check_forced_browsing as _check_forced_browsing_mod,
         format_findings_for_scanner as _format_forced_browsing_findings_mod,
         smart_bola_test as _smart_bola_test_mod,
+        # Enhanced BOLA testing
+        check_bola_multi_user as _check_bola_multi_user_mod,
+        check_bola_enumeration as _check_bola_enumeration_mod,
+    )
+    from scanner_tools.race_condition_tests import (
+        run_race_condition_tests as _run_race_condition_tests_mod,
+        identify_race_prone_endpoints as _identify_race_prone_endpoints_mod,
     )
     from scanner_tools.active_checks import (
         advanced_vuln_tests as _advanced_vuln_tests_mod,
         cache_poisoning_test as _cache_poisoning_test_mod,
         check_exposed_files as _check_exposed_files_mod,
         check_subdomain_takeover as _check_subdomain_takeover_mod,
+        blind_ssrf_test as _blind_ssrf_test_mod,
         custom_sqli_test as _custom_sqli_test_mod,
         custom_xss_test as _custom_xss_test_mod,
         dalfox_one as _dalfox_one_mod,
@@ -2612,6 +1240,7 @@ try:
         http_smuggling_test as _http_smuggling_test_mod,
         jwt_vulnerability_test as _jwt_vulnerability_test_mod,
         ldap_injection_test as _ldap_injection_test_mod,
+        ldap_injection_test_json_body as _ldap_injection_test_json_body_mod,
         nosql_injection_test as _nosql_injection_test_mod,
         nosql_injection_test_json_body as _nosql_injection_test_json_body_mod,
         oauth_vulnerability_test as _oauth_vulnerability_test_mod,
@@ -2626,10 +1255,24 @@ try:
         sqlmap_test_context as _sqlmap_test_context_mod,
         sqlmap_replay_request as _sqlmap_replay_request_mod,
         ssti_test as _ssti_test_mod,
+        ssrf_injection_test_json_body as _ssrf_injection_test_json_body_mod,
+        stored_xss_workflow as _stored_xss_workflow_mod,
         subdomain_takeover_check as _subdomain_takeover_check_mod,
         timing_attack_test as _timing_attack_test_mod,
         xpath_injection_test as _xpath_injection_test_mod,
+        xpath_injection_test_json_body as _xpath_injection_test_json_body_mod,
         xxe_injection_test as _xxe_injection_test_mod,
+        xxe_injection_test_json_body as _xxe_injection_test_json_body_mod,
+        # Enhanced security tests
+        jwt_comprehensive_test as _jwt_comprehensive_test_mod,
+        jwt_algorithm_confusion_test as _jwt_algorithm_confusion_test_mod,
+        jwt_kid_injection_test as _jwt_kid_injection_test_mod,
+        jwt_claim_manipulation_test as _jwt_claim_manipulation_test_mod,
+        graphql_comprehensive_test as _graphql_comprehensive_test_mod,
+        graphql_batch_attack_test as _graphql_batch_attack_test_mod,
+        graphql_depth_attack_test as _graphql_depth_attack_test_mod,
+        graphql_alias_idor_test as _graphql_alias_idor_test_mod,
+        graphql_field_suggestion_test as _graphql_field_suggestion_test_mod,
     )
     from scanner_tools.ai_classifier import (
         AIClassificationResult as _AIClassificationResult_mod,
@@ -2692,6 +1335,7 @@ try:
         analyze_js_bundles as _analyze_js_bundles_mod,
         api_security_test as _api_security_test_mod,
         browser_crawl_fallback as _browser_crawl_fallback_mod,
+        calculate_adaptive_depth as _calculate_adaptive_depth_mod,
         check_cors as _check_cors_mod,
         deep_discovery_scan as _deep_discovery_scan_mod,
         detect_cloud_services as _detect_cloud_services_mod,
@@ -2707,6 +1351,7 @@ try:
         follow_json_links as _follow_json_links_mod,
         katana_crawl as _katana_crawl_mod,
         pd_httpx_probe as _pd_httpx_probe_mod,
+        recursive_directory_discovery as _recursive_directory_discovery_mod,
         schemathesis_run as _schemathesis_run_mod,
         smart_discovery as _smart_discovery_mod,
     )
@@ -2746,6 +1391,12 @@ try:
         parse_security_headers as _parse_security_headers_mod,
         supports_http2 as _supports_http2_mod,
         supports_http3 as _supports_http3_mod,
+        # Enhanced security tests
+        detect_rate_limits as _detect_rate_limits_mod,
+        detect_rate_limits_per_endpoint as _detect_rate_limits_per_endpoint_mod,
+        test_verb_tampering as _test_verb_tampering_mod,
+        test_verb_tampering_authenticated as _test_verb_tampering_authenticated_mod,
+        interactive_browser_crawl as _interactive_browser_crawl_mod,
     )
     from scanner_tools.infrastructure_checks import (
         test_backup_files as _test_backup_files_mod,
@@ -2873,6 +1524,8 @@ try:
     katana_crawl = _katana_crawl_mod
     deep_discovery_scan = _deep_discovery_scan_mod
     smart_discovery = _smart_discovery_mod
+    calculate_adaptive_depth = _calculate_adaptive_depth_mod
+    recursive_directory_discovery = _recursive_directory_discovery_mod
     analyze_js_bundles = _analyze_js_bundles_mod
     schemathesis_run = _schemathesis_run_mod
     follow_json_links = _follow_json_links_mod
@@ -2895,6 +1548,7 @@ try:
     sqlmap_replay_request = _sqlmap_replay_request_mod
     custom_sqli_test = _custom_sqli_test_mod
     custom_xss_test = _custom_xss_test_mod
+    blind_ssrf_test = _blind_ssrf_test_mod
     # Smart active checks (DBMS-aware, context-aware)
     detect_dbms = _detect_dbms_mod
     smart_sqli_test = _smart_sqli_test_mod
@@ -2907,9 +1561,14 @@ try:
     nosql_injection_test = _nosql_injection_test_mod
     nosql_injection_test_json_body = _nosql_injection_test_json_body_mod
     ldap_injection_test = _ldap_injection_test_mod
+    ldap_injection_test_json_body = _ldap_injection_test_json_body_mod
     xpath_injection_test = _xpath_injection_test_mod
+    xpath_injection_test_json_body = _xpath_injection_test_json_body_mod
     xxe_injection_test = _xxe_injection_test_mod
+    xxe_injection_test_json_body = _xxe_injection_test_json_body_mod
     ssti_test = _ssti_test_mod
+    ssrf_injection_test_json_body = _ssrf_injection_test_json_body_mod
+    stored_xss_workflow = _stored_xss_workflow_mod
     jwt_vulnerability_test = _jwt_vulnerability_test_mod
     oauth_vulnerability_test = _oauth_vulnerability_test_mod
     session_vulnerability_test = _session_vulnerability_test_mod
@@ -3012,6 +1671,27 @@ try:
     check_forced_browsing = _check_forced_browsing_mod
     format_forced_browsing_findings = _format_forced_browsing_findings_mod
     smart_bola_test = _smart_bola_test_mod
+    check_bola_multi_user = _check_bola_multi_user_mod
+    check_bola_enumeration = _check_bola_enumeration_mod
+    # Race condition testing
+    run_race_condition_tests = _run_race_condition_tests_mod
+    identify_race_prone_endpoints = _identify_race_prone_endpoints_mod
+    # Rate limiting and verb tampering
+    detect_rate_limits = _detect_rate_limits_mod
+    detect_rate_limits_per_endpoint = _detect_rate_limits_per_endpoint_mod
+    test_verb_tampering = _test_verb_tampering_mod
+    test_verb_tampering_authenticated = _test_verb_tampering_authenticated_mod
+    interactive_browser_crawl = _interactive_browser_crawl_mod
+    # Enhanced JWT and GraphQL tests
+    jwt_comprehensive_test = _jwt_comprehensive_test_mod
+    jwt_algorithm_confusion_test = _jwt_algorithm_confusion_test_mod
+    jwt_kid_injection_test = _jwt_kid_injection_test_mod
+    jwt_claim_manipulation_test = _jwt_claim_manipulation_test_mod
+    graphql_comprehensive_test = _graphql_comprehensive_test_mod
+    graphql_batch_attack_test = _graphql_batch_attack_test_mod
+    graphql_depth_attack_test = _graphql_depth_attack_test_mod
+    graphql_alias_idor_test = _graphql_alias_idor_test_mod
+    graphql_field_suggestion_test = _graphql_field_suggestion_test_mod
     # SSH checks
     ssh_auth_methods = _ssh_auth_methods_mod
     # AI Classifier
@@ -3128,6 +1808,7 @@ async def build_report(target: str,
                        active_checks: bool=False,
                        active_xss: bool=True,
                        active_sqli: bool=True,
+                       deep_domxss: bool | None = None,
                        max_active: int=10,
                        quick_mode: bool=False,
                        no_browser: bool=False,
@@ -3229,6 +1910,7 @@ async def build_report(target: str,
                        ai_url: str | None=None,
                        ai_api_key: str | None=None,
                        ai_model: str="gpt-4o-mini",
+                       include_partial_attack_chains: bool=False,
                        # Discovery enhancements
                        grpc_discovery: bool=False,
                        json_link_following: bool=False,
@@ -3274,6 +1956,7 @@ async def build_report(target: str,
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
     scan_session_id = str(_uuid.uuid4())
+    emit_progress("init", 5, "initializing scan")
 
     # Pre-scan connectivity validation
     pre_scan_issues = []
@@ -3303,6 +1986,8 @@ async def build_report(target: str,
 
             scan_mode_label = "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard"))
             report: dict[str, Any] = {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "scanner_version": SCANNER_VERSION,
                 "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
                 "scan_mode": scan_mode_label,
                 "scan_config": {
@@ -3360,6 +2045,7 @@ async def build_report(target: str,
                         "warnings": ["Target unreachable during pre-scan validation."],
                     }
                 },
+                "network_scan": {},
                 "findings": [],
                 "connectivity": connectivity,
             }
@@ -3413,6 +2099,8 @@ async def build_report(target: str,
                 "completed_at": now_utc_iso(),
                 "scan_mode": scan_mode_label,
                 "coverage_status": coverage["status"],
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "scanner_version": SCANNER_VERSION,
                 "options": {
                     "public_only": public_only,
                     "active_checks_requested": active_checks,
@@ -3422,11 +2110,14 @@ async def build_report(target: str,
                 "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
             }
 
+            emit_progress("pre_scan_failed", 100, "target unreachable")
             return report
         else:
             logging.info(f"Pre-scan validation passed for {target}")
     except Exception as e:
         logging.warning(f"Pre-scan validation error: {e}")
+
+    emit_progress("pre_scan", 10, "validation passed")
 
     # Initialize scan-scoped PoE session to ensure request counts are isolated per scan
     # This prevents cross-scan throttling issues in long-lived worker processes
@@ -3732,6 +2423,34 @@ async def build_report(target: str,
             auth_session.set_refresh_callback(_refresh_oauth, cooldown_seconds=120, max_failures=2)
             auth_config["refresh_method"] = "oauth"
 
+    # P0-3 FIX: Periodic auth refresh background task for long-running scans
+    # This ensures auth tokens don't expire during 1-2+ hour scans
+    auth_refresh_task = None
+    if auth_session:
+        async def periodic_auth_refresh(session, interval_minutes: int = 15):
+            """Background task that periodically refreshes auth to prevent token expiration."""
+            refresh_count = 0
+            while True:
+                try:
+                    await asyncio.sleep(interval_minutes * 60)
+                    if session:
+                        refreshed = await session.refresh_if_needed(force=False)
+                        refresh_count += 1
+                        if refreshed:
+                            print(f"[scanner] Auth token refreshed (refresh #{refresh_count})", file=sys.stderr)
+                        else:
+                            print(f"[scanner] Auth check #{refresh_count} - token still valid", file=sys.stderr)
+                except asyncio.CancelledError:
+                    print(f"[scanner] Auth refresh task cancelled after {refresh_count} refreshes", file=sys.stderr)
+                    break
+                except Exception as e:
+                    print(f"[scanner] Auth refresh error: {e}", file=sys.stderr)
+                    # Continue trying even after errors
+
+        # Start background refresh task - will be cancelled at scan end
+        auth_refresh_task = asyncio.create_task(periodic_auth_refresh(auth_session, interval_minutes=15))
+        print(f"[scanner] Started background auth refresh (every 15 min)", file=sys.stderr)
+
     # parallel tasks (infra)
     dns_task    = asyncio.create_task(resolve_dns(host))
     dmarc_task  = asyncio.create_task(fetch_dmarc(host))
@@ -3980,6 +2699,33 @@ async def build_report(target: str,
                     r'''to:\s*["']([^"']+)["']''',  # to: '/route'
                 ]
 
+                # Hash route patterns for SPAs using hash-based routing
+                hash_route_patterns = [
+                    r'''["'](#/[^"']+)["']''',           # "#/search" or "#/page"
+                    r'''["'](#!/[^"']+)["']''',          # "#!/page" hashbang
+                    r'''location\.hash\s*=\s*["']#?(/[^"']+)["']''',  # location.hash = '#/route'
+                ]
+
+                # Detect SPA frameworks from HTML (use specific patterns to avoid false positives)
+                # Case-insensitive patterns (framework-specific attributes)
+                spa_patterns_ci = [
+                    r'ng-app\s*=', r'ng-controller\s*=', r'\[ng-',  # AngularJS directives
+                    r'v-bind:', r'v-on:', r'v-model\s*=',           # Vue.js directives
+                    r':click\s*=', r'@click\s*=',                   # Vue.js shorthand
+                ]
+                # Case-sensitive patterns (JS globals, specific markers)
+                spa_indicators_cs = [
+                    "__NEXT_DATA__",                       # Next.js hydration
+                    "__NUXT__",                            # Nuxt.js
+                    "data-reactroot", "_reactRootContainer",  # React specific
+                    "data-v-",                             # Vue.js scoped styles (hash suffix)
+                ]
+                html_lower = html.lower()
+                is_spa = (
+                    any(re.search(pat, html_lower) for pat in spa_patterns_ci) or
+                    any(ind in html for ind in spa_indicators_cs)
+                )
+
                 for js_url in script_urls[:5]:
                     try:
                         js_resp = await client.get(js_url)
@@ -3989,6 +2735,7 @@ async def build_report(target: str,
                         if len(js_content) < 1000:  # Skip tiny files (likely not app bundles)
                             continue
 
+                        # Extract standard routes
                         for pattern in route_patterns:
                             for match in re.finditer(pattern, js_content):
                                 route = match.group(1)
@@ -3996,11 +2743,31 @@ async def build_report(target: str,
                                     # Filter out static assets and common non-routes
                                     if not any(route.endswith(ext) for ext in [".js", ".css", ".png", ".jpg", ".svg", ".ico"]):
                                         browser_seed_urls.append(route)
+
+                        # Extract hash routes for SPAs
+                        for pattern in hash_route_patterns:
+                            for match in re.finditer(pattern, js_content):
+                                route = match.group(1)
+                                if route:
+                                    # Keep hash prefix for browser seed URLs
+                                    if not route.startswith("#"):
+                                        route = "#" + route
+                                    browser_seed_urls.append(route)
                     except Exception:
                         continue
 
+                # For detected SPAs, add common hash route patterns as candidates
+                if is_spa:
+                    common_hash_routes = [
+                        "#/search?q=test",
+                        "#!/search?q=test",
+                        "#/login",
+                        "#/home",
+                    ]
+                    browser_seed_urls.extend(common_hash_routes)
+
                 # Deduplicate and limit
-                browser_seed_urls = list(set(browser_seed_urls))[:20]
+                browser_seed_urls = list(set(browser_seed_urls))[:25]  # Increased limit for hash routes
                 if browser_seed_urls:
                     print(f"[smart] Found {len(browser_seed_urls)} routes to seed browser crawl: {browser_seed_urls[:5]}...", file=sys.stderr)
         except Exception as e:
@@ -4025,7 +2792,27 @@ async def build_report(target: str,
         exposed_task = asyncio.create_task(check_exposed_files(base_url, quick_mode=quick_mode))
         # Delay nuclei start until discovery yields target URLs and auth context
         nuclei_task = None
-        nmap_full_task = asyncio.create_task(nmap_full_scan(host, quick_mode=quick_mode))
+
+        # Nmap strategy:
+        # - quick: very light (top 33)
+        # - smart: light (top 33)
+        # - complete (deep/full/aggressive): top 1000 + scripts only if exploit_level aggressive
+        # - standard: no nmap unless grpc_discovery is requested
+        nmap_kwargs: dict[str, Any] | None = None
+        if quick_mode:
+            nmap_kwargs = {"quick_mode": True}
+        elif smart_mode:
+            nmap_kwargs = {"top_ports": 33, "scripts": False}
+        elif complete_mode:
+            nmap_kwargs = {"top_ports": 1000, "scripts": exploit_level == "aggressive"}
+        elif grpc_discovery:
+            nmap_kwargs = {"top_ports": 200, "scripts": False}
+
+        if nmap_kwargs:
+            nmap_full_task = asyncio.create_task(nmap_full_scan(host, **nmap_kwargs))
+        else:
+            async def dummy_nmap_full(): return {"open_ports": [], "services": [], "os_detection": {}, "vulnerabilities": [], "scan_completed": False, "skipped": True, "reason": "nmap_disabled_for_profile"}
+            nmap_full_task = asyncio.create_task(dummy_nmap_full())
     else:
         # Create dummy tasks that return empty results for public-only mode
         async def dummy_cors(): return {"vulnerable": False, "issues": []}
@@ -4040,17 +2827,19 @@ async def build_report(target: str,
         nmap_full_task = asyncio.create_task(dummy_nmap_full())
 
     # Complete mode specific tasks
-    if complete_mode and not public_only:
+    if complete_mode and not public_only and not smart_mode:
         comprehensive_port_task = asyncio.create_task(comprehensive_port_scan(host, max_ports))
         deep_discovery_task = asyncio.create_task(deep_discovery_scan(base_url) if deep_discovery else asyncio.sleep(0))
-        advanced_vuln_task = asyncio.create_task(advanced_vuln_tests(base_url, exploit_level))
     else:
         async def dummy_comprehensive(): return {"scan_type": "standard", "open_ports": [], "services": [], "vulnerabilities": [], "scan_completed": False}
         async def dummy_deep(): return {"directories": [], "files": [], "parameters": [], "scan_completed": False}
-        async def dummy_advanced(): return {"ssrf": {"tested": False}, "xxe": {"tested": False}, "command_injection": {"tested": False}, "scan_completed": False}
         comprehensive_port_task = asyncio.create_task(dummy_comprehensive())
         deep_discovery_task = asyncio.create_task(dummy_deep())
-        advanced_vuln_task = asyncio.create_task(dummy_advanced())
+
+    # Advanced vuln tests are deferred until discovery is available
+    advanced_vuln_task = None
+    schemathesis_task = None
+    schemathesis_schema_url: str | None = None
 
     # New advanced vulnerability checks (smart/full/aggressive only)
     advanced_scan = smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))
@@ -4066,6 +2855,11 @@ async def build_report(target: str,
         timing_task = asyncio.create_task(timing_attack_test(base_url))
         graphql_task = asyncio.create_task(graphql_vulnerability_test(base_url))
         cache_poison_task = asyncio.create_task(cache_poisoning_test(base_url))
+        # Enhanced security tests (new)
+        jwt_comprehensive_task = asyncio.create_task(jwt_comprehensive_test(base_url, None, auth_session))
+        graphql_comprehensive_task = asyncio.create_task(graphql_comprehensive_test(base_url, None, auth_session))
+        verb_tampering_task = asyncio.create_task(test_verb_tampering(base_url))
+        rate_limit_task = asyncio.create_task(detect_rate_limits(base_url))
     else:
         # Create dummy tasks that return empty results for public-only mode
         async def dummy_nosql(): return {"vulnerable": False, "payloads_tested": [], "evidence": []}
@@ -4079,6 +2873,10 @@ async def build_report(target: str,
         async def dummy_timing(): return {"vulnerable": False, "evidence": []}
         async def dummy_graphql(): return {"vulnerable": False, "issues": [], "evidence": []}
         async def dummy_cache_poison(): return {"vulnerable": False, "issues": [], "evidence": []}
+        async def dummy_jwt_comprehensive(): return {"vulnerable": False, "algorithm_confusion": {}, "kid_injection": {}, "claim_manipulation": {}, "findings": []}
+        async def dummy_graphql_comprehensive(): return {"vulnerable": False, "batch_attacks": {}, "depth_attacks": {}, "alias_idor": {}, "field_suggestions": {}, "findings": []}
+        async def dummy_verb_tampering(): return {"vulnerable": False, "method_overrides": [], "findings": []}
+        async def dummy_rate_limit(): return {"rate_limited": False, "headers": {}, "limits": {}, "findings": []}
         nosql_task = asyncio.create_task(dummy_nosql())
         ldap_task = asyncio.create_task(dummy_ldap())
         xpath_task = asyncio.create_task(dummy_xpath())
@@ -4090,6 +2888,10 @@ async def build_report(target: str,
         timing_task = asyncio.create_task(dummy_timing())
         graphql_task = asyncio.create_task(dummy_graphql())
         cache_poison_task = asyncio.create_task(dummy_cache_poison())
+        jwt_comprehensive_task = asyncio.create_task(dummy_jwt_comprehensive())
+        graphql_comprehensive_task = asyncio.create_task(dummy_graphql_comprehensive())
+        verb_tampering_task = asyncio.create_task(dummy_verb_tampering())
+        rate_limit_task = asyncio.create_task(dummy_rate_limit())
 
     # Enhanced security checks (will be run after headers are available)
     if not public_only:
@@ -4158,6 +2960,8 @@ async def build_report(target: str,
     http3 = await h3_task
     sec_txt = await sec_txt_task
 
+    emit_progress("baseline", 20, "dns/tls/http complete")
+
     # Virtual host enumeration (post-DNS, safe)
     if not public_only and dns.get("A"):
         vhost_task = asyncio.create_task(enumerate_virtual_hosts(base_url, host, dns.get("A")))
@@ -4167,7 +2971,16 @@ async def build_report(target: str,
 
     httpx_meta = await httpx_task
     katana_result = await katana_task
-    browser_res = await browser_task
+    browser_fetch_error = None
+    try:
+        browser_res = await browser_task
+    except Exception as e:
+        browser_fetch_error = str(e)
+        print(f"[scanner] Browser fetch failed: {e}, continuing without browser data", file=sys.stderr)
+        # Set browser_res to None on error - downstream code checks `if browser_res` before using
+        browser_res = None
+
+    emit_progress("discovery", 30, "crawling and discovery")
 
     # HAR-First Discovery: Extract endpoints and parameters from browser network capture
     # This is the primary discovery source in smart mode
@@ -4366,6 +3179,94 @@ async def build_report(target: str,
             max_urls=options_limit,
         )
 
+    # Deferred advanced vulnerability tests (full/aggressive only, requires parameterized endpoints)
+    if advanced_vuln_task is None:
+        def _build_adv_candidates() -> list[dict[str, Any]]:
+            ssrf_params = {
+                "url", "uri", "path", "dest", "destination", "redirect", "next",
+                "callback", "return", "continue", "image", "file", "host", "domain", "link", "ref", "target",
+            }
+            cmd_params = {
+                "cmd", "exec", "command", "shell", "ping", "host", "ip", "query",
+            }
+            candidates: list[dict[str, Any]] = []
+            seen_keys: set[tuple[str, str, str]] = set()
+
+            def _add_candidate(url: str, param: str, kind: str) -> None:
+                key = (url, param, kind)
+                if key in seen_keys:
+                    return
+                seen_keys.add(key)
+                candidates.append({"url": url, "param": param, "type": kind})
+
+            def _url_with_params(url: str, params: list[str]) -> str:
+                parsed = urllib.parse.urlparse(url)
+                query = urllib.parse.urlencode({p: "test" for p in params})
+                return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", query, ""))
+
+            def _consume_url(url: str, params_override: list[str] | None = None) -> None:
+                if not url:
+                    return
+                if params_override is None:
+                    parsed = urllib.parse.urlparse(url)
+                    params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
+                else:
+                    params = params_override
+                    url = _url_with_params(url, params)
+                for param in params:
+                    param_lower = param.lower()
+                    if param_lower in ssrf_params:
+                        _add_candidate(url, param, "ssrf")
+                    if param_lower in cmd_params:
+                        _add_candidate(url, param, "cmd")
+
+            # Use real discovered URLs with params
+            for url in crawl_urls:
+                if "?" in url:
+                    _consume_url(url)
+
+            # Manual endpoints (GET only)
+            for ep in manual_endpoints_norm or []:
+                if ep.get("method", "GET").upper() != "GET":
+                    continue
+                params = ep.get("params") or []
+                if params:
+                    _consume_url(ep.get("url", ""), params_override=params)
+
+            # Smart discovery inferred params (if available)
+            if smart_discovery_data and isinstance(smart_discovery_data, dict):
+                for entry in smart_discovery_data.get("endpoints_with_params", []) or []:
+                    if isinstance(entry, dict):
+                        url = entry.get("url")
+                        params = entry.get("params") or []
+                        if url and params:
+                            _consume_url(url, params_override=params[:5])
+
+            return candidates[:40]  # Cap candidates to avoid excessive probing
+
+        run_adv = (
+            complete_mode and not public_only and not smart_mode
+            and complete_tier in ("full", "aggressive")
+            and exploit_level != "safe"
+        )
+        if run_adv:
+            adv_candidates = _build_adv_candidates()
+            if adv_candidates:
+                advanced_vuln_task = asyncio.create_task(
+                    advanced_vuln_tests(
+                        base_url,
+                        exploit_level=exploit_level,
+                        candidates=adv_candidates,
+                        auth_session=auth_session,
+                    )
+                )
+            else:
+                async def dummy_advanced(): return {"ssrf": {"tested": False}, "xxe": {"tested": False}, "command_injection": {"tested": False}, "scan_completed": False, "skipped": True, "reason": "no_parameterized_endpoints"}
+                advanced_vuln_task = asyncio.create_task(dummy_advanced())
+        else:
+            async def dummy_advanced(): return {"ssrf": {"tested": False}, "xxe": {"tested": False}, "command_injection": {"tested": False}, "scan_completed": False, "skipped": True, "reason": "profile_not_enabled"}
+            advanced_vuln_task = asyncio.create_task(dummy_advanced())
+
     # Record discovery coverage
     if coverage_tracker:
         # Record discovered endpoints
@@ -4481,6 +3382,17 @@ async def build_report(target: str,
             if isinstance(port, int) and ("grpc" in name or "grpc" in product or "grpc" in extra):
                 grpc_ports.add(port)
 
+        # If comprehensive port scan already completed, include those ports as candidates
+        try:
+            if comprehensive_port_task and comprehensive_port_task.done():
+                comp_res = comprehensive_port_task.result()
+                for entry in comp_res.get("open_ports", []) or []:
+                    port = entry.get("port")
+                    if isinstance(port, int):
+                        grpc_ports.add(port)
+        except Exception:
+            pass
+
         if grpc_ports:
             grpc_results = await grpc_reflection_discovery(host, sorted(grpc_ports))
         else:
@@ -4495,6 +3407,83 @@ async def build_report(target: str,
 
     # Extract signals from nuclei for smart mode phase coordination
     nuclei_signals = extract_signals_from_nuclei(nuclei_results) if smart_mode else {}
+
+    # Adaptive smart discovery refinement using nuclei signals (post-nuclei)
+    if smart_mode and smart_discovery_data and nuclei_signals:
+        try:
+            signals_used = smart_discovery_data.get("signals_used")
+            if not signals_used:
+                # Build directories from existing discovery results
+                all_urls = smart_discovery_data.get("all_urls", []) or []
+                api_endpoints = smart_discovery_data.get("api_endpoints", []) or []
+                directories = [u for u in all_urls if u.endswith("/")]
+
+                api_bases = set()
+                for endpoint in api_endpoints:
+                    parsed = urllib.parse.urlparse(endpoint)
+                    path_parts = parsed.path.split("/")
+                    if len(path_parts) >= 2:
+                        api_base = "/".join(path_parts[:3]) + "/"
+                        if api_base != "/":
+                            api_bases.add(api_base)
+
+                directories.extend(list(api_bases))
+                if not directories:
+                    directories = [
+                        "/api/", "/api/v1/", "/api/v2/", "/api/v3/",
+                        "/v1/", "/v2/", "/v3/", "/rest/", "/rest/v1/", "/rest/v2/",
+                    ]
+                directories = list(set(directories))
+
+                adaptive_depth, adaptive_paths = calculate_adaptive_depth(nuclei_signals, base_depth=3)
+                refined = await recursive_directory_discovery(
+                    base_url,
+                    directories,
+                    signals=nuclei_signals,
+                    max_depth=adaptive_depth,
+                    max_paths_per_level=adaptive_paths,
+                )
+
+                new_paths = refined.get("paths", []) or []
+                added_urls = 0
+                if new_paths:
+                    new_urls = [urllib.parse.urljoin(base_url, p) for p in new_paths]
+                    existing_urls = set(all_urls)
+                    # Cap additions to avoid runaway growth
+                    config = smart_discovery_data.get("config", {}) or {}
+                    max_urls = config.get("max_urls", 1000)
+                    remaining = max(0, max_urls - len(all_urls))
+                    new_urls = [u for u in new_urls if u not in existing_urls]
+                    if remaining:
+                        new_urls = new_urls[:remaining]
+                    else:
+                        new_urls = []
+
+                    if new_urls:
+                        added_urls = len(new_urls)
+                        all_urls = list(set(all_urls + new_urls))
+                        smart_discovery_data["all_urls"] = all_urls
+                        existing_recursive = smart_discovery_data.get("recursive_paths", []) or []
+                        smart_discovery_data["recursive_paths"] = list(set(existing_recursive + new_urls))
+                        # Add to crawl pool for later active testing
+                        crawl_set = set(crawl_urls)
+                        for u in new_urls:
+                            if u not in crawl_set:
+                                crawl_urls.append(u)
+                                crawl_set.add(u)
+
+                smart_discovery_data["signals_used"] = (
+                    nuclei_signals.to_dict() if hasattr(nuclei_signals, "to_dict") else nuclei_signals
+                )
+                stats = smart_discovery_data.get("stats", {}) or {}
+                stats["adaptive_refinement"] = {
+                    "added_urls": added_urls,
+                    "adaptive_depth": adaptive_depth,
+                    "paths_per_level": adaptive_paths,
+                }
+                smart_discovery_data["stats"] = stats
+        except Exception as e:
+            print(f"[smart] Adaptive discovery refinement failed: {e}", file=sys.stderr)
 
     if coverage_tracker and isinstance(nuclei_results, dict):
         templates_run = 0
@@ -4531,6 +3520,11 @@ async def build_report(target: str,
     timing_results = await timing_task
     graphql_results = await graphql_task
     cache_poison_results = await cache_poison_task
+    # Enhanced security tests (new)
+    jwt_comprehensive_results = await jwt_comprehensive_task
+    graphql_comprehensive_results = await graphql_comprehensive_task
+    verb_tampering_results = await verb_tampering_task
+    rate_limit_results = await rate_limit_task
 
     # Await enhanced security tests
     api_sec_results = await api_sec_task
@@ -4561,9 +3555,10 @@ async def build_report(target: str,
     if default_creds_testing and not public_only:
         # Use aggressive credential checker for full/aggressive scans
         if exploit_level in ("aggressive", "moderate"):
+            # Note: all_techs computed later; pass empty list for now (generic credential testing)
             default_creds_task = asyncio.create_task(test_default_credentials_aggressive(
                 base_url,
-                detected_tech=all_techs,
+                detected_tech=[],
                 max_attempts=20 if exploit_level == "aggressive" else 10,
                 delay_ms=300 if exploit_level == "aggressive" else 500
             ))
@@ -4635,6 +3630,8 @@ async def build_report(target: str,
     bruteforce_results = await bruteforce_task
     http_methods_results = await http_methods_task
 
+    emit_progress("phase_1_2", 55, "critical and auth checks complete")
+
     # Phase 3a Client-Side Security Checks - Create js_deps_task NOW with browser versions
     # (Moved here so we have access to browser_res.get("browser_versions"))
     # Determine headers early for response_headers parameter
@@ -4685,8 +3682,18 @@ async def build_report(target: str,
     cloud_bucket_results = await cloud_bucket_task
     backup_file_results = await backup_file_task
 
+    emit_progress("phase_3", 70, "client and infrastructure checks complete")
+
     # Phase 4 Checks (P1 Priority) - Run AFTER crawling so discovered_urls is available
     # This ensures Phase 4 checks can scan all discovered forms, endpoints, and URLs
+    emit_progress("phase_4", 72, "starting phase 4 checks")
+    forced_browsing_max_seconds = None
+    if smart_mode:
+        try:
+            forced_browsing_max_seconds = int(os.environ.get("SCAN_FORCED_BROWSING_MAX_SECONDS", "90"))
+        except Exception:
+            forced_browsing_max_seconds = 90
+
     if file_upload_testing and not public_only:
         file_upload_task = asyncio.create_task(test_file_upload(base_url, discovered_urls=crawl_urls, auth_session=auth_session, safe_mode=True))
     else:
@@ -4719,7 +3726,11 @@ async def build_report(target: str,
 
     # Access Control Checks - Forced Browsing (can run in parallel with Phase 4)
     if forced_browsing_testing and not public_only:
-        forced_browsing_task = asyncio.create_task(check_forced_browsing(base_url, max_concurrent=10))
+        forced_browsing_task = asyncio.create_task(check_forced_browsing(
+            base_url,
+            max_concurrent=10,
+            max_total_time=forced_browsing_max_seconds,
+        ))
     else:
         async def dummy_forced_browsing(): return {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}
         forced_browsing_task = asyncio.create_task(dummy_forced_browsing())
@@ -4740,6 +3751,49 @@ async def build_report(target: str,
         async def dummy_bola(): return {"vulnerable": False, "findings": [], "endpoints_tested": 0, "access_violations": 0}
         bola_task = asyncio.create_task(dummy_bola())
 
+    # Race Condition Testing (smart/full/aggressive only)
+    if advanced_scan and not public_only:
+        # Identify race-prone endpoints from discovered endpoints
+        race_endpoints = []
+        if har_discovery_result and har_discovery_result.endpoints:
+            def _race_endpoint_from_har(ep: Any) -> dict[str, Any]:
+                if isinstance(ep, dict):
+                    url = ep.get("url", "")
+                    method = ep.get("method", "GET")
+                    query_params = ep.get("query_params") or {}
+                    body_params = ep.get("body_params") or {}
+                else:
+                    url = getattr(ep, "url", "")
+                    method = getattr(ep, "method", "GET")
+                    query_params = getattr(ep, "query_params", {}) or {}
+                    body_params = getattr(ep, "body_params", {}) or {}
+
+                params: list[dict[str, str]] = []
+                if isinstance(query_params, dict):
+                    params.extend({"name": k} for k in query_params.keys())
+                elif isinstance(query_params, list):
+                    params.extend({"name": k} for k in query_params if isinstance(k, str))
+
+                if isinstance(body_params, dict):
+                    params.extend({"name": k} for k in body_params.keys())
+                elif isinstance(body_params, list):
+                    if body_params and isinstance(body_params[0], dict):
+                        params.extend({"name": k} for k in body_params[0].keys())
+                    elif body_params and all(isinstance(item, str) for item in body_params):
+                        params.extend({"name": k} for k in body_params)
+
+                return {"url": url, "method": method, "params": params}
+
+            race_endpoints = identify_race_prone_endpoints(
+                [_race_endpoint_from_har(ep) for ep in har_discovery_result.endpoints]
+            )
+        race_condition_task = asyncio.create_task(
+            run_race_condition_tests(race_endpoints, auth_session=auth_session, concurrent_requests=10)
+        )
+    else:
+        async def dummy_race(): return {"tested_endpoints": 0, "vulnerable_endpoints": 0, "findings": [], "results": []}
+        race_condition_task = asyncio.create_task(dummy_race())
+
     # SSH checks
     if ssh_testing and not public_only:
         ssh_task = asyncio.create_task(ssh_auth_methods(host, ssh_port))
@@ -4747,32 +3801,175 @@ async def build_report(target: str,
         async def dummy_ssh(): return {"password_auth_enabled": False, "auth_methods": [], "findings": [], "scan_completed": False}
         ssh_task = asyncio.create_task(dummy_ssh())
 
-    # Await Phase 4 Checks
-    file_upload_results = await file_upload_task
-    open_redirect_results = await open_redirect_task
-    host_header_results = await host_header_task
-    business_logic_results = await business_logic_task
-    api_security_p4_results = await api_security_p4_task
-    forced_browsing_results = await forced_browsing_task
-    mass_assignment_results = await mass_assignment_task
-    bola_results = await bola_task
-    ssh_results = await ssh_task
+    # Phase 4 watchdog for smart scans (prevents hangs from non-cancellable awaits)
+    phase4_deadline = None
+    if smart_mode:
+        try:
+            phase4_max_seconds = int(os.environ.get("SCAN_PHASE4_MAX_SECONDS", "360"))
+        except Exception:
+            phase4_max_seconds = 360
+        phase4_max_seconds = max(30, phase4_max_seconds)
+        phase4_deadline = time.monotonic() + phase4_max_seconds
+        print(f"[phase_4] Enforcing max duration {phase4_max_seconds}s for smart scan", file=sys.stderr, flush=True)
+    phase4_trace = os.environ.get("SCAN_PHASE4_TRACE")
+    phase4_logs_env = os.environ.get("SCAN_PHASE4_LOGS")
+    if phase4_logs_env is None:
+        phase4_logs = bool(smart_mode)
+    else:
+        phase4_logs = phase4_logs_env.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        phase4_cancel_grace = float(os.environ.get("SCAN_PHASE4_CANCEL_GRACE", "1"))
+    except Exception:
+        phase4_cancel_grace = 1.0
+    if phase4_cancel_grace < 0:
+        phase4_cancel_grace = 0.0
 
-    # Await new security enhancement tasks (IP Reputation, Brand Protection, Enhanced DNS, Domain Intel, CT Monitor, Cloud Security)
-    typosquat_results = await typosquat_task
-    dkim_enum_results = await dkim_task
-    zone_transfer_results = await zone_transfer_task
-    domain_intel_results = await domain_intel_task
-    ct_monitor_results = await ct_monitor_task
-    smtp_security_results = await smtp_security_task
-    asn_discovery_results = await asn_discovery_task
-    network_services_results = await network_services_task
-    cloud_ssrf_results = await cloud_ssrf_task
-    k8s_results = await k8s_task
-    tf_results = await tf_task
-    registry_results = await registry_task
-    breach_check_results = await breach_check_task
-    vendor_risk_results = await vendor_risk_task
+    def _phase4_log(event: str, **fields: Any) -> None:
+        if not phase4_logs:
+            return
+        parts = [f"[phase_4] event={event}"]
+        for key, value in fields.items():
+            if value is None:
+                continue
+            text = str(value)
+            if " " in text:
+                text = text.replace(" ", "_")
+            parts.append(f"{key}={text}")
+        print(" ".join(parts), file=sys.stderr, flush=True)
+
+    _phase4_log(
+        "start",
+        smart=int(bool(smart_mode)),
+        public=int(bool(public_only)),
+        deadline=f"{phase4_max_seconds}s" if phase4_deadline else "none",
+    )
+
+    def _phase4_timeout(requested: int, name: str) -> int:
+        if phase4_deadline is None:
+            return requested
+        remaining = phase4_deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"[phase_4] Deadline exceeded; skipping {name}", file=sys.stderr)
+            return 0
+        return int(min(requested, remaining))
+
+    def _attach_task_suppressor(task: asyncio.Task, name: str) -> None:
+        def _done_callback(t: asyncio.Task) -> None:
+            try:
+                exc = t.exception()
+                if exc:
+                    print(f"[{name}] Task error after timeout: {exc}", file=sys.stderr)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        try:
+            task.add_done_callback(_done_callback)
+        except Exception:
+            pass
+
+    def _cancel_task(task: asyncio.Task | None, name: str) -> None:
+        if task is None or task.done():
+            return
+        try:
+            task.cancel()
+        except Exception:
+            pass
+        _attach_task_suppressor(task, name)
+
+    async def _drain_task(task: asyncio.Task | None, name: str) -> None:
+        if task is None or task.done() or phase4_cancel_grace <= 0:
+            return
+        try:
+            await asyncio.wait_for(task, timeout=phase4_cancel_grace)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            _phase4_log("cancel_grace_timeout", task=name, grace=f"{phase4_cancel_grace:.1f}s")
+        except Exception as e:
+            print(f"[{name}] Cancel cleanup error: {e}", file=sys.stderr)
+
+    # Helper for timeout with default
+    async def await_with_timeout(task, timeout_sec, default, name):
+        if timeout_sec <= 0:
+            _phase4_log("skip", task=name, reason="deadline")
+            print(f"[{name}] Skipped (deadline exceeded), using defaults", file=sys.stderr)
+            _cancel_task(task, name)
+            await _drain_task(task, name)
+            return default
+        start_ts = time.monotonic()
+        try:
+            _phase4_log("await", task=name, timeout=f"{timeout_sec}s")
+            done, pending = await asyncio.wait({task}, timeout=timeout_sec)
+            if task in done:
+                try:
+                    result = task.result()
+                    if phase4_trace:
+                        elapsed = time.monotonic() - start_ts
+                        print(f"[phase_4] {name} completed in {elapsed:.2f}s", file=sys.stderr)
+                    else:
+                        elapsed = time.monotonic() - start_ts
+                        _phase4_log("done", task=name, elapsed=f"{elapsed:.2f}s")
+                    return result
+                except asyncio.CancelledError:
+                    elapsed = time.monotonic() - start_ts
+                    _phase4_log("cancelled", task=name, elapsed=f"{elapsed:.2f}s")
+                    print(f"[{name}] Cancelled, using defaults", file=sys.stderr)
+                except Exception as e:
+                    elapsed = time.monotonic() - start_ts
+                    _phase4_log("error", task=name, elapsed=f"{elapsed:.2f}s", err=type(e).__name__)
+                    print(f"[{name}] Failed: {e}, using defaults", file=sys.stderr)
+                if phase4_trace:
+                    elapsed = time.monotonic() - start_ts
+                    print(f"[phase_4] {name} error after {elapsed:.2f}s", file=sys.stderr)
+                return default
+            if phase4_trace:
+                elapsed = time.monotonic() - start_ts
+                print(f"[phase_4] {name} timed out after {elapsed:.2f}s (limit {timeout_sec}s)", file=sys.stderr)
+            else:
+                elapsed = time.monotonic() - start_ts
+                _phase4_log("timeout", task=name, elapsed=f"{elapsed:.2f}s", timeout=f"{timeout_sec}s")
+                print(f"[{name}] Timed out after {timeout_sec}s, using defaults", file=sys.stderr)
+            _cancel_task(task, name)
+            await _drain_task(task, name)
+            return default
+        except Exception as e:
+            elapsed = time.monotonic() - start_ts
+            _phase4_log("error", task=name, elapsed=f"{elapsed:.2f}s", err=type(e).__name__)
+            print(f"[{name}] Timeout handler error: {e}, using defaults", file=sys.stderr)
+            _cancel_task(task, name)
+            await _drain_task(task, name)
+            return default
+
+    # Await Phase 4 Checks with timeouts
+    file_upload_results = await await_with_timeout(file_upload_task, _phase4_timeout(90, "file_upload"), {"vulnerable": False, "upload_endpoints": [], "tested_endpoints": 0}, "file_upload")
+    open_redirect_results = await await_with_timeout(open_redirect_task, _phase4_timeout(60, "open_redirect"), {"vulnerable": False, "redirect_params_found": [], "confirmed_redirects": []}, "open_redirect")
+    host_header_results = await await_with_timeout(host_header_task, _phase4_timeout(60, "host_header"), {"vulnerable": False, "header_reflection": [], "password_reset_endpoints": []}, "host_header")
+    business_logic_results = await await_with_timeout(business_logic_task, _phase4_timeout(90, "business_logic"), {"potential_issues": [], "price_fields": [], "quantity_fields": []}, "business_logic")
+    api_security_p4_results = await await_with_timeout(api_security_p4_task, _phase4_timeout(90, "api_security_p4"), {"vulnerable": False, "mass_assignment_risks": [], "bfla_endpoints": []}, "api_security_p4")
+    forced_browsing_results = await await_with_timeout(forced_browsing_task, _phase4_timeout(180, "forced_browsing"), {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}, "forced_browsing")
+    mass_assignment_results = await await_with_timeout(mass_assignment_task, _phase4_timeout(60, "mass_assignment"), {"vulnerable": False, "findings": [], "endpoints_tested": 0, "parameters_tested": 0}, "mass_assignment")
+    bola_results = await await_with_timeout(bola_task, _phase4_timeout(120, "bola"), {"vulnerable": False, "findings": [], "endpoints_tested": 0, "access_violations": 0}, "bola")
+    ssh_results = await await_with_timeout(ssh_task, _phase4_timeout(30, "ssh"), {"password_auth_enabled": False, "auth_methods": [], "findings": [], "scan_completed": False}, "ssh")
+    race_condition_results = await await_with_timeout(race_condition_task, _phase4_timeout(90, "race_condition"), {"tested_endpoints": 0, "vulnerable_endpoints": 0, "findings": [], "results": []}, "race_condition")
+
+    # Await new security enhancement tasks with timeouts (IP Reputation, Brand Protection, Enhanced DNS, Domain Intel, CT Monitor, Cloud Security)
+    typosquat_results = await await_with_timeout(typosquat_task, _phase4_timeout(60, "typosquat"), {"similar_domains": [], "risk_domains": []}, "typosquat")
+    dkim_enum_results = await await_with_timeout(dkim_task, _phase4_timeout(30, "dkim"), {"selectors_found": [], "dkim_records": []}, "dkim")
+    zone_transfer_results = await await_with_timeout(zone_transfer_task, _phase4_timeout(30, "zone_transfer"), {"vulnerable": False, "records": []}, "zone_transfer")
+    domain_intel_results = await await_with_timeout(domain_intel_task, _phase4_timeout(60, "domain_intel"), {}, "domain_intel")
+    ct_monitor_results = await await_with_timeout(ct_monitor_task, _phase4_timeout(60, "ct_monitor"), {"certificates": [], "subdomains": []}, "ct_monitor")
+    smtp_security_results = await await_with_timeout(smtp_security_task, _phase4_timeout(60, "smtp_security"), {"open_relay": False, "starttls": False, "findings": []}, "smtp_security")
+    asn_discovery_results = await await_with_timeout(asn_discovery_task, _phase4_timeout(30, "asn_discovery"), {"asn": None, "ranges": []}, "asn_discovery")
+    network_services_results = await await_with_timeout(network_services_task, _phase4_timeout(120, "network_services"), {"services": [], "findings": []}, "network_services")
+    cloud_ssrf_results = await await_with_timeout(cloud_ssrf_task, _phase4_timeout(90, "cloud_ssrf"), {"vulnerable": False, "findings": []}, "cloud_ssrf")
+    k8s_results = await await_with_timeout(k8s_task, _phase4_timeout(60, "k8s"), {"exposed": False, "findings": []}, "k8s")
+    tf_results = await await_with_timeout(tf_task, _phase4_timeout(30, "tf"), {"exposed": False, "findings": []}, "tf")
+
+    emit_progress("phase_4", 85, "priority and enhancement checks complete")
+    registry_results = await await_with_timeout(registry_task, _phase4_timeout(60, "registry"), {"registrar": None, "creation_date": None, "expiration_date": None}, "registry")
+    breach_check_results = await await_with_timeout(breach_check_task, _phase4_timeout(60, "breach_check"), {"breaches": [], "exposed_emails": []}, "breach_check")
+    vendor_risk_results = await await_with_timeout(vendor_risk_task, _phase4_timeout(60, "vendor_risk"), {"risk_score": None, "vendors": []}, "vendor_risk")
 
     # IP Reputation: Now run with actual resolved IP (after DNS resolution)
     # Re-create IP reputation task with actual IP if enabled
@@ -4781,20 +3978,26 @@ async def build_report(target: str,
         if primary_ip:
             abuseipdb_api_key = abuseipdb_key or os.environ.get("ABUSEIPDB_API_KEY")
             virustotal_api_key = virustotal_key or os.environ.get("VIRUSTOTAL_API_KEY")
-            ip_rep_results = await check_ip_reputation(
+            ip_rep_task_actual = asyncio.create_task(check_ip_reputation(
                 primary_ip,
                 abuseipdb_key=abuseipdb_api_key,
                 virustotal_key=virustotal_api_key
+            ))
+            ip_rep_results = await await_with_timeout(
+                ip_rep_task_actual,
+                _phase4_timeout(60, "ip_reputation"),
+                {"abuse_score": None, "malicious": False, "reports": []},
+                "ip_reputation"
             )
         else:
-            ip_rep_results = await ip_rep_task
+            ip_rep_results = await await_with_timeout(ip_rep_task, _phase4_timeout(60, "ip_rep"), {"abuse_score": None, "malicious": False, "reports": []}, "ip_rep")
     else:
-        ip_rep_results = await ip_rep_task
+        ip_rep_results = await await_with_timeout(ip_rep_task, _phase4_timeout(60, "ip_rep"), {"abuse_score": None, "malicious": False, "reports": []}, "ip_rep")
 
-    # Await complete mode tasks
-    comprehensive_port_results = await comprehensive_port_task
-    deep_discovery_results = await deep_discovery_task
-    advanced_vuln_results = await advanced_vuln_task
+    # Await complete mode tasks with timeouts
+    comprehensive_port_results = await await_with_timeout(comprehensive_port_task, _phase4_timeout(300, "comprehensive_port"), {"ports": [], "services": []}, "comprehensive_port")
+    deep_discovery_results = await await_with_timeout(deep_discovery_task, _phase4_timeout(180, "deep_discovery"), {"paths": [], "endpoints": []}, "deep_discovery")
+    advanced_vuln_results = await await_with_timeout(advanced_vuln_task, _phase4_timeout(180, "advanced_vuln"), {"findings": [], "vulnerabilities": []}, "advanced_vuln")
 
     # Optional DKIM selectors
     dkim = None
@@ -4817,7 +4020,7 @@ async def build_report(target: str,
     # Choose header source: prefer browser if it returned a non-error status (<= 399)
     use_browser = False
     try:
-        br_status_code = int(browser_res["status"].split()[-1]) if browser_res.get("status") else 0
+        br_status_code = int(browser_res["status"].split()[-1]) if browser_res and browser_res.get("status") else 0
         curl_status_code = int((headers_main["status"].split()[1]) if headers_main.get("status") else 0)
         # prefer browser if 2xx/3xx, or curl got a 403/401 from CDN
         if 200 <= br_status_code < 400 or (br_status_code and br_status_code != 0 and curl_status_code in (401,403)):
@@ -4825,7 +4028,7 @@ async def build_report(target: str,
     except Exception:
         pass
 
-    chosen_headers = browser_res["headers"] if use_browser else headers_main["headers"]
+    chosen_headers = browser_res["headers"] if use_browser and browser_res else headers_main["headers"]
     sec_headers = parse_security_headers(chosen_headers)
     csp_eval = analyze_csp(sec_headers.get("csp"))
     cookies = analyze_cookies(chosen_headers)
@@ -4881,19 +4084,19 @@ async def build_report(target: str,
         elif isinstance(tech_field, str):
             httpx_techs.extend([t.strip() for t in tech_field.split(",") if t.strip()])
     httpx_techs = sorted(set(httpx_techs))
-    browser_techs = browser_res.get("tech_stack", [])
+    browser_techs = browser_res.get("tech_stack", []) if browser_res else []
 
     # Enhanced technology fingerprinting
     # Get page content for fingerprinting
     page_content = None
-    if browser_res.get("status"):
+    if browser_res and browser_res.get("status"):
         content_out, _, _ = await run(["curl", "-sS", "-L", "-k", "--max-time", "10", base_url])
         page_content = content_out[:50000] if content_out else None
 
     tech_fingerprint = await enhanced_tech_fingerprinting(base_url, chosen_headers, page_content)
 
     # Merge browser-detected versions into tech_fingerprint
-    browser_versions = browser_res.get("browser_versions", {})
+    browser_versions = browser_res.get("browser_versions", {}) if browser_res else {}
     if browser_versions:
         for tech in tech_fingerprint["technologies"]:
             if tech["name"] == "Next.js" and not tech.get("version"):
@@ -4909,16 +4112,26 @@ async def build_report(target: str,
     all_techs = sorted(set(httpx_techs + browser_techs + enhanced_techs))
 
     # Run unified tech discovery engine
+    # Get status code from browser if available, otherwise from curl headers
+    effective_status_code = 0  # Default to 0 (unknown) rather than None
+    if browser_res and browser_res.get("status_code"):
+        effective_status_code = browser_res.get("status_code")
+    elif headers_main.get("status"):
+        try:
+            effective_status_code = int(headers_main["status"].split()[1])
+        except (ValueError, IndexError):
+            pass
+
     tech_discovery_result = await discover_technologies(
         url=base_url,
-        browser_res=browser_res,
+        browser_res=browser_res or {},  # Pass empty dict instead of None
         headers=chosen_headers,
         html_content=page_content,
         dns_result=dns,
         tls_result=tlsx_data,
         httpx_techs=httpx_techs,
         server_versions=server_versions,
-        status_code=browser_res.get("status_code", 200)
+        status_code=effective_status_code
     )
 
     # Update all_techs with discoveries from new engine
@@ -4962,8 +4175,8 @@ async def build_report(target: str,
     if grpc_results:
         discovery["grpc_reflection"] = grpc_results
 
-    # Add complete mode results if available
-    if complete_mode:
+    # Add complete mode results if available (skip for smart mode to avoid duplicating smart discovery)
+    if complete_mode and not smart_mode:
         discovery["complete_ports"] = comprehensive_port_results
         discovery["deep_discovery"] = deep_discovery_results
         discovery["advanced_vulns"] = advanced_vuln_results
@@ -5056,9 +4269,12 @@ async def build_report(target: str,
         )
 
     discovery["summary"] = discovery_summary
+    emit_progress("discovery_complete", 40, "discovery summary ready")
 
     # Base report
     report = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "scanner_version": SCANNER_VERSION,
         "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
         "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
         "scan_config": {
@@ -5067,6 +4283,7 @@ async def build_report(target: str,
             "smart_mode": smart_mode,
             "no_early_stop": no_early_stop,
             "thorough_params": thorough_params,
+            "include_partial_attack_chains": include_partial_attack_chains,
         },
         "timestamp_utc": now_utc_iso(),
         "dns": {
@@ -5091,7 +4308,7 @@ async def build_report(target: str,
         },
         "http": {
             "source": "browser" if use_browser else "curl",
-            "status": browser_res["status"] if use_browser else headers_main["status"],
+            "status": browser_res["status"] if use_browser and browser_res else headers_main["status"],
             "final_url": final_url,
             "headers": chosen_headers,
             "security_headers": sec_headers,
@@ -5102,11 +4319,23 @@ async def build_report(target: str,
             "http3_advertised": bool((headers_main or {}).get("advertises_h3")),
             "scheme_redirect": scheme_redirect,
             "security_txt": sec_txt,
-            "evidence": {"screenshot": browser_res.get("screenshot_path"), "page_title": browser_res.get("title")}
+            "evidence": {"screenshot": browser_res.get("screenshot_path") if browser_res else None, "page_title": browser_res.get("title") if browser_res else None},
+            "browser_fetch_error": browser_fetch_error,
         },
         "discovery": discovery,
         "findings": []
     }
+
+    # Save initial checkpoint with baseline data
+    save_checkpoint(report, "baseline")
+
+    # Canonical network scan output (merge standard and complete port scans)
+    merged_network_scan = _merge_port_scan_results(
+        discovery.get("network_scan"),
+        discovery.get("complete_ports"),
+    )
+    report["network_scan"] = merged_network_scan
+    report["discovery"]["network_scan"] = merged_network_scan
 
     report["auth_checks"] = {
         "password_policy": password_policy_results,
@@ -5725,6 +4954,129 @@ async def build_report(target: str,
             },
             "CWE-444"
         ))
+
+    # Enhanced JWT security findings
+    if jwt_comprehensive_results.get("vulnerable") or jwt_comprehensive_results.get("findings"):
+        for finding in jwt_comprehensive_results.get("findings", []):
+            severity = finding.get("severity", "high")
+            report["findings"].append(normalize_finding(
+                f"jwt_{finding.get('type', 'vulnerability')}",
+                finding.get("title", "JWT Security Vulnerability"),
+                severity,
+                {
+                    "type": finding.get("type"),
+                    "evidence": finding.get("evidence", []),
+                    "recommendation": finding.get("recommendation", "Review JWT implementation")
+                },
+                finding.get("cwe", "CWE-287")
+            ))
+        # Handle specific algorithm confusion findings
+        if jwt_comprehensive_results.get("algorithm_confusion", {}).get("vulnerable"):
+            report["findings"].append(normalize_finding(
+                "jwt_algorithm_confusion",
+                "JWT Algorithm Confusion Attack (RS256 to HS256)",
+                "critical",
+                {
+                    "technique": "Algorithm substitution from RS256 to HS256",
+                    "evidence": jwt_comprehensive_results["algorithm_confusion"].get("evidence", []),
+                    "recommendation": "Explicitly verify the algorithm in JWT tokens server-side; never rely on the alg header"
+                },
+                "CWE-327"
+            ))
+        # Handle KID injection findings
+        if jwt_comprehensive_results.get("kid_injection", {}).get("vulnerable"):
+            report["findings"].append(normalize_finding(
+                "jwt_kid_injection",
+                "JWT Key ID (kid) Injection",
+                "critical",
+                {
+                    "technique": "Path traversal or SQL injection via kid header",
+                    "evidence": jwt_comprehensive_results["kid_injection"].get("evidence", []),
+                    "recommendation": "Sanitize and validate the kid claim; use an allowlist of valid key IDs"
+                },
+                "CWE-94"
+            ))
+
+    # Enhanced GraphQL security findings
+    if graphql_comprehensive_results.get("vulnerable") or graphql_comprehensive_results.get("findings"):
+        for finding in graphql_comprehensive_results.get("findings", []):
+            severity = finding.get("severity", "medium")
+            report["findings"].append(normalize_finding(
+                f"graphql_{finding.get('type', 'vulnerability')}",
+                finding.get("title", "GraphQL Security Vulnerability"),
+                severity,
+                {
+                    "type": finding.get("type"),
+                    "evidence": finding.get("evidence", []),
+                    "recommendation": finding.get("recommendation", "Review GraphQL security configuration")
+                },
+                finding.get("cwe", "CWE-400")
+            ))
+        # Handle batch attack findings
+        if graphql_comprehensive_results.get("batch_attacks", {}).get("vulnerable"):
+            report["findings"].append(normalize_finding(
+                "graphql_batch_attack",
+                "GraphQL Batching Attack Possible",
+                "medium",
+                {
+                    "technique": "Array or alias-based batch queries",
+                    "evidence": graphql_comprehensive_results["batch_attacks"].get("evidence", []),
+                    "recommendation": "Implement query cost analysis and rate limiting for GraphQL"
+                },
+                "CWE-770"
+            ))
+        # Handle depth attack findings
+        if graphql_comprehensive_results.get("depth_attacks", {}).get("vulnerable"):
+            report["findings"].append(normalize_finding(
+                "graphql_depth_attack",
+                "GraphQL Query Depth Limit Bypass",
+                "medium",
+                {
+                    "max_depth_reached": graphql_comprehensive_results["depth_attacks"].get("max_depth", 0),
+                    "evidence": graphql_comprehensive_results["depth_attacks"].get("evidence", []),
+                    "recommendation": "Implement query depth limiting in GraphQL server"
+                },
+                "CWE-400"
+            ))
+
+    # HTTP Verb Tampering findings
+    if verb_tampering_results.get("vulnerable") or verb_tampering_results.get("findings"):
+        for finding in verb_tampering_results.get("findings", []):
+            severity = finding.get("severity", "medium")
+            report["findings"].append(normalize_finding(
+                "http_verb_tampering",
+                finding.get("title", "HTTP Method/Verb Tampering"),
+                severity,
+                {
+                    "method": finding.get("method"),
+                    "bypass_technique": finding.get("technique"),
+                    "evidence": finding.get("evidence", []),
+                    "recommendation": "Ensure consistent authorization checks across all HTTP methods"
+                },
+                "CWE-650"
+            ))
+
+    # Rate Limit Detection findings (informational)
+    if rate_limit_results.get("rate_limited") is False and rate_limit_results.get("tested"):
+        # No rate limiting detected - potential issue
+        report["findings"].append(normalize_finding(
+            "missing_rate_limit",
+            "No Rate Limiting Detected",
+            "low",
+            {
+                "requests_sent": rate_limit_results.get("requests_sent", 0),
+                "all_succeeded": rate_limit_results.get("all_succeeded", True),
+                "recommendation": "Implement rate limiting to prevent brute force and denial of service attacks"
+            },
+            "CWE-770"
+        ))
+    elif rate_limit_results.get("rate_limited") and rate_limit_results.get("limits"):
+        # Rate limiting detected - include info
+        report["result"]["rate_limiting"] = {
+            "detected": True,
+            "limits": rate_limit_results.get("limits", {}),
+            "headers": rate_limit_results.get("headers", {})
+        }
 
     # Add findings from enhanced security checks
     if waf_results.get("waf_detected"):
@@ -6510,11 +5862,31 @@ async def build_report(target: str,
                 "CWE-639"  # BOLA/IDOR
             ))
 
+    # Race Condition Findings
+    if race_condition_results.get("vulnerable_endpoints", 0) > 0:
+        for race_finding in race_condition_results.get("findings", []):
+            severity = race_finding.get("severity", "high")
+            report["findings"].append(normalize_finding(
+                "race_condition",
+                race_finding.get("type", "Race Condition Vulnerability"),
+                severity,
+                {
+                    "endpoint": race_finding.get("endpoint"),
+                    "method": race_finding.get("method"),
+                    "evidence": race_finding.get("evidence"),
+                    "confidence": race_finding.get("confidence"),
+                    "details": race_finding.get("details", {}),
+                    "recommendation": "Implement proper synchronization mechanisms such as database transactions, optimistic locking, or mutex/semaphores"
+                },
+                race_finding.get("cwe", "CWE-362")
+            ))
+
     # Add access control results to report
     report["access_control"] = {
         "forced_browsing": forced_browsing_results,
         "mass_assignment": mass_assignment_results,
         "bola": bola_results,
+        "race_conditions": race_condition_results,
     }
 
     # Add SSH scan results to report and process findings
@@ -6530,10 +5902,20 @@ async def build_report(target: str,
                 ssh_finding.get("cwe", "CWE-287")
             ))
 
-    # Optional: API testing
-    if openapi_url:
-        api_rep = await schemathesis_run(openapi_url, api_token, base_url=None)
-        report["api"] = {"openapi": openapi_url, "schemathesis": api_rep}
+    # Optional: API testing (explicit or smart-discovered OpenAPI)
+    if schemathesis_task:
+        api_rep = await schemathesis_task
+        report["api"] = {
+            "openapi": schemathesis_schema_url,
+            "schemathesis": api_rep,
+            "source": "auto_discovery",
+        }
+    elif openapi_url:
+        api_rep = await schemathesis_run(openapi_url, api_token, base_url=None, auth_session=auth_session)
+        report["api"] = {"openapi": openapi_url, "schemathesis": api_rep, "source": "explicit"}
+
+    if isinstance(report.get("api"), dict):
+        api_rep = report["api"].get("schemathesis")
         # Normalize simple high level finding if errors present
         if isinstance(api_rep, dict) and api_rep.get("errors"):
             report["findings"].append(normalize_finding(
@@ -6542,6 +5924,9 @@ async def build_report(target: str,
 
     # Optional: active checks (sampled outside of smart/complete mode)
     if active_checks and not public_only:
+        dalfox_deep_domxss = deep_domxss
+        if dalfox_deep_domxss is None and (exploit_level == "aggressive" or complete_tier == "aggressive"):
+            dalfox_deep_domxss = True
         if auth_session:
             await auth_session.refresh_if_needed()
         # Reuse already-discovered URLs from main discovery phase (avoid duplicate katana call)
@@ -6645,25 +6030,35 @@ async def build_report(target: str,
         discovered_urls = set(candidates)
 
         # If still need more URLs, create synthetic high-value endpoints
+        synthetic_skipped_reason = None
+        api_hint = (
+            any("/api/" in u or "/rest/" in u or "/graphql" in u for u in functional_urls)
+            or bool(har_test_targets)
+            or bool(browser_api_endpoints)
+            or bool(manual_endpoints_norm)
+        )
         if len(candidates) < max_active:
-            synthetic_endpoints = [
-                # High-value injection targets
-                "/rest/products/search", "/api/products/search", "/search",
-                "/rest/user/login", "/api/user/login", "/api/login",
-                "/api/users", "/rest/users", "/api/user",
-                "/api/products", "/rest/products",
-                "/api/feedbacks", "/rest/feedbacks",
-                "/api/orders", "/rest/orders",
-                # Common vulnerable endpoints
-                "/api/data", "/rest/data",
-                "/admin", "/api/admin",
-            ]
-            for endpoint in synthetic_endpoints:
-                test_url = urllib.parse.urljoin(base_url, endpoint)
-                synthetic_params = add_smart_params(test_url)
-                candidates.extend(synthetic_params)
-                if len(candidates) >= max_active * 2:  # Generate more, will dedupe
-                    break
+            if api_hint or thorough_params:
+                synthetic_endpoints = [
+                    # High-value injection targets
+                    "/rest/products/search", "/api/products/search", "/search",
+                    "/rest/user/login", "/api/user/login", "/api/login",
+                    "/api/users", "/rest/users", "/api/user",
+                    "/api/products", "/rest/products",
+                    "/api/feedbacks", "/rest/feedbacks",
+                    "/api/orders", "/rest/orders",
+                    # Common vulnerable endpoints
+                    "/api/data", "/rest/data",
+                    "/admin", "/api/admin",
+                ]
+                for endpoint in synthetic_endpoints:
+                    test_url = urllib.parse.urljoin(base_url, endpoint)
+                    synthetic_params = add_smart_params(test_url)
+                    candidates.extend(synthetic_params)
+                    if len(candidates) >= max_active * 2:  # Generate more, will dedupe
+                        break
+            else:
+                synthetic_skipped_reason = "Skipped synthetic endpoints (no API hints detected; enable --thorough-params to force)"
 
         # de-dup and cap; mark as synthetic only if not already discovered
         seen = set()
@@ -6680,8 +6075,6 @@ async def build_report(target: str,
 
         run_xss = bool(active_xss)
         run_sqli = bool(active_sqli)
-        filters_active = run_xss != run_sqli
-
         active_block = {
             "targets": cand,
             "dalfox": [],
@@ -6690,10 +6083,68 @@ async def build_report(target: str,
             "custom_xss": [],
             "filters": {"xss": run_xss, "sqli": run_sqli},
         }
+        if synthetic_skipped_reason:
+            active_block.setdefault("warnings", []).append(synthetic_skipped_reason)
+        if cand_synthetic:
+            active_block["synthetic_targets_count"] = len(cand_synthetic)
+            active_block["synthetic_targets_sample"] = list(cand_synthetic)[:10]
 
         # Smart mode: Use DBMS-aware and context-aware active tests
         if smart_mode:
             try:
+                # P1-2 FIX: Early DBMS detection for smarter SQLi testing
+                # Detect DBMS before building test plan to use DBMS-specific payloads
+                early_dbms = None
+                if run_sqli and cand:
+                    try:
+                        # ARCHITECTURE FIX: Intelligent URL selection for DBMS fingerprinting
+                        # Prioritize HAR-discovered endpoints (real DB interaction) over arbitrary URLs
+                        db_param_patterns = ["id", "user", "query", "search", "filter", "sort", "order", "page", "limit"]
+
+                        def score_url_for_dbms(url: str, is_har: bool = False) -> int:
+                            """Score URL for DBMS probing priority (higher = better)."""
+                            score = 0
+                            url_lower = url.lower()
+                            if is_har:
+                                score += 100  # HAR-discovered = highest priority
+                            if any(f"{p}=" in url_lower for p in db_param_patterns):
+                                score += 50  # Has DB-like parameters
+                            if "/api/" in url_lower or "/rest/" in url_lower:
+                                score += 30  # API endpoint
+                            if "?" in url:
+                                score += 10  # Has parameters
+                            return score
+
+                        # Collect candidate URLs with scores
+                        scored_urls = []
+                        # Add HAR endpoints with high priority
+                        if har_test_targets:
+                            for target in har_test_targets[:10]:
+                                url = target.get("url", "")
+                                if url and "?" in url:
+                                    scored_urls.append((score_url_for_dbms(url, is_har=True), url))
+                        # Add discovered URLs
+                        for u in cand:
+                            if "?" in u:
+                                scored_urls.append((score_url_for_dbms(u), u))
+
+                        # Sort by score (highest first), take top 5
+                        scored_urls.sort(key=lambda x: x[0], reverse=True)
+                        param_urls = [url for _, url in scored_urls[:5]]
+
+                        for probe_url in param_urls:
+                            dbms_result = await detect_dbms(probe_url)
+                            if dbms_result.get("dbms") and dbms_result.get("confidence", 0) > 0.5:
+                                early_dbms = dbms_result["dbms"]
+                                print(
+                                    f"[smart] Early DBMS detection: {early_dbms} "
+                                    f"(confidence: {dbms_result.get('confidence', 0):.0%})",
+                                    file=sys.stderr
+                                )
+                                break
+                    except Exception as e:
+                        print(f"[smart] Early DBMS detection failed: {e}", file=sys.stderr)
+
                 # Build endpoints dict for smart testing (GET params from discovered URLs)
                 endpoints = []
                 endpoint_index = {}
@@ -6851,7 +6302,7 @@ async def build_report(target: str,
 
                 for u in cand:
                     parsed = urllib.parse.urlparse(u)
-                    params = list(urllib.parse.parse_qs(parsed.query).keys())
+                    params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
                     # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
                     source = "inferred" if u in cand_synthetic else "har_discovery"
                     _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
@@ -7049,6 +6500,26 @@ async def build_report(target: str,
                                         get_count += 1
                         if post_count or get_count:
                             print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
+
+                        # Smart mode: optionally kick off Schemathesis when OpenAPI is found
+                        if schemathesis_task is None and not public_only:
+                            schema_url = openapi_url
+                            if not schema_url:
+                                for schema in openapi_sources:
+                                    candidate_url = schema.get("url")
+                                    if candidate_url:
+                                        schema_url = candidate_url
+                                        break
+                            if schema_url:
+                                schemathesis_schema_url = schema_url
+                                schemathesis_task = asyncio.create_task(
+                                    schemathesis_run(
+                                        schema_url,
+                                        api_token,
+                                        base_url=base_url,
+                                        auth_session=auth_session,
+                                    )
+                                )
                 except Exception as e:
                     print(f"[scanner] OpenAPI discovery failed: {e}", file=sys.stderr)
 
@@ -7354,11 +6825,17 @@ async def build_report(target: str,
                     print(f"[scanner] Endpoint prioritization (first 100): {source_counts}", file=sys.stderr)
 
                 # Run smart active tests with DBMS detection and context-aware payloads
+                if auth_session:
+                    try:
+                        await auth_session.refresh_if_needed()
+                    except Exception as e:
+                        print(f"[scanner] Auth refresh before smart active tests failed: {e}", file=sys.stderr)
+
                 smart_results = await run_smart_active_tests(
                     url=base_url,
                     endpoints=endpoints,
                     tech_stack=tech_stack,
-                    dbms=None,  # Auto-detect
+                    dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
                     signals=nuclei_signals,  # Pass signals from nuclei findings
                     auth_session=auth_session,  # Pass auth session for authenticated testing
                     run_xss=run_xss,
@@ -7443,8 +6920,8 @@ async def build_report(target: str,
 
                     # OOB SQLi Test - for blind SQLi detection via external callbacks
                     # Requires a callback URL (e.g., Burp Collaborator) for verification
+                    oob_results = []
                     if oob_callback_url and smart_sqli_findings:
-                        oob_results = []
                         for sqli_finding in smart_sqli_findings[:oob_max_findings]:
                             try:
                                 oob_result = await oob_sqli_test(
@@ -7463,44 +6940,481 @@ async def build_report(target: str,
                             except Exception as e:
                                 print(f"[scanner] OOB SQLi test error: {e}", file=sys.stderr)
 
-                        if oob_results:
-                            active_block["oob_sqli"] = oob_results
-                            # Add a finding that requires callback verification
+                    if oob_results:
+                        active_block["oob_sqli"] = oob_results
+                        # Add a finding that requires callback verification
+                        report["findings"].append(normalize_finding(
+                            "oob_sqli",
+                            "Potential Out-of-Band SQL Injection (requires callback verification)",
+                            "medium",  # Medium until callback confirms
+                            {
+                                "payloads_sent": len(oob_results),
+                                "callback_url": oob_callback_url,
+                                "note": "Check callback server for DNS/HTTP requests to confirm exploitation",
+                                "endpoints_tested": [r.get("url") for r in oob_results],
+                            },
+                            "CWE-89"
+                        ))
+
+                # Parameter-aware auxiliary injection tests + blind SSRF (OOB)
+                try:
+                    def _coerce_param_list(raw: Any) -> list[str]:
+                        if isinstance(raw, dict):
+                            return [str(k) for k in raw.keys() if k]
+                        if isinstance(raw, (list, tuple, set)):
+                            return [str(v) for v in raw if v]
+                        if isinstance(raw, str):
+                            return [raw] if raw else []
+                        return []
+
+                    def _build_query_url(test_url: str, defaults: dict[str, Any] | None) -> str:
+                        parsed = urllib.parse.urlparse(test_url)
+                        query_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+                        if defaults:
+                            for name, value in defaults.items():
+                                if name not in query_params:
+                                    query_params[name] = str(value)
+                        if not query_params:
+                            return test_url
+                        new_query = urllib.parse.urlencode(query_params, doseq=True)
+                        return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+                    param_endpoints = [
+                        ep for ep in endpoints
+                        if (ep.get("method") or "GET").upper() == "GET"
+                        and _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                    ]
+                    param_endpoints = param_endpoints[: (8 if thorough_params else 4)]
+
+                    ssrf_param_keywords = {
+                        "url", "uri", "path", "dest", "redirect", "link", "proxy",
+                        "domain", "host", "site", "html", "val", "feed", "dir",
+                        "page", "callback", "webhook", "target", "src", "file",
+                        "reference", "ref", "fetch", "request", "load", "data",
+                        "image", "img", "pdf", "document", "download", "resource",
+                    }
+                    xxe_param_keywords = {"xml", "xxe", "file", "doc", "data", "payload", "content"}
+
+                    if param_endpoints:
+                        ldap_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        xpath_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        ssti_param = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+
+                        ssti_param_hints = {"template", "view", "render", "page", "tpl"}
+
+                        for ep in param_endpoints:
+                            params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                            if not params:
+                                continue
+                            defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
+                            test_url = _build_query_url(ep.get("url", ""), defaults)
+                            if not test_url:
+                                continue
+
+                            ldap_res = await ldap_injection_test(
+                                test_url,
+                                params_to_test=params,
+                                auth_session=auth_session,
+                                param_defaults=defaults,
+                                max_params=3,
+                                max_payloads=6,
+                            )
+                            if ldap_res.get("vulnerable"):
+                                ldap_param["vulnerable"] = True
+                                ldap_param["evidence"].extend(ldap_res.get("evidence", []))
+                                ldap_param["payloads_tested"].update(ldap_res.get("payloads_tested", []))
+                                ldap_param["tested_params"].update(ldap_res.get("tested_params", []))
+
+                            xpath_res = await xpath_injection_test(
+                                test_url,
+                                params_to_test=params,
+                                auth_session=auth_session,
+                                param_defaults=defaults,
+                                max_params=3,
+                                max_payloads=6,
+                            )
+                            if xpath_res.get("vulnerable"):
+                                xpath_param["vulnerable"] = True
+                                xpath_param["evidence"].extend(xpath_res.get("evidence", []))
+                                xpath_param["payloads_tested"].update(xpath_res.get("payloads_tested", []))
+                                xpath_param["tested_params"].update(xpath_res.get("tested_params", []))
+
+                            if any(p.lower() in ssti_param_hints for p in params):
+                                ssti_res = await ssti_test(
+                                    test_url,
+                                    params_to_test=params,
+                                    auth_session=auth_session,
+                                    param_defaults=defaults,
+                                    max_params=3,
+                                    max_payloads=6,
+                                )
+                                if ssti_res.get("vulnerable"):
+                                    ssti_param["vulnerable"] = True
+                                    ssti_param["evidence"].extend(ssti_res.get("evidence", []))
+                                    ssti_param["payloads_tested"].update(ssti_res.get("payloads_tested", []))
+                                    ssti_param["tested_params"].update(ssti_res.get("tested_params", []))
+
+                        if ldap_param["vulnerable"]:
+                            active_block["ldap_param"] = {
+                                "payloads_tested": sorted(ldap_param["payloads_tested"]),
+                                "tested_params": sorted(ldap_param["tested_params"]),
+                                "evidence": ldap_param["evidence"][:10],
+                            }
                             report["findings"].append(normalize_finding(
-                                "oob_sqli",
-                                "Potential Out-of-Band SQL Injection (requires callback verification)",
-                                "medium",  # Medium until callback confirms
+                                "ldap_injection",
+                                "LDAP Injection (parameter-aware)",
+                                "high",
                                 {
-                                    "payloads_sent": len(oob_results),
-                                    "callback_url": oob_callback_url,
-                                    "note": "Check callback server for DNS/HTTP requests to confirm exploitation",
-                                    "endpoints_tested": [r.get("url") for r in oob_results],
+                                    "evidence": ldap_param["evidence"][:10],
+                                    "payloads_tested": len(ldap_param["payloads_tested"]),
+                                    "tested_params": sorted(ldap_param["tested_params"]),
                                 },
-                                "CWE-89"
+                                "CWE-90"
                             ))
+
+                        if xpath_param["vulnerable"]:
+                            active_block["xpath_param"] = {
+                                "payloads_tested": sorted(xpath_param["payloads_tested"]),
+                                "tested_params": sorted(xpath_param["tested_params"]),
+                                "evidence": xpath_param["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "xpath_injection",
+                                "XPath Injection (parameter-aware)",
+                                "high",
+                                {
+                                    "evidence": xpath_param["evidence"][:10],
+                                    "payloads_tested": len(xpath_param["payloads_tested"]),
+                                    "tested_params": sorted(xpath_param["tested_params"]),
+                                },
+                                "CWE-91"
+                            ))
+
+                        if ssti_param["vulnerable"]:
+                            active_block["ssti_param"] = {
+                                "payloads_tested": sorted(ssti_param["payloads_tested"]),
+                                "tested_params": sorted(ssti_param["tested_params"]),
+                                "evidence": ssti_param["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "ssti",
+                                "Server-Side Template Injection (parameter-aware)",
+                                "critical",
+                                {
+                                    "evidence": ssti_param["evidence"][:10],
+                                    "payloads_tested": len(ssti_param["payloads_tested"]),
+                                    "tested_params": sorted(ssti_param["tested_params"]),
+                                },
+                                "CWE-1336"
+                            ))
+
+                    # Parameter-aware POST/JSON injection tests
+                    post_json_endpoints = [
+                        ep for ep in endpoints
+                        if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
+                        and _coerce_param_list(ep.get("body_params") or ep.get("params"))
+                        and ("json" in (ep.get("content_type") or "application/json").lower())
+                    ]
+                    post_json_endpoints = post_json_endpoints[: (6 if thorough_params else 3)]
+
+                    if post_json_endpoints:
+                        ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+
+                        for ep in post_json_endpoints:
+                            params = _coerce_param_list(ep.get("body_params") or ep.get("params"))
+                            if not params:
+                                continue
+                            defaults = ep.get("body_param_defaults") or {}
+                            method = (ep.get("method") or "POST").upper()
+                            content_type = ep.get("content_type") or "application/json"
+                            url = ep.get("url") or ""
+                            if not url:
+                                continue
+
+                            ldap_res = await ldap_injection_test_json_body(
+                                url=url,
+                                method=method,
+                                params=params,
+                                auth_session=auth_session,
+                                body_template=ep.get("body_template"),
+                                body_param_defaults=defaults,
+                                content_type=content_type,
+                                max_params=3,
+                                max_payloads=5,
+                            )
+                            if ldap_res.get("vulnerable"):
+                                ldap_post["vulnerable"] = True
+                                ldap_post["evidence"].extend(ldap_res.get("findings", []))
+                                ldap_post["payloads_tested"].update(ldap_res.get("payloads_tested", []))
+                                ldap_post["tested_params"].update(ldap_res.get("tested_params", []))
+
+                            xpath_res = await xpath_injection_test_json_body(
+                                url=url,
+                                method=method,
+                                params=params,
+                                auth_session=auth_session,
+                                body_template=ep.get("body_template"),
+                                body_param_defaults=defaults,
+                                content_type=content_type,
+                                max_params=3,
+                                max_payloads=5,
+                            )
+                            if xpath_res.get("vulnerable"):
+                                xpath_post["vulnerable"] = True
+                                xpath_post["evidence"].extend(xpath_res.get("findings", []))
+                                xpath_post["payloads_tested"].update(xpath_res.get("payloads_tested", []))
+                                xpath_post["tested_params"].update(xpath_res.get("tested_params", []))
+
+                            ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
+                            if ssrf_params or thorough_params:
+                                ssrf_res = await ssrf_injection_test_json_body(
+                                    url=url,
+                                    method=method,
+                                    params=ssrf_params or params[:2],
+                                    auth_session=auth_session,
+                                    body_template=ep.get("body_template"),
+                                    body_param_defaults=defaults,
+                                    content_type=content_type,
+                                    max_params=2,
+                                    max_payloads=3,
+                                )
+                                if ssrf_res.get("vulnerable"):
+                                    ssrf_post["vulnerable"] = True
+                                    ssrf_post["evidence"].extend(ssrf_res.get("findings", []))
+                                    ssrf_post["payloads_tested"].update(ssrf_res.get("payloads_tested", []))
+                                    ssrf_post["tested_params"].update(ssrf_res.get("tested_params", []))
+
+                            xxe_params = [p for p in params if any(k in p.lower() for k in xxe_param_keywords)]
+                            if xxe_params or thorough_params:
+                                xxe_res = await xxe_injection_test_json_body(
+                                    url=url,
+                                    method=method,
+                                    params=xxe_params or params[:2],
+                                    auth_session=auth_session,
+                                    body_template=ep.get("body_template"),
+                                    body_param_defaults=defaults,
+                                    content_type=content_type,
+                                    max_params=2,
+                                    max_payloads=2,
+                                )
+                                if xxe_res.get("vulnerable"):
+                                    xxe_post["vulnerable"] = True
+                                    xxe_post["evidence"].extend(xxe_res.get("findings", []))
+                                    xxe_post["payloads_tested"].update(xxe_res.get("payloads_tested", []))
+                                    xxe_post["tested_params"].update(xxe_res.get("tested_params", []))
+
+                        if ldap_post["vulnerable"]:
+                            active_block["ldap_json"] = {
+                                "payloads_tested": sorted(ldap_post["payloads_tested"]),
+                                "tested_params": sorted(ldap_post["tested_params"]),
+                                "evidence": ldap_post["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "ldap_injection",
+                                "LDAP Injection (JSON body)",
+                                "high",
+                                {
+                                    "evidence": ldap_post["evidence"][:10],
+                                    "payloads_tested": len(ldap_post["payloads_tested"]),
+                                    "tested_params": sorted(ldap_post["tested_params"]),
+                                },
+                                "CWE-90"
+                            ))
+
+                        if xpath_post["vulnerable"]:
+                            active_block["xpath_json"] = {
+                                "payloads_tested": sorted(xpath_post["payloads_tested"]),
+                                "tested_params": sorted(xpath_post["tested_params"]),
+                                "evidence": xpath_post["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "xpath_injection",
+                                "XPath Injection (JSON body)",
+                                "high",
+                                {
+                                    "evidence": xpath_post["evidence"][:10],
+                                    "payloads_tested": len(xpath_post["payloads_tested"]),
+                                    "tested_params": sorted(xpath_post["tested_params"]),
+                                },
+                                "CWE-91"
+                            ))
+
+                        if ssrf_post["vulnerable"]:
+                            active_block["ssrf_json"] = {
+                                "payloads_tested": sorted(ssrf_post["payloads_tested"]),
+                                "tested_params": sorted(ssrf_post["tested_params"]),
+                                "evidence": ssrf_post["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "ssrf",
+                                "SSRF (JSON body)",
+                                "high",
+                                {
+                                    "evidence": ssrf_post["evidence"][:10],
+                                    "payloads_tested": len(ssrf_post["payloads_tested"]),
+                                    "tested_params": sorted(ssrf_post["tested_params"]),
+                                },
+                                "CWE-918"
+                            ))
+
+                        if xxe_post["vulnerable"]:
+                            active_block["xxe_json"] = {
+                                "payloads_tested": sorted(xxe_post["payloads_tested"]),
+                                "tested_params": sorted(xxe_post["tested_params"]),
+                                "evidence": xxe_post["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "xxe_injection",
+                                "XXE (JSON body)",
+                                "high",
+                                {
+                                    "evidence": xxe_post["evidence"][:10],
+                                    "payloads_tested": len(xxe_post["payloads_tested"]),
+                                    "tested_params": sorted(xxe_post["tested_params"]),
+                                },
+                                "CWE-611"
+                            ))
+
+                    # Blind SSRF (OOB) for smart mode when callback is provided
+                    if oob_callback_url:
+                        ssrf_results = []
+                        ssrf_candidates = param_endpoints[:5] if param_endpoints else []
+                        for ep in ssrf_candidates:
+                            params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                            if not params:
+                                continue
+                            ssrf_params = [p for p in params if p.lower() in ssrf_param_keywords]
+                            if not ssrf_params and not thorough_params:
+                                continue
+                            if not ssrf_params:
+                                ssrf_params = params[:2]
+                            defaults = ep.get("param_defaults") or ep.get("query_param_defaults") or {}
+                            test_url = _build_query_url(ep.get("url", ""), defaults)
+                            if not test_url:
+                                continue
+                            ssrf_res = await blind_ssrf_test(
+                                test_url,
+                                callback_domain=oob_callback_url,
+                                params_to_test=ssrf_params,
+                                auth_session=auth_session,
+                            )
+                            if ssrf_res.get("payloads_injected"):
+                                ssrf_results.append({
+                                    "url": test_url,
+                                    "params": ssrf_params,
+                                    **ssrf_res,
+                                })
+
+                        if ssrf_results:
+                            active_block["blind_ssrf"] = ssrf_results
+                            report["findings"].append(normalize_finding(
+                                "blind_ssrf",
+                                "Potential Blind SSRF (OOB callbacks sent)",
+                                "medium",
+                                {
+                                    "callback_domain": oob_callback_url,
+                                    "payloads_sent": sum(r.get("payloads_injected", 0) for r in ssrf_results),
+                                    "endpoints_tested": [r.get("url") for r in ssrf_results],
+                                    "note": "Check your callback server for DNS/HTTP hits to confirm SSRF.",
+                                },
+                                "CWE-918"
+                            ))
+
+                    # Stored XSS workflow
+                    try:
+                        stored_urls = []
+                        if smart_discovery_data and isinstance(smart_discovery_data, dict):
+                            stored_urls.extend(smart_discovery_data.get("all_urls", []) or [])
+                        stored_urls.extend(crawl_urls or [])
+                        if browser_api_endpoints:
+                            for ep in browser_api_endpoints:
+                                if isinstance(ep, dict) and ep.get("url"):
+                                    stored_urls.append(ep["url"])
+                                elif isinstance(ep, str):
+                                    stored_urls.append(ep)
+                        stored_urls = list({u for u in stored_urls if isinstance(u, str)})
+
+                        stored_res = await stored_xss_workflow(
+                            base_url=base_url,
+                            endpoints=endpoints,
+                            discovered_urls=stored_urls,
+                            auth_session=auth_session,
+                            max_forms=8 if thorough_params else 5,
+                            max_pages=25 if thorough_params else 12,
+                        )
+                        active_block["stored_xss"] = stored_res
+                        if stored_res.get("vulnerable"):
+                            for finding in stored_res.get("findings", [])[:5]:
+                                report["findings"].append(normalize_finding(
+                                    "stored_xss",
+                                    "Stored XSS (workflow)",
+                                    finding.get("severity", "high"),
+                                    {
+                                        "injection_url": finding.get("injection_url"),
+                                        "stored_url": finding.get("stored_url"),
+                                        "param": finding.get("param"),
+                                        "payload": finding.get("payload"),
+                                        "payload_reflected": finding.get("payload_reflected"),
+                                        "snippet": finding.get("snippet"),
+                                        "method": finding.get("method"),
+                                    },
+                                    "CWE-79"
+                                ))
+                    except Exception as e:
+                        active_block["stored_xss_error"] = str(e)
+                except Exception as e:
+                    active_block["param_injection_error"] = str(e)
 
                 if run_xss:
-                    smart_xss_findings = smart_results.get("xss", {}).get("findings", [])
+                    all_xss_findings = smart_results.get("xss", {}).get("findings", [])
+                    # Filter out hash-route DOM XSS (tracked separately in active_block["hash_route_dom_xss"])
+                    smart_xss_findings = [f for f in all_xss_findings if f.get("subtype") != "dom_xss_hash_route"]
                     active_block["smart_xss"] = smart_xss_findings
                     active_block["smart_reflections_found"] = smart_results.get("xss", {}).get("reflections_found", 0)
+                    active_block["xss_get_endpoints_tested"] = smart_results.get("xss", {}).get("get_endpoints_tested", 0)
+                    active_block["xss_post_endpoints_tested"] = smart_results.get("xss", {}).get("post_endpoints_tested", 0)
 
-                    # Process smart XSS results
-                    if smart_xss_findings:
-                        for f in smart_xss_findings:
-                            report["findings"].append(normalize_finding(
-                                "smart_xss",
-                                f"Cross-Site Scripting ({f.get('context', 'unknown')})",
-                                f.get("severity", "high"),
-                                {
-                                    "type": f.get("type", "XSS"),
-                                    "url": f.get("url"),
-                                    "param": f.get("param"),
-                                    "payload": f.get("payload"),
-                                    "evidence": f.get("evidence"),
-                                    "context": f.get("context"),
-                                },
-                                "CWE-79"
-                            ))
+                    # Process smart XSS results (hash-route DOM XSS handled separately below)
+                    for f in smart_xss_findings:
+                        report["findings"].append(normalize_finding(
+                            "smart_xss",
+                            f"Cross-Site Scripting ({f.get('context', 'unknown')})",
+                            f.get("severity", "high"),
+                            {
+                                "type": f.get("type", "XSS"),
+                                "url": f.get("url"),
+                                "param": f.get("param"),
+                                "payload": f.get("payload"),
+                                "evidence": f.get("evidence"),
+                                "context": f.get("context"),
+                            },
+                            "CWE-79"
+                        ))
+
+                # Hash-route DOM XSS always reported (runs unconditionally in smart scans)
+                hash_route_dom_xss = smart_results.get("hash_route_dom_xss", {})
+                hash_route_findings = hash_route_dom_xss.get("findings", [])
+                if hash_route_findings:
+                    active_block["hash_route_dom_xss"] = hash_route_findings
+                    active_block["hash_route_endpoints_tested"] = hash_route_dom_xss.get("endpoints_tested", 0)
+                    for f in hash_route_findings:
+                        report["findings"].append(normalize_finding(
+                            "hash_route_dom_xss",
+                            f"DOM XSS in Hash Route ({f.get('technique', 'unknown')})",
+                            f.get("severity", "high"),
+                            {
+                                "type": "DOM XSS",
+                                "url": f.get("url"),
+                                "param": f.get("param"),
+                                "payload": f.get("payload"),
+                                "evidence": f.get("evidence"),
+                                "verified": f.get("verified", False),
+                            },
+                            "CWE-79"
+                        ))
 
                 # Record coverage for smart active tests
                 if coverage_tracker:
@@ -7659,7 +7573,7 @@ async def build_report(target: str,
                                 # Build normalized key: (method, path, sorted_query_param_names)
                                 cap_method = cap_req.get("method", "GET").upper()
                                 cap_path = cap_parsed.path.rstrip("/") or "/"
-                                cap_query_params = tuple(sorted(urllib.parse.parse_qs(cap_parsed.query).keys()))
+                                cap_query_params = tuple(sorted(urllib.parse.parse_qs(cap_parsed.query, keep_blank_values=True).keys()))
                                 cap_key = (cap_method, cap_path, cap_query_params)
 
                                 # Keep best capture for each key
@@ -7683,7 +7597,8 @@ async def build_report(target: str,
                                     f"reason={candidate.get('reason')}",
                                     file=sys.stderr
                                 )
-                            aggressive_sqlmap = complete_mode and not quick_mode
+                            # Only use aggressive SQLmap for aggressive exploit level
+                            aggressive_sqlmap = exploit_level == "aggressive"
                             # Get detected DBMS from smart_sqli for DBMS-aware SQLmap tuning
                             detected_dbms = active_block.get("dbms_detected")
 
@@ -7697,7 +7612,7 @@ async def build_report(target: str,
                                 ep_method = ep.get("method", "GET").upper()
                                 ep_parsed = urllib.parse.urlparse(ep_url)
                                 ep_path = ep_parsed.path.rstrip("/") or "/"
-                                ep_query_params = tuple(sorted(urllib.parse.parse_qs(ep_parsed.query).keys()))
+                                ep_query_params = tuple(sorted(urllib.parse.parse_qs(ep_parsed.query, keep_blank_values=True).keys()))
 
                                 # Build match key
                                 match_key = (ep_method, ep_path, ep_query_params)
@@ -7909,6 +7824,7 @@ async def build_report(target: str,
                                     "snippet": f.get("snippet"),
                                     "sink_type": f.get("sink_type"),
                                     "source_pattern": f.get("source_pattern"),
+                                    "source_nearby": f.get("source_nearby"),  # Include for validation
                                     "evidence": f.get("evidence"),
                                     "confidence": f.get("confidence", 0.7),
                                 },
@@ -7978,7 +7894,9 @@ async def build_report(target: str,
                     # Run selected tools concurrently for each URL
                     tasks: dict[str, asyncio.Task] = {}
                     if run_xss:
-                        tasks["dalfox"] = asyncio.create_task(dalfox_one(u, quick_mode, auth_session=auth_session))
+                        tasks["dalfox"] = asyncio.create_task(
+                            dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
+                        )
                         tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
                     if run_sqli:
                         tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
@@ -8201,6 +8119,11 @@ async def build_report(target: str,
         import traceback
         traceback.print_exc()
 
+    emit_progress("validation", 92, "finding validation complete")
+
+    # Save checkpoint with all findings collected
+    save_checkpoint(report, "findings_complete")
+
     # Assess scan completeness before grading
     coverage = assess_scan_completeness(
         report,
@@ -8235,7 +8158,45 @@ async def build_report(target: str,
                 print(f"[verification] Warning: Verification phase failed: {e}", file=sys.stderr)
                 # Continue with unverified findings
 
+    # Attack chain analysis (optional)
+    def _empty_attack_chains(error_message: str | None = None) -> dict[str, Any]:
+        payload = {
+            "chains": [],
+            "partial_chains": [],
+            "summary": {
+                "total_chains": 0,
+                "total_partial_chains": 0,
+                "critical_chains": 0,
+                "high_chains": 0,
+                "chain_types": [],
+                "partial_chain_types": [],
+                "partial_chains_included": include_partial_attack_chains,
+            },
+        }
+        if error_message:
+            payload["error"] = error_message
+        return payload
+
+    # Save checkpoint before final analysis
+    save_checkpoint(report, "pre_finalize")
+
+    if report.get("findings"):
+        if analyze_attack_chains:
+            try:
+                report["attack_chains"] = analyze_attack_chains(
+                    report["findings"],
+                    include_partial_chains=include_partial_attack_chains,
+                )
+            except Exception as e:
+                report["attack_chains"] = _empty_attack_chains(str(e))
+        else:
+            report["attack_chains"] = _empty_attack_chains("attack_chains module unavailable")
+
+    if report.get("attack_chains"):
+        emit_progress("attack_chains", 95, "attack chain analysis complete")
+
     # Calculate grade
+    emit_progress("finalizing", 97, "grading report")
     grade_result = grade(report)
 
     # If required modules failed, mark grade as unreliable
@@ -8288,13 +8249,17 @@ async def build_report(target: str,
         "completed_at": now_utc_iso(),
         "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
         "coverage_status": coverage["status"],
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "scanner_version": SCANNER_VERSION,
         "options": {
             "public_only": public_only,
             "active_checks_requested": active_checks,
             "ai_validation_enabled": ai_validation,
+            "include_partial_attack_chains": include_partial_attack_chains,
         },
         "checks_skipped": checks_skipped,
         "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
+        "browser_fetch_error": browser_fetch_error,
     }
 
     # =========================================================================
@@ -8432,665 +8397,18 @@ async def build_report(target: str,
     except (ImportError, NameError):
         pass
 
+    # P0-3 FIX: Cancel background auth refresh task to prevent memory leaks
+    if auth_refresh_task and not auth_refresh_task.done():
+        auth_refresh_task.cancel()
+        try:
+            await auth_refresh_task
+        except asyncio.CancelledError:
+            pass  # Expected when cancelling
+
     return report
 
-# ---------- Config findings emitters ----------
-
-def _reproCurlHost(base_url: str) -> str:
-    return f"curl -sIL {shlex.quote(base_url)}"
-
-def _reproCurlCors(url: str, origin: str = "https://evil.com") -> str:
-    return f"curl -sI -H 'Origin: {origin}' -H 'Access-Control-Request-Method: GET' -X OPTIONS {shlex.quote(url)}"
-
-def _reproDig(name: str, rtype: str = "TXT") -> str:
-    return f"dig +short {shlex.quote(name)} {rtype}"
-
-def _reproDelv(domain: str) -> str:
-    return f"delv @1.1.1.1 {shlex.quote(domain)} A"
-
-def _reproTLS(host: str, port: int) -> str:
-    return f"testssl.sh -e --fast {shlex.quote(host)}:{port}"
-
-def emit_config_findings(report: dict[str, Any]) -> None:
-    """Translate HTTP header/CSP/cookies/TLS/DNS/CORS/cloud/WAF data into normalized findings.
-    This mirrors how Nuclei emits issues: one finding per concrete misconfiguration.
-    """
-    base_url = report.get("http", {}).get("final_url") or f"https://{report['input']['normalized_host']}"
-    host = report.get("input", {}).get("normalized_host") or ""
-    port = report.get("input", {}).get("port") or 443
-    http = report.get("http", {})
-    dns = report.get("dns", {})
-    tls = report.get("tls", {})
-    discovery = report.get("discovery", {})
-
-    # ---- HTTP security headers ----
-    sec = http.get("security_headers", {}) or {}
-    # HSTS
-    if not sec.get("hsts"):
-        report["findings"].append(normalize_finding(
-            "http_headers",
-            "HSTS header missing",
-            "medium",
-            {"header": "strict-transport-security", "missing": True, "reproduction": _reproCurlHost(base_url)},
-            "CWE-693"
-        ))
-    # X-Frame-Options
-    if not sec.get("x_frame_options"):
-        report["findings"].append(normalize_finding(
-            "http_headers",
-            "X-Frame-Options missing",
-            "low",
-            {"header": "x-frame-options", "missing": True, "reproduction": _reproCurlHost(base_url)},
-            "CWE-693"
-        ))
-    # X-Content-Type-Options
-    xcto = sec.get("x_content_type_options")
-    if not xcto or xcto.lower() != "nosniff":
-        report["findings"].append(normalize_finding(
-            "http_headers",
-            "X-Content-Type-Options not 'nosniff'",
-            "low",
-            {"header": "x-content-type-options", "current_value": xcto, "reproduction": _reproCurlHost(base_url)},
-            "CWE-16"
-        ))
-    # Referrer-Policy
-    if not sec.get("referrer_policy"):
-        report["findings"].append(normalize_finding(
-            "http_headers",
-            "Referrer-Policy missing",
-            "low",
-            {"header": "referrer-policy", "missing": True, "reproduction": _reproCurlHost(base_url)},
-            "CWE-200"
-        ))
-    # Permissions-Policy
-    if not sec.get("permissions_policy"):
-        report["findings"].append(normalize_finding(
-            "http_headers",
-            "Permissions-Policy missing",
-            "low",
-            {"header": "permissions-policy", "missing": True, "reproduction": _reproCurlHost(base_url)},
-            "CWE-693"
-        ))
-
-    # ---- CSP ----
-    csp_eval = http.get("csp_evaluation", {}) or {}
-    csp_present = csp_eval.get("present", False)
-    if not csp_present:
-        report["findings"].append(normalize_finding(
-            "csp_evaluator",
-            "CSP header missing",
-            "medium",
-            {"present": False, "reproduction": _reproCurlHost(base_url)},
-            "CWE-693"
-        ))
-    else:
-        issues = csp_eval.get("issues", []) or []
-        directives = csp_eval.get("directives", {}) or {}
-        missing_default = "default-src" not in directives
-        missing_script = "script-src" not in directives
-        # If both are missing, emit a single high-severity finding and skip individual missing-* issues to avoid noise
-        if missing_default and missing_script:
-            finding = normalize_finding(
-                "csp_evaluator",
-                "CSP: default-src and script-src missing",
-                "high",
-                {
-                    "present": True,
-                    "grade": csp_eval.get("grade"),
-                    "issue": "both default-src and script-src missing",
-                    "reproduction": _reproCurlHost(base_url)
-                },
-                "CWE-693"
-            )
-            finding["template_id"] = "http/csp/missing-default-and-script-src"
-            finding["category"] = "http.csp"
-            report["findings"].append(finding)
-        for issue in issues:
-            if missing_default and missing_script and "both default-src and script-src missing" in issue.lower():
-                continue
-            sev = "medium"
-            title = f"CSP: {issue}"
-            template_id = None
-            # Simple templating for common patterns
-            low_patterns = ["upgrade-insecure-requests missing", "Trusted Types not required"]
-            if any(lp in issue for lp in low_patterns):
-                sev = "low"
-            if "missing default-src" in issue.lower():
-                template_id = "http/csp/missing-default-src"
-                # Skip individual issue if both are missing (already emitted combined)
-                if missing_default and missing_script:
-                    continue
-            elif "unsafe-inline" in issue.lower():
-                template_id = "http/csp/unsafe-inline"
-            elif "unsafe-eval" in issue.lower():
-                template_id = "http/csp/unsafe-eval"
-            elif "object-src" in issue.lower():
-                template_id = "http/csp/object-src-weak"
-            elif "frame-ancestors" in issue.lower():
-                template_id = "http/csp/frame-ancestors-weak"
-            elif "missing script-src" in issue.lower():
-                template_id = "http/csp/missing-script-src"
-                if missing_default and missing_script:
-                    continue
-            finding = normalize_finding("csp_evaluator", title, sev, {
-                "present": True,
-                "grade": csp_eval.get("grade"),
-                "issue": issue,
-                "reproduction": _reproCurlHost(base_url)
-            }, "CWE-693")
-            if template_id:
-                finding["template_id"] = template_id
-            finding["category"] = "http.csp"
-            report["findings"].append(finding)
-
-    # ---- Cookies ----
-    cookies = http.get("cookies", {}) or {}
-    for det in cookies.get("details", [])[:10]:
-        raw = det.get("raw", "")
-        # Determine issues for this cookie
-        if not det.get("secure", False):
-            report["findings"].append(normalize_finding(
-                "cookies_analyzer",
-                "Cookie without Secure flag",
-                "medium",
-                {"raw_sample": raw[:200], "cookie_secure": False, "reproduction": _reproCurlHost(base_url)},
-                "CWE-614"
-            ))
-        if not det.get("httponly", False):
-            report["findings"].append(normalize_finding(
-                "cookies_analyzer",
-                "Cookie without HttpOnly flag",
-                "medium",
-                {"raw_sample": raw[:200], "cookie_httponly": False, "reproduction": _reproCurlHost(base_url)},
-                "CWE-1004"
-            ))
-        if det.get("samesite") is None:
-            report["findings"].append(normalize_finding(
-                "cookies_analyzer",
-                "Cookie without SameSite attribute",
-                "low",
-                {"raw_sample": raw[:200], "cookie_samesite": None, "reproduction": _reproCurlHost(base_url)},
-                "CWE-16"
-            ))
-
-    # ---- Redirect to HTTPS ----
-    if http.get("scheme_redirect") == "none":
-        report["findings"].append(normalize_finding(
-            "redirect_check",
-            "Does not redirect HTTP to HTTPS",
-            "medium",
-            {"detail": "HTTP did not redirect to HTTPS", "reproduction": f"curl -sI http://{host}"},
-            "CWE-319"
-        ))
-
-    # ---- TLS/SSL config ----
-    sslyze = tls.get("sslyze", {}) or {}
-    tlsx_ep = tls.get("endpoints", []) or []
-    supports = (sslyze.get("tls_versions") or {})
-    legacy = any(k in supports for k in ("ssl_3_0", "tls_1_0", "tls_1_1") if supports.get(k))
-    if legacy:
-        report["findings"].append(normalize_finding(
-            "tls_config",
-            "Legacy TLS enabled (<= TLS 1.1)",
-            "medium",
-            {"tls_versions": list(k for k,v in supports.items() if v), "reproduction": _reproTLS(host, port)},
-            "CWE-310"
-        ))
-    # TLS 1.3 not supported (best-effort)
-    has13 = supports.get("tls_1_3") or tls.get("testssl", {}).get("supports_tls13")
-    if has13 is False:
-        report["findings"].append(normalize_finding(
-            "tls_config",
-            "TLS 1.3 not supported",
-            "low",
-            {"detail": "Server does not offer TLS 1.3", "reproduction": _reproTLS(host, port)},
-            "CWE-310"
-        ))
-    # OCSP stapling off
-    if not (tls.get("ocsp", {}).get("stapled") or sslyze.get("ocsp_stapling")):
-        report["findings"].append(normalize_finding(
-            "tls_config",
-            "OCSP stapling not detected",
-            "low",
-            {"detail": "No stapled OCSP response", "reproduction": f"openssl s_client -connect {host}:{port} -servername {host} -status | sed -n '1,120p'"},
-            "CWE-310"
-        ))
-    # Certificate expiry
-    cert = tls.get("certificate", {}) or {}
-    if isinstance(cert, dict):
-        days = cert.get("days_remaining")
-        if isinstance(days, int) and days <= 30:
-            report["findings"].append(normalize_finding(
-                "tls_config",
-                "TLS certificate expiring soon (<= 30 days)",
-                "medium",
-                {"days_remaining": days, "not_after": cert.get("not_after"), "reproduction": f"echo | openssl s_client -connect {host}:{port} -servername {host} 2>/dev/null | openssl x509 -noout -enddate"},
-                "CWE-295"
-            ))
-
-    # ---- DNS, Email policy & DNSSEC ----
-    # Check for MX records - if domain doesn't send email, SPF/DMARC findings are informational only
-    mx_records = dns.get("mx", [])
-    has_email_capability = bool(mx_records)
-    email_policy_severity = "medium" if has_email_capability else "info"
-
-    if not dns.get("spf"):
-        title = "SPF missing" if has_email_capability else "SPF missing (no MX records - informational)"
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            title,
-            email_policy_severity,
-            {"record": None, "reproduction": _reproDig(host, "TXT")},
-            "CWE-16"
-        ))
-    dmarc = (dns.get("dmarc") or {})
-    if not dmarc.get("record"):
-        title = "DMARC missing" if has_email_capability else "DMARC missing (no MX records - informational)"
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            title,
-            email_policy_severity,
-            {"record": None, "reproduction": _reproDig(f"_dmarc.{host}", "TXT")},
-            "CWE-16"
-        ))
-    else:
-        pol = (dmarc.get("fields") or {}).get("p", "").lower()
-        if pol not in ("quarantine", "reject"):
-            report["findings"].append(normalize_finding(
-                "dns_policy",
-                "DMARC policy not enforced (p != quarantine/reject)",
-                "low",
-                {"current_p": pol or "none", "reproduction": _reproDig(f"_dmarc.{host}", "TXT")},
-                "CWE-16"
-            ))
-        if not (dmarc.get("fields") or {}).get("rua"):
-            report["findings"].append(normalize_finding(
-                "dns_policy",
-                "DMARC rua not set",
-                "low",
-                {"detail": "Aggregate reports not configured", "reproduction": _reproDig(f"_dmarc.{host}", "TXT")},
-                "CWE-16"
-            ))
-    dnssec = (dns.get("dnssec") or {})
-    if dnssec.get("status") == "bogus":
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            "DNSSEC validation failure (bogus)",
-            "high",
-            {"raw": (dnssec.get("raw") or "")[:400], "reproduction": _reproDelv(host)},
-            "CWE-16"
-        ))
-    elif dnssec.get("status") in ("insecure", None):
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            "DNSSEC not validated",
-            "info",
-            {"status": dnssec.get("status"), "reproduction": _reproDelv(host)},
-            "CWE-16"
-        ))
-    # CAA
-    caa = (dns.get("caa") or {}).get("records", [])
-    if not caa:
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            "CAA record missing",
-            "low",
-            {"record": None, "reproduction": _reproDig(host, "CAA")},
-            "CWE-16"
-        ))
-    # MTA-STS / TLS-RPT - only relevant if domain has email capability (MX records)
-    mta = dns.get("mta_sts", {}) or {}
-    if not mta.get("record") and not mta.get("policy_present"):
-        mta_title = "MTA-STS not configured" if has_email_capability else "MTA-STS not configured (no MX records - informational)"
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            mta_title,
-            "low" if has_email_capability else "info",
-            {"reproduction": _reproDig(f"_mta-sts.{host}", "TXT")},
-            "CWE-16"
-        ))
-    tlsrpt = dns.get("tls_rpt", {}) or {}
-    if not tlsrpt.get("record"):
-        tlsrpt_title = "TLS-RPT not configured" if has_email_capability else "TLS-RPT not configured (no MX records - informational)"
-        report["findings"].append(normalize_finding(
-            "dns_policy",
-            tlsrpt_title,
-            "low" if has_email_capability else "info",
-            {"reproduction": _reproDig(f"_smtp._tls.{host}", "TXT")},
-            "CWE-16"
-        ))
-    # DKIM selectors (if provided)
-    if dns.get("dkim"):
-        for name, info in (dns["dkim"] or {}).items():
-            if not info.get("present"):
-                report["findings"].append(normalize_finding(
-                    "dns_policy",
-                    f"DKIM selector missing: {name}",
-                    "low",
-                    {"selector": name, "reproduction": _reproDig(name, "TXT")},
-                    "CWE-16"
-                ))
-
-    # ---- CORS ----
-    cors = (discovery.get("cors") or {})
-    if cors.get("vulnerable"):
-        issues = cors.get("issues", [])
-        report["findings"].append(normalize_finding(
-            "cors_scanner",
-            "CORS misconfiguration",
-            "high" if any("*" in i or "Reflects" in i for i in issues) else "medium",
-            {"issues": issues[:5], "reproduction": _reproCurlCors(base_url)},
-            "CWE-942"
-        ))
-
-    # ---- Security.txt ----
-    sec_txt = (http.get("security_txt") or {})
-    if isinstance(sec_txt, dict) and not sec_txt.get("present"):
-        report["findings"].append(normalize_finding(
-            "security_txt",
-            "security.txt missing",
-            "info",
-            {"url": sec_txt.get("url"), "reproduction": f"curl -sL {sec_txt.get('url') or urllib.parse.urljoin(base_url, '/.well-known/security.txt')}"},
-            "CWE-16"
-        ))
-
-    # ---- Cloud/WAF ----
-    cloud = (discovery.get("cloud_services") or {})
-    for mis in cloud.get("misconfigurations", [])[:5]:
-        sev = mis.get("severity", "low").lower()
-        title = {
-            "s3_public_list": "S3 bucket allows public listing",
-            "origin_ip_leak": "Origin IP exposed via headers",
-            "cloudflare_ip_leak": "Cloudflare IP leak indicator"
-        }.get(mis.get("type"), "Cloud service misconfiguration")
-        report["findings"].append(normalize_finding(
-            "cloud_scanner",
-            title,
-            sev if sev in ("critical","high","medium","low","info") else "medium",
-            {"details": mis.get("details"), "provider": cloud.get("provider"), "cdn": cloud.get("cdn")},
-            "CWE-200" if "leak" in (mis.get("type") or "") else "CWE-16"
-        ))
-    waf = (discovery.get("waf_detection") or {})
-    if waf.get("waf_detected"):
-        report["findings"].append(normalize_finding(
-            "waf_detector",
-            "WAF detected",
-            "info",
-            {"products": waf.get("waf_products", []), "confidence": waf.get("confidence")},
-            "CWE-16"
-        ))
-
 # ---------- AI review ----------
-
-def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str]:
-    tool = (f.get("tool") or "").lower()
-    title = (f.get("title") or "").lower()
-    cmds: list[str] = []
-    if tool in ("http_headers","csp_evaluator","cookies_analyzer","redirect_check","security_txt"):
-        cmds.append(_reproCurlHost(base_url))
-    if tool == "cors_scanner":
-        cmds.append(_reproCurlCors(base_url))
-    if tool.startswith("tls") or "tls" in title or "cipher" in title:
-        port = 443
-        cmds.append(_reproTLS(host, port))
-    if tool == "dns_policy" or any(k in title for k in ["spf","dmarc","dkim","dnssec","caa"]):
-        cmds.append(_reproDig(host, "TXT"))
-        cmds.append(_reproDelv(host))
-    if tool == "exposed_files":
-        ev = f.get("evidence", {}) or {}
-        url = ev.get("url") or urllib.parse.urljoin(base_url + "/", (ev.get("path") or "").lstrip("/"))
-        path_l = (ev.get("path") or "").lower()
-        # Always include a HEAD and a short safe preview of the body
-        cmds.append(f"curl -sI {shlex.quote(url)}")
-        cmds.append(f"curl -sL {shlex.quote(url)} | sed -n '1,40p'")
-        # Targeted probes for common high-risk exposures
-        if any(k in path_l for k in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "server.key", "private.key", ".pem"]):
-            cmds.append(f"curl -sL {shlex.quote(url)} | grep -E 'BEGIN (OPENSSH|RSA|DSA|EC) PRIVATE KEY' -m1")
-        if ".git" in path_l:
-            base = base_url.rstrip("/")
-            cmds.append(f"curl -sL {shlex.quote(base)}/.git/HEAD")
-            cmds.append(f"curl -sL {shlex.quote(base)}/.git/config")
-    if tool == "graphql_vulnerability" or ("graphql" in title):
-        ev = f.get("evidence", {}) or {}
-        # Try to use detected endpoint, else probe common ones
-        endpoints: list[str] = []
-        if isinstance(ev.get("evidence"), list) and ev["evidence"]:
-            ep = ev["evidence"][0].get("endpoint") if isinstance(ev["evidence"][0], dict) else None
-            if isinstance(ep, str):
-                endpoints.append(ep)
-        endpoints += ["/graphql", "/graphql/v2", "/api/graphql", "/query"]
-        introspect = '{"query":"{ __schema { types { name } } }"}'
-        for ep in endpoints[:2]:
-            url = urllib.parse.urljoin(base_url, ep)
-            cmds.append(f"curl -sX POST -H 'Content-Type: application/json' -d '{introspect}' {shlex.quote(url)}")
-    if tool == "api_security" or ("openapi" in title) or ("swagger" in title):
-        # Probe OpenAPI schema endpoints and look for securitySchemes/Bearer/API key hints
-        for ep in ["/openapi.json", "/swagger.json", "/swagger/v1/swagger.json"]:
-            url = urllib.parse.urljoin(base_url, ep)
-            cmds.append(f"curl -sI {shlex.quote(url)}")
-            cmds.append(f"curl -sS {shlex.quote(url)} | grep -Ei 'securitySchemes|bearer|apiKey' -m1")
-    if "nosql" in title:
-        _payload = json.dumps({"$ne": "1"})
-        cmds.append(f"curl -i -X POST -H 'Content-Type: application/json' {shlex.quote(base_url)} --data '{_payload}'")
-    if tool == "waf_detector":
-        cmds.append(f"curl -sIL {shlex.quote(base_url)}?test=%3Cscript%3Ealert(1)%3C%2Fscript%3E")
-    return cmds[:3]
-
-# Allowlist of test honeypot domains where vulnerabilities ARE intentional and real
-# Findings on these domains should NOT be marked as false positives due to honeypot indicators
-HONEYPOT_TEST_DOMAINS = {"honey.shakerscan.com", "test.shakerscan.com"}
-
-
-def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") -> tuple[str, float, str]:
-    """Heuristic verdict when no external AI provider configured."""
-    title = (f.get("title") or "").lower()
-    tool = (f.get("tool") or "").lower()
-    ev = f.get("evidence") or {}
-    rationale = []
-    # Strong true-positives: header/config absences
-    if tool in ("http_headers","csp_evaluator","cookies_analyzer","dns_policy","tls_config","cors_scanner","redirect_check","security_txt"):
-        rationale.append("Static misconfiguration derived from observed headers/records")
-        return "true_positive", 0.95, "; ".join(rationale)
-
-    # Check if this is a known test honeypot domain - skip honeypot detection
-    is_test_honeypot = any(domain in target_host.lower() for domain in HONEYPOT_TEST_DOMAINS)
-
-    # Honeypot heuristic (only for non-test domains)
-    snippet = (ev.get("response_snippet") or "").lower()
-    # Consider nested evidence structures for honeypot indicators
-    nested_blob = ""
-    try:
-        nested_blob = json.dumps(ev, default=str).lower()
-    except Exception:
-        nested_blob = str(ev).lower()
-    if not is_test_honeypot and (
-        "honeypot" in snippet or "enterprise security testing honeypot" in snippet or
-        "honeypot" in nested_blob or "enterprise security testing honeypot" in nested_blob or
-        (http_status and " 405" in http_status)):
-        rationale.append("Response indicates honeypot/405 behavior, not exploitable")
-        return "false_positive", 0.9, "; ".join(rationale)
-    # Known tool vulns: assume likely true
-    if tool in ("sslyze","testssl","nuclei","dalfox","sqlmap","xxe_injection","subdomain_takeover_advanced"):
-        rationale.append("Detected by specialized security tool")
-        return "true_positive", 0.8, "; ".join(rationale)
-    # Exposed files: treat medium/high-confidence as true positives; critical markers boost confidence
-    if tool == "exposed_files":
-        ev = f.get("evidence", {}) or {}
-        conf = (ev.get("confidence") or "low").lower()
-        path_l = (ev.get("path") or "").lower()
-        critical_markers = ["id_rsa","id_dsa","id_ecdsa","id_ed25519","server.key","privatekey","private.key","ssl.key","cert.key","certificate.key",".pem"]
-        if conf in ("high","medium"):
-            if any(m in path_l for m in critical_markers):
-                rationale.append("High-risk secret/key file path with medium/high evidence confidence")
-                return "true_positive", 0.98 if conf == "high" else 0.9, "; ".join(rationale)
-            rationale.append("Exposed sensitive file confirmed (medium/high confidence)")
-            return "true_positive", 0.9 if conf == "high" else 0.8, "; ".join(rationale)
-        return "unclear", 0.55, "Low confidence exposed file; verify manually"
-    return "unclear", 0.5, "Insufficient evidence without active verification"
-
-def _mask_text_host(text: str, host: str, replacement_host: str, scheme: str | None) -> str:
-    if not isinstance(text, str) or not host:
-        return text
-    h = re.escape(host)
-    # Replace URLs first to preserve scheme
-    def _repl_url(m):
-        scheme_used = (scheme or m.group(1) or "https")
-        # Pattern has two groups: (https?) and (:\d+)? → group(2) is optional port
-        port = m.group(2) or ""
-        return f"{scheme_used}://{replacement_host}{port}"
-    text = re.sub(r"(?i)(https?)://" + h + r"(:\d+)?", _repl_url, text)
-    # Replace bare host occurrences (word boundary or separators) - case-insensitive
-    text = re.sub(r"(?i)(?<![\w.-])" + h + r"(?![\w.-])", replacement_host, text)
-    # Common www variant
-    text = re.sub(r"(?i)www\." + h, "www." + replacement_host, text)
-    return text
-
-def _redact_sensitive(text: str) -> str:
-    if not isinstance(text, str):
-        return text
-    text = re.sub(r"(?i)(authorization:\s*bearer)\s+[A-Za-z0-9._-]+", r"\1 ***", text)
-    text = re.sub(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)", r"\1=***", text)
-    return text
-
-
-def _redact_body_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return 0
-    if isinstance(value, float):
-        return 0.0
-    if isinstance(value, str):
-        return "[REDACTED]"
-    return "[REDACTED]"
-
-
-def _redact_body_structure(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _redact_body_structure(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_body_structure(v) for v in value]
-    return _redact_body_value(value)
-
-
-def _redact_body_for_report(body: Any, content_type: str | None = None) -> Any:
-    if body is None:
-        return None
-    if isinstance(body, (dict, list)):
-        return _redact_body_structure(body)
-    if not isinstance(body, str):
-        return "[REDACTED]"
-
-    stripped = body.strip()
-    content_type_l = (content_type or "").lower()
-    if "json" in content_type_l or stripped.startswith(("{", "[")):
-        try:
-            parsed = json.loads(body)
-            return json.dumps(_redact_body_structure(parsed))
-        except (json.JSONDecodeError, TypeError):
-            return "[REDACTED]"
-
-    if "application/x-www-form-urlencoded" in content_type_l:
-        try:
-            pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
-            redacted_pairs = [(key, "[REDACTED]") for key, _ in pairs]
-            return urllib.parse.urlencode(redacted_pairs)
-        except Exception:
-            return "[REDACTED]"
-
-    return "[REDACTED]"
-
-def _mask_structure(obj: Any, host: str, replacement_host: str, scheme: str | None) -> Any:
-    if isinstance(obj, dict):
-        return {k: _mask_structure(v, host, replacement_host, scheme) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_mask_structure(v, host, replacement_host, scheme) for v in obj]
-    if isinstance(obj, str):
-        return _redact_sensitive(_mask_text_host(obj, host, replacement_host, scheme))
-    return obj
-
-
-def _generate_fallback_executive_summary(
-    report: dict[str, Any],
-    findings: list[dict[str, Any]],
-    tp_count: int,
-    fp_count: int,
-    unclear_count: int
-) -> dict[str, Any]:
-    """
-    Generate a template-based executive summary when AI is unavailable.
-
-    This provides a baseline summary that can be used for customer-facing reports
-    when the AI provider fails or is not configured.
-    """
-    host = report.get("input", {}).get("normalized_host", "target")
-    result = report.get("result", {})
-    score = result.get("score", 0)
-    grade = result.get("grade", "N/A")
-
-    # Count findings by severity
-    critical = sum(1 for f in findings if f.get("severity") == "critical")
-    high = sum(1 for f in findings if f.get("severity") == "high")
-    medium = sum(1 for f in findings if f.get("severity") == "medium")
-    low = sum(1 for f in findings if f.get("severity") == "low")
-
-    # Determine risk level
-    if critical > 0:
-        risk_level = "Critical"
-        risk_description = f"The scan identified {critical} critical vulnerabilities that require immediate attention."
-    elif high > 0:
-        risk_level = "High"
-        risk_description = f"The scan identified {high} high-severity issues that should be prioritized for remediation."
-    elif medium > 0:
-        risk_level = "Medium"
-        risk_description = f"The scan identified {medium} medium-severity issues that should be addressed in your security roadmap."
-    else:
-        risk_level = "Low"
-        risk_description = "No critical or high-severity vulnerabilities were identified. Continue monitoring and maintain security best practices."
-
-    # Build key findings list
-    key_findings = []
-    for f in findings[:5]:  # Top 5 findings
-        sev = f.get("severity", "info").capitalize()
-        title = f.get("title", "Unknown issue")
-        key_findings.append(f"[{sev}] {title}")
-
-    # Build recommendations
-    recommendations = []
-    if critical > 0:
-        recommendations.append("Address critical vulnerabilities immediately - these represent exploitable attack vectors.")
-    if high > 0:
-        recommendations.append("Prioritize high-severity issues in your next sprint or maintenance window.")
-    if not report.get("http", {}).get("security_headers", {}).get("hsts"):
-        recommendations.append("Enable HTTP Strict Transport Security (HSTS) to protect against protocol downgrade attacks.")
-    if report.get("http", {}).get("csp_evaluation", {}).get("grade") in ["D", "F"]:
-        recommendations.append("Strengthen your Content Security Policy to mitigate XSS risks.")
-    if not report.get("dns", {}).get("dmarc", {}).get("record"):
-        recommendations.append("Implement DMARC to protect your domain from email spoofing.")
-
-    return {
-        "generated_by": "template_fallback",
-        "risk_level": risk_level,
-        "overall_summary": f"Security assessment of {host} completed with a score of {score}/100 (Grade: {grade}). {risk_description}",
-        "key_findings": key_findings,
-        "finding_counts": {
-            "critical": critical,
-            "high": high,
-            "medium": medium,
-            "low": low,
-            "total": len(findings)
-        },
-        "confidence_summary": f"{tp_count} likely true positives, {fp_count} likely false positives, {unclear_count} require verification.",
-        "recommendations": recommendations[:5],  # Top 5 recommendations
-        "next_steps": [
-            "Review critical and high-severity findings first.",
-            "Validate findings marked as 'unclear' manually.",
-            "Implement recommended security controls.",
-            "Schedule a follow-up scan after remediation."
-        ]
-    }
+# Note: Config findings emitters and AI helpers moved to reporting.py module
 
 
 async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: str | None, ai_api_key: str | None, exploit_level: str = "safe", public_only: bool = False, mask_host: str = "example.com") -> dict[str, Any]:
@@ -9346,6 +8664,7 @@ async def cli_main():
     ap.add_argument("--active", action="store_true", help="Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs")
     ap.add_argument("--xss", action="store_true", help="Run only XSS active checks (implies --active)")
     ap.add_argument("--sqli", action="store_true", help="Run only SQLi active checks (implies --active)")
+    ap.add_argument("--deep-domxss", action="store_true", default=None, help="Enable dalfox deep DOM XSS (spawns headless browser; heavy)")
     ap.add_argument("--max-active", type=int, default=10, help="Max URLs for active checks (default 10)")
     ap.add_argument("--quick", action="store_true", help="Quick scan mode - faster but less thorough (affects active checks)")
     ap.add_argument("--no-browser", action="store_true", help="Disable browser-based scanning, use curl only (faster but less data)")
@@ -9366,6 +8685,7 @@ async def cli_main():
     ap.add_argument("--ai-url", dest="ai_url", help="AI provider URL (HTTP endpoint)")
     ap.add_argument("--ai-api-key", dest="ai_api_key", help="AI provider API key")
     ap.add_argument("--ai-mask-host", dest="ai_mask_host", default="example.com", help="Replacement host sent to AI instead of the real target (default: example.com)")
+    ap.add_argument("--include-partial-attack-chains", action="store_true", help="Include partial attack chains in report (analyst mode)")
 
     # ===========================================
     # Vulnerability Check Categories (opt-in)
@@ -9628,6 +8948,7 @@ async def cli_main():
                        active: bool = False,
                        xss: bool = False,
                        sqli: bool = False,
+                       deep_domxss: bool | None = None,
                        max_active: int = 10,
                        quick: bool = False,
                        no_browser: bool = False,
@@ -9645,6 +8966,7 @@ async def cli_main():
                        ai_url: str | None = Query(default=None, alias="ai-url"),
                        ai_api_key: str | None = Query(default=None, alias="ai-api-key"),
                        ai_mask_host: str | None = Query(default="example.com", alias="ai-mask-host"),
+                       include_partial_attack_chains: bool = False,
                        # Phase 1 Critical Checks
                        csrf_testing: bool = False,
                        idor_testing: bool = False,
@@ -9865,9 +9187,10 @@ async def cli_main():
                 active_checks=active,
                 active_xss=active_xss,
                 active_sqli=active_sqli,
+                deep_domxss=deep_domxss,
                 max_active=max_active,
                 quick_mode=quick,
-                no_browser=no_browser,
+                no_browser=no_browser or quick,  # Quick mode skips browser for speed
                 public_only=public,
                 complete_mode=complete,
                 max_ports=max_ports,
@@ -9948,6 +9271,7 @@ async def cli_main():
                 ai_url=ai_url,
                 ai_api_key=ai_api_key,
                 ai_model=model or "gpt-4o-mini",
+                include_partial_attack_chains=include_partial_attack_chains,
             )
             if ai:
                 try:
@@ -10356,9 +9680,10 @@ async def cli_main():
         active_checks=args.active,
         active_xss=active_xss,
         active_sqli=active_sqli,
+        deep_domxss=args.deep_domxss,
         max_active=args.max_active,
         quick_mode=args.quick,
-        no_browser=args.no_browser,
+        no_browser=args.no_browser or args.quick,  # Quick mode skips browser for speed
         public_only=args.public,
         complete_mode=args.complete,
         max_ports=args.max_ports,
@@ -10445,6 +9770,7 @@ async def cli_main():
         ai_url=args.ai_url,
         ai_api_key=args.ai_api_key,
         ai_model=args.model or "gpt-4o-mini",
+        include_partial_attack_chains=args.include_partial_attack_chains,
         grpc_discovery=args.grpc_discovery,
         json_link_following=args.json_link_following,
         options_method_discovery=args.options_method_discovery,
@@ -10563,8 +9889,102 @@ async def cli_main():
     if exit_code != 0:
         sys.exit(exit_code)
 
-if __name__ == "__main__":
+def _run_cli_with_shutdown_guard() -> int:
+    """Run cli_main with bounded shutdown to avoid hangs on pending tasks."""
+    exit_code = 0
+    executor_shutdown_timed_out = False
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(cli_main())
+        loop.run_until_complete(cli_main())
     except KeyboardInterrupt:
+        exit_code = 0
+    except SystemExit as e:
+        exit_code = e.code if isinstance(e.code, int) else 1
+    except Exception as e:
+        print(f"[scanner] Unhandled error: {e}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        except Exception:
+            pending = []
+        if pending:
+            for task in pending:
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
+            # Best-effort cancellation with a short grace period.
+            try:
+                grace = float(os.environ.get("SCAN_SHUTDOWN_GRACE_SECONDS", "2"))
+            except Exception:
+                grace = 2.0
+            if grace > 0:
+                try:
+                    loop.run_until_complete(asyncio.wait(pending, timeout=grace))
+                except Exception:
+                    pass
+        # Best-effort shutdown of default executor to avoid hanging on non-daemon threads.
+        try:
+            grace = float(os.environ.get("SCAN_SHUTDOWN_GRACE_SECONDS", "2"))
+        except Exception:
+            grace = 2.0
+        if grace < 0:
+            grace = 0
+        try:
+            shutdown_coro = loop.shutdown_default_executor()
+        except Exception:
+            shutdown_coro = None
+        if shutdown_coro is not None:
+            try:
+                loop.run_until_complete(asyncio.wait_for(shutdown_coro, timeout=grace or 0.1))
+            except Exception:
+                executor_shutdown_timed_out = True
+                try:
+                    default_executor = getattr(loop, "_default_executor", None)
+                    if default_executor:
+                        default_executor.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+        # Shutdown async generators to properly clean up subprocess transports
+        # before closing the event loop (prevents "Event loop is closed" errors
+        # during garbage collection of BaseSubprocessTransport objects)
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        try:
+            loop.stop()
+        except Exception:
+            pass
+        # Force garbage collection while loop is still technically available
+        # to allow subprocess transport __del__ methods to run cleanly
+        import gc
+        gc.collect()
+        try:
+            loop.close()
+        except Exception:
+            pass
+        try:
+            asyncio.set_event_loop(None)
+        except Exception:
+            pass
+    if executor_shutdown_timed_out and os.environ.get("SCAN_FORCE_EXIT_ON_SHUTDOWN_TIMEOUT", "1") != "0":
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(exit_code)
+    return exit_code
+
+
+if __name__ == "__main__":
+    code = _run_cli_with_shutdown_guard()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
         pass
+    sys.exit(code)

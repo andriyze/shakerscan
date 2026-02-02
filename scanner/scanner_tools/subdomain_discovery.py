@@ -183,7 +183,7 @@ async def discover_subdomains(
                     if callback:
                         try:
                             callback(s, source_name)
-                        except:
+                        except Exception:
                             pass
 
         source_subdomains[source_name] = normalized
