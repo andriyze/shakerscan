@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import secrets
 import sys
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -1435,8 +1436,65 @@ async def test_verb_tampering(
         except Exception as e:
             return {"method": method, "status": None, "allowed": False, "error": str(e)}
 
+    async def test_trace_echo() -> dict:
+        """Test TRACE with header echo verification (XST check)."""
+        trace_header = "X-ShakerScan-Trace-Test"
+        trace_value = f"xst-probe-{secrets.token_hex(4)}"
+        trace_headers = request_headers.copy()
+        trace_headers[trace_header] = trace_value
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.request("TRACE", url, headers=trace_headers, ssl=False) as response:
+                    body = ""
+                    try:
+                        body = await response.text()
+                    except Exception:
+                        pass
+                    body_lower = body.lower() if body else ""
+                    echoed = trace_value.lower() in body_lower or trace_header.lower() in body_lower
+                    return {
+                        "method": "TRACE",
+                        "status": response.status,
+                        "allowed": response.status < 400,
+                        "echoed": echoed,
+                        "trace_header": trace_header,
+                        "trace_value": trace_value,
+                        "body_sample": body[:200],
+                    }
+        except Exception as e:
+            return {"method": "TRACE", "status": None, "allowed": False, "echoed": False, "error": str(e)}
+
     # Test each method
     for method in test_methods:
+        if method == "TRACE":
+            trace_result = await test_trace_echo()
+            results["methods_tested"].append(trace_result["method"])
+
+            if trace_result["allowed"]:
+                results["methods_allowed"].append(trace_result["method"])
+            else:
+                results["methods_denied"].append(trace_result["method"])
+
+            if trace_result["allowed"] and trace_result.get("echoed"):
+                results["vulnerable"] = True
+                results["findings"].append({
+                    "type": "trace_method_enabled",
+                    "severity": "medium",
+                    "endpoint": url,
+                    "method": "TRACE",
+                    "status": trace_result.get("status"),
+                    "description": "HTTP TRACE echoes request headers (XST risk).",
+                    "remediation": "Disable TRACE method on the server.",
+                    "cwe": "CWE-693",
+                    "evidence": {
+                        "header": trace_result.get("trace_header"),
+                        "value": trace_result.get("trace_value"),
+                        "body_sample": trace_result.get("body_sample"),
+                    },
+                })
+            continue
+
         result = await test_method(method)
         results["methods_tested"].append(result["method"])
 
@@ -1446,21 +1504,8 @@ async def test_verb_tampering(
             results["methods_denied"].append(result["method"])
 
         # Check for sensitive methods allowed without proper response
-        if method in ["DELETE", "PUT", "PATCH", "TRACE"] and result["allowed"]:
-            if method == "TRACE":
-                # TRACE should always be disabled
-                results["vulnerable"] = True
-                results["findings"].append({
-                    "type": "trace_method_enabled",
-                    "severity": "medium",
-                    "endpoint": url,
-                    "method": method,
-                    "status": result["status"],
-                    "description": "HTTP TRACE method is enabled. May allow XST (Cross-Site Tracing) attacks.",
-                    "remediation": "Disable TRACE method on the server.",
-                    "cwe": "CWE-693",
-                })
-            elif expected_allowed_methods and method not in expected_allowed_methods:
+        if method in ["DELETE", "PUT", "PATCH"] and result["allowed"]:
+            if expected_allowed_methods and method not in expected_allowed_methods:
                 # Method allowed but not expected
                 results["vulnerable"] = True
                 results["findings"].append({

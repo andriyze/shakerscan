@@ -1,0 +1,35 @@
+{
+  "benchmarks": [
+    {
+      "name": "juice-shop",
+      "result_path": "results/host.docker.internal/latest.json",
+      "assertions": {
+        "min_total_findings": 10,
+        "min_high_or_critical": 2,
+        "min_quality_score": 60,
+        "min_endpoint_coverage": 0.05,
+        "min_har_api_requests": 5,
+        "min_har_unique_endpoints": 10,
+        "require_methods_used": [
+          "browser_api_capture"
+        ],
+        "require_any_finding_tools": [
+          "smart_sqli",
+          "nosql_injection",
+          "dom_xss"
+        ]
+      }
+    },
+    {
+      "name": "crapi",
+      "result_path": "results/cr.shakerscan.com/latest.json",
+      "allow_missing_har": true,
+      "assertions": {
+        "min_total_findings": 5,
+        "min_high_or_critical": 1,
+        "min_quality_score": 50,
+        "min_endpoint_coverage": 0.05
+      }
+    }
+  ]
+}

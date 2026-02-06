@@ -9,6 +9,7 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 - [Quick Start](#quick-start)
 - [CLI Reference](#cli-reference)
 - [Scan Types](#scan-types)
+- [Interactive Security Sessions](#interactive-security-sessions)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
@@ -18,6 +19,8 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 - [License](#license)
 
 **[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
+
+**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
 
 ## Features
 
@@ -56,6 +59,13 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
   - Horizontal scaling (multiple workers)
   - Full API access
 
+- **Interactive AI Security Sessions**
+  - Real-time browser-based testing with Playwright
+  - Multi-user BOLA/IDOR testing
+  - Visual screenshots for context
+  - Finding persistence to database
+  - Collaborative human-AI security testing
+
 ## Claude Code Integration
 
 This project is designed to work seamlessly with Claude Code. Just clone and open:
@@ -72,6 +82,9 @@ claude    # Claude reads CLAUDE.md and understands the project
 |---------|-------------|
 | `/scan <url>` | Quick security scan |
 | `/scan-full <url>` | Full assessment (asks permission first) |
+| `/scan-smart <url>` | Smart adaptive scan |
+| `/ai-security-session <url>` | Interactive security testing with browser |
+| `/save-finding [session_id]` | Save a discovered vulnerability |
 | `/findings` | List active vulnerabilities |
 | `/status` | Check scanner status |
 | `/subdomains <domain>` | Discover subdomains |
@@ -92,6 +105,9 @@ Just ask Claude:
 ├── commands/              # Slash commands
 │   ├── scan.md
 │   ├── scan-full.md
+│   ├── scan-smart.md
+│   ├── ai-security-session.md  # Interactive testing
+│   ├── save-finding.md         # Persist discoveries
 │   ├── findings.md
 │   ├── status.md
 │   ├── subdomains.md
@@ -225,6 +241,70 @@ The `smart` scan type uses adaptive techniques for more efficient and accurate t
 > **Note**: `full`, `aggressive`, and `smart` scans include active testing (XSS/SQLi probes). Only run these against targets you have permission to test.
 
 Tip: Use `--xss` or `--sqli` to run only those active checks (CLI) or set `xss`/`sqli` in API options.
+
+## Interactive Security Sessions
+
+For manual penetration testing and complex vulnerability verification, use interactive AI security sessions. Unlike automated scans, these provide real-time browser-based testing with human guidance.
+
+### Recommended Workflow
+
+**Best practice**: Run a smart scan first, then use interactive session to validate findings and explore areas scanners miss.
+
+```bash
+# 1. Run automated scan first
+/scan-smart https://example.com
+# Wait for completion, then...
+
+# 2. Start interactive session (auto-bootstraps from scan data)
+/ai-security-session https://example.com
+```
+
+The session will automatically:
+- Fetch discovered API endpoints from the scan
+- Load existing findings for validation
+- Use tech stack info for tailored testing
+
+### Testing Scenarios
+
+| Category | Use Cases |
+|----------|-----------|
+| **Access Control** | BOLA/IDOR, privilege escalation, tenant isolation |
+| **Authentication** | Session fixation, JWT flaws, token invalidation |
+| **Business Logic** | Price manipulation, coupon abuse, workflow bypass |
+| **API Security** | Mass assignment, GraphQL abuse, rate limiting |
+| **Client-Side** | Stored XSS, DOM XSS, open redirect |
+
+### Saving Findings
+
+Findings discovered during interactive sessions can be persisted to the database:
+
+```bash
+# Save from active session (target auto-populated)
+curl -X POST "http://localhost:8080/session/{session_id}/findings" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "BOLA on Basket API",
+    "severity": "critical",
+    "category": "BOLA",
+    "cwe": "CWE-639",
+    "description": "User2 can access User1 basket items"
+  }'
+
+# Or use the skill
+/save-finding {session_id}
+```
+
+Findings are tagged with `source: "ai_session"` and linked to the session for tracking.
+
+### When to Use
+
+- **Validating findings** from automated scans
+- **Chaining vulnerabilities** into attack paths
+- Testing complex business logic requiring judgment
+- Verifying BOLA with real user authentication contexts
+- Demonstrating vulnerabilities to stakeholders
+
+See `CLAUDE.md` for full session API reference.
 
 ## API Reference
 

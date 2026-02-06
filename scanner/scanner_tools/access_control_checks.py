@@ -1170,13 +1170,13 @@ async def check_bola(
             results["endpoints_tested"] += 1
 
             # Test without auth (should fail)
-            no_auth_response = await fetch_with_capture(url, timeout=timeout)
+            no_auth_response = await fetch_with_capture(url, timeout=timeout, budget_key="bola")
 
             # Test with user1's auth
-            user1_response = await fetch_with_capture(url, headers=user1_headers, timeout=timeout) if user1_headers else None
+            user1_response = await fetch_with_capture(url, headers=user1_headers, timeout=timeout, budget_key="bola") if user1_headers else None
 
             # Test with user2's auth
-            user2_response = await fetch_with_capture(url, headers=user2_headers, timeout=timeout) if user2_headers else None
+            user2_response = await fetch_with_capture(url, headers=user2_headers, timeout=timeout, budget_key="bola") if user2_headers else None
 
             # Analysis:
             # 1. If no-auth gets 200 with data = public endpoint or broken auth
@@ -1252,9 +1252,160 @@ ID_PATTERNS = [
     (r'/([a-f0-9]{24})(?:/|$|\?)', 'mongodb_id'),  # MongoDB ObjectID
     (r'/([a-f0-9-]{36})(?:/|$|\?)', 'uuid'),       # UUID v4
     (r'/([a-zA-Z0-9]{20,})(?:/|$|\?)', 'base64_id'),  # Base64-like IDs
-    (r'\?.*?id=(\d+)', 'query_numeric_id'),   # ?id=123
-    (r'\?.*?id=([a-f0-9-]+)', 'query_uuid'),  # ?id=uuid
+    (r'[?&]id=(\d+)', 'query_numeric_id'),   # ?id=123
+    (r'[?&]id=([a-f0-9-]{36})', 'query_uuid'),  # ?id=uuid
+    (r'[?&][^=&]*id[^=&]*=(\d+)', 'query_numeric_id'),  # ?vehicleId=123
+    (r'[?&][^=&]*id[^=&]*=([a-f0-9-]{36})', 'query_uuid'),  # ?vehicleId=uuid
+    (r'[?&][^=&]*id[^=&]*=([a-f0-9]{24})', 'query_mongodb_id'),  # ?objectId=...
 ]
+
+# Patterns for detecting REST collection endpoints
+COLLECTION_ENDPOINT_PATTERNS = [
+    r'^(https?://[^/]+)?(/(?:[^/?]+/)*?(?:api|rest)(?:/v\d+)?/[A-Za-z][A-Za-z0-9_-]+(?:s|es|ies))/?$',
+    r'^(https?://[^/]+)?(/(?:[^/?]+/)*?(?:api|rest)(?:/v\d+)?/[A-Za-z][A-Za-z0-9_-]+)/?$',
+    r'^(https?://[^/]+)?(/v\d+/[A-Za-z][A-Za-z0-9_-]+(?:s|es|ies))/?$',
+    r'^(https?://[^/]+)?(/(?:[^/?]+/)*?(?:api|rest)(?:/v\d+)?/[^/]+/\d+/[A-Za-z][A-Za-z0-9_-]+(?:s|es|ies))/?$',
+]
+
+COLLECTION_EXCLUSIONS = [
+    '/api/docs', '/api/schema', '/api/health', '/api/status',
+    '/swagger', '/openapi', '/graphql', '/metrics',
+    '.js', '.css', '.html', '.json', '.xml', '.yaml',
+]
+
+DEFAULT_SYNTH_IDS = ['1', '2', '3', '100', '999']
+QUERY_ID_PARAM_EXCLUSIONS = ['token', 'session', 'csrf']
+
+
+def _is_probable_id_param(param_name: str) -> bool:
+    if not param_name or not isinstance(param_name, str):
+        return False
+    name = param_name.strip()
+    if not name:
+        return False
+    lowered = name.lower()
+    if any(excl in lowered for excl in QUERY_ID_PARAM_EXCLUSIONS):
+        return False
+    if lowered in {"id", "uid", "uuid"}:
+        return True
+    return lowered.endswith("id")
+
+
+def synthesize_resource_urls_from_collections(
+    discovered_urls: list[str],
+    max_collections: int = 20,
+    ids_to_test: list[str] | None = None,
+) -> list[str]:
+    """
+    Synthesize resource URLs from REST collection endpoints.
+    /api/BasketItems/ -> /api/BasketItems/1, /api/BasketItems/2, etc.
+    """
+    import re
+
+    if ids_to_test is None:
+        ids_to_test = DEFAULT_SYNTH_IDS
+
+    synthesized = []
+    collections_found = []
+
+    for url in discovered_urls:
+        # Skip if URL already has an ID pattern
+        if any(re.search(pattern, url) for pattern, _ in ID_PATTERNS):
+            continue
+
+        base_url = url.split("?", 1)[0].split("#", 1)[0]
+
+        # Skip excluded paths
+        url_lower = base_url.lower()
+        if any(excl in url_lower for excl in COLLECTION_EXCLUSIONS):
+            continue
+
+        # Check if URL matches collection patterns
+        for pattern in COLLECTION_ENDPOINT_PATTERNS:
+            if re.match(pattern, base_url, re.IGNORECASE):
+                collections_found.append(base_url)
+                break
+
+    for collection_url in collections_found[:max_collections]:
+        base = collection_url.rstrip('/')
+        for test_id in ids_to_test:
+            synthesized.append(f"{base}/{test_id}")
+
+    return synthesized
+
+
+def synthesize_query_urls_from_param_endpoints(
+    base_url: str,
+    param_endpoints: list[dict[str, Any]] | None,
+    max_endpoints: int = 20,
+    ids_to_test: list[str] | None = None,
+) -> list[str]:
+    """
+    Synthesize query URLs for endpoints that expose ID-like parameters.
+    /api/v3/mechanic/mechanic_report?id= -> /api/v3/mechanic/mechanic_report?id=1
+    """
+    import urllib.parse
+
+    if not param_endpoints:
+        return []
+    if ids_to_test is None:
+        ids_to_test = DEFAULT_SYNTH_IDS
+
+    synthesized = []
+    seen_urls = set()
+    processed = 0
+
+    for entry in param_endpoints:
+        if processed >= max_endpoints:
+            break
+        if not isinstance(entry, dict):
+            continue
+        raw_url = entry.get("url")
+        params = entry.get("params") or []
+        if not raw_url or not isinstance(raw_url, str) or not params:
+            continue
+
+        url = raw_url.strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if url.startswith("/"):
+            url = urljoin(base_url, url)
+        if not url.startswith("http"):
+            url = urljoin(base_url + "/", url)
+
+        url_lower = url.lower()
+        if any(excl in url_lower for excl in COLLECTION_EXCLUSIONS):
+            continue
+
+        id_params = [p for p in params if _is_probable_id_param(p)]
+        if not id_params:
+            continue
+
+        parsed = urllib.parse.urlsplit(url)
+        base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+        existing_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        keep_pairs = [(k, v) for k, v in existing_pairs if not _is_probable_id_param(k)]
+
+        id_param = id_params[0]
+        for test_id in ids_to_test:
+            parts = []
+            for k, v in keep_pairs:
+                if v == "":
+                    parts.append(f"{k}=")
+                else:
+                    parts.append(f"{k}={v}")
+            parts.append(f"{id_param}={test_id}")
+            query = "&".join(parts)
+            candidate = f"{base}?{query}" if query else base
+            if candidate in seen_urls:
+                continue
+            synthesized.append(candidate)
+            seen_urls.add(candidate)
+
+        processed += 1
+
+    return synthesized
 
 
 async def smart_bola_test(
@@ -1262,6 +1413,7 @@ async def smart_bola_test(
     discovered_urls: list[str],
     user1_session: Any | None = None,
     user2_session: Any | None = None,
+    param_endpoints: list[dict[str, Any]] | None = None,
     max_endpoints: int = 30,
     timeout: int = 10
 ) -> dict[str, Any]:
@@ -1280,6 +1432,7 @@ async def smart_bola_test(
         discovered_urls: List of discovered URLs from crawling
         user1_session: First user's authenticated session
         user2_session: Second user's authenticated session
+        param_endpoints: Endpoints with parameter names for query synthesis
         max_endpoints: Maximum unique endpoints to test
         timeout: Request timeout
 
@@ -1298,6 +1451,8 @@ async def smart_bola_test(
         "access_violations": 0,
         "cross_user_violations": 0,
         "method_variations_tested": 0,
+        "synthesized_urls_tested": 0,
+        "synthesized_query_urls_tested": 0,
     }
 
     def build_headers(session):
@@ -1312,10 +1467,38 @@ async def smart_bola_test(
     user1_headers = build_headers(user1_session)
     user2_headers = build_headers(user2_session)
 
+    # Synthesize resource URLs from collection endpoints
+    synthesized_urls = synthesize_resource_urls_from_collections(
+        discovered_urls,
+        max_collections=min(20, max_endpoints // 2),
+    )
+    if synthesized_urls:
+        print(
+            f"[bola] Synthesized {len(synthesized_urls)} resource URLs from collection endpoints",
+            file=__import__('sys').stderr
+        )
+        results["synthesized_urls_tested"] = len(synthesized_urls)
+
+    synthesized_query_urls = synthesize_query_urls_from_param_endpoints(
+        base_url=base_url,
+        param_endpoints=param_endpoints,
+        max_endpoints=min(20, max_endpoints // 2),
+    )
+    if synthesized_query_urls:
+        print(
+            f"[bola] Synthesized {len(synthesized_query_urls)} query URLs from parameter hints",
+            file=__import__('sys').stderr
+        )
+        results["synthesized_query_urls_tested"] = len(synthesized_query_urls)
+
+    all_urls_to_analyze = list(
+        dict.fromkeys(list(discovered_urls) + synthesized_urls + synthesized_query_urls)
+    )
+
     # Extract endpoints with ID patterns from discovered URLs
     id_endpoints = {}  # path_template -> {pattern_type, original_ids, base_url}
 
-    for url in discovered_urls:
+    for url in all_urls_to_analyze:
         for pattern, pattern_type in ID_PATTERNS:
             match = re.search(pattern, url)
             if match:
@@ -1370,14 +1553,14 @@ async def smart_bola_test(
             test_url = template.replace('{id}', test_id)
 
             # Test with user1
-            user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout)
+            user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout, budget_key="bola")
             user1_status = user1_resp.get("status_code", 0)
             user1_body = user1_resp.get("body", "")
 
             # Test with user2 if user2_session is actually provided
             # (cross-user comparison only makes sense with two authenticated users)
             if user2_session is not None:
-                user2_resp = await fetch_with_capture(test_url, headers=user2_headers, timeout=timeout)
+                user2_resp = await fetch_with_capture(test_url, headers=user2_headers, timeout=timeout, budget_key="bola")
                 user2_status = user2_resp.get("status_code", 0)
                 user2_body = user2_resp.get("body", "")
 
@@ -1418,7 +1601,7 @@ async def smart_bola_test(
                                 })
 
             # Test without auth
-            no_auth_resp = await fetch_with_capture(test_url, timeout=timeout)
+            no_auth_resp = await fetch_with_capture(test_url, timeout=timeout, budget_key="bola")
             no_auth_status = no_auth_resp.get("status_code", 0)
             no_auth_body = no_auth_resp.get("body", "")
 
@@ -1599,7 +1782,7 @@ async def check_bola_multi_user(
             # Test with each user (including unauthenticated at index 0)
             user_responses = []
             for user_idx, headers in enumerate(user_headers_list):
-                response = await fetch_with_capture(url, headers=headers, timeout=timeout)
+                response = await fetch_with_capture(url, headers=headers, timeout=timeout, budget_key="bola")
                 user_responses.append(response)
 
                 status = response.get("status_code", 0)
@@ -1775,7 +1958,7 @@ async def check_bola_enumeration(
         path = endpoint_template.replace("{id}", str(resource_id))
         url = urljoin(base_url, path)
         try:
-            response = await fetch_with_capture(url, headers=headers, timeout=timeout)
+            response = await fetch_with_capture(url, headers=headers, timeout=timeout, budget_key="bola")
             status = response.get("status_code", 0)
             body = response.get("body", "")
             accessible = status == 200 and len(body) > 50

@@ -1157,7 +1157,31 @@ def assess_scan_completeness(
         sqlmap_results = active_results.get("sqlmap") or []
         dalfox_errors = active_results.get("dalfox_errors") or []
         sqlmap_errors = active_results.get("sqlmap_errors") or []
-        attempted = bool(dalfox_results or sqlmap_results or dalfox_errors or sqlmap_errors)
+
+        def _has_findings(value: Any) -> bool:
+            if isinstance(value, list):
+                return len(value) > 0
+            if isinstance(value, dict):
+                if value.get("findings"):
+                    return True
+                vulns = value.get("vulnerabilities_found")
+                return isinstance(vulns, int) and vulns > 0
+            return False
+
+        smart_attempted = False
+        smart_attempted = smart_attempted or _has_findings(active_results.get("smart_sqli"))
+        smart_attempted = smart_attempted or _has_findings(active_results.get("smart_xss"))
+        smart_attempted = smart_attempted or _has_findings(active_results.get("nosql_injection"))
+        smart_attempted = smart_attempted or _has_findings(active_results.get("dom_xss"))
+        smart_attempted = smart_attempted or _has_findings(active_results.get("smart_bola"))
+        smart_attempted = smart_attempted or (active_results.get("smart_total_endpoints_tested") or 0) > 0
+        smart_attempted = smart_attempted or (active_results.get("get_endpoints_tested") or 0) > 0
+        smart_attempted = smart_attempted or (active_results.get("post_endpoints_tested") or 0) > 0
+        smart_attempted = smart_attempted or (active_results.get("xss_get_endpoints_tested") or 0) > 0
+        smart_attempted = smart_attempted or (active_results.get("xss_post_endpoints_tested") or 0) > 0
+        smart_attempted = smart_attempted or (active_results.get("smart_reflections_found") or 0) > 0
+
+        attempted = bool(dalfox_results or sqlmap_results or dalfox_errors or sqlmap_errors or smart_attempted)
 
         modules["active_checks"] = {
             "completed": attempted,
@@ -1168,6 +1192,12 @@ def assess_scan_completeness(
                 "sqlmap_results": len(sqlmap_results),
                 "dalfox_errors": len(dalfox_errors),
                 "sqlmap_errors": len(sqlmap_errors),
+                "smart_total_endpoints_tested": active_results.get("smart_total_endpoints_tested") or 0,
+                "smart_get_endpoints_tested": active_results.get("get_endpoints_tested") or 0,
+                "smart_post_endpoints_tested": active_results.get("post_endpoints_tested") or 0,
+                "smart_xss_get_endpoints_tested": active_results.get("xss_get_endpoints_tested") or 0,
+                "smart_xss_post_endpoints_tested": active_results.get("xss_post_endpoints_tested") or 0,
+                "smart_reflections_found": active_results.get("smart_reflections_found") or 0,
             }
         }
         if not attempted:
@@ -1922,7 +1952,7 @@ async def build_report(target: str,
                        thorough_params: bool=False,
                        oob_callback_url: str | None=None,
                        # Safety/performance limits
-                       smart_bola_max_endpoints: int=30,
+                       smart_bola_max_endpoints: int=80,
                        dom_xss_max_files: int=20,
                        sqli_extract_max: int=3,
                        oob_max_findings: int=3,
@@ -1940,6 +1970,36 @@ async def build_report(target: str,
 
     # Initialize coverage tracker for smart scans
     coverage_tracker = CoverageTracker() if smart_mode else None
+
+    # Seed URLs derived from target path (improves discovery when target is a subpath or static asset)
+    seed_entry_urls: list[str] = []
+    seed_js_urls: list[str] = []
+    try:
+        target_str = target if isinstance(target, str) else (target.get("url") if isinstance(target, dict) else "")
+        if target_str and "://" in target_str:
+            parsed_target = urllib.parse.urlparse(target_str)
+            target_path = parsed_target.path or "/"
+            static_exts = {
+                ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg",
+                ".svg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot",
+            }
+            target_ext = os.path.splitext(target_path.lower())[1]
+            if target_path and target_path != "/":
+                if target_ext in static_exts:
+                    if target_ext in (".js", ".mjs"):
+                        seed_js_urls.append(target_str)
+                    parent = target_path.rsplit("/", 1)[0] or "/"
+                    seed_entry_urls.append(urllib.parse.urljoin(base_url + "/", parent.lstrip("/") + "/"))
+                else:
+                    seed_entry_urls.append(urllib.parse.urljoin(base_url + "/", target_path.lstrip("/")))
+                if parsed_target.query and target_ext not in static_exts:
+                    seed_entry_urls.append(target_str)
+    except Exception:
+        pass
+
+    if seed_entry_urls:
+        seed_entry_urls = list(dict.fromkeys(seed_entry_urls))
+        print(f"[scanner] Entry seed URLs derived from target: {seed_entry_urls[:3]}...", file=sys.stderr)
 
     manual_endpoints_norm = normalize_manual_endpoints(base_url, manual_endpoints)
     if manual_endpoints_norm:
@@ -2667,7 +2727,7 @@ async def build_report(target: str,
 
     # For smart mode: Quick JS route discovery to seed browser crawl
     # This helps SPAs by finding routes before the browser crawl starts
-    browser_seed_urls: list[str] = []
+    browser_seed_urls: list[str] = list(seed_entry_urls)
     if smart_mode and not no_browser:
         try:
             import re
@@ -2675,8 +2735,31 @@ async def build_report(target: str,
 
             print(f"[smart] Quick JS route discovery for browser crawl seeding", file=sys.stderr)
             async with _httpx.AsyncClient(verify=False, timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(base_url)
-                html = resp.text or ""
+                candidate_urls = [base_url]
+                if seed_entry_urls:
+                    candidate_urls.extend(seed_entry_urls)
+                candidate_urls = list(dict.fromkeys(candidate_urls))
+
+                seed_base_url = base_url
+                html = ""
+                for candidate in candidate_urls:
+                    try:
+                        resp = await client.get(candidate)
+                    except Exception:
+                        continue
+                    candidate_html = resp.text or ""
+                    content_type = (resp.headers.get("content-type") or "").lower()
+                    if candidate_html and (
+                        "text/html" in content_type
+                        or "<html" in candidate_html.lower()
+                        or "<script" in candidate_html.lower()
+                    ):
+                        seed_base_url = candidate
+                        html = candidate_html
+                        break
+                    if not html:
+                        seed_base_url = candidate
+                        html = candidate_html
 
                 # Extract script URLs from HTML
                 script_urls: list[str] = []
@@ -2686,10 +2769,8 @@ async def build_report(target: str,
                     if src and not src.startswith("data:"):
                         if src.startswith("//"):
                             src = "https:" + src
-                        elif src.startswith("/"):
-                            src = base_url.rstrip("/") + src
                         elif not src.startswith("http"):
-                            src = base_url.rstrip("/") + "/" + src
+                            src = urllib.parse.urljoin(seed_base_url, src)
                         script_urls.append(src)
 
                 # Quick JS analysis for routes (limit to 5 scripts)
@@ -2767,7 +2848,7 @@ async def build_report(target: str,
                     browser_seed_urls.extend(common_hash_routes)
 
                 # Deduplicate and limit
-                browser_seed_urls = list(set(browser_seed_urls))[:25]  # Increased limit for hash routes
+                browser_seed_urls = list(dict.fromkeys(browser_seed_urls))[:25]  # Increased limit for hash routes
                 if browser_seed_urls:
                     print(f"[smart] Found {len(browser_seed_urls)} routes to seed browser crawl: {browser_seed_urls[:5]}...", file=sys.stderr)
         except Exception as e:
@@ -3041,6 +3122,17 @@ async def build_report(target: str,
         crawl_urls = katana_result
         smart_discovery_data = None
 
+    if seed_entry_urls:
+        existing_urls = set(crawl_urls)
+        added_seeds = 0
+        for seed_url in seed_entry_urls:
+            if seed_url and seed_url not in existing_urls:
+                crawl_urls.append(seed_url)
+                existing_urls.add(seed_url)
+                added_seeds += 1
+        if added_seeds > 0:
+            print(f"[scanner] Added {added_seeds} entry seed URLs to discovery pool (total: {len(crawl_urls)})", file=sys.stderr)
+
     # Merge API endpoints discovered via Playwright network capture into crawl_urls
     browser_api_endpoints = browser_res.get("api_endpoints", []) if browser_res else []
     if browser_api_endpoints:
@@ -3113,6 +3205,10 @@ async def build_report(target: str,
             js_bundle_analysis = {"source": "discovery_phase", "js_parsing_enabled": True}
     elif smart_mode:
         js_urls = [u for u in crawl_urls if u.endswith(".js") or ".js?" in u]
+        if seed_js_urls:
+            for js_url in seed_js_urls:
+                if js_url and js_url not in js_urls:
+                    js_urls.append(js_url)
         if js_urls:
             print(f"[scanner] Smart mode: Analyzing {len(js_urls)} JS bundles for hidden endpoints", file=sys.stderr)
             js_bundle_analysis = await analyze_js_bundles(base_url, js_urls)
@@ -7792,6 +7888,10 @@ async def build_report(target: str,
                         u for u in crawl_urls
                         if u and (u.endswith(".js") or ".js?" in u)
                     ]
+                if seed_js_urls:
+                    js_urls_for_dom_xss.extend([u for u in seed_js_urls if u])
+                if js_urls_for_dom_xss:
+                    js_urls_for_dom_xss = list(dict.fromkeys(js_urls_for_dom_xss))
 
                 # Always run DOM XSS analysis - function will self-discover JS if none provided
                 if js_urls_for_dom_xss:
@@ -7839,12 +7939,65 @@ async def build_report(target: str,
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
         if smart_mode and smart_succeeded and not public_only:
             try:
-                # Get discovered URLs from crawl data for BOLA pattern analysis
-                bola_urls = []
+                # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
+                bola_urls: list[str] = []
+                bola_param_endpoints: list[dict[str, Any]] = []
+
+                def _normalize_bola_url(raw_url: str) -> str | None:
+                    if not raw_url or not isinstance(raw_url, str):
+                        return None
+                    u = raw_url.strip()
+                    if not u:
+                        return None
+                    if u.startswith("//"):
+                        u = "https:" + u
+                    if u.startswith("/"):
+                        u = urllib.parse.urljoin(base_url, u)
+                    if not u.startswith("http"):
+                        u = urllib.parse.urljoin(base_url + "/", u)
+                    return u
+
+                def _add_bola_urls(urls: list[str] | None) -> None:
+                    if not urls:
+                        return
+                    for u in urls:
+                        normalized = _normalize_bola_url(u)
+                        if normalized:
+                            bola_urls.append(normalized)
+
                 if smart_discovery_data:
-                    bola_urls = smart_discovery_data.get("all_urls", [])[:500]
-                if not bola_urls and crawl_urls:
-                    bola_urls = crawl_urls[:500]
+                    _add_bola_urls(smart_discovery_data.get("all_urls", []))
+                    _add_bola_urls(smart_discovery_data.get("api_endpoints", []))
+                    _add_bola_urls(smart_discovery_data.get("parameterized_urls", []))
+                    _add_bola_urls(smart_discovery_data.get("recursive_paths", []))
+                    bola_param_endpoints.extend(smart_discovery_data.get("endpoints_with_params", []) or [])
+
+                if crawl_urls:
+                    _add_bola_urls(crawl_urls)
+
+                if browser_api_endpoints:
+                    _add_bola_urls(browser_api_endpoints)
+
+                if js_bundle_analysis and isinstance(js_bundle_analysis, dict):
+                    _add_bola_urls(js_bundle_analysis.get("api_endpoints", []))
+
+                if har_discovery_result and getattr(har_discovery_result, "endpoints", None):
+                    for ep in har_discovery_result.endpoints:
+                        ep_url = getattr(ep, "url", None)
+                        if ep_url:
+                            _add_bola_urls([ep_url])
+                        # Collect query param hints for synthesis
+                        params: list[str] = []
+                        query_params = getattr(ep, "query_params", None)
+                        if isinstance(query_params, dict):
+                            params = list(query_params.keys())
+                        elif isinstance(query_params, list):
+                            params = [p for p in query_params if isinstance(p, str)]
+                        if params and ep_url:
+                            bola_param_endpoints.append({"url": ep_url, "params": params})
+
+                # Deduplicate and cap
+                bola_urls = list(dict.fromkeys(bola_urls))[:500]
 
                 if bola_urls:
                     print(f"[scanner] Smart mode: Running BOLA/IDOR testing on {len(bola_urls)} discovered URLs", file=sys.stderr)
@@ -7858,6 +8011,7 @@ async def build_report(target: str,
                         discovered_urls=bola_urls,
                         user1_session=auth_session,
                         user2_session=user2_session,  # Only runs cross-user tests if provided
+                        param_endpoints=bola_param_endpoints,
                         max_endpoints=smart_bola_max_endpoints,
                         timeout=10
                     )
@@ -8375,6 +8529,87 @@ async def build_report(target: str,
             f"{len(checks_skipped)} check(s) were skipped due to scan configuration"
         )
 
+    # =========================================================================
+    # TRIAGE: Separate confirmed vs suspected findings + coverage gaps
+    # =========================================================================
+    def _sample_findings(items: list[dict], limit: int = 5) -> list[dict[str, Any]]:
+        sample = []
+        for f in items[:limit]:
+            sample.append({
+                "id": f.get("id"),
+                "title": f.get("title"),
+                "severity": f.get("severity"),
+                "tool": f.get("tool"),
+                "url": f.get("url") or f.get("endpoint"),
+            })
+        return sample
+
+    confirmed_findings = [f for f in findings_list if f.get("verified") is True]
+    suspected_high = [
+        f for f in findings_list
+        if f.get("severity") in ("high", "critical") and not f.get("verified")
+    ]
+    needs_review = [
+        f for f in findings_list
+        if f.get("confidence_tier") in ("low", "uncertain")
+    ]
+    ai_false_positives = [f for f in findings_list if f.get("ai_verdict") == "false_positive"]
+    verification_skipped = [f for f in findings_list if f.get("verification_skipped")]
+
+    report["triage"] = {
+        "confirmed": {
+            "count": len(confirmed_findings),
+            "sample": _sample_findings(confirmed_findings),
+        },
+        "suspected_high": {
+            "count": len(suspected_high),
+            "sample": _sample_findings(suspected_high),
+        },
+        "needs_review": {
+            "count": len(needs_review),
+            "sample": _sample_findings(needs_review),
+        },
+        "ai_false_positive": {
+            "count": len(ai_false_positives),
+            "sample": _sample_findings(ai_false_positives),
+        },
+        "verification_skipped": {
+            "count": len(verification_skipped),
+            "sample": _sample_findings(verification_skipped),
+        },
+    }
+
+    coverage_gaps: list[str] = []
+    if coverage.get("issues"):
+        coverage_gaps.extend(coverage.get("issues") or [])
+
+    smart_cov = report.get("smart_coverage")
+    if not smart_cov and coverage_tracker:
+        try:
+            smart_cov = coverage_tracker.to_dict()
+        except Exception:
+            smart_cov = None
+    smart_cov = smart_cov or {}
+    endpoints_cov = smart_cov.get("endpoints") or {}
+    if endpoints_cov.get("discovered") and endpoints_cov.get("coverage") is not None:
+        if endpoints_cov.get("coverage", 1.0) < 0.3:
+            coverage_gaps.append(
+                f"Low endpoint coverage ({endpoints_cov.get('coverage'):.2f}) - increase crawl depth or authenticated coverage"
+            )
+
+    nuclei_cov = smart_cov.get("nuclei_templates") or {}
+    if nuclei_cov.get("run") == 0 and not public_only:
+        coverage_gaps.append("Nuclei templates not executed - check nuclei configuration or timeouts")
+
+    auth_states = smart_cov.get("auth_states_tested") or []
+    if auth_states == ["anonymous"]:
+        coverage_gaps.append("Only anonymous auth state tested - authenticated coverage may be missing")
+
+    report["coverage_gaps"] = {
+        "count": len(coverage_gaps),
+        "issues": coverage_gaps,
+    }
+
     # Redact request bodies from findings before returning/saving reports.
     if report.get("findings"):
         for finding in report["findings"]:
@@ -8851,7 +9086,7 @@ async def cli_main():
     ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
     ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
     # Safety/performance limits
-    ap.add_argument("--smart-bola-max-endpoints", type=int, default=30, dest="smart_bola_max_endpoints", help="Max endpoints for smart BOLA testing (default: 30)")
+    ap.add_argument("--smart-bola-max-endpoints", type=int, default=80, dest="smart_bola_max_endpoints", help="Max endpoints for smart BOLA testing (default: 80)")
     ap.add_argument("--dom-xss-max-files", type=int, default=20, dest="dom_xss_max_files", help="Max JS files for DOM XSS analysis (default: 20)")
     ap.add_argument("--sqli-extract-max", type=int, default=3, dest="sqli_extract_max", help="Max SQLi findings to attempt data extraction (default: 3)")
     ap.add_argument("--oob-max-findings", type=int, default=None, dest="oob_max_findings", help="Max SQLi findings to test with OOB payloads (default: 3)")

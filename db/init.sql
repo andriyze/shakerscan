@@ -123,6 +123,10 @@ CREATE TABLE findings (
     -- Notes
     notes TEXT,
 
+    -- Source tracking
+    source TEXT DEFAULT 'scan',  -- scan, manual, ai_session
+    session_id TEXT,  -- For AI session findings
+
     -- Timestamps
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -208,6 +212,8 @@ CREATE INDEX idx_findings_severity ON findings(severity);
 CREATE INDEX idx_findings_status ON findings(status);
 CREATE INDEX idx_findings_fingerprint ON findings(fingerprint);
 CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
+CREATE INDEX idx_findings_source ON findings(source);
+CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
 
 -- Discovery
 CREATE INDEX idx_discovery_root_domain ON discovery_runs(root_domain);

@@ -18,6 +18,7 @@ import asyncpg
 import redis
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 # Configuration
@@ -434,6 +435,39 @@ class TargetUpdate(BaseModel):
 
 class FindingUpdate(BaseModel):
     status: str  # active, resolved, false_positive, accepted_risk
+    notes: Optional[str] = None
+
+
+class ManualFindingCreate(BaseModel):
+    """Create a finding from manual testing or AI session."""
+    target: str  # Target URL (required for manual, optional for session)
+    title: str
+    severity: str  # critical, high, medium, low, info
+    description: Optional[str] = None
+    category: Optional[str] = None  # BOLA, XSS, SQLi, etc.
+    cwe: Optional[str] = None  # CWE ID (e.g., "CWE-639")
+    cvss_score: Optional[float] = None
+    url: Optional[str] = None  # Specific vulnerable URL/endpoint
+    evidence: Optional[str] = None  # Proof of vulnerability
+    request: Optional[str] = None  # HTTP request that triggered it
+    response: Optional[str] = None  # HTTP response showing vuln
+    remediation: Optional[str] = None  # How to fix
+    notes: Optional[str] = None
+
+
+class SessionFindingCreate(BaseModel):
+    """Create a finding from an AI security session (target auto-populated)."""
+    title: str
+    severity: str  # critical, high, medium, low, info
+    description: Optional[str] = None
+    category: Optional[str] = None
+    cwe: Optional[str] = None
+    cvss_score: Optional[float] = None
+    url: Optional[str] = None
+    evidence: Optional[str] = None
+    request: Optional[str] = None
+    response: Optional[str] = None
+    remediation: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -1408,6 +1442,149 @@ async def bulk_update_findings(finding_ids: list[str], status: str, notes: Optio
     return {'updated': len(finding_ids), 'status': status}
 
 
+@app.post("/findings/manual")
+async def create_manual_finding(request: ManualFindingCreate):
+    """
+    Create a finding from manual testing.
+
+    Use this endpoint to record vulnerabilities discovered during manual
+    penetration testing, bug bounty hunting, or AI-assisted security sessions.
+
+    The finding will be linked to the target (created if it doesn't exist).
+    """
+    # Validate severity
+    valid_severities = ['critical', 'high', 'medium', 'low', 'info']
+    if request.severity.lower() not in valid_severities:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid severity. Must be one of: {', '.join(valid_severities)}"
+        )
+
+    # Normalize target URL
+    from urllib.parse import urlparse
+    target_url = request.target.strip()
+    if not target_url.startswith(('http://', 'https://')):
+        target_url = f"https://{target_url}"
+
+    parsed = urlparse(target_url)
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid target URL")
+
+    # Normalize to origin (scheme + host)
+    normalized_target = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Generate fingerprint for deduplication
+    fingerprint_source = f"{normalized_target}:{request.title}:{request.severity}"
+    if request.url:
+        fingerprint_source += f":{request.url}"
+    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
+
+    async with db_pool.acquire() as conn:
+        # Get or create target
+        target = await conn.fetchrow(
+            "SELECT id FROM targets WHERE url = $1",
+            normalized_target
+        )
+
+        if target:
+            target_id = target['id']
+        else:
+            # Create new target
+            target_id = await conn.fetchval("""
+                INSERT INTO targets (url, name, root_domain, discovery_source)
+                VALUES ($1, $2, $3, 'manual')
+                RETURNING id
+            """, normalized_target, parsed.hostname, parsed.hostname)
+
+        # Check for existing finding with same fingerprint
+        existing = await conn.fetchrow(
+            "SELECT id, status FROM findings WHERE fingerprint = $1 AND target_id = $2",
+            fingerprint, target_id
+        )
+
+        if existing:
+            # Update last_seen and potentially resurface
+            if existing['status'] == 'resolved':
+                await conn.execute("""
+                    UPDATE findings
+                    SET status = 'active', last_seen_at = NOW(),
+                        resurfaced_count = resurfaced_count + 1, updated_at = NOW()
+                    WHERE id = $1
+                """, existing['id'])
+                return {
+                    'id': str(existing['id']),
+                    'fingerprint': fingerprint,
+                    'status': 'resurfaced',
+                    'message': 'Existing finding resurfaced'
+                }
+            else:
+                await conn.execute(
+                    "UPDATE findings SET last_seen_at = NOW() WHERE id = $1",
+                    existing['id']
+                )
+                return {
+                    'id': str(existing['id']),
+                    'fingerprint': fingerprint,
+                    'status': 'duplicate',
+                    'message': 'Finding already exists'
+                }
+
+        # Build evidence JSON if provided
+        evidence_json = None
+        if request.evidence or request.remediation:
+            evidence_json = {}
+            if request.evidence:
+                evidence_json['proof'] = request.evidence
+            if request.remediation:
+                evidence_json['remediation'] = request.remediation
+
+        # Create new finding
+        finding_id = await conn.fetchval("""
+            INSERT INTO findings (
+                target_id, fingerprint, title, description, severity,
+                cvss_score, tool, cwe, url, evidence, request, response,
+                notes, source, status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'manual', 'active'
+            )
+            RETURNING id
+        """,
+            target_id,
+            fingerprint,
+            request.title,
+            request.description,
+            request.severity.lower(),
+            request.cvss_score,
+            request.category or 'manual',
+            request.cwe,
+            request.url or normalized_target,
+            json.dumps(evidence_json) if evidence_json else None,
+            request.request,
+            request.response,
+            request.notes
+        )
+
+        # Update target finding count
+        await conn.execute("""
+            UPDATE targets SET
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = $1 AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = $1
+        """, target_id)
+
+    return {
+        'id': str(finding_id),
+        'fingerprint': fingerprint,
+        'target_id': str(target_id),
+        'target': normalized_target,
+        'status': 'created',
+        'message': 'Finding created successfully'
+    }
+
+
 # ============================================================
 # DISCOVERY (Subdomain Enumeration)
 # ============================================================
@@ -2089,6 +2266,453 @@ async def gungnir_stop():
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop Gungnir: {str(e)}")
+
+
+# ============================================================
+# INTERACTIVE SESSIONS (AI Security Testing)
+# ============================================================
+
+# Import session manager
+from session_manager import InteractiveSessionManager, InteractiveSession
+
+
+class SessionStartRequest(BaseModel):
+    target: str
+
+
+class SessionActionRequest(BaseModel):
+    action: str  # navigate, click, fill, register, login, submit, wait, extract
+    user: Optional[str] = "default"
+    data: Optional[dict] = None
+
+
+class EndpointTestRequest(BaseModel):
+    endpoint: str
+    method: str = "GET"
+    as_user: Optional[str] = None
+    body: Optional[dict] = None
+    allow_out_of_scope: bool = False  # Set True to allow cross-origin requests (SSRF risk)
+
+
+@app.post("/session/start")
+async def start_session(request: SessionStartRequest):
+    """
+    Start an interactive browser session for AI-assisted security testing.
+
+    This creates a headless browser session that can be used for:
+    - Taking screenshots to analyze UI
+    - Navigating and interacting with the application
+    - Registering and logging in test users
+    - Testing endpoints with different user contexts (BOLA testing)
+
+    Returns a session_id to use in subsequent requests.
+
+    Unlike scan endpoints which strip paths, sessions preserve the full URL
+    so you can start at specific pages (e.g., /login).
+    """
+    # Validate and normalize URL (but preserve path for sessions)
+    from urllib.parse import urlparse, urlunparse
+    raw_target = (request.target or "").strip()
+    if not raw_target:
+        raise HTTPException(status_code=400, detail="Target URL required")
+
+    # Add scheme if missing
+    has_scheme = "://" in raw_target
+    url_to_parse = raw_target if has_scheme else f"https://{raw_target}"
+
+    try:
+        parsed = urlparse(url_to_parse)
+        # Validate scheme
+        if parsed.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail=f"Invalid scheme '{parsed.scheme}': only http/https allowed")
+        # Validate host
+        if not parsed.hostname:
+            raise HTTPException(status_code=400, detail="Invalid target URL: no hostname")
+        # Reject URLs with credentials (prevents credential leakage in logs/artifacts)
+        if parsed.username or parsed.password:
+            raise HTTPException(status_code=400, detail="URLs with embedded credentials (user:pass@host) are not allowed")
+        # Access port early to catch malformed URLs
+        _ = parsed.port
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid target URL: {e}")
+
+    # Reconstruct URL preserving path (but normalizing host to lowercase)
+    normalized_target = urlunparse((
+        parsed.scheme,
+        parsed.netloc.lower(),
+        parsed.path or "/",
+        parsed.params,
+        parsed.query,
+        ""  # Strip fragment
+    ))
+
+    try:
+        manager = await InteractiveSessionManager.get_instance()
+        session = await manager.create_session(normalized_target, RESULTS_DIR)
+        result = await session.start()
+
+        if not result.get("success"):
+            await manager.close_session(session.session_id)
+            raise HTTPException(status_code=500, detail=result.get("error", "Failed to start session"))
+
+        return result
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
+
+
+@app.get("/session/{session_id}")
+async def get_session_state(session_id: str):
+    """Get current state of an interactive session."""
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    return await session.get_state()
+
+
+@app.post("/session/{session_id}/screenshot")
+async def session_screenshot(
+    session_id: str,
+    full_page: bool = False,
+    user: str = "default"
+):
+    """
+    Capture a screenshot of the current page.
+
+    Args:
+        session_id: The session ID
+        full_page: Capture full scrollable page (default: viewport only)
+        user: Which user's browser context to screenshot (default: "default")
+
+    Returns base64-encoded PNG image.
+    """
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    result = await session.screenshot(full_page=full_page, user=user)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Screenshot failed"))
+
+    return result
+
+
+@app.get("/session/{session_id}/screenshot.png")
+async def session_screenshot_raw(
+    session_id: str,
+    full_page: bool = False,
+    user: str = "default"
+):
+    """
+    Capture a screenshot and return raw PNG bytes.
+
+    This endpoint returns the image directly (not JSON), making it easy to
+    save to a file with curl:
+        curl -s "http://localhost:8080/session/{id}/screenshot.png" -o screenshot.png
+
+    Args:
+        session_id: The session ID
+        full_page: Capture full scrollable page (default: viewport only)
+        user: Which user's browser context to screenshot (default: "default")
+    """
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    screenshot_bytes = await session.screenshot_raw(full_page=full_page, user=user)
+
+    if screenshot_bytes is None:
+        raise HTTPException(status_code=500, detail=f"Screenshot failed for user '{user}'")
+
+    return Response(content=screenshot_bytes, media_type="image/png")
+
+
+@app.post("/session/{session_id}/action")
+async def session_action(session_id: str, request: SessionActionRequest):
+    """
+    Execute a browser action in the session.
+
+    Supported actions:
+    - navigate: Go to URL (data: {"url": "/path"})
+    - click: Click element (data: {"selector": "button#submit"})
+    - fill: Fill input (data: {"selector": "input#email", "value": "test@example.com"})
+    - register: Register user (data: {"email": "...", "password": "..."})
+    - login: Login user (data: {"email": "...", "password": "..."})
+    - submit: Submit form (data: {"selector": "form"})
+    - wait: Wait for selector/timeout (data: {"selector": "...", "timeout": 5000})
+    - extract: Extract data (data: {"selector": "...", "attribute": "href"})
+
+    The 'user' parameter creates separate browser contexts for multi-user testing.
+    """
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    result = await session.action({
+        "action": request.action,
+        "user": request.user,
+        "data": request.data or {}
+    })
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Action failed"))
+
+    return result
+
+
+@app.post("/session/{session_id}/test-endpoint")
+async def session_test_endpoint(session_id: str, request: EndpointTestRequest):
+    """
+    Test a specific API endpoint with optional user authentication.
+
+    This is the core BOLA testing endpoint. It makes a request to the
+    specified endpoint using the authentication context of 'as_user'.
+
+    By default, only same-origin requests are allowed to prevent SSRF.
+    Set allow_out_of_scope=True to test cross-origin endpoints.
+
+    Example BOLA test:
+    1. Login as user1, discover resource at /api/items/42
+    2. Login as user2
+    3. Call this endpoint with endpoint="/api/items/42" and as_user="user2"
+    4. If status is 200, BOLA vulnerability confirmed
+
+    Args:
+        endpoint: API endpoint path (e.g., "/api/items/42")
+        method: HTTP method (GET, POST, PUT, DELETE, etc.)
+        as_user: Test as this user's session (uses their cookies/token)
+        body: Request body for POST/PUT/PATCH
+        allow_out_of_scope: Allow cross-origin requests (default: False for SSRF protection)
+    """
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    result = await session.test_endpoint(
+        endpoint=request.endpoint,
+        method=request.method,
+        as_user=request.as_user,
+        body=request.body,
+        allow_out_of_scope=request.allow_out_of_scope
+    )
+
+    # Don't raise exception on request failure - return the result
+    # so Claude can analyze the access control behavior
+    return result
+
+
+@app.delete("/session/{session_id}")
+async def end_session(session_id: str):
+    """
+    End an interactive session and cleanup resources.
+
+    This closes the browser and frees memory. Sessions also auto-expire
+    after 30 minutes of inactivity.
+    """
+    manager = await InteractiveSessionManager.get_instance()
+    closed = await manager.close_session(session_id)
+
+    if not closed:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "status": "closed",
+        "session_id": session_id,
+        "message": "Session ended successfully"
+    }
+
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all active interactive sessions."""
+    manager = await InteractiveSessionManager.get_instance()
+
+    sessions = []
+    for session_id, session in manager.sessions.items():
+        sessions.append({
+            "session_id": session_id,
+            "target_url": session.state.target_url,
+            "created_at": session.state.created_at.isoformat(),
+            "last_activity": session.state.last_activity.isoformat(),
+            "is_expired": session.is_expired()
+        })
+
+    return {
+        "sessions": sessions,
+        "count": len(sessions)
+    }
+
+
+@app.post("/session/{session_id}/findings")
+async def create_session_finding(session_id: str, request: SessionFindingCreate):
+    """
+    Create a finding from an AI security session.
+
+    The target is automatically populated from the session.
+    Use this during interactive testing to record discovered vulnerabilities.
+
+    Example:
+        curl -X POST "http://localhost:8080/session/{id}/findings" \\
+          -H "Content-Type: application/json" \\
+          -d '{
+            "title": "BOLA on Basket API",
+            "severity": "critical",
+            "description": "User2 can access User1 basket via /rest/basket/{id}",
+            "category": "BOLA",
+            "cwe": "CWE-639",
+            "evidence": "GET /rest/basket/9 with User2 token returns User1 data"
+          }'
+    """
+    # Get session to extract target
+    manager = await InteractiveSessionManager.get_instance()
+    session = await manager.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    target_url = session.target_url
+
+    # Validate severity
+    valid_severities = ['critical', 'high', 'medium', 'low', 'info']
+    if request.severity.lower() not in valid_severities:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid severity. Must be one of: {', '.join(valid_severities)}"
+        )
+
+    # Normalize target URL to origin
+    from urllib.parse import urlparse
+    parsed = urlparse(target_url)
+    normalized_target = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Generate fingerprint for deduplication
+    fingerprint_source = f"{normalized_target}:{request.title}:{request.severity}"
+    if request.url:
+        fingerprint_source += f":{request.url}"
+    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:32]
+
+    async with db_pool.acquire() as conn:
+        # Get or create target
+        target = await conn.fetchrow(
+            "SELECT id FROM targets WHERE url = $1",
+            normalized_target
+        )
+
+        if target:
+            target_id = target['id']
+        else:
+            # Create new target
+            target_id = await conn.fetchval("""
+                INSERT INTO targets (url, name, root_domain, discovery_source)
+                VALUES ($1, $2, $3, 'ai_session')
+                RETURNING id
+            """, normalized_target, parsed.hostname, parsed.hostname)
+
+        # Check for existing finding with same fingerprint
+        existing = await conn.fetchrow(
+            "SELECT id, status FROM findings WHERE fingerprint = $1 AND target_id = $2",
+            fingerprint, target_id
+        )
+
+        if existing:
+            # Update last_seen and potentially resurface
+            if existing['status'] == 'resolved':
+                await conn.execute("""
+                    UPDATE findings
+                    SET status = 'active', last_seen_at = NOW(),
+                        resurfaced_count = resurfaced_count + 1,
+                        session_id = $2, updated_at = NOW()
+                    WHERE id = $1
+                """, existing['id'], session_id)
+                return {
+                    'id': str(existing['id']),
+                    'fingerprint': fingerprint,
+                    'status': 'resurfaced',
+                    'message': 'Existing finding resurfaced'
+                }
+            else:
+                await conn.execute(
+                    "UPDATE findings SET last_seen_at = NOW(), session_id = $2 WHERE id = $1",
+                    existing['id'], session_id
+                )
+                return {
+                    'id': str(existing['id']),
+                    'fingerprint': fingerprint,
+                    'status': 'duplicate',
+                    'message': 'Finding already exists'
+                }
+
+        # Build evidence JSON if provided
+        evidence_json = None
+        if request.evidence or request.remediation:
+            evidence_json = {}
+            if request.evidence:
+                evidence_json['proof'] = request.evidence
+            if request.remediation:
+                evidence_json['remediation'] = request.remediation
+
+        # Create new finding
+        finding_id = await conn.fetchval("""
+            INSERT INTO findings (
+                target_id, fingerprint, title, description, severity,
+                cvss_score, tool, cwe, url, evidence, request, response,
+                notes, source, session_id, status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                'ai_session', $14, 'active'
+            )
+            RETURNING id
+        """,
+            target_id,
+            fingerprint,
+            request.title,
+            request.description,
+            request.severity.lower(),
+            request.cvss_score,
+            request.category or 'ai_session',
+            request.cwe,
+            request.url or normalized_target,
+            json.dumps(evidence_json) if evidence_json else None,
+            request.request,
+            request.response,
+            request.notes,
+            session_id
+        )
+
+        # Update target finding count
+        await conn.execute("""
+            UPDATE targets SET
+                active_findings_count = (
+                    SELECT COUNT(*) FROM findings
+                    WHERE target_id = $1 AND status = 'active'
+                ),
+                updated_at = NOW()
+            WHERE id = $1
+        """, target_id)
+
+    return {
+        'id': str(finding_id),
+        'fingerprint': fingerprint,
+        'target_id': str(target_id),
+        'target': normalized_target,
+        'session_id': session_id,
+        'status': 'created',
+        'message': 'Finding created successfully'
+    }
 
 
 # ============================================================

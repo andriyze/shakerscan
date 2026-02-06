@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Security Session"
+  short_description: "Drive interactive /session API testing"
+  default_prompt: "Use the /session API to start and control Playwright sessions for manual security testing (BOLA/IDOR). Follow the workflow and scope rules in SKILL.md; keep same-origin unless explicitly allowed."

@@ -23,11 +23,16 @@ Run a comprehensive security assessment with ALL security tests including active
      -d '{"target": "$ARGUMENTS", "options": {"scan_type": "full"}}'
    ```
 
-5. Inform user this will take 1-2 hours
+5. Report scan ID and UI link, then STOP:
+   ```
+   Full assessment submitted: {scan_id}
+   Expected duration: 1-2 hours
+   View progress: http://localhost:3000/scans/{scan_id}
+   ```
 
-6. Poll status every 30 seconds and provide progress updates showing current phase
+**Important**: Do NOT poll or wait for completion - full scans take 1-2 hours. Users can check results via UI or ask later.
 
-7. When complete, provide a comprehensive report
+6. When user asks for results later, provide a comprehensive report
 
 ## What Full Scan Includes
 

@@ -1960,6 +1960,17 @@ async def nosql_injection_test_json_body(
     if not params:
         return results
 
+    meta_pattern = re.compile(r"__SHAKERSCAN_NOSQL__(\d{3})__SHAKERSCAN_NOSQL__$")
+
+    def _parse_meta(raw: str) -> tuple[str, int | None]:
+        if not raw:
+            return "", None
+        match = meta_pattern.search(raw.strip())
+        if not match:
+            return raw, None
+        body = raw[: match.start()]
+        return body, int(match.group(1))
+
     # NoSQLi payloads for JSON body injection
     nosql_payloads = [
         {"$ne": ""},                   # Not equal to empty - bypasses auth
@@ -2001,10 +2012,11 @@ async def nosql_injection_test_json_body(
         baseline_cmd = [
             "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
             "-H", "Content-Type: application/json",
-            "-d", baseline_body
+            "-d", baseline_body,
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
         ] + auth_args + [url]
-        baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=15)
-        baseline_status = "error" if baseline_rc != 0 else "ok"
+        baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
+        baseline_out, baseline_code = _parse_meta(baseline_raw or "")
         baseline_len = len(baseline_out) if baseline_out else 0
         print(f"[DEBUG NoSQL Test] param={param} baseline_body={baseline_body}", file=sys.stderr)
         print(f"[DEBUG NoSQL Test] baseline_out={baseline_out[:200] if baseline_out else 'None'}...", file=sys.stderr)
@@ -2018,13 +2030,15 @@ async def nosql_injection_test_json_body(
             test_cmd = [
                 "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
                 "-H", "Content-Type: application/json",
-                "-d", test_body
+                "-d", test_body,
+                "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
             ] + auth_args + [url]
-            test_out, _, test_rc = await run(test_cmd, timeout=15)
+            test_raw, _, test_rc = await run(test_cmd, timeout=15)
 
             if test_rc != 0:
                 continue
 
+            test_out, test_code = _parse_meta(test_raw or "")
             test_len = len(test_out) if test_out else 0
 
             # DEBUG: Log the first payload test result
@@ -2072,31 +2086,38 @@ async def nosql_injection_test_json_body(
             evidence_type = ""
 
             # Pre-compute success/error indicators
-            test_looks_success = not any(x in test_out.lower() for x in ['"error"', 'invalid', 'not found', 'failed']) if test_out else False
+            error_markers = [
+                "error", "errors", "invalid", "not found", "failed", "unauthorized",
+                "forbidden", "exception", "validation error", "unprocessable",
+            ]
+            baseline_lower = (baseline_out or "").lower()
+            test_lower = (test_out or "").lower()
+            baseline_is_error = (baseline_code is not None and baseline_code >= 400) or any(m in baseline_lower for m in error_markers)
+            test_is_success = (test_code is not None and test_code < 400) and not any(m in test_lower for m in error_markers)
 
             # Significant length difference (use lower threshold for small baselines)
             min_diff = min(100, max(20, baseline_len * 2))
-            if test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
+            if baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
                 is_vulnerable = True
                 evidence_type = "length_difference"
                 print(f"[DEBUG NoSQL Test] LENGTH DIFFERENCE DETECTED: baseline={baseline_len} test={test_len}", file=sys.stderr)
 
             # Empty/minimal baseline with substantial response (catches {} -> data)
             baseline_minimal = baseline_len <= 10 or baseline_out in ('{}', '[]', 'null', '')
-            if baseline_minimal and test_len > 30 and test_looks_success:
+            if baseline_minimal and test_len > 30 and test_is_success:
                 is_vulnerable = True
                 evidence_type = "empty_baseline_bypass"
                 print(f"[DEBUG NoSQL Test] EMPTY BASELINE BYPASS DETECTED!", file=sys.stderr)
 
             # Response looks like success when baseline was error
             if baseline_out and test_out:
-                baseline_looks_error = any(x in baseline_out.lower() for x in ['"error"', '"message":', 'invalid', 'not found', 'failed'])
+                baseline_looks_error = baseline_is_error
 
                 # DEBUG: Log the heuristic evaluation
                 if payload == nosql_payloads[0]:
-                    print(f"[DEBUG NoSQL Test] baseline_looks_error={baseline_looks_error} test_looks_success={test_looks_success}", file=sys.stderr)
+                    print(f"[DEBUG NoSQL Test] baseline_looks_error={baseline_looks_error} test_looks_success={test_is_success}", file=sys.stderr)
 
-                if baseline_looks_error and test_looks_success and test_len > 50:
+                if baseline_looks_error and test_is_success and test_len > 50:
                     is_vulnerable = True
                     evidence_type = "bypass_error"
                     print(f"[DEBUG NoSQL Test] BYPASS ERROR DETECTED!", file=sys.stderr)
@@ -2105,7 +2126,7 @@ async def nosql_injection_test_json_body(
             data_indicators = ['"id"', '"_id"', '"email"', '"user', '"token"', '"coupon"', '"code"', '"amount"']
             test_has_data = any(x in test_out.lower() for x in data_indicators) if test_out else False
             baseline_has_data = any(x in (baseline_out or "").lower() for x in data_indicators)
-            if test_has_data and not baseline_has_data:
+            if test_has_data and not baseline_has_data and test_is_success:
                 is_vulnerable = True
                 evidence_type = "data_leak"
                 print(f"[DEBUG NoSQL Test] DATA LEAK DETECTED!", file=sys.stderr)
@@ -5974,7 +5995,7 @@ def _check_sqli_response(
         Tuple of (is_vulnerable, evidence_list)
     """
     response_len = len(out) if out else 0
-    is_vulnerable = False
+    strong_signal = False
     evidence = []
     size_diff = None
 
@@ -5982,10 +6003,10 @@ def _check_sqli_response(
     for dbms_name, patterns in DBMS_FINGERPRINTS.items():
         for pattern in patterns:
             if re.search(pattern, out or "", re.I):
-                is_vulnerable = True
+                strong_signal = True
                 evidence.append(f"SQL error detected: {pattern}")
                 break
-        if is_vulnerable:
+        if strong_signal:
             break
 
     # 2. Check for time-based injection (enhanced with adaptive tolerance)
@@ -5997,7 +6018,7 @@ def _check_sqli_response(
             if baseline_elapsed is None:
                 # No baseline - use simple threshold
                 if elapsed >= 2.0:
-                    is_vulnerable = True
+                    strong_signal = True
                     evidence.append(f"Time-based delay: {elapsed:.2f}s (no baseline)")
             else:
                 actual_delay = elapsed - baseline_elapsed
@@ -6008,7 +6029,7 @@ def _check_sqli_response(
                 max_delay = expected_delay * 2.5  # Cap at 5s for SLEEP(2)
 
                 if min_delay <= actual_delay <= max_delay:
-                    is_vulnerable = True
+                    strong_signal = True
                     # Confidence based on how close to expected delay
                     delay_accuracy = 1.0 - abs(actual_delay - expected_delay) / expected_delay
                     timing_confidence = max(0.65, min(0.90, 0.75 + delay_accuracy * 0.15))
@@ -6019,7 +6040,7 @@ def _check_sqli_response(
                     # Note: For higher confidence, use statistical_timing_test() with multiple samples
 
     # 3. JSON structure comparison for blind SQLi
-    if baseline_body and not is_vulnerable:
+    if baseline_body and not strong_signal:
         baseline_json = _try_parse_json(baseline_body)
         response_json = _try_parse_json(out)
 
@@ -6047,7 +6068,7 @@ def _check_sqli_response(
         if true_condition_len > 0:
             diff_ratio = abs(true_condition_len - false_len) / max(true_condition_len, false_len)
             if diff_ratio > 0.3:  # 30% difference between true/false
-                is_vulnerable = True
+                strong_signal = True
                 evidence.append(f"Boolean difference: true={true_condition_len}, false={false_len}")
 
     # 5. Response size change (lowered threshold for evidence)
@@ -6055,18 +6076,18 @@ def _check_sqli_response(
         size_diff = abs(response_len - baseline_len) / baseline_len
         if size_diff > 0.3:  # 30% change = evidence
             evidence.append(f"Response size changed: {baseline_len} -> {response_len} ({size_diff*100:.1f}%)")
-        if size_diff > 0.5 and status_code and status_code >= 500:
-            is_vulnerable = True
 
     # 6. Server crash indicators (200 -> 500/502/503)
     if status_code is not None and baseline_status is not None:
         if baseline_status == 200 and status_code in (500, 502, 503):
-            is_vulnerable = True
             evidence.append(f"Server crash indicator: {baseline_status} -> {status_code}")
+            if size_diff is not None and size_diff > 0.5:
+                strong_signal = True
         elif baseline_status < 400 and status_code >= 500:
             if size_diff is not None and size_diff > 0.3:
-                is_vulnerable = True
                 evidence.append(f"Status code changed: {baseline_status} -> {status_code}")
+            if size_diff is not None and size_diff > 0.5:
+                strong_signal = True
 
     # 7. Data extraction indicators
     if "schema" in technique or "version" in technique or "user" in technique or "database" in technique:
@@ -6081,11 +6102,11 @@ def _check_sqli_response(
         ]
         for pattern in extraction_patterns:
             if re.search(pattern, out or "", re.I):
-                is_vulnerable = True
+                strong_signal = True
                 evidence.append(f"Data extraction indicator: {pattern}")
                 break
 
-    return is_vulnerable, evidence
+    return strong_signal, evidence
 
 
 async def smart_xss_test(

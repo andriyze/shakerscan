@@ -21,12 +21,15 @@ Run a security scan on the specified target.
 
 3. Extract the `scan_id` from response
 
-4. Poll for completion every 10 seconds:
-   ```bash
-   curl http://localhost:8080/scans/{scan_id}
+4. Report the scan ID and UI link, then STOP:
+   ```
+   Scan submitted: {scan_id}
+   View progress: http://localhost:3000/scans/{scan_id}
    ```
 
-5. When status is "completed", extract and report the rich data:
+**Important**: Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
+
+5. When user asks for results later, fetch and report the rich data:
 
    The API returns a `result` object with detailed scan data:
    - `result.http.csp_evaluation` - CSP grade, score, issues, directives

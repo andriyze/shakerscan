@@ -72,6 +72,7 @@ class AuthResponse:
 
 
 _AUTH_META_PATTERN = re.compile(r"__SHAKERSCAN_AUTH__(\d{3})__SHAKERSCAN_AUTH__$")
+_HTTP_META_PATTERN = re.compile(r"__SHAKERSCAN_META__(\d{3})__SHAKERSCAN_META__$")
 
 
 def _parse_auth_response(raw: str) -> AuthResponse:
@@ -171,6 +172,47 @@ def _looks_like_json(body: str) -> bool:
     """Check if body looks like JSON (starts with { or [), handling XSSI prefixes."""
     stripped = _strip_xssi_prefix(body)
     return stripped.startswith("{") or stripped.startswith("[")
+
+
+def _parse_http_meta(raw: str) -> tuple[str, int | None]:
+    """Parse curl output with a __SHAKERSCAN_META__ status marker."""
+    if not raw:
+        return "", None
+    match = _HTTP_META_PATTERN.search(raw.strip())
+    if not match:
+        return raw, None
+    body = raw[: match.start()]
+    return body, int(match.group(1))
+
+
+def _split_headers_body(raw: str) -> tuple[str, str]:
+    """Split raw HTTP response into headers and body (last response block)."""
+    if "\r\n\r\n" in raw:
+        parts = raw.split("\r\n\r\n")
+    elif "\n\n" in raw:
+        parts = raw.split("\n\n")
+    else:
+        return "", raw
+    if len(parts) >= 2:
+        return parts[-2], parts[-1]
+    return parts[0], ""
+
+
+def _get_header_value(headers: str, header_name: str) -> str:
+    if not headers:
+        return ""
+    header_name = header_name.lower()
+    for line in headers.splitlines():
+        if line.lower().startswith(f"{header_name}:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _looks_like_spa_shell(body: str) -> bool:
+    if not body:
+        return False
+    body_lower = body[:5000].lower()
+    return any(ind.lower() in body_lower for ind in SPA_FRAMEWORK_INDICATORS)
 
 
 def _is_valid_json_auth_success(resp: AuthResponse) -> tuple[bool, str]:
@@ -1901,32 +1943,120 @@ async def test_password_reset(
             urljoin(url, "/reset-password"),
         ]
 
+    reset_success_markers = [
+        "reset link",
+        "password reset",
+        "reset email",
+        "reset instructions",
+        "check your email",
+        "email sent",
+        "if an account exists",
+        "if the account exists",
+        "password recovery",
+    ]
+
+    def _is_password_reset_confirmed(body: str, content_type: str) -> bool:
+        if not body:
+            return False
+        body_lower = body.lower()
+        if "text/html" in content_type.lower() and _looks_like_spa_shell(body):
+            return False
+        if any(marker in body_lower for marker in reset_success_markers):
+            return True
+        if "application/json" in content_type.lower() or _looks_like_json(body):
+            try:
+                data = json.loads(_strip_xssi_prefix(body))
+            except Exception:
+                return False
+            if isinstance(data, dict):
+                message = str(data.get("message", "")).lower()
+                if any(marker in message for marker in reset_success_markers):
+                    return True
+                status_value = str(data.get("status", "")).lower()
+                if data.get("success") is True or status_value in {"ok", "success", "sent", "queued"}:
+                    return True
+                if "email" in message and ("reset" in message or "link" in message):
+                    return True
+        return False
+
     # Test 1: Check for rate limiting on reset requests
     results["tested_checks"] += 1
     for endpoint in reset_endpoints[:3]:  # Test first 3
         response_codes = []
+        rate_limited = False
 
-        # Send 5 reset requests
-        for i in range(5):
-            out, err, rc = await run([
-                "curl", "-sS", "-k", "--max-time", "5",
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "-d", '{"email":"test@example.com"}',
-                "-w", "%{http_code}",
-                "-o", "/dev/null"
-            ] + auth_args + [endpoint], timeout=8)
+        # First request: validate endpoint behavior and confirm reset response
+        out, _, rc = await run([
+            "curl", "-sS", "-k", "--max-time", "5",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", '{"email":"test@example.com"}',
+            "-i",
+            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+        ] + auth_args + [endpoint], timeout=8)
 
-            if rc == 0 and out:
-                try:
-                    http_code = int(out.strip())
-                    response_codes.append(http_code)
-                except ValueError:
-                    pass
+        if rc != 0 or not out:
+            continue
+
+        body_part, status_code = _parse_http_meta(out)
+        headers, body = _split_headers_body(body_part or "")
+        content_type = _get_header_value(headers, "content-type")
+
+        if "text/html" in content_type.lower() and _looks_like_spa_shell(body):
+            results["evidence"].append({
+                "type": "info",
+                "endpoint": endpoint,
+                "message": "SPA shell detected on reset endpoint - skipping rate limit check"
+            })
+            continue
+
+        if status_code is None or status_code >= 500:
+            continue
+
+        if status_code in (429, 423):
+            rate_limited = True
+            continue
+
+        if not _is_password_reset_confirmed(body, content_type):
+            results["evidence"].append({
+                "type": "info",
+                "endpoint": endpoint,
+                "message": "Reset response not confirmed - skipping rate limit check"
+            })
+            continue
+
+        response_codes.append(status_code)
+
+        if _get_header_value(headers, "retry-after"):
+            rate_limited = True
+
+        # Send remaining reset requests (total 5)
+        if not rate_limited:
+            for _ in range(4):
+                out, _, rc = await run([
+                    "curl", "-sS", "-k", "--max-time", "5",
+                    "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                    "-d", '{"email":"test@example.com"}',
+                    "-i",
+                    "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+                ] + auth_args + [endpoint], timeout=8)
+
+                if rc == 0 and out:
+                    body_part, status_code = _parse_http_meta(out)
+                    headers, _ = _split_headers_body(body_part or "")
+                    if status_code is not None:
+                        response_codes.append(status_code)
+                    if _get_header_value(headers, "retry-after"):
+                        rate_limited = True
+                        break
+                    if status_code in (429, 423):
+                        rate_limited = True
+                        break
 
         # Check for rate limiting
-        if response_codes and 429 not in response_codes:
-            if len([c for c in response_codes if c in [200, 201]]) >= 4:
+        if response_codes and not rate_limited and 429 not in response_codes:
+            if len([c for c in response_codes if c in [200, 201, 202, 204]]) >= 4:
                 results["vulnerable"] = True
                 results["vulnerabilities_found"].append({
                     "type": "no_rate_limiting",
@@ -2481,45 +2611,75 @@ async def test_bruteforce_protection(
     common_login_paths = [
         "/login", "/signin", "/auth/login", "/api/login", "/api/auth/login",
     ]
-    urls_to_test = []
-    if discovered_urls:
-        for u in discovered_urls:
-            if any(k in u.lower() for k in ["login", "signin", "auth"]):
-                urls_to_test.append(u)
-    if not urls_to_test:
-        urls_to_test = [urllib.parse.urljoin(url, p) for p in common_login_paths]
-
+    static_exts = {
+        ".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp",
+        ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map",
+    }
+    negative_segments = {
+        "logout", "signout", "callback", "verify", "verification", "reset",
+        "forgot", "password", "passwd", "signup", "register", "enroll",
+        "unlock", "activate", "confirm", "consent", "authorize",
+        "saml", "sso", "2fa", "mfa", "otp",
+    }
+    positive_segments = {
+        "login", "signin", "sign-in", "authenticate", "auth", "token", "session",
+    }
+    login_error_markers = [
+        "invalid", "unauthorized", "unauthorised", "bad credentials",
+        "login failed", "authentication failed", "incorrect", "wrong password",
+        "user not found", "not authorized",
+    ]
+    login_form_markers = [
+        'type="password"', "name=\"password\"", "sign in", "signin", "log in", "login",
+    ]
     lockout_markers = [
         "too many", "try again later", "locked", "account locked",
         "captcha", "verify you are human", "rate limit", "slow down",
     ]
-    meta_pattern = re.compile(r"__SHAKERSCAN_META__(\d{3})__SHAKERSCAN_META__$")
 
-    def parse_curl_meta(raw: str) -> tuple[str, int | None]:
-        if not raw:
-            return "", None
-        match = meta_pattern.search(raw.strip())
-        if not match:
-            return raw, None
-        body = raw[:match.start()]
-        return body, int(match.group(1))
+    def _is_static_asset_path(path: str) -> bool:
+        return any(path.endswith(ext) for ext in static_exts)
 
-    def split_headers_body(raw: str) -> tuple[str, str]:
-        if "\r\n\r\n" in raw:
-            parts = raw.split("\r\n\r\n")
-        elif "\n\n" in raw:
-            parts = raw.split("\n\n")
-        else:
-            return "", raw
-        if len(parts) >= 2:
-            return parts[-2], parts[-1]
-        return parts[0], ""
+    def _is_likely_login_endpoint(candidate: str) -> bool:
+        parsed = urllib.parse.urlparse(candidate)
+        path = (parsed.path or "").lower()
+        if not path or _is_static_asset_path(path):
+            return False
+        segments = [seg for seg in path.split("/") if seg]
+        if any(seg in negative_segments for seg in segments):
+            return False
+        if any(seg in positive_segments for seg in segments):
+            return True
+        return path.endswith(("/auth", "/login", "/signin", "/sign-in", "/authenticate", "/token", "/session"))
+
+    def _is_login_like_response(body: str, content_type: str) -> bool:
+        if not body:
+            return False
+        body_lower = body.lower()
+        if "application/json" in content_type.lower() or _looks_like_json(body):
+            return any(marker in body_lower for marker in login_error_markers)
+        if "text/html" in content_type.lower():
+            return any(marker in body_lower for marker in login_form_markers)
+        return any(marker in body_lower for marker in login_error_markers)
+
+    urls_to_test = []
+    if discovered_urls:
+        for u in discovered_urls:
+            if _is_likely_login_endpoint(u):
+                urls_to_test.append(u)
+    if not urls_to_test:
+        urls_to_test = [
+            urllib.parse.urljoin(url, p)
+            for p in common_login_paths
+            if _is_likely_login_endpoint(urllib.parse.urljoin(url, p))
+        ]
 
     for endpoint in urls_to_test[:5]:
         results["tested_endpoints"] += 1
         statuses = []
         bodies = []
         rate_limited = False
+        skip_endpoint = False
         for attempt in range(4):
             payload = json.dumps({"username": "invalid_user", "password": "WrongPass123!"})
             out, _, rc = await run(
@@ -2531,18 +2691,31 @@ async def test_bruteforce_protection(
                 timeout=12
             )
             if rc == 0:
-                body_part, status_code = parse_curl_meta(out or "")
-                headers, body = split_headers_body(body_part or "")
+                body_part, status_code = _parse_http_meta(out or "")
+                headers, body = _split_headers_body(body_part or "")
                 bodies.append(body or "")
                 if status_code is not None:
                     statuses.append(status_code)
 
-                retry_match = re.search(r"(?im)^retry-after:\s*([0-9]+)", headers or "")
-                if retry_match:
+                if attempt == 0:
+                    content_type = _get_header_value(headers, "content-type")
+                    if "text/html" in content_type.lower() and _looks_like_spa_shell(body):
+                        skip_endpoint = True
+                        break
+                    if not _is_login_like_response(body, content_type):
+                        skip_endpoint = True
+                        break
+
+                retry_after = _get_header_value(headers, "retry-after")
+                if retry_after:
+                    try:
+                        retry_after_value: int | str = int(retry_after.split(",", 1)[0].strip())
+                    except ValueError:
+                        retry_after_value = retry_after
                     results["protections_detected"].append({
                         "endpoint": endpoint,
                         "indicator": "retry_after",
-                        "retry_after": int(retry_match.group(1)),
+                        "retry_after": retry_after_value,
                     })
                     rate_limited = True
                     break
@@ -2557,6 +2730,9 @@ async def test_bruteforce_protection(
 
             base_delay = 0.5 + (attempt * 0.5)
             await asyncio.sleep(base_delay + random.uniform(0.1, 0.4))
+
+        if skip_endpoint:
+            continue
 
         protection_found = rate_limited
         for body in bodies:
