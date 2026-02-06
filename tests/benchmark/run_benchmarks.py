@@ -398,6 +398,22 @@ def main() -> int:
         print("No benchmarks configured.", file=sys.stderr)
         return 2
 
+    benchmark_names = [bench.get("name") or "unnamed" for bench in benchmarks]
+    seen_names: set[str] = set()
+    duplicate_names: set[str] = set()
+    for name in benchmark_names:
+        if name in seen_names:
+            duplicate_names.add(name)
+        seen_names.add(name)
+    if duplicate_names:
+        print(
+            f"Duplicate benchmark names are not allowed: {sorted(duplicate_names)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    known_benchmark_names = set(benchmark_names)
+
     try:
         overrides = _parse_overrides(args.result, "--result")
         baseline_overrides = _parse_overrides(args.baseline_result, "--baseline-result")
@@ -405,13 +421,26 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    unknown_result_overrides = sorted(set(overrides.keys()) - known_benchmark_names)
+    if unknown_result_overrides:
+        print(
+            f"WARN: --result overrides for unknown benchmarks: {unknown_result_overrides}",
+            file=sys.stderr,
+        )
+    unknown_baseline_overrides = sorted(set(baseline_overrides.keys()) - known_benchmark_names)
+    if unknown_baseline_overrides:
+        print(
+            f"WARN: --baseline-result overrides for unknown benchmarks: {unknown_baseline_overrides}",
+            file=sys.stderr,
+        )
+
     results_dir = Path(args.results_dir) if args.results_dir else None
     baseline_results_dir = Path(args.baseline_results_dir) if args.baseline_results_dir else results_dir
 
     any_fail = False
     summary: dict[str, Any] = {"benchmarks": []}
-    metrics_collection: list[dict[str, Any]] = []
-    baseline_metrics_collection: list[dict[str, Any]] = []
+    metrics_by_name: dict[str, dict[str, Any]] = {}
+    baseline_metrics_by_name: dict[str, dict[str, Any]] = {}
 
     for bench in benchmarks:
         name = bench.get("name") or "unnamed"
@@ -442,7 +471,7 @@ def main() -> int:
             else:
                 baseline_report = _load_json(baseline_resolved)
                 baseline_metrics = _collect_metrics(baseline_report)
-                baseline_metrics_collection.append(baseline_metrics)
+                baseline_metrics_by_name[name] = baseline_metrics
 
         ok, failures, warnings, metrics = _check_benchmark(
             name=name,
@@ -451,7 +480,7 @@ def main() -> int:
             strict=args.strict,
             baseline_metrics=baseline_metrics,
         )
-        metrics_collection.append(metrics)
+        metrics_by_name[name] = metrics
 
         status = "PASS" if ok else "FAIL"
         high_plus = metrics["severity_counts"]["high"] + metrics["severity_counts"]["critical"]
@@ -482,7 +511,8 @@ def main() -> int:
     global_regression_assertions = config.get("global_regression_assertions") or {}
 
     if global_assertions or global_regression_assertions:
-        global_metrics = _aggregate_metrics(metrics_collection)
+        ordered_current_names = sorted(metrics_by_name.keys())
+        global_metrics = _aggregate_metrics([metrics_by_name[n] for n in ordered_current_names])
         global_failures: list[str] = []
         global_warnings: list[str] = []
 
@@ -499,10 +529,23 @@ def main() -> int:
             _apply_assertions(global_assertions, global_metrics, g_fail, g_warn)
 
         if global_regression_assertions:
-            if len(baseline_metrics_collection) != len(metrics_collection):
-                g_warn("global_regression_assertions configured but full baseline metrics are unavailable")
+            current_names = set(metrics_by_name.keys())
+            baseline_names = set(baseline_metrics_by_name.keys())
+            missing_baselines = sorted(current_names - baseline_names)
+            extra_baselines = sorted(baseline_names - current_names)
+            if missing_baselines or extra_baselines:
+                issues = []
+                if missing_baselines:
+                    issues.append(f"missing baselines for: {missing_baselines}")
+                if extra_baselines:
+                    issues.append(f"unexpected baselines for: {extra_baselines}")
+                g_warn(
+                    "global_regression_assertions configured but baseline benchmark mapping is incomplete: "
+                    + "; ".join(issues)
+                )
             else:
-                global_baseline = _aggregate_metrics(baseline_metrics_collection)
+                ordered_names = sorted(current_names)
+                global_baseline = _aggregate_metrics([baseline_metrics_by_name[n] for n in ordered_names])
                 _apply_regression_assertions(
                     global_regression_assertions,
                     global_metrics,
