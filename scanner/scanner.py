@@ -8365,6 +8365,7 @@ async def build_report(target: str,
     # Calculate grade
     emit_progress("finalizing", 97, "grading report")
     grade_result = grade(report)
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # If required modules failed, mark grade as unreliable
     if not coverage["grade_reliable"]:
@@ -8389,6 +8390,7 @@ async def build_report(target: str,
             )
         except Exception as e:
             report["compliance"] = {"error": str(e)}
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add scan metadata (per SCANNER_REFERENCE.md spec)
     # Use the scan_session_id we created at the start for consistency
@@ -8523,6 +8525,7 @@ async def build_report(target: str,
         "coverage_status": coverage["status"],
         "reliability_notes": [],
     }
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add reliability notes
     if coverage["status"] != "complete":
@@ -8591,6 +8594,7 @@ async def build_report(target: str,
             "sample": _sample_findings(verification_skipped),
         },
     }
+    await asyncio.sleep(0)  # yield to heartbeat
 
     coverage_gaps: list[str] = []
     if coverage.get("issues"):
@@ -8631,6 +8635,7 @@ async def build_report(target: str,
                     finding.get("body"),
                     finding.get("content_type"),
                 )
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add smart coverage metrics without overwriting completeness coverage
     # report["coverage"] contains grade_reliable, issues, status from assess_scan_completeness
