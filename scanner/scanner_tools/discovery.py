@@ -23,7 +23,7 @@ try:
 except ImportError:
     HAS_YAML = False
 
-from .common import get_auth_curl_args, run, normalize_hash_route_url
+from .common import get_auth_curl_args, run, normalize_hash_route_url, detect_spa_catch_all
 from .http_scanner import HAS_PLAYWRIGHT, _pw
 
 
@@ -1199,6 +1199,15 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
     common_probe_limit = config.get("common_probe_limit", 0)
     api_root_resource_limit = config.get("api_root_resource_limit", 0)
 
+    # Detect SPA catch-all routing before fuzzing
+    spa_result = await detect_spa_catch_all(url, timeout=10)
+    spa_catch_all = spa_result.get("is_spa_catch_all", False)
+    if spa_catch_all:
+        print(f"[discovery] SPA catch-all detected (confidence={spa_result.get('confidence')}) — skipping ffuf and recursive fuzzing", file=sys.stderr)
+        ffuf_wordlist = None
+        do_recursive_fuzzing = False
+        api_probe_limit = 0
+
     print(f"[discovery] Starting {scan_type} discovery (depth={depth}, max_urls={max_urls}, js_parsing={do_js_parsing}, recursive={do_recursive_fuzzing})", file=sys.stderr)
 
     discovered_urls: list[str] = []
@@ -1420,6 +1429,7 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
             ffuf_out, _, ffuf_rc = await run([
                 ffuf_cmd, "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist_path,
                 "-mc", "200,201,204,301,302,307,401,403",
+                "-ac",  # Auto-calibrate to filter soft 404s
                 "-t", "20", "-timeout", "5", "-o", "/dev/stdout", "-of", "json",
                 "-s"  # Silent mode
             ], timeout=180)
@@ -1500,6 +1510,7 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
         "js_bundle_analysis": js_bundle_analysis,
         "scan_type": scan_type,
         "config": config,
+        "spa_catch_all": spa_catch_all,
     }
 
 
@@ -1823,6 +1834,7 @@ async def deep_discovery_scan(base_url: str) -> dict[str, Any]:
         "ffuf", "-u", f"{base_url}/FUZZ",
         "-w", wordlist,
         "-mc", "200,301,302,401,403",
+        "-ac",  # Auto-calibrate to filter soft 404s
         "-t", "10",
         "-timeout", "10",
         "-sf",  # Smart filter
@@ -2299,6 +2311,7 @@ async def _run_ffuf_on_path(
         "ffuf", "-u", fuzz_url,
         "-w", wordlist_path,
         "-mc", "200,201,204,301,302,307,401,403",
+        "-ac",  # Auto-calibrate to filter soft 404s
         "-t", "10",
         "-timeout", "8",
         "-sf",
@@ -3039,6 +3052,7 @@ async def smart_discovery(
     # Start with enhanced URL discovery
     print(f"[discovery] Phase 1: Enhanced URL discovery", file=sys.stderr)
     initial_discovery = await enhanced_url_discovery(url, scan_type=scan_type)
+    spa_catch_all = initial_discovery.get("spa_catch_all", False)
 
     # Get initial directories for recursive fuzzing
     all_urls = initial_discovery.get("all_urls", [])
@@ -3056,7 +3070,7 @@ async def smart_discovery(
                 api_bases.add(api_base)
 
     directories.extend(list(api_bases))
-    if not directories:
+    if not directories and not spa_catch_all:
         directories = [
             "/api/",
             "/api/v1/",
@@ -3089,7 +3103,7 @@ async def smart_discovery(
     config = initial_discovery.get("config", {})
     api_probe_limit = config.get("api_probe_limit", 600)
 
-    if api_bases:
+    if api_bases and not spa_catch_all:
         print(f"[discovery] Phase 2a: Probing {len(api_bases)} API bases for common resources", file=sys.stderr)
         per_base_limit = max(20, api_probe_limit // max(len(api_bases), 1))
         for api_base in list(api_bases)[:5]:  # Limit to 5 bases
@@ -3105,15 +3119,19 @@ async def smart_discovery(
             print(f"[discovery] Probed {len(probed_endpoints)} API resources from bases", file=sys.stderr)
 
     # Phase 2b: Recursive fuzzing with adaptive depth (P1-1 fix)
-    adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(signals, base_depth=3)
-    print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories, depth={adaptive_depth})", file=sys.stderr)
-    recursive_result = await recursive_directory_discovery(
-        url,
-        directories,
-        signals=signals,
-        max_depth=adaptive_depth,
-        max_paths_per_level=adaptive_paths_per_level
-    )
+    recursive_result: dict[str, Any] = {}
+    if not spa_catch_all:
+        adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(signals, base_depth=3)
+        print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories, depth={adaptive_depth})", file=sys.stderr)
+        recursive_result = await recursive_directory_discovery(
+            url,
+            directories,
+            signals=signals,
+            max_depth=adaptive_depth,
+            max_paths_per_level=adaptive_paths_per_level
+        )
+    else:
+        print(f"[discovery] Phase 2b: Skipped recursive fuzzing (SPA catch-all)", file=sys.stderr)
 
     # Merge results and apply URL cap from config
     config = initial_discovery.get("config", {})
@@ -3205,4 +3223,5 @@ async def smart_discovery(
         "js_bundle_analysis": initial_discovery.get("js_bundle_analysis"),
         "signals_used": signals,
         "tech_stack_guess": [],  # Populated by browser/httpx in main scanner
+        "spa_catch_all": spa_catch_all,
     }

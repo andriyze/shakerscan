@@ -3505,7 +3505,8 @@ async def build_report(target: str,
     nuclei_signals = extract_signals_from_nuclei(nuclei_results) if smart_mode else {}
 
     # Adaptive smart discovery refinement using nuclei signals (post-nuclei)
-    if smart_mode and smart_discovery_data and nuclei_signals:
+    # Skip when SPA catch-all detected — recursive fuzzing on SPA sites produces false paths
+    if smart_mode and smart_discovery_data and nuclei_signals and not smart_discovery_data.get("spa_catch_all"):
         try:
             signals_used = smart_discovery_data.get("signals_used")
             if not signals_used:
@@ -4362,6 +4363,13 @@ async def build_report(target: str,
         discovery_summary["warnings"].append(
             "No endpoints discovered. For API-only targets, use custom_endpoints option "
             "or ensure OpenAPI spec is available at standard paths."
+        )
+
+    if smart_discovery_data and smart_discovery_data.get("spa_catch_all"):
+        discovery_summary["spa_catch_all"] = True
+        discovery_summary["warnings"].append(
+            "SPA catch-all routing detected. Directory fuzzing and POST inference were skipped "
+            "to avoid false positives. Only real URLs from crawl/JS parsing are included."
         )
 
     discovery["summary"] = discovery_summary
@@ -6622,6 +6630,10 @@ async def build_report(target: str,
                 # Infer POST endpoints from discovered URLs (katana crawl results)
                 # This converts API paths like /api/auth/login, /workshop/api/shop/apply_coupon
                 # into POST endpoint candidates with inferred body parameters
+                # Skip when SPA catch-all detected — discovered URLs are phantom paths
+                _skip_post_inference = smart_discovery_data and smart_discovery_data.get("spa_catch_all")
+                if _skip_post_inference:
+                    print("[scanner] POST inference: skipped (SPA catch-all detected)", file=sys.stderr)
                 try:
                     # Patterns that suggest POST/mutation operations
                     POST_INDICATORS = [
@@ -6668,10 +6680,11 @@ async def build_report(target: str,
 
                     # Collect all discovered URLs from crawl
                     all_discovered_urls = []
-                    if crawl_urls:
-                        all_discovered_urls.extend(crawl_urls)
-                    if smart_discovery_data:
-                        all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
+                    if not _skip_post_inference:
+                        if crawl_urls:
+                            all_discovered_urls.extend(crawl_urls)
+                        if smart_discovery_data:
+                            all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
 
                     print(f"[scanner] POST inference: {len(all_discovered_urls)} URLs to analyze (crawl_urls={len(crawl_urls) if crawl_urls else 0})", file=sys.stderr)
 
