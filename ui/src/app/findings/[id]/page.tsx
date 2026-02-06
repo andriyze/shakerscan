@@ -1,12 +1,12 @@
 'use client'
 
-import { useEffect, useMemo, useState, Suspense } from 'react'
-import { Check, Copy } from 'lucide-react'
-import { useParams, useSearchParams } from 'next/navigation'
+import { useEffect, useMemo, useState, useCallback, Suspense } from 'react'
+import { Check, Copy, ExternalLink } from 'lucide-react'
+import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import FindingCard from '@/components/FindingCard'
-import { formatDate, getFinding, getSeverityBg, type Finding } from '@/lib/api'
-import { formatAnomaly, parseEvidence } from '@/lib/evidence-parser'
+import { formatDate, getFinding, updateFinding, deleteFinding, getSeverityBg, type Finding } from '@/lib/api'
+import { FINDING_STATUSES } from '@/lib/constants'
+import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 
 function StatusBadge({ status }: { status: Finding['status'] }) {
   const styles: Record<string, string> = {
@@ -69,13 +69,15 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
 function FindingDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
+  const router = useRouter()
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [statusUpdating, setStatusUpdating] = useState(false)
 
   // Build back URL with preserved filters
-  const buildBackUrl = () => {
+  const backUrl = useMemo(() => {
     const returnParams = new URLSearchParams()
     searchParams.forEach((value, key) => {
       if (key.startsWith('return_')) {
@@ -84,25 +86,47 @@ function FindingDetailContent() {
     })
     const queryString = returnParams.toString()
     return queryString ? `/findings?${queryString}` : '/findings'
-  }
+  }, [searchParams])
 
-  const backUrl = buildBackUrl()
+  const fetchFinding = useCallback(async () => {
+    try {
+      const data = await getFinding(findingId)
+      setFinding(data)
+      setError(null)
+    } catch {
+      setError('Failed to load finding details')
+    } finally {
+      setLoading(false)
+    }
+  }, [findingId])
 
   useEffect(() => {
-    async function fetchFinding() {
-      try {
-        const data = await getFinding(findingId)
-        setFinding(data)
-        setError(null)
-      } catch (err) {
-        setError('Failed to load finding details')
-      } finally {
-        setLoading(false)
-      }
-    }
-
     fetchFinding()
-  }, [findingId])
+  }, [fetchFinding])
+
+  async function handleStatusChange(newStatus: string) {
+    if (!finding || statusUpdating) return
+    try {
+      setStatusUpdating(true)
+      await updateFinding(finding.id, newStatus, undefined, finding.scan_id)
+      await fetchFinding()
+    } catch (err) {
+      console.error('Failed to update finding:', err)
+    } finally {
+      setStatusUpdating(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!finding) return
+    if (!confirm('Delete this finding permanently? This cannot be undone.')) return
+    try {
+      await deleteFinding(finding.id)
+      router.push(backUrl)
+    } catch (err) {
+      console.error('Failed to delete finding:', err)
+    }
+  }
 
   const evidence = useMemo(() => parseEvidence(finding?.evidence), [finding?.evidence])
   const primaryUrl = finding?.url || evidence.url || finding?.target_url || ''
@@ -136,13 +160,21 @@ function FindingDetailContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link href={backUrl} className="text-gray-400 hover:text-white">
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-        </Link>
-        <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Link href={backUrl} className="text-gray-400 hover:text-white">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </Link>
+          <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
+        </div>
+        <button
+          onClick={handleDelete}
+          className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
+        >
+          Delete
+        </button>
       </div>
 
       <SectionCard title="Overview">
@@ -182,6 +214,24 @@ function FindingDetailContent() {
                 )}
                 {finding.owasp && <span>{finding.owasp}</span>}
               </div>
+
+              {/* Status change controls */}
+              <div className="flex flex-wrap gap-2 mt-4">
+                {FINDING_STATUSES.map((status) => (
+                  <button
+                    key={status}
+                    onClick={() => handleStatusChange(status)}
+                    disabled={finding.status === status || statusUpdating}
+                    className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                      finding.status === status
+                        ? 'bg-blue-600 text-white cursor-default'
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-50'
+                    }`}
+                  >
+                    {status.replace('_', ' ')}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="space-y-2 text-xs text-gray-400">
@@ -192,8 +242,10 @@ function FindingDetailContent() {
               </div>
               {finding.scan_id && (
                 <div className="flex items-center gap-2">
-                  <span>Scan ID:</span>
-                  <code className="text-gray-300 break-all">{finding.scan_id}</code>
+                  <span>Scan:</span>
+                  <Link href={`/scans/${finding.scan_id}`} className="text-blue-400 hover:text-blue-300 break-all">
+                    {finding.scan_id}
+                  </Link>
                   <CopyButton text={finding.scan_id} label="Copy scan ID" />
                 </div>
               )}
@@ -204,11 +256,12 @@ function FindingDetailContent() {
                   <CopyButton text={finding.target_id} label="Copy target ID" />
                 </div>
               )}
-              {finding.fingerprint && (
+              {(finding.target_name || finding.target_url) && (
                 <div className="flex items-center gap-2">
-                  <span>Fingerprint:</span>
-                  <code className="text-gray-300 break-all">{finding.fingerprint}</code>
-                  <CopyButton text={finding.fingerprint} label="Copy fingerprint" />
+                  <span>Target:</span>
+                  <span className="text-gray-300">
+                    {finding.target_name || finding.target_url}
+                  </span>
                 </div>
               )}
             </div>
@@ -223,64 +276,18 @@ function FindingDetailContent() {
         </div>
       </SectionCard>
 
-      <FindingCard finding={finding} defaultExpanded />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <SectionCard title="Tracking">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <InfoItem label="Status">
-              <StatusBadge status={finding.status} />
-            </InfoItem>
-            <InfoItem label="First seen">{formatDate(finding.first_seen_at)}</InfoItem>
-            <InfoItem label="Last seen">{formatDate(finding.last_seen_at)}</InfoItem>
-            {finding.resolved_at && (
-              <InfoItem label="Resolved at">{formatDate(finding.resolved_at)}</InfoItem>
-            )}
-            {finding.resurfaced_count !== undefined && (
-              <InfoItem label="Resurfaced count">{finding.resurfaced_count}</InfoItem>
-            )}
-            {finding.created_at && <InfoItem label="Created">{formatDate(finding.created_at)}</InfoItem>}
-            {finding.updated_at && <InfoItem label="Updated">{formatDate(finding.updated_at)}</InfoItem>}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Target and Scan">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <InfoItem label="Target">
-              {finding.target_name ? (
-                <div className="space-y-1">
-                  <div className="text-white">{finding.target_name}</div>
-                  {finding.target_url && (
-                    <div className="text-xs text-gray-400 break-all">{finding.target_url}</div>
-                  )}
-                </div>
-              ) : (
-                <span className="text-gray-400 text-sm">{finding.target_url || 'Unknown target'}</span>
-              )}
-            </InfoItem>
-            <InfoItem label="Scan">
-              {finding.scan_id ? (
-                <div className="flex items-center gap-2">
-                  <a href={`/scans/${finding.scan_id}`} className="text-blue-400 hover:text-blue-300 break-all">
-                    {finding.scan_id}
-                  </a>
-                  <CopyButton text={finding.scan_id} label="Copy scan ID" />
-                </div>
-              ) : (
-                <span className="text-gray-400 text-sm">Not available</span>
-              )}
-            </InfoItem>
-            {finding.target_id && (
-              <InfoItem label="Target ID">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs break-all">{finding.target_id}</span>
-                  <CopyButton text={finding.target_id} label="Copy target ID" />
-                </div>
-              </InfoItem>
-            )}
-          </div>
-        </SectionCard>
-      </div>
+      <SectionCard title="Tracking">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+          <InfoItem label="First seen">{formatDate(finding.first_seen_at)}</InfoItem>
+          <InfoItem label="Last seen">{formatDate(finding.last_seen_at)}</InfoItem>
+          {finding.resolved_at && (
+            <InfoItem label="Resolved at">{formatDate(finding.resolved_at)}</InfoItem>
+          )}
+          {finding.resurfaced_count !== undefined && (
+            <InfoItem label="Resurfaced count">{finding.resurfaced_count}</InfoItem>
+          )}
+        </div>
+      </SectionCard>
 
       <SectionCard title="Evidence Summary">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -296,12 +303,6 @@ function FindingDetailContent() {
           </InfoItem>
           {evidence.duplicateCount > 0 && (
             <InfoItem label="Occurrences">{evidence.duplicateCount}</InfoItem>
-          )}
-          {evidence.allUrls.length > 0 && (
-            <InfoItem label="Affected URLs">{evidence.allUrls.length}</InfoItem>
-          )}
-          {evidence.allPayloads.length > 0 && (
-            <InfoItem label="Payloads">{evidence.allPayloads.length}</InfoItem>
           )}
           {evidence.parameter && (
             <InfoItem label="Parameter">
@@ -329,13 +330,72 @@ function FindingDetailContent() {
             </InfoItem>
           )}
         </div>
+
+        {/* Vulnerable URLs */}
+        {evidence.allUrls.length > 0 && (
+          <div className="mt-4">
+            <p className="text-xs text-gray-500 mb-2">Vulnerable URLs ({evidence.allUrls.length})</p>
+            <div className="space-y-2">
+              {evidence.allUrls.map((url, i) => (
+                <div key={i} className="bg-gray-800/60 rounded p-2 flex items-start justify-between gap-2">
+                  <code className="text-xs text-blue-300 break-all flex-1">{extractEndpoint(url)}</code>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <CopyButton text={url} label="Copy full URL" />
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-1 rounded hover:bg-gray-700 transition-colors"
+                      title="Open in new tab"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5 text-gray-400" />
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Working Payloads */}
+        {evidence.allPayloads.length > 0 && (
+          <div className="mt-4">
+            <p className="text-xs text-gray-500 mb-2">Working Payloads ({evidence.allPayloads.length})</p>
+            <div className="space-y-2">
+              {evidence.allPayloads.map((payload, i) => (
+                <div key={i} className="bg-gray-800/60 rounded p-2 flex items-start justify-between gap-2">
+                  <code className="text-xs text-yellow-300 break-all flex-1">{decodePayload(payload)}</code>
+                  <CopyButton text={decodePayload(payload)} label="Copy payload" />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Remediation Steps */}
+        {evidence.remediation.length > 0 && (
+          <div className="mt-4">
+            <p className="text-xs text-gray-500 mb-2">Remediation Steps</p>
+            <div className="space-y-2">
+              {evidence.remediation.map((step, i) => (
+                <div key={i} className="flex items-start gap-3 text-sm">
+                  <div className="w-5 h-5 rounded border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
+                    <span className="text-xs text-gray-500">{i + 1}</span>
+                  </div>
+                  <span className="text-gray-300">{step}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {evidence.evidenceDetails.length > 0 && (
           <div className="mt-4 space-y-2">
             <p className="text-xs text-gray-500">Evidence signals</p>
             <ul className="space-y-1 text-sm text-gray-300">
               {evidence.evidenceDetails.map((detail, idx) => (
                 <li key={idx} className="flex items-start gap-2">
-                  <span className="text-yellow-400 mt-0.5">•</span>
+                  <span className="text-yellow-400 mt-0.5">&#8226;</span>
                   <span className="break-words">{detail}</span>
                 </li>
               ))}
@@ -417,9 +477,12 @@ function FindingDetailContent() {
       )}
 
       {rawEvidence && (
-        <SectionCard title="Raw Evidence">
-          <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
-        </SectionCard>
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <details>
+            <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
+            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+          </details>
+        </div>
       )}
     </div>
   )

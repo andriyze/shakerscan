@@ -1384,6 +1384,7 @@ async def list_findings(
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     search: Optional[str] = None,
+    not_seen_since_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
     sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
     limit: int = Query(100, le=500),
@@ -1454,6 +1455,14 @@ async def list_findings(
             count_query += f" AND (f.title ILIKE ${count_param_idx} OR f.url ILIKE ${count_param_idx})"
             params.append(search_pattern)
             count_params.append(search_pattern)
+            param_idx += 1
+            count_param_idx += 1
+
+        if not_seen_since_days:
+            query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${param_idx}"
+            count_query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${count_param_idx}"
+            params.append(not_seen_since_days)
+            count_params.append(not_seen_since_days)
             param_idx += 1
             count_param_idx += 1
 
@@ -1628,6 +1637,105 @@ async def update_finding(
             raise HTTPException(status_code=404, detail="Finding not found")
 
     return {'id': str(updated_id), 'status': request.status}
+
+
+@app.delete("/findings/{finding_id:path}")
+async def delete_finding(finding_id: str):
+    """Delete a finding by ID or fingerprint."""
+    async with db_pool.acquire() as conn:
+        deleted_id = None
+
+        # Try UUID first
+        try:
+            finding_uuid = uuid.UUID(finding_id)
+            result = await conn.fetchrow(
+                "DELETE FROM findings WHERE id = $1 RETURNING id", finding_uuid
+            )
+            if result:
+                deleted_id = result['id']
+        except ValueError:
+            pass
+
+        # Try fingerprint
+        if not deleted_id:
+            result = await conn.fetchrow("""
+                DELETE FROM findings
+                WHERE id = (
+                    SELECT id FROM findings WHERE fingerprint = $1
+                    ORDER BY last_seen_at DESC LIMIT 1
+                )
+                RETURNING id
+            """, finding_id)
+            if result:
+                deleted_id = result['id']
+
+        # Backward compat: suffix-only
+        if not deleted_id and ':' in finding_id:
+            suffix = finding_id.split(':')[-1]
+            result = await conn.fetchrow("""
+                DELETE FROM findings
+                WHERE id = (
+                    SELECT id FROM findings WHERE fingerprint = $1
+                    ORDER BY last_seen_at DESC LIMIT 1
+                )
+                RETURNING id
+            """, suffix)
+            if result:
+                deleted_id = result['id']
+
+        if not deleted_id:
+            raise HTTPException(status_code=404, detail="Finding not found")
+
+    return {'id': str(deleted_id), 'status': 'deleted'}
+
+
+class FindingsCleanup(BaseModel):
+    older_than_days: int = Field(..., ge=1)
+    status: Optional[str] = None
+    root_domain: Optional[str] = None
+    dry_run: bool = True
+
+
+@app.post("/findings/cleanup")
+async def cleanup_findings(request: FindingsCleanup):
+    """Delete old findings by age, optionally filtered by status and domain."""
+    async with db_pool.acquire() as conn:
+        where = "f.last_seen_at < NOW() - INTERVAL '1 day' * $1"
+        params: list = [request.older_than_days]
+        idx = 2
+
+        if request.status:
+            where += f" AND f.status = ${idx}"
+            params.append(request.status)
+            idx += 1
+
+        if request.root_domain:
+            where += f" AND t.root_domain = ${idx}"
+            params.append(request.root_domain)
+            idx += 1
+
+        if request.dry_run:
+            count = await conn.fetchval(f"""
+                SELECT COUNT(*)
+                FROM findings f
+                LEFT JOIN targets t ON f.target_id = t.id
+                WHERE {where}
+            """, *params)
+            return {'would_delete': count, 'dry_run': True}
+        else:
+            # Use subquery to select IDs, then delete by ID
+            ids = await conn.fetch(f"""
+                SELECT f.id
+                FROM findings f
+                LEFT JOIN targets t ON f.target_id = t.id
+                WHERE {where}
+            """, *params)
+            if ids:
+                id_list = [r['id'] for r in ids]
+                await conn.execute(
+                    "DELETE FROM findings WHERE id = ANY($1)", id_list
+                )
+            return {'deleted': len(ids), 'dry_run': False}
 
 
 @app.post("/findings/bulk")

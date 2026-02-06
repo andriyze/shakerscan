@@ -240,6 +240,7 @@ export async function getFindings(params?: {
   scan_id?: string
   target_id?: string
   search?: string
+  not_seen_since_days?: number
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
 }): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
@@ -252,6 +253,7 @@ export async function getFindings(params?: {
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.search) searchParams.set('search', params.search)
+  if (params?.not_seen_since_days) searchParams.set('not_seen_since_days', params.not_seen_since_days.toString())
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
@@ -283,6 +285,29 @@ export async function updateFinding(id: string, status: string, notes?: string, 
     body: JSON.stringify({ status, notes })
   })
   if (!res.ok) throw new Error('Failed to update finding')
+  return res.json()
+}
+
+export async function deleteFinding(id: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/findings/${id}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok) throw new Error('Failed to delete finding')
+  return res.json()
+}
+
+export async function cleanupFindings(params: {
+  older_than_days: number
+  status?: string
+  root_domain?: string
+  dry_run: boolean
+}): Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
+  const res = await fetch(`${API_URL}/findings/cleanup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) throw new Error('Failed to cleanup findings')
   return res.json()
 }
 

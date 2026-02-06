@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
-import { getFindings, updateFinding, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
+import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
+import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, AGE_FILTER_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -17,6 +17,7 @@ interface FindingsFilters {
   scan_id?: string
   target_id?: string
   search?: string
+  age?: number
   sort_by?: string
   sort_order?: string
   page?: number
@@ -30,10 +31,15 @@ function FindingsContent() {
   const [findings, setFindings] = useState<Finding[]>([])
   const [loading, setLoading] = useState(true)
   const [domains, setDomains] = useState<string[]>([])
-  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null)
   const [total, setTotal] = useState(0)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const [showCleanup, setShowCleanup] = useState(false)
+  const [cleanupDays, setCleanupDays] = useState(90)
+  const [cleanupStatus, setCleanupStatus] = useState('')
+  const [cleanupDomain, setCleanupDomain] = useState('')
+  const [cleanupPreview, setCleanupPreview] = useState<number | null>(null)
+  const [cleanupLoading, setCleanupLoading] = useState(false)
 
   const severityFilter = filters.severity || ''
   const statusFilter = filters.status || ''
@@ -41,6 +47,7 @@ function FindingsContent() {
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
   const searchQuery = filters.search || ''
+  const ageFilter = filters.age ? Number(filters.age) : 0
   const sortBy = (filters.sort_by || 'severity') as SortOption
   const sortOrder = (filters.sort_order || 'desc') as SortOrder
   // Page is 1-based in URL (page=1 is first page)
@@ -74,7 +81,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, ageFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -86,6 +93,7 @@ function FindingsContent() {
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
         search: searchQuery || undefined,
+        not_seen_since_days: ageFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: PAGE_SIZE,
@@ -110,13 +118,41 @@ function FindingsContent() {
     }
   }
 
-  async function handleStatusChange(findingId: string, newStatus: string, scanId?: string) {
+  async function handleCleanupPreview() {
+    setCleanupLoading(true)
     try {
-      await updateFinding(findingId, newStatus, undefined, scanId)
-      await fetchFindings()
-      setSelectedFinding(null)
+      const result = await cleanupFindings({
+        older_than_days: cleanupDays,
+        status: cleanupStatus || undefined,
+        root_domain: cleanupDomain || undefined,
+        dry_run: true
+      })
+      setCleanupPreview(result.would_delete ?? 0)
     } catch (err) {
-      console.error('Failed to update finding:', err)
+      console.error('Cleanup preview failed:', err)
+    } finally {
+      setCleanupLoading(false)
+    }
+  }
+
+  async function handleCleanupDelete() {
+    if (cleanupPreview === null || cleanupPreview === 0) return
+    if (!confirm(`Delete ${cleanupPreview} finding${cleanupPreview !== 1 ? 's' : ''} permanently?`)) return
+    setCleanupLoading(true)
+    try {
+      await cleanupFindings({
+        older_than_days: cleanupDays,
+        status: cleanupStatus || undefined,
+        root_domain: cleanupDomain || undefined,
+        dry_run: false
+      })
+      setShowCleanup(false)
+      setCleanupPreview(null)
+      await fetchFindings()
+    } catch (err) {
+      console.error('Cleanup failed:', err)
+    } finally {
+      setCleanupLoading(false)
     }
   }
 
@@ -167,14 +203,96 @@ function FindingsContent() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Findings</h1>
-        <p className="text-gray-400 mt-1">
-          Vulnerability findings across all scans
-          {scanIdFilter && <span className="text-blue-400"> (filtered by scan)</span>}
-          {targetIdFilter && <span className="text-blue-400"> (filtered by target)</span>}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Findings</h1>
+          <p className="text-gray-400 mt-1">
+            Vulnerability findings across all scans
+            {scanIdFilter && <span className="text-blue-400"> (filtered by scan)</span>}
+            {targetIdFilter && <span className="text-blue-400"> (filtered by target)</span>}
+          </p>
+        </div>
+        <button
+          onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}
+          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 shrink-0"
+        >
+          Cleanup old findings
+        </button>
       </div>
+
+      {/* Cleanup Panel */}
+      {showCleanup && (
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 space-y-4">
+          <h3 className="text-sm font-medium text-white">Cleanup Old Findings</h3>
+          <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Not seen in</label>
+              <select
+                value={cleanupDays}
+                onChange={(e) => { setCleanupDays(Number(e.target.value)); setCleanupPreview(null) }}
+                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+              >
+                {AGE_FILTER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Status (optional)</label>
+              <select
+                value={cleanupStatus}
+                onChange={(e) => { setCleanupStatus(e.target.value); setCleanupPreview(null) }}
+                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+              >
+                <option value="">Any status</option>
+                {FINDING_STATUSES.map((s) => (
+                  <option key={s} value={s}>{s.replace('_', ' ')}</option>
+                ))}
+              </select>
+            </div>
+            {domains.length > 0 && (
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Domain (optional)</label>
+                <select
+                  value={cleanupDomain}
+                  onChange={(e) => { setCleanupDomain(e.target.value); setCleanupPreview(null) }}
+                  className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">All domains</option>
+                  {domains.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <button
+              onClick={handleCleanupPreview}
+              disabled={cleanupLoading}
+              className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            >
+              {cleanupLoading ? 'Checking...' : 'Preview'}
+            </button>
+            {cleanupPreview !== null && (
+              <>
+                <span className="text-sm text-gray-400">
+                  {cleanupPreview === 0
+                    ? 'No findings match'
+                    : `${cleanupPreview} finding${cleanupPreview !== 1 ? 's' : ''} will be deleted`}
+                </span>
+                {cleanupPreview > 0 && (
+                  <button
+                    onClick={handleCleanupDelete}
+                    disabled={cleanupLoading}
+                    className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 disabled:opacity-50"
+                  >
+                    Delete
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Filters Row */}
       <div className="flex flex-wrap items-center gap-4">
@@ -194,6 +312,21 @@ function FindingsContent() {
             </select>
           </div>
         )}
+
+        {/* Age Filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400">Age:</label>
+          <select
+            value={ageFilter || ''}
+            onChange={(e) => setFilter('age', e.target.value ? Number(e.target.value) : undefined)}
+            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">Any age</option>
+            {AGE_FILTER_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
 
         {/* Sort Options */}
         <div className="flex items-center gap-2">
@@ -314,10 +447,10 @@ function FindingsContent() {
         ) : (
           <div className="divide-y divide-gray-800">
             {findings.map((finding) => (
-              <div
+              <Link
                 key={finding.id}
-                className="p-4 hover:bg-gray-800/50 transition-colors cursor-pointer"
-                onClick={() => setSelectedFinding(finding)}
+                href={buildDetailUrl(finding.id)}
+                className="block p-4 hover:bg-gray-800/50 transition-colors"
               >
                 <div className="flex items-start gap-3">
                   <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSeverityBg(finding.severity)}`}>
@@ -340,7 +473,7 @@ function FindingsContent() {
                   </div>
                   <StatusBadge status={finding.status} />
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}
@@ -359,103 +492,6 @@ function FindingsContent() {
         </div>
       )}
 
-      {/* Finding Detail Modal */}
-      {selectedFinding && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-lg border border-gray-800 max-w-2xl w-full max-h-[80vh] overflow-auto">
-            <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="font-medium text-white">Finding Details</h2>
-              <div className="flex items-center gap-3">
-                <Link
-                  href={buildDetailUrl(selectedFinding.id)}
-                  className="text-xs text-blue-400 hover:text-blue-300"
-                >
-                  Open full view
-                </Link>
-                <button
-                  onClick={() => setSelectedFinding(null)}
-                  className="text-gray-400 hover:text-white"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div className="p-4 space-y-4">
-              <div className="flex items-center gap-2">
-                <span className={`px-2 py-0.5 text-xs font-medium rounded ${getSeverityBg(selectedFinding.severity)}`}>
-                  {selectedFinding.severity}
-                </span>
-                <StatusBadge status={selectedFinding.status} />
-              </div>
-              <h3 className="text-lg font-medium text-white">{selectedFinding.title}</h3>
-              {selectedFinding.description && (
-                <p className="text-sm text-gray-400">{selectedFinding.description}</p>
-              )}
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                {selectedFinding.tool && (
-                  <div>
-                    <span className="text-gray-500">Tool:</span>
-                    <span className="ml-2 text-white">{selectedFinding.tool}</span>
-                  </div>
-                )}
-                {selectedFinding.cwe && (
-                  <div>
-                    <span className="text-gray-500">CWE:</span>
-                    <span className="ml-2 text-white">{selectedFinding.cwe}</span>
-                  </div>
-                )}
-                {selectedFinding.owasp && (
-                  <div>
-                    <span className="text-gray-500">OWASP:</span>
-                    <span className="ml-2 text-white">{selectedFinding.owasp}</span>
-                  </div>
-                )}
-                {selectedFinding.cvss_score && (
-                  <div>
-                    <span className="text-gray-500">CVSS:</span>
-                    <span className="ml-2 text-white">{selectedFinding.cvss_score}</span>
-                  </div>
-                )}
-                <div>
-                  <span className="text-gray-500">First seen:</span>
-                  <span className="ml-2 text-white">{formatDate(selectedFinding.first_seen_at)}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Last seen:</span>
-                  <span className="ml-2 text-white">{formatDate(selectedFinding.last_seen_at)}</span>
-                </div>
-              </div>
-              {selectedFinding.url && (
-                <div>
-                  <span className="text-gray-500 text-sm">URL:</span>
-                  <p className="text-sm text-blue-400 break-all mt-1">{selectedFinding.url}</p>
-                </div>
-              )}
-              <div className="pt-4 border-t border-gray-800">
-                <span className="text-sm text-gray-500">Change Status:</span>
-                <div className="flex gap-2 mt-2">
-                  {FINDING_STATUSES.map((status) => (
-                    <button
-                      key={status}
-                      onClick={() => handleStatusChange(selectedFinding.id, status, selectedFinding.scan_id)}
-                      disabled={selectedFinding.status === status}
-                      className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                        selectedFinding.status === status
-                          ? 'bg-blue-600 text-white cursor-default'
-                          : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                      }`}
-                    >
-                      {status.replace('_', ' ')}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
