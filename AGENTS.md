@@ -25,13 +25,14 @@ The scanner runs as Docker containers:
 
 ## Current UI (Implemented)
 
-- **Dashboard (`/`)**: global metrics, queue stats, worker scaling, Gungnir start/stop
-- **Scans (`/scans`)**: filtering, pagination, cancel running scans, one-click re-scan
-- **Scan Detail (`/scans/{id}`)**: live logs while running, partial-results view for failed scans, full report when complete
-- **New Scan (`/scan/new`)**: scan type selection plus advanced option toggles
-- **Targets (`/targets`)**: grouped root/subdomains, add target, subdomain discovery, scan one/all, quick links to schedules
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
-- **Findings (`/findings`, `/findings/{id}`)**: triage/status updates, detailed evidence/AI analysis view
+- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
+- **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
+- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export and compliance section when complete. Preserves list filter context on back navigation.
+- **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning). Warning for active testing types.
+- **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
+- **Findings (`/findings`)**: filter by severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
 
 ## Your Role
 
@@ -97,14 +98,18 @@ curl -X POST http://localhost:8080/scans \
 # Get scan by ID
 curl http://localhost:8080/scans/{scan_id}
 
-# List recent scans
+# List recent scans (filter by status, domain)
 curl "http://localhost:8080/scans?limit=10"
+curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
 
-# Get recent scan logs (tail)
+# Get recent scan logs (default 200 lines, max 1000)
 curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+
+# Cancel a running or pending scan
+curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 ```
 
 ### Batch Scans
@@ -128,10 +133,34 @@ curl "http://localhost:8080/findings?status=active"
 curl "http://localhost:8080/findings?severity=critical"
 curl "http://localhost:8080/findings?severity=high"
 
-# Update finding status
+# Filter by recency (last 30 days)
+curl "http://localhost:8080/findings?seen_within_days=30"
+
+# Combined filters with sorting
+curl "http://localhost:8080/findings?severity=high&status=active&sort_by=cvss&sort_order=desc&limit=50"
+
+# Update finding status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
-  -d '{"status": "resolved"}'
+  -d '{"status": "resolved", "notes": "Fixed in v2.1 deploy"}'
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
+
+# Bulk cleanup (execute after reviewing dry-run count)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "status": "resolved", "root_domain": "example.com", "dry_run": false}'
+
+# Bulk update finding statuses
+curl -X POST http://localhost:8080/findings/bulk \
+  -H "Content-Type: application/json" \
+  -d '{"finding_ids": ["id1", "id2"], "status": "false_positive", "notes": "Verified non-issue"}'
 
 # Create manual finding (from manual testing)
 curl -X POST http://localhost:8080/findings/manual \
@@ -162,10 +191,87 @@ Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI security session)
 
+**Findings Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
+| `severity` | Filter by severity (critical, high, medium, low, info) |
+| `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
+| `root_domain` | Filter by root domain |
+| `target_id` | Filter by target ID |
+| `scan_id` | Filter by scan ID |
+| `search` | Search by title or URL |
+| `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
+| `sort_order` | asc or desc (default: desc) |
+| `limit` | Results per page (default: 100, max: 500) |
+| `offset` | Pagination offset |
+
+**Cleanup Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `older_than_days` | Required. Delete findings last seen more than N days ago |
+| `status` | Optional. Only delete findings with this status |
+| `root_domain` | Optional. Only delete findings for this domain |
+| `dry_run` | If true, returns count without deleting (default: true) |
+
+### Target Management
+
+```bash
+# List targets (flat)
+curl http://localhost:8080/targets
+
+# List targets grouped by root domain (hierarchical view)
+curl "http://localhost:8080/targets/grouped?sort_by=active_findings_count&sort_order=desc"
+
+# List root domains (for filter dropdowns)
+curl http://localhost:8080/domains
+
+# Add a target
+curl -X POST http://localhost:8080/targets \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "name": "Production"}'
+
+# Get target details with recent scans
+curl http://localhost:8080/targets/{target_id}
+
+# Update target
+curl -X PATCH http://localhost:8080/targets/{target_id} \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Staging", "scan_options": {"scan_type": "standard"}}'
+
+# Deactivate target (soft delete)
+curl -X DELETE http://localhost:8080/targets/{target_id}
+
+# Start scan for a specific target
+curl -X POST http://localhost:8080/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"scan_type": "quick"}}'
+```
+
+**Grouped Targets Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `search` | Search by URL or domain |
+| `discovery_source` | Filter: manual, subfinder, gungnir-monitor, import |
+| `grade` | Filter by grade: A, B, C, D, F |
+| `has_findings` | Filter: true (with findings) or false (no findings) |
+| `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
+| `sort_order` | asc or desc |
+
 ### Subdomain Discovery
 
 ```bash
+# Start subdomain discovery
 curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
+
+# List discovery runs
+curl http://localhost:8080/discovery
+
+# Get discovery run details
+curl http://localhost:8080/discovery/{discovery_id}
 ```
 
 ### Dashboard & Status
@@ -176,6 +282,9 @@ curl http://localhost:8080/dashboard
 
 # Queue status
 curl http://localhost:8080/queue/stats
+
+# Emergency clear all pending jobs
+curl -X DELETE http://localhost:8080/queue/clear
 ```
 
 ### Worker Management

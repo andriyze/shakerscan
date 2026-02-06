@@ -33,20 +33,32 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 |----------|--------|-------------|
 | `/scans` | POST | Submit a new scan |
 | `/scans/batch` | POST | Submit scans for multiple targets |
-| `/scans` | GET | List all scans |
-| `/scans/{id}` | GET | Get scan details |
+| `/scans` | GET | List all scans (filter by status, domain, search) |
+| `/scans/{id}` | GET | Get scan details with findings |
 | `/scans/{id}/result` | GET | Get full scan result JSON |
-| `/scans/{id}/logs` | GET | Get live scan logs tail |
-| `/scans/{id}/cancel` | POST | Cancel a running scan |
-| `/findings` | GET | List findings |
-| `/findings/{id}` | PATCH | Update finding status |
+| `/scans/{id}/logs` | GET | Get live scan logs tail (limit param, default 200, max 1000) |
+| `/scans/{id}/cancel` | POST | Cancel a running or pending scan |
+| `/findings` | GET | List findings (filter by severity, status, seen_within_days, domain, search) |
+| `/findings/{id}` | GET | Get finding details |
+| `/findings/{id}` | PATCH | Update finding status and notes |
+| `/findings/{id}` | DELETE | Delete a finding |
+| `/findings/cleanup` | POST | Bulk delete old findings (dry_run support) |
+| `/findings/bulk` | POST | Bulk update finding statuses |
 | `/findings/manual` | POST | Create manual finding |
-| `/targets` | GET/POST | Manage targets |
-| `/targets/grouped` | GET | Hierarchical targets view (root + subdomains) |
+| `/targets` | GET/POST | List/create targets |
+| `/targets/grouped` | GET | Hierarchical targets view (root + subdomains, with filtering/sorting) |
+| `/targets/{id}` | GET | Get target details with recent scans |
+| `/targets/{id}` | PATCH | Update target (name, is_active, scan_options) |
+| `/targets/{id}` | DELETE | Deactivate target (soft delete) |
+| `/targets/{id}/scan` | POST | Start a scan for a specific target |
+| `/domains` | GET | List unique root domains |
 | `/discovery` | POST | Start subdomain discovery |
+| `/discovery` | GET | List discovery runs |
+| `/discovery/{id}` | GET | Get discovery run details |
 | `/schedules` | GET/POST | Manage recurring scans |
+| `/schedules/{id}` | GET | Get schedule details |
 | `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
-| `/workers` | GET/POST | View/scale worker count |
+| `/workers` | GET/POST | View/scale worker count (1-20) |
 | `/gungnir/status` | GET | CT monitor status |
 | `/gungnir/start` | POST | Start CT monitor |
 | `/gungnir/stop` | POST | Stop CT monitor |
@@ -60,6 +72,7 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | `/sessions` | GET | List active sessions |
 | `/dashboard` | GET | Get dashboard metrics |
 | `/queue/stats` | GET | Get queue status |
+| `/queue/clear` | DELETE | Emergency clear all pending jobs |
 | `/health` | GET | Health check |
 
 ## Scan Types
@@ -91,8 +104,16 @@ curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
 
-# List findings
-curl "http://localhost:8080/findings?severity=critical&status=active"
+# List findings (with recency filter)
+curl "http://localhost:8080/findings?severity=critical&status=active&seen_within_days=30"
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{finding_id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
 
 # Subdomain discovery
 curl -X POST "http://localhost:8080/discovery?root_domain=example.com"

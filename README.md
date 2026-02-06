@@ -70,13 +70,14 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 ## Web UI Overview
 
-- **Dashboard (`/`)**: metrics, queue health, worker scaling, Gungnir controls
-- **Scans (`/scans`)**: filter/paginate scans, cancel running jobs, start new scans
-- **Scan Report (`/scans/{id}`)**: live logs for running scans, full rich report/partial report rendering
-- **Targets (`/targets`)**: grouped root/subdomains, discovery trigger, scan-one/scan-all actions
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
-- **Findings (`/findings`, `/findings/{id}`)**: triage workflow with status updates and detailed evidence view
-- **New Scan (`/scan/new`)**: scan type picker with advanced option toggles
+- **Dashboard (`/`)**: real-time metrics, queue health, worker scaling (1-20), Gungnir CT monitor toggle
+- **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan with any scan type
+- **Scan Report (`/scans/{id}`)**: live logs while running, progress bar, PDF export, compliance section, partial-results for failed scans
+- **Targets (`/targets`)**: hierarchical root/subdomains, filter by source/grade/findings, scan-one/scan-all, subdomain discovery
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans with target pre-population
+- **Findings (`/findings`)**: filter by severity/status/last-seen/domain, sort by CVSS/date, bulk cleanup with dry-run preview, delete individual findings
+- **Finding Detail (`/findings/{id}`)**: triage status buttons, delete, analyst notes, evidence with copy buttons, AI analysis, remediation steps, raw HTTP
+- **New Scan (`/scan/new`)**: scan type picker with advanced toggles (Active Testing, Nuclei, Discovery, DNS, JS Deps, JS Secrets)
 
 ## Claude Code Integration
 
@@ -473,32 +474,47 @@ GET /scans?status=completed&limit=50
 GET /scans/{scan_id}
 ```
 
-### List Findings
+### Findings
 
 ```bash
-GET /findings?severity=critical&status=active
-```
+# List with filters
+GET /findings?severity=critical&status=active&seen_within_days=30&sort_by=cvss
 
-### Update Finding Status
-
-```bash
+# Update status and notes
 PATCH /findings/{finding_id}
-{
-  "status": "resolved",
-  "notes": "Fixed in v2.0"
-}
+{"status": "resolved", "notes": "Fixed in v2.0"}
+
+# Delete a finding
+DELETE /findings/{finding_id}
+
+# Bulk cleanup old findings (dry-run first, then execute)
+POST /findings/cleanup
+{"older_than_days": 90, "status": "resolved", "dry_run": true}
+
+# Bulk update statuses
+POST /findings/bulk
+{"finding_ids": ["id1", "id2"], "status": "false_positive"}
 ```
 
-### Dashboard Metrics
+### Targets
+
+```bash
+GET /targets
+GET /targets/grouped          # Hierarchical view with filtering/sorting
+GET /targets/{target_id}
+POST /targets                 # {"url": "https://example.com", "name": "Prod"}
+PATCH /targets/{target_id}    # Update name, scan_options, is_active
+DELETE /targets/{target_id}   # Soft delete
+POST /targets/{target_id}/scan  # Start scan for target
+GET /domains                  # List root domains
+```
+
+### Dashboard & Queue
 
 ```bash
 GET /dashboard
-```
-
-### Queue Status
-
-```bash
 GET /queue/stats
+DELETE /queue/clear            # Emergency clear pending jobs
 ```
 
 ### Batch Scans
@@ -511,10 +527,11 @@ POST /scans/batch
 }
 ```
 
-### Scan Logs
+### Scan Logs & Control
 
 ```bash
-GET /scans/{scan_id}/logs?limit=200
+GET /scans/{scan_id}/logs?limit=200    # Default 200, max 1000
+POST /scans/{scan_id}/cancel           # Cancel running/pending scan
 ```
 
 ### Schedules

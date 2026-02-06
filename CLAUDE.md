@@ -87,11 +87,18 @@ curl -X POST http://localhost:8080/scans \
 # Get scan by ID
 curl http://localhost:8080/scans/{scan_id}
 
-# List recent scans
+# List recent scans (filter by status, domain)
 curl "http://localhost:8080/scans?limit=10"
+curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
+
+# Get recent scan logs (default 200 lines, max 1000)
+curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+
+# Cancel a running or pending scan
+curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 ```
 
 ### Findings
@@ -104,10 +111,34 @@ curl "http://localhost:8080/findings?status=active"
 curl "http://localhost:8080/findings?severity=critical"
 curl "http://localhost:8080/findings?severity=high"
 
-# Update finding status
+# Filter by recency (last 30 days)
+curl "http://localhost:8080/findings?seen_within_days=30"
+
+# Combined filters with sorting
+curl "http://localhost:8080/findings?severity=high&status=active&sort_by=cvss&sort_order=desc&limit=50"
+
+# Update finding status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
-  -d '{"status": "resolved"}'
+  -d '{"status": "resolved", "notes": "Fixed in v2.1 deploy"}'
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
+
+# Bulk cleanup (execute after reviewing dry-run count)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "status": "resolved", "root_domain": "example.com", "dry_run": false}'
+
+# Bulk update finding statuses
+curl -X POST http://localhost:8080/findings/bulk \
+  -H "Content-Type: application/json" \
+  -d '{"finding_ids": ["id1", "id2"], "status": "false_positive", "notes": "Verified non-issue"}'
 
 # Create manual finding (from manual testing)
 curl -X POST http://localhost:8080/findings/manual \
@@ -138,10 +169,67 @@ Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI security session)
 
+**Findings Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
+| `severity` | Filter by severity (critical, high, medium, low, info) |
+| `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
+| `root_domain` | Filter by root domain |
+| `target_id` | Filter by target ID |
+| `scan_id` | Filter by scan ID |
+| `search` | Search by title or URL |
+| `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
+| `sort_order` | asc or desc (default: desc) |
+| `limit` | Results per page (default: 100, max: 500) |
+| `offset` | Pagination offset |
+
+### Target Management
+
+```bash
+# List targets (flat)
+curl http://localhost:8080/targets
+
+# List targets grouped by root domain (hierarchical view)
+curl "http://localhost:8080/targets/grouped?sort_by=active_findings_count&sort_order=desc"
+
+# List root domains (for filter dropdowns)
+curl http://localhost:8080/domains
+
+# Add a target
+curl -X POST http://localhost:8080/targets \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "name": "Production"}'
+
+# Get target details with recent scans
+curl http://localhost:8080/targets/{target_id}
+
+# Update target
+curl -X PATCH http://localhost:8080/targets/{target_id} \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Staging", "scan_options": {"scan_type": "standard"}}'
+
+# Deactivate target (soft delete)
+curl -X DELETE http://localhost:8080/targets/{target_id}
+
+# Start scan for a specific target
+curl -X POST http://localhost:8080/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"scan_type": "quick"}}'
+```
+
 ### Subdomain Discovery
 
 ```bash
+# Start subdomain discovery
 curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
+
+# List discovery runs
+curl http://localhost:8080/discovery
+
+# Get discovery run details
+curl http://localhost:8080/discovery/{discovery_id}
 ```
 
 ### Dashboard & Status
@@ -152,6 +240,9 @@ curl http://localhost:8080/dashboard
 
 # Queue status
 curl http://localhost:8080/queue/stats
+
+# Emergency clear all pending jobs
+curl -X DELETE http://localhost:8080/queue/clear
 ```
 
 ### Worker Management
@@ -174,6 +265,44 @@ curl -X POST http://localhost:8080/workers \
 ```
 
 Worker limits: 1-20 workers. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
+
+### Schedules (Recurring Scans)
+
+```bash
+# List schedules
+curl http://localhost:8080/schedules
+
+# Create daily schedule
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "frequency": "daily",
+    "time_of_day": "02:00",
+    "scan_type": "standard"
+  }'
+
+# Create weekly schedule
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "frequency": "weekly",
+    "day_of_week": 1,
+    "time_of_day": "03:00",
+    "scan_type": "deep"
+  }'
+
+# Update/toggle schedule
+curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+
+# Delete schedule
+curl -X DELETE http://localhost:8080/schedules/{schedule_id}
+```
+
+Schedule fields: `target_id` (required), `frequency` (daily/weekly), `time_of_day` (HH:MM UTC), `day_of_week` (0-6, for weekly), `scan_type`, `name` (optional), `scan_options` (optional JSONB).
 
 ### Certificate Transparency Monitoring (Gungnir)
 

@@ -36,8 +36,61 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 - **DBMS fingerprinting**: Detects SQLite, MySQL, PostgreSQL, MSSQL, Oracle
 - **DBMS-specific SQLi payloads**: Uses targeted payloads based on detected database
 - **Context-aware XSS**: Detects reflection context (in_script, in_attribute, etc.) and uses appropriate payloads
+- **DOM XSS analysis**: Static source-to-sink flow detection in JavaScript bundles
+- **POST body injection**: Tests JSON/form POST parameters for SQLi (not just GET query params)
 - **Recursive discovery**: Adapts depth based on findings
 - **Adaptive rate limiting**: Backs off on 429/503, speeds up on success
+- **Attack chain analysis**: Correlates findings into exploitable attack paths (XSS->ATO, SQLi->data exfil, etc.)
+- **Coverage tracking**: Monitors endpoint/parameter/template coverage metrics
+- **Authenticated Playwright crawl**: Multi-page headless crawl with API capture
+- **JS bundle analysis**: Discovers hidden endpoints from JavaScript bundles
+
+### Smart Scan Tuning
+
+```bash
+# Thorough mode: no early stop + more params
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {
+    "scan_type": "smart",
+    "no_early_stop": true,
+    "thorough_params": true
+  }}'
+
+# Custom endpoints with params
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://api.example.com", "options": {
+    "scan_type": "smart",
+    "custom_endpoints": [
+      "GET /api/v1/users?id=1&name=test",
+      "POST /api/v1/login json:{\"username\":\"test\",\"password\":\"test\"}",
+      "POST /api/v1/search form:query=test&limit=10"
+    ]
+  }}'
+```
+
+**Advanced Options:**
+
+| Option | Description |
+|--------|-------------|
+| `no_early_stop` | Disable early stopping (continue scanning even after finding many vulns) |
+| `thorough_params` | Test 100 endpoints x 10 params per method instead of default 50x5 |
+| `custom_endpoints` | Array of endpoints with params to test (format: `[METHOD] /path [params]`) |
+| `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
+| `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
+| `grpc_discovery` | Use gRPC reflection to discover services |
+| `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
+| `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
+
+**Performance/Safety Limits:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 80 |
+| `dom_xss_max_files` | Max JS files for DOM XSS analysis | 20 |
+| `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
+| `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
 ## API Reference
 
@@ -126,24 +179,63 @@ curl -X POST http://localhost:8080/scans \
 ```bash
 curl http://localhost:8080/scans/{scan_id}
 curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 ```
 
-### List Findings
+### Findings
 
 ```bash
+# List with filters
 curl "http://localhost:8080/findings?status=active"
-curl "http://localhost:8080/findings?severity=critical"
-```
+curl "http://localhost:8080/findings?severity=critical&seen_within_days=30&sort_by=cvss&sort_order=desc"
 
-### Update Finding Status
-
-```bash
+# Update status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
   -d '{"status": "resolved", "notes": "Fixed in v2.0"}'
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
+
+# Bulk cleanup (execute)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "status": "resolved", "dry_run": false}'
+
+# Bulk update statuses
+curl -X POST http://localhost:8080/findings/bulk \
+  -H "Content-Type: application/json" \
+  -d '{"finding_ids": ["id1", "id2"], "status": "false_positive"}'
 ```
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
+
+**Query Parameters:** `status`, `severity`, `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
+
+### Target Management
+
+```bash
+# List targets grouped by root domain
+curl "http://localhost:8080/targets/grouped"
+
+# List root domains
+curl http://localhost:8080/domains
+
+# Add a target
+curl -X POST http://localhost:8080/targets \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "name": "Production"}'
+
+# Scan a specific target
+curl -X POST http://localhost:8080/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"scan_type": "quick"}}'
+```
 
 ### Subdomain Discovery
 
@@ -157,6 +249,7 @@ curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
 curl http://localhost:8080/dashboard
 curl http://localhost:8080/queue/stats
 curl http://localhost:8080/health
+curl -X DELETE http://localhost:8080/queue/clear  # emergency clear
 ```
 
 ### Additional Operational Endpoints
@@ -167,7 +260,7 @@ POST /scans/batch
 
 # Workers
 GET /workers
-POST /workers
+POST /workers  # {"count": 5}
 
 # Schedules
 GET /schedules
@@ -180,11 +273,18 @@ GET /gungnir/status
 POST /gungnir/start
 POST /gungnir/stop
 
+# Target CRUD
+GET /targets/{target_id}
+PATCH /targets/{target_id}
+DELETE /targets/{target_id}
+
 # Interactive sessions
 POST /session/start
 GET /session/{session_id}
 POST /session/{session_id}/action
 POST /session/{session_id}/test-endpoint
+POST /session/{session_id}/screenshot
+GET /session/{session_id}/screenshot.png
 POST /session/{session_id}/findings
 GET /sessions
 DELETE /session/{session_id}
@@ -216,10 +316,26 @@ The `/scans/{id}` endpoint returns detailed data in the `result` object:
 
 ### Other Discovery (`result.discovery`)
 - `browser_api_endpoints` - discovered API endpoints
+- `browser_crawl` - headless crawl stats + sampled page URLs
 - `waf_detection` - WAF product detection
 - `cors` - CORS misconfiguration
 - `nuclei` - Nuclei vulnerability findings
-- `attack_chains` - attack chain analysis (complete + optional partial chains)
+
+### Attack Chains (`result.attack_chains`)
+- `chains` - complete attack chains (always included)
+- `partial_chains` - incomplete chains (in JSON; in human report only with `include_partial_attack_chains`)
+- `summary` - total/critical/high chain counts
+
+Chain types: `xss_to_account_takeover`, `sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`, `idor_to_data_breach`, `lfi_to_credential_theft`, `auth_bypass_to_admin_access`, `cors_to_data_theft`, `weak_jwt_to_impersonation`, `open_redirect_to_phishing`, `info_disclosure_to_exploitation`
+
+### Smart Coverage (`result.smart_coverage`)
+- `endpoints` - discovered/tested counts, coverage ratio, by_method breakdown
+- `parameters` - by location (query, body, path) with discovered/tested counts
+- `nuclei_templates` - templates run vs matched, hit_rate
+- `discovery_sources` - array of methods used (har_network_capture, url_crawl, js_bundle_analysis)
+- `auth_states_tested` - array of auth states tested (anonymous, user1, user2)
+
+Coverage interpretation: `< 0.5` possible rate limiting, `0.5-0.8` normal, `> 0.8` excellent
 
 ## Example Report Format
 
