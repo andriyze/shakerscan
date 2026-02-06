@@ -33,6 +33,7 @@ export interface Scan {
   grade?: string
   findings_count: number
   created_at: string
+  started_at?: string | null
   completed_at?: string
   duration_seconds?: number
   error_message?: string

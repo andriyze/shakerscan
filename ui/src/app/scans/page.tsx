@@ -8,6 +8,7 @@ import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
+const LIVE_DURATION_REFRESH_MS = 5000
 
 interface ScansFilters {
   [key: string]: string | number | undefined
@@ -29,6 +30,7 @@ function ScansContent() {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
   const [total, setTotal] = useState(0)
   const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
+  const [durationTickMs, setDurationTickMs] = useState<number>(Date.now())
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
   const scanMenuRef = useRef<HTMLDivElement>(null)
 
@@ -112,6 +114,24 @@ function ScansContent() {
     const interval = setInterval(() => fetchScans(true), 5000)
     return () => clearInterval(interval)
   }, [fetchScans])
+
+  // Keep running scan elapsed durations fresh without per-second churn.
+  useEffect(() => {
+    const interval = setInterval(() => setDurationTickMs(Date.now()), LIVE_DURATION_REFRESH_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  const getDurationLabel = useCallback((scan: Scan): string => {
+    if (scan.status === 'running') {
+      const startedAt = scan.started_at || scan.created_at
+      const startedAtMs = Date.parse(startedAt)
+      if (!Number.isNaN(startedAtMs)) {
+        const elapsedSeconds = Math.max(0, Math.floor((durationTickMs - startedAtMs) / 1000))
+        return formatDuration(elapsedSeconds)
+      }
+    }
+    return scan.duration_seconds ? formatDuration(scan.duration_seconds) : '-'
+  }, [durationTickMs])
 
   async function handleCancel(scanId: string) {
     setCancelling(prev => new Set(prev).add(scanId))
@@ -320,7 +340,7 @@ function ScansContent() {
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm text-gray-400">
-                      {scan.duration_seconds ? formatDuration(scan.duration_seconds) : '-'}
+                      {getDurationLabel(scan)}
                     </span>
                   </td>
                   <td className="px-4 py-3">
