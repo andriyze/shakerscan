@@ -23,6 +23,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+try:
+    from constants import SMART_SCAN_BUDGETS
+except ImportError:
+    from scanner.constants import SMART_SCAN_BUDGETS
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -563,10 +568,22 @@ class ScanOptions(BaseModel):
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
 
     # Safety/performance limits
-    smart_bola_max_endpoints: Optional[int] = None # Max endpoints for BOLA testing (default: 80)
-    dom_xss_max_files: Optional[int] = None        # Max JS files for DOM XSS (default: 20)
-    sqli_extract_max: Optional[int] = None         # Max SQLi findings for extraction (default: 3)
-    oob_max_findings: Optional[int] = None         # Max findings for OOB SQLi test (default: 3)
+    smart_bola_max_endpoints: Optional[int] = Field(
+        default=None,
+        description=f"Max endpoints for BOLA testing (default: {SMART_SCAN_BUDGETS.smart_bola_max_endpoints})",
+    )
+    dom_xss_max_files: Optional[int] = Field(
+        default=None,
+        description=f"Max JS files for DOM XSS analysis (default: {SMART_SCAN_BUDGETS.dom_xss_max_files})",
+    )
+    sqli_extract_max: Optional[int] = Field(
+        default=None,
+        description=f"Max SQLi findings for extraction (default: {SMART_SCAN_BUDGETS.sqli_extract_max})",
+    )
+    oob_max_findings: Optional[int] = Field(
+        default=None,
+        description=f"Max findings for OOB SQLi testing (default: {SMART_SCAN_BUDGETS.oob_max_findings})",
+    )
     oob_max_payloads: Optional[int] = None         # Deprecated alias for oob_max_findings
     target_scheme_inferred: Optional[bool] = None  # Output-only: set by API when scheme was auto-inferred (do not use as input)
 

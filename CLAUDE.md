@@ -396,6 +396,8 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
+Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS`.
+
 ### Smart Scan Tuning
 
 For thorough penetration testing, you can disable early stopping and increase parameter coverage:

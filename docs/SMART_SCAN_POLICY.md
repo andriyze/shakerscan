@@ -77,6 +77,21 @@ A release is blocked if any of these fail:
 - Precision or confidence SLO regressions exceed tolerance.
 - New smart-scan features ship without at least one deterministic test.
 
+CI gate command examples:
+```bash
+# Absolute SLO gates
+python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmarks.json
+
+# Absolute + regression gates against baseline artifacts
+python3 tests/benchmark/run_benchmarks.py \
+  --benchmarks tests/benchmark/benchmarks.json \
+  --results-dir /tmp/current-results \
+  --baseline-results-dir /tmp/baseline-results \
+  --baseline-result juice-shop=host.docker.internal/latest.json \
+  --baseline-result crapi=cr.shakerscan.com/latest.json \
+  --strict
+```
+
 ## Upgrade Policy
 - In-place upgrades are the default production assumption.
 - DB schema changes must ship with executable migration steps.
@@ -91,6 +106,7 @@ How to answer common buyer questions:
 
 ## Implementation Notes
 Recent policy-aligned hardening:
+- Smart budget defaults are centralized in `scanner/constants.py` as `SMART_SCAN_BUDGETS` and consumed by scanner CLI/API.
 - Session startup cleanup avoids lock re-entry deadlock.
 - Synthetic BOLA generation excludes auth/session-style paths.
 - Synthetic query URLs preserve valid URL encoding.

@@ -149,7 +149,7 @@ def _merge_port_scan_results(primary: dict[str, Any] | None, secondary: dict[str
 # These modules extract common functionality for better maintainability
 # Support both package import (from scanner.scanner) and script import (python3 scanner.py)
 try:
-    from .constants import NUCLEI_PROMOTE_TEMPLATES
+    from .constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
     from .grading import grade
     from .findings import (
         normalize_finding,
@@ -177,7 +177,7 @@ try:
     )
 except ImportError:
     try:
-        from scanner.constants import NUCLEI_PROMOTE_TEMPLATES
+        from scanner.constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
         from scanner.grading import grade
         from scanner.findings import (
             normalize_finding,
@@ -204,7 +204,7 @@ except ImportError:
             HONEYPOT_TEST_DOMAINS,
         )
     except ImportError:
-        from constants import NUCLEI_PROMOTE_TEMPLATES
+        from constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
         from grading import grade
         from findings import (
             normalize_finding,
@@ -1952,10 +1952,10 @@ async def build_report(target: str,
                        thorough_params: bool=False,
                        oob_callback_url: str | None=None,
                        # Safety/performance limits
-                       smart_bola_max_endpoints: int=80,
-                       dom_xss_max_files: int=20,
-                       sqli_extract_max: int=3,
-                       oob_max_findings: int=3,
+                       smart_bola_max_endpoints: int=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+                       dom_xss_max_files: int=SMART_SCAN_BUDGETS.dom_xss_max_files,
+                       sqli_extract_max: int=SMART_SCAN_BUDGETS.sqli_extract_max,
+                       oob_max_findings: int=SMART_SCAN_BUDGETS.oob_max_findings,
                        # Active enforcement metadata
                        active_enforced: bool=False) -> dict[str, Any]:
 
@@ -9086,10 +9086,34 @@ async def cli_main():
     ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
     ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
     # Safety/performance limits
-    ap.add_argument("--smart-bola-max-endpoints", type=int, default=80, dest="smart_bola_max_endpoints", help="Max endpoints for smart BOLA testing (default: 80)")
-    ap.add_argument("--dom-xss-max-files", type=int, default=20, dest="dom_xss_max_files", help="Max JS files for DOM XSS analysis (default: 20)")
-    ap.add_argument("--sqli-extract-max", type=int, default=3, dest="sqli_extract_max", help="Max SQLi findings to attempt data extraction (default: 3)")
-    ap.add_argument("--oob-max-findings", type=int, default=None, dest="oob_max_findings", help="Max SQLi findings to test with OOB payloads (default: 3)")
+    ap.add_argument(
+        "--smart-bola-max-endpoints",
+        type=int,
+        default=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+        dest="smart_bola_max_endpoints",
+        help=f"Max endpoints for smart BOLA testing (default: {SMART_SCAN_BUDGETS.smart_bola_max_endpoints})",
+    )
+    ap.add_argument(
+        "--dom-xss-max-files",
+        type=int,
+        default=SMART_SCAN_BUDGETS.dom_xss_max_files,
+        dest="dom_xss_max_files",
+        help=f"Max JS files for DOM XSS analysis (default: {SMART_SCAN_BUDGETS.dom_xss_max_files})",
+    )
+    ap.add_argument(
+        "--sqli-extract-max",
+        type=int,
+        default=SMART_SCAN_BUDGETS.sqli_extract_max,
+        dest="sqli_extract_max",
+        help=f"Max SQLi findings to attempt data extraction (default: {SMART_SCAN_BUDGETS.sqli_extract_max})",
+    )
+    ap.add_argument(
+        "--oob-max-findings",
+        type=int,
+        default=None,
+        dest="oob_max_findings",
+        help=f"Max SQLi findings to test with OOB payloads (default: {SMART_SCAN_BUDGETS.oob_max_findings})",
+    )
     # Deprecated alias for backward compatibility (hidden from help)
     ap.add_argument("--oob-max-payloads", type=int, default=None, dest="oob_max_payloads_deprecated", help=argparse.SUPPRESS)
 
@@ -9102,7 +9126,7 @@ async def cli_main():
 
     # Apply default if neither was set
     if args.oob_max_findings is None:
-        args.oob_max_findings = 3
+        args.oob_max_findings = SMART_SCAN_BUDGETS.oob_max_findings
 
     # Auto-enable AI when environment variables are set
     if not args.ai_url:
@@ -10016,10 +10040,10 @@ async def cli_main():
         thorough_params=getattr(args, 'thorough_params', False),
         oob_callback_url=getattr(args, 'oob_callback_url', None),
         # Safety/performance limits
-        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', 80),
-        dom_xss_max_files=getattr(args, 'dom_xss_max_files', 20),
-        sqli_extract_max=getattr(args, 'sqli_extract_max', 3),
-        oob_max_findings=getattr(args, 'oob_max_findings', 3),
+        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', SMART_SCAN_BUDGETS.smart_bola_max_endpoints),
+        dom_xss_max_files=getattr(args, 'dom_xss_max_files', SMART_SCAN_BUDGETS.dom_xss_max_files),
+        sqli_extract_max=getattr(args, 'sqli_extract_max', SMART_SCAN_BUDGETS.sqli_extract_max),
+        oob_max_findings=getattr(args, 'oob_max_findings', SMART_SCAN_BUDGETS.oob_max_findings),
         # Active enforcement metadata
         active_enforced=getattr(args, 'active_enforced', False),
     )
