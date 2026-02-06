@@ -180,6 +180,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set(['critical', 'high', 'medium', 'low', 'info']))
   const [minChainConfidence, setMinChainConfidence] = useState<number>(0.5)
   const [showPartialChains, setShowPartialChains] = useState<boolean>(false)
+  const [fbShowAllFindings, setFbShowAllFindings] = useState<boolean>(false)
+  const [fbExpandedCategories, setFbExpandedCategories] = useState<Set<string>>(new Set())
 
   const toggleAIDetails = (id: string) => {
     setExpandedAI(prev => {
@@ -1094,36 +1096,182 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Access Control Testing */}
-      {(access_control.forced_browsing || access_control.mass_assignment || access_control.bola_idor) && (
+      {(access_control.forced_browsing || access_control.mass_assignment || access_control.bola_idor || access_control.bola) && (() => {
+        const fb = access_control.forced_browsing
+        const bola = access_control.bola_idor || access_control.bola
+        const fbFindings = fb?.findings || []
+        const fbSummary = fb?.summary || {}
+        const accessibleFindings = fbFindings.filter((f: any) => f.accessible && !f.false_positive_detected)
+        const protectedFindings = fbFindings.filter((f: any) => f.protected)
+        const fpFindings = fbFindings.filter((f: any) => f.false_positive_detected)
+        const otherFindings = fbFindings.filter((f: any) => !f.accessible && !f.protected && !f.false_positive_detected)
+
+        // Group non-accessible findings by category
+        const fpByCategory: Record<string, any[]> = {}
+        for (const f of [...fpFindings, ...otherFindings]) {
+          const cat = f.category || 'other'
+          if (!fpByCategory[cat]) fpByCategory[cat] = []
+          fpByCategory[cat].push(f)
+        }
+        const categoryLabels: Record<string, string> = {
+          admin_panels: 'Admin Panels',
+          debug_dev: 'Debug / Dev Tools',
+          sensitive_files: 'Sensitive Files',
+          backup_files: 'Backup Files',
+          management_consoles: 'Management Consoles',
+          logs_monitoring: 'Logs & Monitoring',
+          user_management: 'User Management',
+          api_endpoints: 'API Endpoints',
+          cloud_metadata: 'Cloud Metadata',
+        }
+        const sevColors: Record<string, string> = {
+          critical: 'bg-red-500/20 text-red-400 border-red-500/40',
+          high: 'bg-orange-500/20 text-orange-400 border-orange-500/40',
+          medium: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40',
+          low: 'bg-blue-500/20 text-blue-400 border-blue-500/40',
+          info: 'bg-gray-500/20 text-gray-400 border-gray-500/40',
+        }
+
+        return (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Access Control Testing</h2>
           <div className="space-y-4">
-            {access_control.forced_browsing && (
+            {fb && (
               <div className="bg-gray-900 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-gray-400 mb-2">Forced Browsing</h3>
-                {access_control.forced_browsing.paths_tested !== undefined && (
-                  <p className="text-sm text-gray-400">Paths tested: <span className="text-white">{access_control.forced_browsing.paths_tested}</span></p>
+                <h3 className="text-sm font-semibold text-gray-400 mb-3">Forced Browsing</h3>
+
+                {/* Summary bar */}
+                <div className="flex items-center gap-4 mb-3 flex-wrap">
+                  {fb.paths_tested !== undefined && (
+                    <span className="text-sm text-gray-400">Paths tested: <span className="text-white font-medium">{fb.paths_tested}</span></span>
+                  )}
+                  {Object.entries(fbSummary).filter(([, v]) => (v as number) > 0).map(([sev, count]) => (
+                    <span key={sev} className={`text-xs px-2 py-0.5 rounded-full border ${sevColors[sev] || sevColors.info}`}>
+                      {String(count)} {sev}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Accessible paths - the real findings, always visible */}
+                {accessibleFindings.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-2">Accessible (Confirmed)</p>
+                    <div className="space-y-2">
+                      {accessibleFindings.map((f: any, i: number) => (
+                        <div key={i} className="bg-red-900/20 border border-red-500/30 rounded-lg p-3">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-xs px-2 py-0.5 rounded-full border ${sevColors[f.severity] || sevColors.info}`}>{f.severity}</span>
+                            <span className="text-sm font-mono text-red-300">{f.path}</span>
+                            <span className="text-xs text-gray-500">HTTP {f.status_code}</span>
+                            {f.content_type && <span className="text-xs text-gray-500">{f.content_type.split(';')[0]}</span>}
+                            {f.content_length && <span className="text-xs text-gray-500">{(f.content_length / 1024).toFixed(1)}KB</span>}
+                          </div>
+                          <p className="text-xs text-gray-400 mt-1">Category: {categoryLabels[f.category] || f.category}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
-                {access_control.forced_browsing.findings?.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {access_control.forced_browsing.findings.map((f: any, i: number) => (
-                      <div key={i} className="text-sm text-yellow-400">{f.path || f.url || f}</div>
-                    ))}
+                {accessibleFindings.length === 0 && fb.paths_tested > 0 && (
+                  <div className="mb-3 bg-green-900/20 border border-green-500/30 rounded-lg p-3">
+                    <p className="text-sm text-green-400">No accessible sensitive paths found</p>
+                  </div>
+                )}
+
+                {/* Protected endpoints (401/403) */}
+                {protectedFindings.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-2">Protected (Auth Required) - {protectedFindings.length}</p>
+                    <div className="space-y-1">
+                      {protectedFindings.map((f: any, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-sm">
+                          <span className="text-blue-400 font-mono">{f.path}</span>
+                          <span className="text-xs text-gray-500">HTTP {f.status_code}</span>
+                          <span className="text-xs text-gray-600">{categoryLabels[f.category] || f.category}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Collapsed: all tested paths grouped by category */}
+                {(fpFindings.length > 0 || otherFindings.length > 0) && (
+                  <div className="mt-3 border-t border-gray-700/50 pt-3">
+                    <button
+                      onClick={() => setFbShowAllFindings(!fbShowAllFindings)}
+                      className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      <svg className={`w-3 h-3 transition-transform ${fbShowAllFindings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                      {fbShowAllFindings ? 'Hide' : 'Show'} all tested paths ({fpFindings.length + otherFindings.length} not accessible)
+                    </button>
+                    {fbShowAllFindings && (
+                      <div className="mt-3 space-y-2">
+                        {Object.entries(fpByCategory).sort(([,a], [,b]) => b.length - a.length).map(([cat, items]) => (
+                          <div key={cat} className="bg-gray-800/50 rounded-lg overflow-hidden">
+                            <button
+                              onClick={() => {
+                                setFbExpandedCategories(prev => {
+                                  const next = new Set(prev)
+                                  next.has(cat) ? next.delete(cat) : next.add(cat)
+                                  return next
+                                })
+                              }}
+                              className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-gray-700/30 transition-colors"
+                            >
+                              <span className="text-gray-400 font-medium">{categoryLabels[cat] || cat}</span>
+                              <span className="flex items-center gap-2">
+                                <span className="text-gray-500">{items.length} paths</span>
+                                <svg className={`w-3 h-3 text-gray-500 transition-transform ${fbExpandedCategories.has(cat) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              </span>
+                            </button>
+                            {fbExpandedCategories.has(cat) && (
+                              <div className="px-3 pb-2 space-y-1">
+                                {items.map((f: any, i: number) => (
+                                  <div key={i} className="flex items-center gap-2 text-xs">
+                                    <span className="font-mono text-gray-500">{f.path}</span>
+                                    <span className="text-gray-600">HTTP {f.status_code}</span>
+                                    {f.false_positive_detected && <span className="text-gray-600 italic">FP filtered</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
-            {access_control.bola_idor && (
+
+            {/* BOLA/IDOR Testing */}
+            {bola && (
               <div className="bg-gray-900 rounded-lg p-4">
                 <h3 className="text-sm font-semibold text-gray-400 mb-2">BOLA/IDOR Testing</h3>
-                {access_control.bola_idor.endpoints_tested !== undefined && (
-                  <p className="text-sm text-gray-400">Endpoints tested: <span className="text-white">{access_control.bola_idor.endpoints_tested}</span></p>
+                {bola.endpoints_tested !== undefined && (
+                  <div className="flex items-center gap-4 mb-2">
+                    <span className="text-sm text-gray-400">Endpoints tested: <span className="text-white font-medium">{bola.endpoints_tested}</span></span>
+                    {bola.access_violations > 0 && (
+                      <span className="text-xs px-2 py-0.5 rounded-full border bg-red-500/20 text-red-400 border-red-500/40">{bola.access_violations} violations</span>
+                    )}
+                  </div>
                 )}
-                {access_control.bola_idor.vulnerable_endpoints?.length > 0 && (
+                {bola.vulnerable === false && bola.endpoints_tested > 0 && (
+                  <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-3">
+                    <p className="text-sm text-green-400">No BOLA/IDOR vulnerabilities detected</p>
+                  </div>
+                )}
+                {(bola.vulnerable_endpoints?.length > 0 || bola.findings?.length > 0) && (
                   <div className="mt-2">
-                    <p className="text-sm text-red-400">Vulnerable endpoints found:</p>
-                    {access_control.bola_idor.vulnerable_endpoints.map((ep: any, i: number) => (
-                      <div key={i} className="text-sm text-red-300 font-mono mt-1">{ep.path || ep.url || ep}</div>
+                    <p className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-2">Vulnerable Endpoints</p>
+                    {(bola.vulnerable_endpoints || bola.findings || []).map((ep: any, i: number) => (
+                      <div key={i} className="bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-2">
+                        <span className="text-sm text-red-300 font-mono">{ep.path || ep.url || ep}</span>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -1131,7 +1279,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             )}
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* Cloud & Infrastructure Exposure */}
       {(cloud_buckets.findings?.length > 0 || cloud_ssrf.vulnerable || kubernetes_exposure.findings?.length > 0 || container_registry.exposed || cicd_exposure.findings?.length > 0) && (
