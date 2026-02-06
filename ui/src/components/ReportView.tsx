@@ -1101,10 +1101,30 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         const bola = access_control.bola_idor || access_control.bola
         const fbFindings = fb?.findings || []
         const fbSummary = fb?.summary || {}
+        const bolaRawFindings = bola?.vulnerable_endpoints || bola?.findings || []
         const accessibleFindings = fbFindings.filter((f: any) => f.accessible && !f.false_positive_detected)
         const protectedFindings = fbFindings.filter((f: any) => f.protected)
         const fpFindings = fbFindings.filter((f: any) => f.false_positive_detected)
         const otherFindings = fbFindings.filter((f: any) => !f.accessible && !f.protected && !f.false_positive_detected)
+        const bolaFindings = bolaRawFindings.map((f: any, i: number) => {
+          if (typeof f === 'string') {
+            return {
+              key: `bola-finding-${i}`,
+              endpoint: f,
+              title: null,
+              severity: null,
+            }
+          }
+          const evidence = f?.evidence || {}
+          return {
+            key: f?.id || `bola-finding-${i}`,
+            endpoint: f?.path || f?.url || evidence?.url || evidence?.path || evidence?.endpoint || null,
+            title: f?.title || f?.type || null,
+            severity: f?.severity || null,
+          }
+        }).filter((f: any) => f.endpoint || f.title)
+        const bolaHasFindings = bolaFindings.length > 0
+        const bolaClean = bola?.endpoints_tested > 0 && !bolaHasFindings && (bola?.access_violations ?? 0) === 0
 
         // Group non-accessible findings by category
         const fpByCategory: Record<string, any[]> = {}
@@ -1260,17 +1280,26 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     )}
                   </div>
                 )}
-                {bola.vulnerable === false && bola.endpoints_tested > 0 && (
+                {bolaClean && (
                   <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-3">
                     <p className="text-sm text-green-400">No BOLA/IDOR vulnerabilities detected</p>
                   </div>
                 )}
-                {(bola.vulnerable_endpoints?.length > 0 || bola.findings?.length > 0) && (
+                {bolaHasFindings && (
                   <div className="mt-2">
-                    <p className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-2">Vulnerable Endpoints</p>
-                    {(bola.vulnerable_endpoints || bola.findings || []).map((ep: any, i: number) => (
-                      <div key={i} className="bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-2">
-                        <span className="text-sm text-red-300 font-mono">{ep.path || ep.url || ep}</span>
+                    <p className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-2">Findings</p>
+                    {bolaFindings.map((f: any) => (
+                      <div key={f.key} className="bg-red-900/20 border border-red-500/30 rounded-lg p-3 mb-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {f.severity && (
+                            <span className={`text-xs px-2 py-0.5 rounded-full border ${sevColors[f.severity] || sevColors.info}`}>{f.severity}</span>
+                          )}
+                          {f.endpoint && <span className="text-sm text-red-300 font-mono">{f.endpoint}</span>}
+                          {!f.endpoint && f.title && <span className="text-sm text-red-300">{f.title}</span>}
+                        </div>
+                        {f.endpoint && f.title && (
+                          <p className="text-xs text-gray-400 mt-1">{f.title}</p>
+                        )}
                       </div>
                     ))}
                   </div>
