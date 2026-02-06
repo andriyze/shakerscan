@@ -20,7 +20,7 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 **[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
 
-**[Interactive Sessions Guide](INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
+**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
 
 **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs for next-gen smart scanning.
 
@@ -67,6 +67,16 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
   - Visual screenshots for context
   - Finding persistence to database
   - Collaborative human-AI security testing
+
+## Web UI Overview
+
+- **Dashboard (`/`)**: metrics, queue health, worker scaling, Gungnir controls
+- **Scans (`/scans`)**: filter/paginate scans, cancel running jobs, start new scans
+- **Scan Report (`/scans/{id}`)**: live logs for running scans, full rich report/partial report rendering
+- **Targets (`/targets`)**: grouped root/subdomains, discovery trigger, scan-one/scan-all actions
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
+- **Findings (`/findings`, `/findings/{id}`)**: triage workflow with status updates and detailed evidence view
+- **New Scan (`/scan/new`)**: scan type picker with advanced option toggles
 
 ## Claude Code Integration
 
@@ -174,31 +184,32 @@ Commands:
   stop               Stop all services
   restart            Restart all services
   status             Show service status and queue metrics
+  scale <N>          Scale to N workers (1-20)
   logs [service]     View logs (api, worker, ui, postgres, redis)
-  scan <target>           Quick scan a target
-  scan-standard <target>  Standard scan (5-10 min)
-  scan-deep <target>      Deep scan with full Nuclei (30-60 min)
-  scan-full <target>      Full assessment with active XSS/SQLi (1-2 hrs)
-  scan-aggressive <target> Maximum coverage scan (2-5 hrs)
-  scan-smart <target>     Adaptive intelligent scan (variable)
+  scan <target>      Quick scan a target
+  scan-full <target> Full assessment scan
+  scan-smart <target> Smart adaptive scan
+  gungnir <cmd>      CT monitor: start, stop, status, logs
   build              Build Docker images
-  rebuild            Force rebuild (no cache)
+  rebuild [opts]     Rebuild images (cached by default, supports --no-cache, scanner, ui)
   reset              Reset database (WARNING: deletes all data)
   shell              Open shell in scanner container
 
 Options:
-  -w, --workers N    Number of workers (default: 3)
+  -w, --workers N    Number of workers (default: 5)
   -f, --follow       Follow logs in real-time
 
 Examples:
-  ./scanner.sh start                           # Start with 3 workers
+  ./scanner.sh start                           # Start with 5 workers
   ./scanner.sh start -w 10                     # Start with 10 workers
-  ./scanner.sh scan https://example.com        # Quick scan (1-2 min)
-  ./scanner.sh scan-deep https://example.com   # Deep scan (30-60 min)
-  ./scanner.sh scan-full https://example.com   # Full assessment (1-2 hrs)
-  ./scanner.sh scan-smart https://example.com  # Smart adaptive scan
+  ./scanner.sh scan https://example.com        # Quick scan
+  ./scanner.sh scan-full https://example.com   # Full assessment (active)
+  ./scanner.sh scan-smart https://example.com  # Smart adaptive scan (active)
+  ./scanner.sh gungnir status                  # Check CT monitor status
   ./scanner.sh logs worker -f                  # Follow worker logs
 ```
+
+Note: the CLI currently wraps `quick`, `full`, and `smart` scans. Use the API or UI for `standard`, `deep`, `aggressive`, and advanced auth/tuning options.
 
 ## Scan Types
 
@@ -242,7 +253,7 @@ The `smart` scan type uses adaptive techniques for more efficient and accurate t
 
 > **Note**: `full`, `aggressive`, and `smart` scans include active testing (XSS/SQLi probes). Only run these against targets you have permission to test.
 
-Tip: Use `--xss` or `--sqli` to run only those active checks (CLI) or set `xss`/`sqli` in API options.
+Tip: use `xss` or `sqli` in API scan options for focused active checks.
 
 ## Interactive Security Sessions
 
@@ -422,12 +433,21 @@ Auth is propagated to discovery (Playwright crawl, JSON link following), Nuclei,
 Provide endpoints directly when no HTML/OpenAPI is available:
 
 ```bash
-# CLI examples
-./scanner.sh scan-smart https://api.example.com \
-  --endpoints "POST /api/login json:{\"email\":\"user@test.com\",\"password\":\"pass\"}" \
-  --endpoints "GET /api/products id=1"
+# API example
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://api.example.com",
+    "options": {
+      "scan_type": "smart",
+      "custom_endpoints": [
+        "POST /api/login json:{\"email\":\"user@test.com\",\"password\":\"pass\"}",
+        "GET /api/products id=1"
+      ]
+    }
+  }'
 
-# File format (one per line)
+# Supported endpoint formats
 GET /api/search query:q=test
 POST /api/login json:{"email":"user@test.com","password":"pass"}
 POST /api/coupon/validate form:coupon_code=TEST
@@ -479,6 +499,63 @@ GET /dashboard
 
 ```bash
 GET /queue/stats
+```
+
+### Batch Scans
+
+```bash
+POST /scans/batch
+{
+  "targets": ["https://a.example.com", "https://b.example.com"],
+  "options": {"scan_type": "quick"}
+}
+```
+
+### Scan Logs
+
+```bash
+GET /scans/{scan_id}/logs?limit=200
+```
+
+### Schedules
+
+```bash
+GET /schedules
+POST /schedules
+PATCH /schedules/{schedule_id}
+DELETE /schedules/{schedule_id}
+```
+
+### Worker Management
+
+```bash
+GET /workers
+POST /workers
+{
+  "count": 8
+}
+```
+
+### Gungnir CT Monitor
+
+```bash
+GET /gungnir/status
+POST /gungnir/start
+POST /gungnir/stop
+```
+
+### Interactive Sessions
+
+```bash
+POST /session/start
+GET /session/{session_id}
+POST /session/{session_id}/action
+POST /session/{session_id}/test-endpoint
+POST /session/{session_id}/screenshot
+GET /session/{session_id}/screenshot.png
+GET /sessions
+DELETE /session/{session_id}
+POST /session/{session_id}/findings
 ```
 
 ## Configuration

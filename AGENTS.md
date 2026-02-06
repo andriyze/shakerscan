@@ -23,6 +23,16 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
+## Current UI (Implemented)
+
+- **Dashboard (`/`)**: global metrics, queue stats, worker scaling, Gungnir start/stop
+- **Scans (`/scans`)**: filtering, pagination, cancel running scans, one-click re-scan
+- **Scan Detail (`/scans/{id}`)**: live logs while running, partial-results view for failed scans, full report when complete
+- **New Scan (`/scan/new`)**: scan type selection plus advanced option toggles
+- **Targets (`/targets`)**: grouped root/subdomains, add target, subdomain discovery, scan one/all, quick links to schedules
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
+- **Findings (`/findings`, `/findings/{id}`)**: triage/status updates, detailed evidence/AI analysis view
+
 ## Your Role
 
 When users ask about security scanning, you should:
@@ -92,6 +102,20 @@ curl "http://localhost:8080/scans?limit=10"
 
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
+
+# Get recent scan logs (tail)
+curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+```
+
+### Batch Scans
+
+```bash
+curl -X POST http://localhost:8080/scans/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targets": ["https://a.example.com", "https://b.example.com"],
+    "options": {"scan_type": "quick"}
+  }'
 ```
 
 ### Findings
@@ -175,6 +199,31 @@ curl -X POST http://localhost:8080/workers \
 
 Worker limits: 1-20 workers. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
 
+### Schedules (Recurring Scans)
+
+```bash
+# List schedules
+curl http://localhost:8080/schedules
+
+# Create daily schedule
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "frequency": "daily",
+    "time_of_day": "02:00",
+    "scan_type": "standard"
+  }'
+
+# Update/toggle schedule
+curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+
+# Delete schedule
+curl -X DELETE http://localhost:8080/schedules/{schedule_id}
+```
+
 ### Certificate Transparency Monitoring (Gungnir)
 
 Monitor CT logs in real-time to discover new certificates issued for your domains:
@@ -186,8 +235,9 @@ Monitor CT logs in real-time to discover new certificates issued for your domain
 # Check Gungnir status
 curl http://localhost:8080/gungnir/status
 
-# View discovered subdomains for a domain
-curl "http://localhost:8080/gungnir/discoveries?domain=example.com"
+# Start/stop via API (alternative to CLI)
+curl -X POST http://localhost:8080/gungnir/start
+curl -X POST http://localhost:8080/gungnir/stop
 ```
 
 Gungnir watches Certificate Transparency logs and automatically discovers new subdomains when certificates are issued. Useful for:
@@ -692,7 +742,7 @@ curl -s "http://localhost:8080/scans/{scan_id}/result" | jq '{
 }'
 
 # Get existing findings to validate
-curl -s "http://localhost:8080/findings?target_url=https://example.com&status=active"
+curl -s "http://localhost:8080/findings?root_domain=example.com&status=active"
 ```
 
 ### Session API
@@ -708,6 +758,9 @@ curl http://localhost:8080/session/{session_id}
 
 # Take a screenshot
 curl -X POST "http://localhost:8080/session/{session_id}/screenshot"
+
+# Get raw screenshot PNG
+curl -s "http://localhost:8080/session/{session_id}/screenshot.png" -o screenshot.png
 
 # Execute browser action
 curl -X POST "http://localhost:8080/session/{session_id}/action" \
@@ -746,13 +799,16 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 # End session
 curl -X DELETE "http://localhost:8080/session/{session_id}"
+
+# List active sessions
+curl http://localhost:8080/sessions
 ```
 
 ### Session Actions
 
 | Action | Description | Data Fields |
 |--------|-------------|-------------|
-| `navigate` | Go to URL | `url` |
+| `navigate` | Go to URL | `url`, `allow_out_of_scope` (optional) |
 | `click` | Click element | `selector` |
 | `fill` | Fill input field | `selector`, `value` |
 | `register` | Register new account | `email`, `password` |
@@ -760,6 +816,8 @@ curl -X DELETE "http://localhost:8080/session/{session_id}"
 | `submit` | Submit form | `selector` (optional) |
 | `wait` | Wait for element/time | `selector`, `timeout` |
 | `extract` | Extract data from page | `selector`, `attribute` |
+
+Same-origin is enforced by default for navigation and endpoint tests (SSRF protection). Only use `allow_out_of_scope: true` when user explicitly requests cross-origin testing.
 
 ### BOLA Testing Workflow
 
@@ -799,27 +857,16 @@ Users can also use the CLI directly:
 ./scanner.sh scan-full https://example.com  # Full assessment
 ./scanner.sh scan-smart https://example.com # Smart adaptive scan
 
-# Authenticated scans
-./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
-
-# Focused active checks
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"   # SQLi-only
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123" # XSS-only
-
-# Dual-auth BOLA testing
-./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1_token" --user2-header "Bearer user2_token"
-
-# Thorough mode (no early stop, more params)
-./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
-
 # Management
 ./scanner.sh status                          # Check status
 ./scanner.sh scale 5                         # Scale to 5 workers
 ./scanner.sh logs -f                         # Follow logs
 ./scanner.sh rebuild                         # Full rebuild (code changes)
 ./scanner.sh restart                         # Restart services
+./scanner.sh gungnir status                  # CT monitor status
 ```
+
+For authenticated scans, focused XSS/SQLi-only checks, and advanced smart tuning (`no_early_stop`, `thorough_params`, `custom_endpoints`, etc.), use the REST API `POST /scans` options.
 
 ## Files Structure
 

@@ -13,6 +13,10 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 - **Subdomain Discovery**: Enumerate subdomains using CT logs and passive sources
 - **Finding Management**: Track, triage, and manage security findings
 - **Target Management**: Maintain a list of assets to scan
+- **Recurring Schedules**: Automate daily/weekly scans per target
+- **Worker Control**: Scale worker pool based on queue pressure
+- **CT Monitoring**: Start/stop Gungnir certificate transparency monitoring
+- **Interactive Testing**: Use `/session` APIs for manual browser-driven security validation
 
 ## Scan Types
 
@@ -121,6 +125,7 @@ curl -X POST http://localhost:8080/scans \
 
 ```bash
 curl http://localhost:8080/scans/{scan_id}
+curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
 ```
 
 ### List Findings
@@ -152,6 +157,37 @@ curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
 curl http://localhost:8080/dashboard
 curl http://localhost:8080/queue/stats
 curl http://localhost:8080/health
+```
+
+### Additional Operational Endpoints
+
+```bash
+# Batch scans
+POST /scans/batch
+
+# Workers
+GET /workers
+POST /workers
+
+# Schedules
+GET /schedules
+POST /schedules
+PATCH /schedules/{schedule_id}
+DELETE /schedules/{schedule_id}
+
+# Gungnir CT monitor
+GET /gungnir/status
+POST /gungnir/start
+POST /gungnir/stop
+
+# Interactive sessions
+POST /session/start
+GET /session/{session_id}
+POST /session/{session_id}/action
+POST /session/{session_id}/test-endpoint
+POST /session/{session_id}/findings
+GET /sessions
+DELETE /session/{session_id}
 ```
 
 ## Rich Scan Response Data
@@ -216,3 +252,4 @@ The `/scans/{id}` endpoint returns detailed data in the `result` object:
 3. **Use smart** for sophisticated targets - it adapts based on what it finds
 4. **Report rich data** - include CSP grade, TLS info, tech stack
 5. **Link to UI** - always include the report URL
+6. **CLI scope** - `scanner.sh` wraps `scan`, `scan-full`, `scan-smart`; use API for advanced options

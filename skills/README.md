@@ -21,6 +21,10 @@ This directory contains skills files for integrating Shaker Scan with Claude Cod
    - "List all critical findings"
    - "Run a full security assessment on my-app.com"
 
+Available skills in this folder:
+- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules)
+- `ai-security-session/` - interactive `/session` Playwright workflows (BOLA/IDOR/manual testing)
+
 ## API Endpoints
 
 The scanner exposes these endpoints at `http://localhost:8080`:
@@ -28,14 +32,32 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/scans` | POST | Submit a new scan |
+| `/scans/batch` | POST | Submit scans for multiple targets |
 | `/scans` | GET | List all scans |
 | `/scans/{id}` | GET | Get scan details |
 | `/scans/{id}/result` | GET | Get full scan result JSON |
+| `/scans/{id}/logs` | GET | Get live scan logs tail |
 | `/scans/{id}/cancel` | POST | Cancel a running scan |
 | `/findings` | GET | List findings |
 | `/findings/{id}` | PATCH | Update finding status |
+| `/findings/manual` | POST | Create manual finding |
 | `/targets` | GET/POST | Manage targets |
+| `/targets/grouped` | GET | Hierarchical targets view (root + subdomains) |
 | `/discovery` | POST | Start subdomain discovery |
+| `/schedules` | GET/POST | Manage recurring scans |
+| `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
+| `/workers` | GET/POST | View/scale worker count |
+| `/gungnir/status` | GET | CT monitor status |
+| `/gungnir/start` | POST | Start CT monitor |
+| `/gungnir/stop` | POST | Stop CT monitor |
+| `/session/start` | POST | Start interactive browser session |
+| `/session/{id}` | GET/DELETE | Read/end interactive session |
+| `/session/{id}/action` | POST | Execute browser action |
+| `/session/{id}/test-endpoint` | POST | Run BOLA/IDOR endpoint test |
+| `/session/{id}/screenshot` | POST | Capture screenshot (base64 JSON) |
+| `/session/{id}/screenshot.png` | GET | Capture screenshot (PNG bytes) |
+| `/session/{id}/findings` | POST | Save finding from session |
+| `/sessions` | GET | List active sessions |
 | `/dashboard` | GET | Get dashboard metrics |
 | `/queue/stats` | GET | Get queue status |
 | `/health` | GET | Health check |
@@ -141,11 +163,25 @@ curl -X POST http://localhost:8080/scans \
 |--------|-------------|
 | `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains always appear in `result.attack_chains.chains`. |
 
-## Focused Active Checks (CLI)
+## Focused Active Checks (API)
 
-Use `--sqli` or `--xss` to run only those active checks (implies `--active`):
+Use `xss` or `sqli` in scan options:
 
 ```bash
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123"
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://api.example.com","options":{"scan_type":"smart","sqli":true}}'
+
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://example.com","options":{"scan_type":"smart","xss":true}}'
 ```
+
+## CLI Notes
+
+Current `scanner.sh` scan wrappers are:
+- `scan` (quick)
+- `scan-full`
+- `scan-smart`
+
+For `standard`/`deep`/`aggressive` and advanced auth/tuning options, use the API or web UI.
