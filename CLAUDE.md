@@ -391,7 +391,7 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 **Performance/Safety Limits:**
 | Option | Description | Default |
 |--------|-------------|---------|
-| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 30 |
+| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 80 |
 | `dom_xss_max_files` | Max JS files for DOM XSS analysis | 20 |
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |

@@ -139,6 +139,7 @@ class InteractiveSession:
                 "error": "Playwright not available. Install with: pip install playwright && playwright install chromium"
             }
 
+        start_error: str | None = None
         async with self._lock:
             try:
                 # Create screenshots directory
@@ -175,11 +176,14 @@ class InteractiveSession:
                 }
 
             except Exception as e:
-                await self.close()
-                return {
-                    "success": False,
-                    "error": f"Failed to start session: {str(e)}"
-                }
+                start_error = str(e)
+
+        # Cleanup outside lock to avoid re-entrant deadlock on self.close().
+        await self.close()
+        return {
+            "success": False,
+            "error": f"Failed to start session: {start_error or 'unknown error'}"
+        }
 
     async def _create_user_context(self, user_name: str) -> BrowserContext:
         """Create a new browser context for a user."""

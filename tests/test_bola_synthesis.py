@@ -24,6 +24,16 @@ def test_skip_excluded_paths():
     assert len(result) == 0
 
 
+def test_skip_auth_like_collection_paths():
+    urls = [
+        'http://localhost:3000/api/login',
+        'http://localhost:3000/api/auth',
+        'http://localhost:3000/api/session',
+    ]
+    result = synthesize_resource_urls_from_collections(urls)
+    assert result == []
+
+
 def test_synthesize_query_from_params():
     param_endpoints = [{
         "url": "http://localhost:3000/api/v3/mechanic/mechanic_report",
@@ -48,3 +58,16 @@ def test_skip_non_id_params():
         max_endpoints=1,
     )
     assert result == []
+
+
+def test_query_synthesis_preserves_encoded_params():
+    param_endpoints = [{
+        "url": "http://localhost:3000/api/report?sort=created%20at&filter=a%2Bb",
+        "params": ["reportId"],
+    }]
+    result = synthesize_query_urls_from_param_endpoints(
+        base_url="http://localhost:3000",
+        param_endpoints=param_endpoints,
+        max_endpoints=1,
+    )
+    assert result[0] == "http://localhost:3000/api/report?sort=created+at&filter=a%2Bb&reportId=1"

@@ -15,7 +15,7 @@ import asyncio
 import hashlib
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
 
@@ -1275,6 +1275,26 @@ COLLECTION_EXCLUSIONS = [
 
 DEFAULT_SYNTH_IDS = ['1', '2', '3', '100', '999']
 QUERY_ID_PARAM_EXCLUSIONS = ['token', 'session', 'csrf']
+SYNTH_PATH_SEGMENT_EXCLUSIONS = {
+    "auth",
+    "login",
+    "signin",
+    "sign-in",
+    "logout",
+    "signout",
+    "token",
+    "session",
+    "sessions",
+    "register",
+    "signup",
+    "forgot",
+    "reset",
+    "oauth",
+    "callback",
+    "mfa",
+    "otp",
+    "sso",
+}
 
 
 def _is_probable_id_param(param_name: str) -> bool:
@@ -1289,6 +1309,17 @@ def _is_probable_id_param(param_name: str) -> bool:
     if lowered in {"id", "uid", "uuid"}:
         return True
     return lowered.endswith("id")
+
+
+def _has_excluded_synth_path_segment(url: str) -> bool:
+    """Skip synthetic BOLA URL generation for auth/session-style endpoints."""
+    try:
+        path = urlsplit(url).path.lower()
+    except Exception:
+        return False
+
+    segments = [seg for seg in path.split("/") if seg]
+    return any(seg in SYNTH_PATH_SEGMENT_EXCLUSIONS for seg in segments)
 
 
 def synthesize_resource_urls_from_collections(
@@ -1318,6 +1349,8 @@ def synthesize_resource_urls_from_collections(
         # Skip excluded paths
         url_lower = base_url.lower()
         if any(excl in url_lower for excl in COLLECTION_EXCLUSIONS):
+            continue
+        if _has_excluded_synth_path_segment(base_url):
             continue
 
         # Check if URL matches collection patterns
@@ -1376,6 +1409,8 @@ def synthesize_query_urls_from_param_endpoints(
         url_lower = url.lower()
         if any(excl in url_lower for excl in COLLECTION_EXCLUSIONS):
             continue
+        if _has_excluded_synth_path_segment(url):
+            continue
 
         id_params = [p for p in params if _is_probable_id_param(p)]
         if not id_params:
@@ -1389,14 +1424,9 @@ def synthesize_query_urls_from_param_endpoints(
 
         id_param = id_params[0]
         for test_id in ids_to_test:
-            parts = []
-            for k, v in keep_pairs:
-                if v == "":
-                    parts.append(f"{k}=")
-                else:
-                    parts.append(f"{k}={v}")
-            parts.append(f"{id_param}={test_id}")
-            query = "&".join(parts)
+            query_pairs = list(keep_pairs)
+            query_pairs.append((id_param, str(test_id)))
+            query = urllib.parse.urlencode(query_pairs, doseq=True)
             candidate = f"{base}?{query}" if query else base
             if candidate in seen_urls:
                 continue

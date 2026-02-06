@@ -563,7 +563,7 @@ class ScanOptions(BaseModel):
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
 
     # Safety/performance limits
-    smart_bola_max_endpoints: Optional[int] = None # Max endpoints for BOLA testing (default: 30)
+    smart_bola_max_endpoints: Optional[int] = None # Max endpoints for BOLA testing (default: 80)
     dom_xss_max_files: Optional[int] = None        # Max JS files for DOM XSS (default: 20)
     sqli_extract_max: Optional[int] = None         # Max SQLi findings for extraction (default: 3)
     oob_max_findings: Optional[int] = None         # Max findings for OOB SQLi test (default: 3)

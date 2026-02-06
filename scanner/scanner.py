@@ -10016,7 +10016,7 @@ async def cli_main():
         thorough_params=getattr(args, 'thorough_params', False),
         oob_callback_url=getattr(args, 'oob_callback_url', None),
         # Safety/performance limits
-        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', 30),
+        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', 80),
         dom_xss_max_files=getattr(args, 'dom_xss_max_files', 20),
         sqli_extract_max=getattr(args, 'sqli_extract_max', 3),
         oob_max_findings=getattr(args, 'oob_max_findings', 3),

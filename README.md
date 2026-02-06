@@ -20,7 +20,9 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 **[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
 
-**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
+**[Interactive Sessions Guide](INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
+
+**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs for next-gen smart scanning.
 
 ## Features
 
