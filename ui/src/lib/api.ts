@@ -354,6 +354,86 @@ export async function stopGungnir(): Promise<{ status: string; message: string }
   return res.json()
 }
 
+// Schedules
+export interface Schedule {
+  id: string
+  target_id: string
+  target_url: string
+  target_name?: string
+  name?: string
+  frequency: 'daily' | 'weekly'
+  day_of_week?: number
+  time_of_day: string
+  timezone: string
+  jitter_minutes: number
+  scan_type: string
+  scan_options?: Record<string, unknown>
+  is_active: boolean
+  last_run_at?: string
+  next_run_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduleCreate {
+  target_id: string
+  name?: string
+  frequency: string
+  day_of_week?: number
+  time_of_day: string
+  timezone?: string
+  scan_type: string
+  scan_options?: Record<string, unknown>
+  jitter_minutes?: number
+}
+
+export async function getSchedules(params?: {
+  target_id?: string
+  is_active?: boolean
+}): Promise<{ schedules: Schedule[]; total: number }> {
+  const searchParams = new URLSearchParams()
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.is_active !== undefined) searchParams.set('is_active', String(params.is_active))
+
+  const res = await fetch(`${API_URL}/schedules?${searchParams}`)
+  if (!res.ok) throw new Error('Failed to fetch schedules')
+  return res.json()
+}
+
+export async function createSchedule(data: ScheduleCreate): Promise<{ id: string; target_url: string; next_run_at: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to create schedule'))
+  }
+  return res.json()
+}
+
+export async function updateSchedule(id: string, data: Partial<Schedule>): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update schedule'))
+  }
+  return res.json()
+}
+
+export async function deleteSchedule(id: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules/${id}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to delete schedule'))
+  }
+  return res.json()
+}
+
 // Discovery
 export async function discoverSubdomains(rootDomain: string): Promise<{ status: string; message: string }> {
   const res = await fetch(`${API_URL}/discovery?root_domain=${encodeURIComponent(rootDomain)}`, {

@@ -8,11 +8,13 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import redis
@@ -28,6 +30,7 @@ RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 HEARTBEAT_TIMEOUT_MINUTES = 5  # Mark scan stale if no heartbeat for this long
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
+SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
 
 # Maximum allowed duration per scan type (minutes) - safety net
 MAX_SCAN_DURATION = {
@@ -293,6 +296,158 @@ async def stale_scan_checker(pool: asyncpg.Pool):
             print(f"[cleanup] Error checking stale scans: {e}", flush=True)
 
 
+def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str, timezone: str, jitter_minutes: int = 0) -> datetime:
+    """Calculate the next UTC datetime for a scheduled run.
+
+    Args:
+        frequency: 'daily' or 'weekly'
+        day_of_week: 0-6 (Monday-Sunday) for weekly schedules
+        time_of_day: 'HH:MM' format
+        timezone: IANA timezone string (e.g. 'UTC', 'America/New_York')
+        jitter_minutes: Random jitter range (±minutes) to avoid thundering herd
+
+    Returns:
+        UTC datetime for the next scheduled run
+    """
+    try:
+        tz = ZoneInfo(timezone)
+    except (KeyError, Exception):
+        tz = ZoneInfo('UTC')
+
+    now_utc = datetime.utcnow()
+    now_local = now_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(tz)
+
+    hour, minute = 2, 0
+    try:
+        parts = time_of_day.split(':')
+        hour, minute = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        pass
+
+    # Start with today at the specified time
+    candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if frequency == 'weekly' and day_of_week is not None:
+        # day_of_week: 0=Monday, 6=Sunday (Python weekday convention)
+        current_weekday = now_local.weekday()
+        days_ahead = day_of_week - current_weekday
+        if days_ahead < 0 or (days_ahead == 0 and candidate <= now_local):
+            days_ahead += 7
+        candidate = candidate + timedelta(days=days_ahead)
+    else:
+        # Daily: if today's time has passed, schedule for tomorrow
+        if candidate <= now_local:
+            candidate = candidate + timedelta(days=1)
+
+    # Apply jitter
+    if jitter_minutes > 0:
+        jitter = random.randint(-jitter_minutes, jitter_minutes)
+        candidate = candidate + timedelta(minutes=jitter)
+
+    # Convert to UTC
+    return candidate.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+
+
+async def run_due_schedules(pool: asyncpg.Pool):
+    """Check for and execute due scheduled scans."""
+    r = get_redis()
+    now = datetime.utcnow()
+
+    async with pool.acquire() as conn:
+        due_schedules = await conn.fetch("""
+            SELECT s.*, t.url as target_url
+            FROM schedules s
+            JOIN targets t ON s.target_id = t.id
+            WHERE s.is_active = true AND s.next_run_at <= $1
+        """, now)
+
+        for schedule in due_schedules:
+            schedule_id = schedule['id']
+            target_id = schedule['target_id']
+            target_url = schedule['target_url']
+            scan_type = schedule['scan_type'] or 'standard'
+
+            # Check if target already has a running/pending scan
+            existing = await conn.fetchval("""
+                SELECT COUNT(*) FROM scans
+                WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
+            """, target_id)
+
+            if existing > 0:
+                print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: target already has active scan", flush=True)
+                # Recalculate next_run_at anyway so we don't keep retrying every 60s
+                next_run = calculate_next_run(
+                    schedule['frequency'],
+                    schedule['day_of_week'],
+                    schedule['time_of_day'] or '02:00',
+                    schedule['timezone'] or 'UTC',
+                    schedule['jitter_minutes'] or 0
+                )
+                await conn.execute("""
+                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
+                """, next_run, schedule_id)
+                continue
+
+            # Create scan record + queue job (reuse scan submission logic)
+            job_id = str(uuid.uuid4())
+            scan_id = str(uuid.uuid4())
+
+            scan_options = {}
+            if schedule['scan_options']:
+                if isinstance(schedule['scan_options'], str):
+                    scan_options = json.loads(schedule['scan_options'])
+                else:
+                    scan_options = dict(schedule['scan_options'])
+            scan_options['scan_type'] = scan_type
+
+            await conn.execute("""
+                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+            """, uuid.UUID(scan_id), target_id, target_url, job_id,
+                 json.dumps(scan_options), scan_type)
+
+            job_data = {
+                'job_id': job_id,
+                'scan_id': scan_id,
+                'target': target_url,
+                'options': scan_options,
+                'submitted_at': datetime.utcnow().isoformat(),
+                'scheduled': True,
+                'schedule_id': str(schedule_id)
+            }
+            r.rpush(QUEUE_NAME, json.dumps(job_data))
+            r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': target_url})
+
+            # Update schedule
+            next_run = calculate_next_run(
+                schedule['frequency'],
+                schedule['day_of_week'],
+                schedule['time_of_day'] or '02:00',
+                schedule['timezone'] or 'UTC',
+                schedule['jitter_minutes'] or 0
+            )
+            await conn.execute("""
+                UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
+                WHERE id = $3
+            """, now, next_run, schedule_id)
+
+            print(f"[scheduler] Triggered scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url}, {scan_type})", flush=True)
+
+
+async def schedule_runner(pool: asyncpg.Pool):
+    """Background task to periodically check and run due schedules."""
+    print("[scheduler] Schedule runner started", flush=True)
+    while True:
+        try:
+            await asyncio.sleep(SCHEDULE_CHECK_INTERVAL_SECONDS)
+            await run_due_schedules(pool)
+        except asyncio.CancelledError:
+            print("[scheduler] Schedule runner stopped", flush=True)
+            break
+        except Exception as e:
+            print(f"[scheduler] Error running schedules: {e}", flush=True)
+
+
 # Database connection pool
 db_pool: Optional[asyncpg.Pool] = None
 
@@ -303,15 +458,21 @@ async def lifespan(app: FastAPI):
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
 
-    # Start background stale scan checker
+    # Start background tasks
     cleanup_task = asyncio.create_task(stale_scan_checker(db_pool))
+    scheduler_task = asyncio.create_task(schedule_runner(db_pool))
 
     yield
 
-    # Stop background task
+    # Stop background tasks
     cleanup_task.cancel()
+    scheduler_task.cancel()
     try:
         await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await scheduler_task
     except asyncio.CancelledError:
         pass
 
@@ -469,6 +630,30 @@ class SessionFindingCreate(BaseModel):
     response: Optional[str] = None
     remediation: Optional[str] = None
     notes: Optional[str] = None
+
+
+class ScheduleCreate(BaseModel):
+    target_id: str
+    name: Optional[str] = None
+    frequency: str  # daily, weekly
+    day_of_week: Optional[int] = None  # 0-6 (Monday-Sunday)
+    time_of_day: str = '02:00'  # HH:MM
+    timezone: str = 'UTC'
+    scan_type: str = 'standard'
+    scan_options: Optional[dict] = None
+    jitter_minutes: int = 30
+
+
+class ScheduleUpdate(BaseModel):
+    name: Optional[str] = None
+    frequency: Optional[str] = None
+    day_of_week: Optional[int] = None
+    time_of_day: Optional[str] = None
+    timezone: Optional[str] = None
+    scan_type: Optional[str] = None
+    scan_options: Optional[dict] = None
+    jitter_minutes: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 # ============================================================
@@ -2827,6 +3012,264 @@ async def get_latest_result(target_folder: str):
         raise HTTPException(status_code=404, detail="Result not found")
     with open(filepath) as f:
         return json.load(f)
+
+
+# ============================================================
+# SCHEDULES (Recurring Scans)
+# ============================================================
+
+@app.get("/schedules")
+async def list_schedules(
+    target_id: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    limit: int = Query(50, le=200),
+    offset: int = 0
+):
+    """List scan schedules."""
+    async with db_pool.acquire() as conn:
+        query = """
+            SELECT s.*, t.url as target_url, t.name as target_name
+            FROM schedules s
+            JOIN targets t ON s.target_id = t.id
+            WHERE 1=1
+        """
+        params = []
+        param_idx = 1
+
+        if target_id:
+            query += f" AND s.target_id = ${param_idx}"
+            params.append(uuid.UUID(target_id))
+            param_idx += 1
+
+        if is_active is not None:
+            query += f" AND s.is_active = ${param_idx}"
+            params.append(is_active)
+            param_idx += 1
+
+        query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+
+        rows = await conn.fetch(query, *params)
+
+    return {
+        'schedules': [row_to_dict(r) for r in rows],
+        'total': len(rows)
+    }
+
+
+@app.post("/schedules")
+async def create_schedule(request: ScheduleCreate):
+    """Create a new scan schedule."""
+    # Validate frequency
+    if request.frequency not in ('daily', 'weekly'):
+        raise HTTPException(status_code=400, detail="Frequency must be 'daily' or 'weekly'")
+
+    # Validate time_of_day format
+    try:
+        parts = request.time_of_day.split(':')
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=400, detail="time_of_day must be in HH:MM format (00:00 - 23:59)")
+
+    # Validate day_of_week for weekly
+    if request.frequency == 'weekly':
+        if request.day_of_week is None:
+            raise HTTPException(status_code=400, detail="day_of_week is required for weekly schedules (0=Monday, 6=Sunday)")
+        if not (0 <= request.day_of_week <= 6):
+            raise HTTPException(status_code=400, detail="day_of_week must be 0-6 (Monday-Sunday)")
+
+    # Validate scan_type
+    valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
+    if request.scan_type not in valid_scan_types:
+        raise HTTPException(status_code=400, detail=f"scan_type must be one of: {', '.join(valid_scan_types)}")
+
+    # Validate timezone
+    try:
+        ZoneInfo(request.timezone)
+    except (KeyError, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid timezone: {request.timezone}")
+
+    async with db_pool.acquire() as conn:
+        # Verify target exists
+        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", uuid.UUID(request.target_id))
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+        next_run = calculate_next_run(
+            request.frequency,
+            request.day_of_week,
+            request.time_of_day,
+            request.timezone,
+            request.jitter_minutes
+        )
+
+        schedule_id = await conn.fetchval("""
+            INSERT INTO schedules (
+                target_id, name, frequency, day_of_week, time_of_day,
+                timezone, jitter_minutes, scan_type, scan_options,
+                is_active, next_run_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)
+            RETURNING id
+        """,
+            uuid.UUID(request.target_id),
+            request.name,
+            request.frequency,
+            request.day_of_week,
+            request.time_of_day,
+            request.timezone,
+            request.jitter_minutes,
+            request.scan_type,
+            json.dumps(request.scan_options) if request.scan_options else '{}',
+            next_run
+        )
+
+    return {
+        'id': str(schedule_id),
+        'target_url': target['url'],
+        'next_run_at': next_run.isoformat(),
+        'status': 'created'
+    }
+
+
+@app.get("/schedules/{schedule_id}")
+async def get_schedule(schedule_id: str):
+    """Get schedule details."""
+    async with db_pool.acquire() as conn:
+        schedule = await conn.fetchrow("""
+            SELECT s.*, t.url as target_url, t.name as target_name
+            FROM schedules s
+            JOIN targets t ON s.target_id = t.id
+            WHERE s.id = $1
+        """, uuid.UUID(schedule_id))
+
+        if not schedule:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+    return row_to_dict(schedule)
+
+
+@app.patch("/schedules/{schedule_id}")
+async def update_schedule(schedule_id: str, request: ScheduleUpdate):
+    """Update a schedule."""
+    async with db_pool.acquire() as conn:
+        # Get existing schedule to check timing field changes
+        existing = await conn.fetchrow("SELECT * FROM schedules WHERE id = $1", uuid.UUID(schedule_id))
+        if not existing:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+        updates = []
+        params = []
+        param_idx = 1
+        timing_changed = False
+
+        if request.name is not None:
+            updates.append(f"name = ${param_idx}")
+            params.append(request.name)
+            param_idx += 1
+
+        if request.frequency is not None:
+            if request.frequency not in ('daily', 'weekly'):
+                raise HTTPException(status_code=400, detail="Frequency must be 'daily' or 'weekly'")
+            updates.append(f"frequency = ${param_idx}")
+            params.append(request.frequency)
+            param_idx += 1
+            timing_changed = True
+
+        if request.day_of_week is not None:
+            if not (0 <= request.day_of_week <= 6):
+                raise HTTPException(status_code=400, detail="day_of_week must be 0-6")
+            updates.append(f"day_of_week = ${param_idx}")
+            params.append(request.day_of_week)
+            param_idx += 1
+            timing_changed = True
+
+        if request.time_of_day is not None:
+            try:
+                parts = request.time_of_day.split(':')
+                h, m = int(parts[0]), int(parts[1])
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    raise ValueError
+            except (ValueError, IndexError):
+                raise HTTPException(status_code=400, detail="time_of_day must be HH:MM")
+            updates.append(f"time_of_day = ${param_idx}")
+            params.append(request.time_of_day)
+            param_idx += 1
+            timing_changed = True
+
+        if request.timezone is not None:
+            try:
+                ZoneInfo(request.timezone)
+            except (KeyError, Exception):
+                raise HTTPException(status_code=400, detail=f"Invalid timezone: {request.timezone}")
+            updates.append(f"timezone = ${param_idx}")
+            params.append(request.timezone)
+            param_idx += 1
+            timing_changed = True
+
+        if request.scan_type is not None:
+            valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
+            if request.scan_type not in valid_scan_types:
+                raise HTTPException(status_code=400, detail=f"Invalid scan_type")
+            updates.append(f"scan_type = ${param_idx}")
+            params.append(request.scan_type)
+            param_idx += 1
+
+        if request.scan_options is not None:
+            updates.append(f"scan_options = ${param_idx}")
+            params.append(json.dumps(request.scan_options))
+            param_idx += 1
+
+        if request.jitter_minutes is not None:
+            updates.append(f"jitter_minutes = ${param_idx}")
+            params.append(request.jitter_minutes)
+            param_idx += 1
+            timing_changed = True
+
+        if request.is_active is not None:
+            updates.append(f"is_active = ${param_idx}")
+            params.append(request.is_active)
+            param_idx += 1
+
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        # Recalculate next_run_at if timing fields changed
+        if timing_changed:
+            freq = request.frequency or existing['frequency']
+            dow = request.day_of_week if request.day_of_week is not None else existing['day_of_week']
+            tod = request.time_of_day or existing['time_of_day'] or '02:00'
+            tz = request.timezone or existing['timezone'] or 'UTC'
+            jitter = request.jitter_minutes if request.jitter_minutes is not None else (existing['jitter_minutes'] or 0)
+            next_run = calculate_next_run(freq, dow, tod, tz, jitter)
+            updates.append(f"next_run_at = ${param_idx}")
+            params.append(next_run)
+            param_idx += 1
+
+        updates.append("updated_at = NOW()")
+        params.append(uuid.UUID(schedule_id))
+
+        query = f"UPDATE schedules SET {', '.join(updates)} WHERE id = ${param_idx} RETURNING id"
+        result = await conn.fetchval(query, *params)
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+    return {'id': schedule_id, 'status': 'updated'}
+
+
+@app.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str):
+    """Delete a schedule."""
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM schedules WHERE id = $1", uuid.UUID(schedule_id)
+        )
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+    return {'id': schedule_id, 'status': 'deleted'}
 
 
 # ============================================================
