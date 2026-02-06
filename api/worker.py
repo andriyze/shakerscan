@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -525,18 +526,19 @@ def save_result_file(result: dict, job_id: str) -> str:
     return str(filepath)
 
 
-async def send_heartbeats(job_id: str, stop_event: asyncio.Event):
-    """Send periodic heartbeats."""
+def send_heartbeats(job_id: str, stop_event: threading.Event):
+    """Send periodic heartbeats from a dedicated thread.
+
+    This avoids heartbeat starvation when the asyncio event loop is busy with
+    synchronous CPU/JSON work.
+    """
     r = get_redis()
     while not stop_event.is_set():
         try:
             r.hset(f"job:{job_id}", 'heartbeat', datetime.utcnow().isoformat())
         except Exception as e:
             print(f"[{job_id[:8]}] Heartbeat error: {e}", flush=True)
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+        stop_event.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
 
 
 async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: str | None = None):
@@ -603,8 +605,14 @@ async def process_scan_job(job_data: dict):
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)
 
     # Keep heartbeat alive for the entire job lifecycle, including post-scan persistence.
-    stop_heartbeat = asyncio.Event()
-    heartbeat_task = asyncio.create_task(send_heartbeats(job_id, stop_heartbeat))
+    stop_heartbeat = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=send_heartbeats,
+        args=(job_id, stop_heartbeat),
+        name=f"heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
 
     try:
         try:
@@ -708,10 +716,7 @@ async def process_scan_job(job_data: dict):
         print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
     finally:
         stop_heartbeat.set()
-        try:
-            await heartbeat_task
-        except BaseException:
-            pass  # CancelledError is BaseException in Python 3.8+
+        heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
 
 
 async def process_discovery_job(job_data: dict):

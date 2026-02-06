@@ -34,6 +34,9 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 HEARTBEAT_TIMEOUT_MINUTES = 5  # Mark scan stale if no heartbeat for this long
+FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
+    os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "15")
+)
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
 
@@ -152,7 +155,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     """Check for and mark stale scans as failed.
 
     A scan is considered stale if:
-    1. No heartbeat received for HEARTBEAT_TIMEOUT_MINUTES, OR
+    1. No heartbeat received for timeout window (adaptive near finalization), OR
     2. Running longer than MAX_SCAN_DURATION for its scan type
     """
     r = get_redis()
@@ -161,7 +164,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         # Get all running scans
         running_scans = await conn.fetch("""
-            SELECT id, scan_type, started_at, target_id
+            SELECT id, scan_type, started_at, target_id, current_phase, progress
             FROM scans
             WHERE status = 'running' AND started_at IS NOT NULL
         """)
@@ -170,6 +173,15 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             scan_id = str(scan['id'])
             scan_type = scan['scan_type'] or 'standard'
             started_at = scan['started_at']
+            current_phase = (scan['current_phase'] or '').lower()
+            progress = int(scan['progress'] or 0)
+
+            heartbeat_timeout_minutes = HEARTBEAT_TIMEOUT_MINUTES
+            if progress >= 95 or current_phase in {"validation", "attack_chains", "finalizing"}:
+                heartbeat_timeout_minutes = max(
+                    HEARTBEAT_TIMEOUT_MINUTES,
+                    FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES,
+                )
 
             is_stale = False
             reason = ""
@@ -189,19 +201,26 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                             heartbeat_age = (now - heartbeat_time).total_seconds() / 60
                             heartbeat_found = True
 
-                            if heartbeat_age > HEARTBEAT_TIMEOUT_MINUTES:
+                            if heartbeat_age > heartbeat_timeout_minutes:
                                 is_stale = True
-                                reason = f"No heartbeat for {heartbeat_age:.1f} minutes"
+                                reason = (
+                                    f"No heartbeat for {heartbeat_age:.1f} minutes "
+                                    f"(timeout {heartbeat_timeout_minutes} min, "
+                                    f"phase={current_phase or 'unknown'}, progress={progress})"
+                                )
                         except (ValueError, TypeError):
                             pass
                     break
 
-            # If no heartbeat found at all and scan started > 5 min ago, it's stale
+            # If no heartbeat found at all and scan started beyond timeout, it's stale
             if not heartbeat_found:
                 scan_age = (now - started_at.replace(tzinfo=None)).total_seconds() / 60
-                if scan_age > HEARTBEAT_TIMEOUT_MINUTES:
+                if scan_age > heartbeat_timeout_minutes:
                     is_stale = True
-                    reason = f"No heartbeat found, scan started {scan_age:.1f} minutes ago"
+                    reason = (
+                        f"No heartbeat found, scan started {scan_age:.1f} minutes ago "
+                        f"(timeout {heartbeat_timeout_minutes} min)"
+                    )
 
             # Check 2: Max duration exceeded (safety net)
             if not is_stale and started_at:
