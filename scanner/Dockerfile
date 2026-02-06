@@ -36,7 +36,7 @@ RUN ARCH=$(uname -m) && \
     chmod +x nuclei
 
 # --- Stage 4: Runtime with Playwright (Chromium) ---
-FROM mcr.microsoft.com/playwright/python:v1.57.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \

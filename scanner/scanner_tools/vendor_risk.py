@@ -119,6 +119,10 @@ KNOWN_CDNS = {
     "kit.fontawesome.com": {"provider": "Font Awesome", "trust_level": "high", "category": "fonts"},
 }
 
+# Self-hosted analytics hints (treat as first-party-like)
+SELF_HOSTED_ANALYTICS_HOST_HINTS = {"umami", "plausible", "matomo", "piwik"}
+SELF_HOSTED_ANALYTICS_PATH_HINTS = {"/js/plausible.js", "/matomo.js", "/piwik.js", "/umami.js"}
+
 # Patterns for detecting third-party resources in HTML
 THIRD_PARTY_PATTERNS = [
     # Script tags
@@ -156,6 +160,7 @@ class ThirdPartyResource:
     fourth_parties: list[str] = field(default_factory=list)
     content_hash: str | None = None
     size_bytes: int | None = None
+    first_party_like: bool = False
 
 
 @dataclass
@@ -183,6 +188,30 @@ def extract_domain(url: str) -> str:
         return netloc
     except Exception:
         return ""
+
+
+def is_self_hosted_analytics_url(url: str, base_domain: str | None = None) -> bool:
+    """Heuristic to detect self-hosted analytics script URLs (only if first-party)."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+    except Exception:
+        return False
+
+    if base_domain:
+        base_root = get_registrable_domain(base_domain.lower())
+        host_root = get_registrable_domain(host)
+        if base_root and host_root and host_root != base_root:
+            return False
+
+    if any(hint in host for hint in SELF_HOSTED_ANALYTICS_HOST_HINTS):
+        return True
+    if any(path.endswith(p) for p in SELF_HOSTED_ANALYTICS_PATH_HINTS):
+        return True
+    if path.endswith("/script.js") and "umami" in host:
+        return True
+    return False
 
 
 # Common multi-part TLDs that need special handling
@@ -286,6 +315,7 @@ def extract_third_party_resources(
     Returns list of (url, resource_type) tuples.
     """
     base_domain = extract_domain(base_url)
+    base_root = get_registrable_domain(base_domain) if base_domain else ""
     resources = []
     seen_urls = set()
 
@@ -501,7 +531,7 @@ def generate_vendor_findings(result: VendorRiskResult) -> list[dict[str, Any]]:
     findings = []
 
     # High-risk third parties
-    high_risk_resources = [r for r in result.resources if r.security_score < 50]
+    high_risk_resources = [r for r in result.resources if r.security_score < 50 and not r.first_party_like]
     if high_risk_resources:
         findings.append({
             "id": f"vendor_risk:high_risk_{hashlib.md5(result.target.encode()).hexdigest()[:8]}",
@@ -527,7 +557,10 @@ def generate_vendor_findings(result: VendorRiskResult) -> list[dict[str, Any]]:
         })
 
     # Missing SRI for scripts
-    scripts_without_sri = [r for r in result.resources if r.resource_type == "script"]
+    scripts_without_sri = [
+        r for r in result.resources
+        if r.resource_type == "script" and not r.first_party_like
+    ]
     if scripts_without_sri:
         findings.append({
             "id": f"vendor_risk:no_sri_{hashlib.md5(result.target.encode()).hexdigest()[:8]}",
@@ -545,7 +578,10 @@ def generate_vendor_findings(result: VendorRiskResult) -> list[dict[str, Any]]:
         })
 
     # Unknown providers
-    unknown_providers = [r for r in result.resources if r.trust_level == "unknown"]
+    unknown_providers = [
+        r for r in result.resources
+        if r.trust_level == "unknown" and not r.first_party_like
+    ]
     if unknown_providers:
         findings.append({
             "id": f"vendor_risk:unknown_providers_{hashlib.md5(result.target.encode()).hexdigest()[:8]}",
@@ -563,7 +599,7 @@ def generate_vendor_findings(result: VendorRiskResult) -> list[dict[str, Any]]:
         })
 
     # TLS issues
-    tls_issues = [r for r in result.resources if not r.tls_valid]
+    tls_issues = [r for r in result.resources if not r.tls_valid and not r.first_party_like]
     if tls_issues:
         findings.append({
             "id": f"vendor_risk:tls_issues_{hashlib.md5(result.target.encode()).hexdigest()[:8]}",
@@ -666,6 +702,12 @@ async def vendor_risk_assessment(
             trust_level=cdn_info.get("trust_level", "unknown"),
         )
 
+        if is_self_hosted_analytics_url(url, base_root):
+            resource.provider = resource.provider or "Self-hosted analytics"
+            resource.category = resource.category or "analytics"
+            resource.trust_level = "high"
+            resource.first_party_like = True
+
         # Check security if enabled
         if check_security and resource_type in ["script", "stylesheet"]:
             security_info = await check_resource_security(url, timeout)
@@ -681,17 +723,19 @@ async def vendor_risk_assessment(
 
         resources.append(resource)
 
+    effective_resources = [r for r in resources if not r.first_party_like]
+
     # Calculate overall risk
-    risk_score, risk_level = calculate_overall_risk(resources)
+    risk_score, risk_level = calculate_overall_risk(effective_resources)
 
     # Get unique domains
-    third_party_domains = sorted(set(r.domain for r in resources))
+    third_party_domains = sorted(set(r.domain for r in effective_resources))
 
     # Build result
     result = VendorRiskResult(
         target=base_url,
         assessed_at=datetime.now(UTC).isoformat(),
-        total_third_parties=len(resources),
+        total_third_parties=len(effective_resources),
         third_party_domains=third_party_domains,
         resources=resources,
         risk_score=risk_score,
@@ -699,15 +743,17 @@ async def vendor_risk_assessment(
         findings=[],
         summary={
             "total_resources": len(resources),
+            "third_party_resources": len(effective_resources),
+            "first_party_like_resources": len(resources) - len(effective_resources),
             "by_type": {},
             "by_trust_level": {},
             "by_category": {},
-            "average_score": sum(r.security_score for r in resources) / len(resources) if resources else 0,
+            "average_score": sum(r.security_score for r in effective_resources) / len(effective_resources) if effective_resources else 0,
         }
     )
 
     # Calculate summary stats
-    for r in resources:
+    for r in effective_resources:
         result.summary["by_type"][r.resource_type] = result.summary["by_type"].get(r.resource_type, 0) + 1
         result.summary["by_trust_level"][r.trust_level] = result.summary["by_trust_level"].get(r.trust_level, 0) + 1
         if r.category:

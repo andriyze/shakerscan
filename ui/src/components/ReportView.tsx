@@ -112,6 +112,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const rawFindings = scanData.findings || []
   const findings = sortBySeverity(rawFindings)
   const result = scanData.result || {}
+  const triage = scanData.triage || {}
+  const coverageGaps = scanData.coverage_gaps || {}
   const js_dependencies = scanData.js_dependencies || {}
   const js_secrets = scanData.js_secrets || {}
   const cicd_exposure = scanData.cicd_exposure || {}
@@ -294,6 +296,47 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>
+
+      {/* Triage + Coverage Gaps */}
+      {(triage?.confirmed?.count !== undefined || (coverageGaps?.issues || []).length > 0) && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <h2 className="text-2xl font-bold mb-4">Triage & Coverage</h2>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Confirmed</div>
+              <div className="text-lg font-semibold text-green-400">{triage?.confirmed?.count || 0}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Suspected High</div>
+              <div className="text-lg font-semibold text-orange-400">{triage?.suspected_high?.count || 0}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Needs Review</div>
+              <div className="text-lg font-semibold text-yellow-400">{triage?.needs_review?.count || 0}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">AI False Positives</div>
+              <div className="text-lg font-semibold text-slate-300">{triage?.ai_false_positive?.count || 0}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Verification Skipped</div>
+              <div className="text-lg font-semibold text-slate-300">{triage?.verification_skipped?.count || 0}</div>
+            </div>
+          </div>
+          <div>
+            <h3 className="text-sm text-gray-400 mb-2">Coverage Gaps</h3>
+            {(coverageGaps?.issues || []).length > 0 ? (
+              <ul className="list-disc list-inside text-sm text-gray-300 space-y-1">
+                {coverageGaps.issues.map((issue: string, idx: number) => (
+                  <li key={idx}>{issue}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-400">No coverage gaps flagged.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Compliance */}
       {result?.compliance && <ComplianceSection compliance={result.compliance} />}

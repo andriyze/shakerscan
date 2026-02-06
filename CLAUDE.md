@@ -108,9 +108,35 @@ curl "http://localhost:8080/findings?severity=high"
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
   -d '{"status": "resolved"}'
+
+# Create manual finding (from manual testing)
+curl -X POST http://localhost:8080/findings/manual \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "title": "BOLA on User API",
+    "severity": "critical",
+    "description": "User2 can access User1 data via /api/users/{id}",
+    "category": "BOLA",
+    "cwe": "CWE-639",
+    "evidence": "GET /api/users/1 with User2 token returns User1 profile"
+  }'
+
+# Create finding from AI session (target auto-populated)
+curl -X POST "http://localhost:8080/session/{session_id}/findings" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "BOLA on Basket API",
+    "severity": "critical",
+    "description": "User2 can read/delete User1 basket items",
+    "category": "BOLA",
+    "cwe": "CWE-639"
+  }'
 ```
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
+
+Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI security session)
 
 ### Subdomain Discovery
 
@@ -359,6 +385,16 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
 | `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
+| `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
+| `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
+
+**Performance/Safety Limits:**
+| Option | Description | Default |
+|--------|-------------|---------|
+| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 30 |
+| `dom_xss_max_files` | Max JS files for DOM XSS analysis | 20 |
+| `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
+| `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
 ### Smart Scan Tuning
 
@@ -622,15 +658,175 @@ The `smart_coverage` field tracks discovery vs testing coverage:
 2. POST /workers with increased count
 3. Confirm new worker count
 
+**User**: "Test for BOLA vulnerabilities on api.example.com"
+1. **Ask permission** for active testing first
+2. Ask user for two different user auth tokens
+3. Submit smart scan with `auth_header` and `user2_header`
+4. Report scan ID and UI link - done (don't poll/wait)
+
+**User**: "Let's do interactive security testing on juice-shop.example.com"
+1. Start an AI security session with `/ai-security-session juice-shop.example.com`
+2. Follow the interactive workflow (see AI Security Sessions below)
+
+## AI Security Sessions
+
+The `/ai-security-session` skill enables interactive, collaborative security testing between you and Claude. Unlike automated scans, this is a manual workflow where:
+
+1. Claude bootstraps from existing scan data (endpoints, tech, findings)
+2. Claude analyzes the target and suggests testing approaches
+3. You direct which areas to test
+4. Claude executes tests and reports findings in real-time
+5. You can ask follow-up questions and explore deeper
+6. Validated findings are saved to the database
+
+**Recommended Workflow**: Run `/scan-smart <url>` first, then use `/ai-security-session <url>` to validate findings and explore areas scanners miss.
+
+### Session API
+
+```bash
+# Start a session
+curl -X POST http://localhost:8080/session/start \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com"}'
+
+# Get session state
+curl http://localhost:8080/session/{session_id}
+
+# Take a screenshot
+curl -X POST "http://localhost:8080/session/{session_id}/screenshot"
+
+# Execute browser action
+curl -X POST "http://localhost:8080/session/{session_id}/action" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "navigate", "data": {"url": "/login"}}'
+
+# Login as a user
+curl -X POST "http://localhost:8080/session/{session_id}/action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "login",
+    "user": "user1",
+    "data": {"email": "user1@test.com", "password": "pass123"}
+  }'
+
+# Test endpoint for BOLA (cross-user access)
+curl -X POST "http://localhost:8080/session/{session_id}/test-endpoint" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "endpoint": "/api/items/42",
+    "method": "GET",
+    "as_user": "user2"
+  }'
+
+# Save a finding discovered during the session
+curl -X POST "http://localhost:8080/session/{session_id}/findings" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "BOLA on Basket API",
+    "severity": "critical",
+    "description": "User2 can access User1 basket",
+    "category": "BOLA",
+    "cwe": "CWE-639",
+    "evidence": "GET /rest/basket/9 with User2 token returns User1 data"
+  }'
+
+# End session
+curl -X DELETE "http://localhost:8080/session/{session_id}"
+```
+
+### Session Actions
+
+| Action | Description | Data Fields |
+|--------|-------------|-------------|
+| `navigate` | Go to URL | `url` |
+| `click` | Click element | `selector` |
+| `fill` | Fill input field | `selector`, `value` |
+| `register` | Register new account | `email`, `password` |
+| `login` | Login to app | `email`, `password` |
+| `submit` | Submit form | `selector` (optional) |
+| `wait` | Wait for element/time | `selector`, `timeout` |
+| `extract` | Extract data from page | `selector`, `attribute` |
+
+### BOLA Testing Workflow
+
+1. Start session for target
+2. Register/login as user1
+3. Navigate and discover resource IDs
+4. Register/login as user2 (separate context)
+5. Test endpoints with `as_user: "user2"` to check cross-user access
+6. **Save findings** with `POST /session/{id}/findings`
+7. Report findings
+
+### Bootstrapping from Scan Data
+
+When starting an interactive session, first check for existing scan data:
+
+```bash
+# Find existing scans for the target
+curl -s "http://localhost:8080/scans?limit=5" | jq '[.scans[] | select(.target_url | contains("example.com"))]'
+
+# Get scan results with discovered endpoints
+curl -s "http://localhost:8080/scans/{scan_id}/result" | jq '{
+  endpoints: .discovery.browser_api_endpoints[:10],
+  tech: .discovery.tech.items,
+  urls: .discovery.browser_crawl.sampled_urls[:5]
+}'
+
+# Get existing findings to validate
+curl -s "http://localhost:8080/findings?target_url=https://example.com&status=active"
+```
+
+**Scan Context to Use:**
+| Data | Use For |
+|------|---------|
+| `browser_api_endpoints` | BOLA/IDOR testing candidates |
+| `browser_crawl.sampled_urls` | Navigation targets |
+| `tech.items` | Tailored attack vectors |
+| Active findings | Validation and exploitation |
+
+### Interactive Session Testing Scenarios
+
+| Category | Scenarios | Best For |
+|----------|-----------|----------|
+| **Access Control** | BOLA/IDOR, privilege escalation, tenant isolation, function-level access | Multi-user apps, APIs with resource ownership |
+| **Authentication** | Session fixation, JWT flaws, concurrent sessions, token invalidation | Apps with login functionality |
+| **Business Logic** | Price manipulation, coupon abuse, workflow bypass, race conditions | E-commerce, financial apps |
+| **API Security** | Mass assignment, GraphQL abuse, parameter pollution, rate limiting | REST/GraphQL APIs |
+| **Client-Side** | Stored/DOM XSS, open redirect, clickjacking, sensitive data exposure | Apps with user-generated content |
+
+**When to Use Interactive Sessions:**
+- Validating findings from automated scans
+- Testing vulnerabilities requiring human judgment
+- Verifying BOLA with real user contexts
+- Chaining findings into attack paths
+- Demonstrating vulnerabilities to stakeholders
+
+**Saving Findings:** All discoveries can be persisted with `POST /session/{id}/findings` and will appear in the UI with `source: "ai_session"`.
+
 ## CLI Shortcuts
 
 Users can also use the CLI directly:
 ```bash
+# Basic scans
 ./scanner.sh scan https://example.com       # Quick scan
 ./scanner.sh scan-full https://example.com  # Full assessment
 ./scanner.sh scan-smart https://example.com # Smart adaptive scan
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"   # SQLi-only with auth
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123" # XSS-only with cookies
+
+# Authenticated scans
+./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
+./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
+
+# Focused active checks
+./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"   # SQLi-only
+./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123" # XSS-only
+
+# Dual-auth BOLA testing
+./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1_token" --user2-header "Bearer user2_token"
+
+# Thorough mode (no early stop, more params)
+./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
+
+# Management
 ./scanner.sh status                          # Check status
 ./scanner.sh scale 5                         # Scale to 5 workers
 ./scanner.sh logs -f                         # Follow logs
@@ -658,7 +854,8 @@ scanner-oss/
 ├── api/                 # FastAPI backend
 │   ├── api.py           # REST API server
 │   ├── worker.py        # Redis job worker
-│   └── gungnir_worker.py # CT log monitor worker
+│   ├── gungnir_worker.py # CT log monitor worker
+│   └── session_manager.py # Interactive session management
 ├── ui/                  # Next.js dashboard
 │   └── src/             # React components + pages
 ├── db/                  # PostgreSQL

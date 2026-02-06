@@ -152,12 +152,25 @@ async def verify_high_severity_findings(
                     auth_session,
                     max_samples=max_verification_attempts
                 )
-            elif "error" in technique or "union" in technique:
-                # Error-based and union SQLi can be verified by data extraction
+            else:
+                # Error-based/union/unknown techniques: attempt data extraction proof
                 finding = await _verify_sqli_extraction(
                     finding,
                     auth_session
                 )
+
+            # If still unverified, downgrade to avoid unconfirmed high/critical SQLi
+            if not finding.get("verified") and finding.get("severity") in ("high", "critical"):
+                if finding.get("severity") == "critical":
+                    finding["severity"] = "high"
+                    finding["confidence"] = min(finding.get("confidence", 0.75), 0.75)
+                else:
+                    finding["severity"] = "medium"
+                    finding["confidence"] = min(finding.get("confidence", 0.65), 0.65)
+                evidence = finding.get("evidence", [])
+                if isinstance(evidence, list):
+                    evidence.append("Verification failed or skipped - downgraded severity")
+                finding["evidence"] = evidence
 
         verified_findings.append(finding)
 

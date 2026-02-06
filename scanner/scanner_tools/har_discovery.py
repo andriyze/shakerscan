@@ -358,20 +358,44 @@ def extract_discovery_from_har(
         # Parse query parameters
         query_params, query_discovered = _parse_query_params(query, url)
 
-        # Parse body parameters based on content type
+        # Parse body parameters based on content type (with fallback inference)
         body_params: dict[str, Any] = {}
         body_discovered: list[DiscoveredParameter] = []
         if post_data:
-            if "json" in content_type.lower():
-                body_discovered = _parse_json_params(post_data, url)
+            body_text = post_data if isinstance(post_data, str) else str(post_data)
+            content_type_lower = (content_type or "").lower()
+            looks_like_json = body_text.lstrip().startswith(("{", "["))
+
+            if "json" in content_type_lower or (looks_like_json and not content_type_lower):
+                body_discovered = _parse_json_params(body_text, url)
                 try:
-                    body_params = json.loads(post_data)
+                    body_params = json.loads(body_text)
+                    if not content_type:
+                        content_type = "application/json"
                 except Exception:
                     pass
-            elif "form" in content_type.lower() or "urlencoded" in content_type.lower():
-                body_discovered = _parse_form_params(post_data, url)
+            elif "form" in content_type_lower or "urlencoded" in content_type_lower:
+                body_discovered = _parse_form_params(body_text, url)
                 try:
-                    body_params = dict(urllib.parse.parse_qsl(post_data, keep_blank_values=True))
+                    body_params = dict(urllib.parse.parse_qsl(body_text, keep_blank_values=True))
+                    if not content_type:
+                        content_type = "application/x-www-form-urlencoded"
+                except Exception:
+                    pass
+            elif looks_like_json:
+                body_discovered = _parse_json_params(body_text, url)
+                try:
+                    body_params = json.loads(body_text)
+                    if not content_type:
+                        content_type = "application/json"
+                except Exception:
+                    pass
+            elif "=" in body_text and "&" in body_text:
+                body_discovered = _parse_form_params(body_text, url)
+                try:
+                    body_params = dict(urllib.parse.parse_qsl(body_text, keep_blank_values=True))
+                    if not content_type:
+                        content_type = "application/x-www-form-urlencoded"
                 except Exception:
                     pass
 
@@ -472,6 +496,34 @@ def get_testable_endpoints(
     # Sort by score descending
     scored.sort(key=lambda x: x[0], reverse=True)
 
+    # Ensure a minimum share of POST/PUT/PATCH endpoints for active testing
+    post_methods = {"POST", "PUT", "PATCH"}
+    post_scored = [(s, e) for s, e in scored if e.method in post_methods]
+    get_scored = [(s, e) for s, e in scored if e.method not in post_methods]
+
+    min_post = 0
+    if post_scored:
+        min_post = min(len(post_scored), max(5, max_endpoints // 4))
+
+    selected: list[tuple[int, DiscoveredEndpoint]] = []
+    selected_keys: set[str] = set()
+
+    for score, endpoint in post_scored[:min_post]:
+        key = f"{endpoint.method}:{endpoint.url}"
+        if key in selected_keys:
+            continue
+        selected.append((score, endpoint))
+        selected_keys.add(key)
+
+    for score, endpoint in scored:
+        if len(selected) >= max_endpoints:
+            break
+        key = f"{endpoint.method}:{endpoint.url}"
+        if key in selected_keys:
+            continue
+        selected.append((score, endpoint))
+        selected_keys.add(key)
+
     def _normalize_defaults(params: dict[str, Any], allow_list: bool = False) -> dict[str, Any]:
         """Normalize param values for replay fidelity."""
         normalized = {}
@@ -536,7 +588,7 @@ def get_testable_endpoints(
             "has_auth": e.has_auth,
             "score": s,
         }
-        for s, e in scored[:max_endpoints]
+        for s, e in selected[:max_endpoints]
     ]
 
 

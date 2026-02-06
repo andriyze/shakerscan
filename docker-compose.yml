@@ -57,6 +57,7 @@ services:
       - GIT_COMMIT=${GIT_COMMIT:-dev}
     volumes:
       - ./api/api.py:/app/api.py:ro
+      - ./api/session_manager.py:/app/session_manager.py:ro
       - ./results:/results
       # Docker socket for worker scaling
       - /var/run/docker.sock:/var/run/docker.sock
