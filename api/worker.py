@@ -24,6 +24,7 @@ QUEUE_NAME = 'scan_jobs'
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
+HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
 
 # Maximum allowed duration per scan type (minutes) - worker-side safety net
 MAX_SCAN_DURATION = {
@@ -533,7 +534,7 @@ async def send_heartbeats(job_id: str, stop_event: asyncio.Event):
         except Exception as e:
             print(f"[{job_id[:8]}] Heartbeat error: {e}", flush=True)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=30)
+            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -548,7 +549,15 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
     if job_id:
         try:
             r = get_redis()
-            r.hset(f"job:{job_id}", mapping={'current_phase': phase, 'progress': str(progress)})
+            now_iso = datetime.utcnow().isoformat()
+            r.hset(
+                f"job:{job_id}",
+                mapping={
+                    'current_phase': phase,
+                    'progress': str(progress),
+                    'heartbeat': now_iso,
+                },
+            )
         except Exception:
             pass
 
@@ -593,115 +602,116 @@ async def process_scan_job(job_data: dict):
     # Initial progress
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)
 
-    # Start heartbeat
+    # Keep heartbeat alive for the entire job lifecycle, including post-scan persistence.
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(send_heartbeats(job_id, stop_heartbeat))
 
     try:
-        result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
-    except ValueError as e:
-        # Validation errors (e.g., incompatible options like public+smart)
-        result = {
-            'target': target,
-            'error': str(e),
-            'result': {'score': None, 'grade': None},
-            'findings': []
-        }
-        print(f"[{job_id[:8]}] Validation error: {e}", flush=True)
+        try:
+            result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+        except ValueError as e:
+            # Validation errors (e.g., incompatible options like public+smart)
+            result = {
+                'target': target,
+                'error': str(e),
+                'result': {'score': None, 'grade': None},
+                'findings': []
+            }
+            print(f"[{job_id[:8]}] Validation error: {e}", flush=True)
+
+        result['job_id'] = job_id
+        result['scan_id'] = scan_id
+
+        # Extract results
+        score = result.get('result', {}).get('score')
+        grade = result.get('result', {}).get('grade')
+        findings = result.get('findings', [])
+        error = result.get('error')
+
+        # Save to file
+        filepath = save_result_file(result, job_id)
+
+        # Calculate duration
+        completed_at = datetime.utcnow()
+        duration = int((completed_at - now).total_seconds())
+
+        # Update database - but check if scan was already marked failed by stale checker
+        async with db_pool.acquire() as conn:
+            # Check current status - don't overwrite if already failed (e.g., by stale scan checker)
+            current = await conn.fetchrow(
+                "SELECT status FROM scans WHERE id = $1",
+                uuid.UUID(scan_id)
+            )
+            if current and current['status'] == 'failed':
+                print(f"[{job_id[:8]}] Scan already marked failed (stale?), not overwriting scan row", flush=True)
+                # Don't save findings - stale checker already saved partial findings from checkpoint.
+                # Saving late-completing findings would cause inconsistency between scan report and /findings.
+                # Update Redis to mark job as done so it doesn't stay "running"
+                # Don't set result_path - the late-completing output doesn't match the official partial results
+                job_key = f"job:{job_id}"
+                r.hset(job_key, mapping={
+                    'status': 'failed',
+                    'score': str(score) if score else 'N/A',
+                    'grade': str(grade) if grade else 'N/A',
+                    'completed_at': completed_at.isoformat(),
+                    'progress': '100',
+                    'current_phase': 'terminated'
+                })
+                r.expire(job_key, 86400)
+                return
+
+            if error:
+                await conn.execute("""
+                    UPDATE scans SET
+                        status = 'failed',
+                        error_message = $1,
+                        completed_at = $2,
+                        duration_seconds = $3,
+                        progress = 100,
+                        current_phase = 'failed'
+                    WHERE id = $4
+                """, error, completed_at, duration, uuid.UUID(scan_id))
+            else:
+                await conn.execute("""
+                    UPDATE scans SET
+                        status = 'completed',
+                        result = $1,
+                        score = $2,
+                        grade = $3,
+                        findings_count = $4,
+                        completed_at = $5,
+                        duration_seconds = $6,
+                        progress = 100
+                    WHERE id = $7
+                """, json.dumps(result), score, grade, len(findings),
+                     completed_at, duration, uuid.UUID(scan_id))
+
+        # Save findings
+        if target_id and findings:
+            await save_findings(scan_id, target_id, findings)
+
+        # Update Redis
+        status = 'failed' if error else 'completed'
+        job_key = f"job:{job_id}"
+        r.hset(job_key, mapping={
+            'status': status,
+            'result_path': filepath,
+            'score': str(score) if score else 'N/A',
+            'grade': str(grade) if grade else 'N/A',
+            'completed_at': completed_at.isoformat(),
+            'progress': '100',
+            'current_phase': status
+        })
+        # Expire completed/failed job keys after 24 hours
+        r.expire(job_key, 86400)
+
+        print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
     finally:
         stop_heartbeat.set()
         try:
             await heartbeat_task
         except BaseException:
             pass  # CancelledError is BaseException in Python 3.8+
-
-    result['job_id'] = job_id
-    result['scan_id'] = scan_id
-
-    # Extract results
-    score = result.get('result', {}).get('score')
-    grade = result.get('result', {}).get('grade')
-    findings = result.get('findings', [])
-    error = result.get('error')
-
-    # Save to file
-    filepath = save_result_file(result, job_id)
-
-    # Calculate duration
-    completed_at = datetime.utcnow()
-    duration = int((completed_at - now).total_seconds())
-
-    # Update database - but check if scan was already marked failed by stale checker
-    async with db_pool.acquire() as conn:
-        # Check current status - don't overwrite if already failed (e.g., by stale scan checker)
-        current = await conn.fetchrow(
-            "SELECT status FROM scans WHERE id = $1",
-            uuid.UUID(scan_id)
-        )
-        if current and current['status'] == 'failed':
-            print(f"[{job_id[:8]}] Scan already marked failed (stale?), not overwriting scan row", flush=True)
-            # Don't save findings - stale checker already saved partial findings from checkpoint.
-            # Saving late-completing findings would cause inconsistency between scan report and /findings.
-            # Update Redis to mark job as done so it doesn't stay "running"
-            # Don't set result_path - the late-completing output doesn't match the official partial results
-            job_key = f"job:{job_id}"
-            r.hset(job_key, mapping={
-                'status': 'failed',
-                'score': str(score) if score else 'N/A',
-                'grade': str(grade) if grade else 'N/A',
-                'completed_at': completed_at.isoformat(),
-                'progress': '100',
-                'current_phase': 'terminated'
-            })
-            r.expire(job_key, 86400)
-            return
-
-        if error:
-            await conn.execute("""
-                UPDATE scans SET
-                    status = 'failed',
-                    error_message = $1,
-                    completed_at = $2,
-                    duration_seconds = $3,
-                    progress = 100,
-                    current_phase = 'failed'
-                WHERE id = $4
-            """, error, completed_at, duration, uuid.UUID(scan_id))
-        else:
-            await conn.execute("""
-                UPDATE scans SET
-                    status = 'completed',
-                    result = $1,
-                    score = $2,
-                    grade = $3,
-                    findings_count = $4,
-                    completed_at = $5,
-                    duration_seconds = $6,
-                    progress = 100
-                WHERE id = $7
-            """, json.dumps(result), score, grade, len(findings),
-                 completed_at, duration, uuid.UUID(scan_id))
-
-    # Save findings
-    if target_id and findings:
-        await save_findings(scan_id, target_id, findings)
-
-    # Update Redis
-    status = 'failed' if error else 'completed'
-    job_key = f"job:{job_id}"
-    r.hset(job_key, mapping={
-        'status': status,
-        'result_path': filepath,
-        'score': str(score) if score else 'N/A',
-        'grade': str(grade) if grade else 'N/A',
-        'completed_at': completed_at.isoformat(),
-        'progress': '100',
-        'current_phase': status
-    })
-    # Expire completed/failed job keys after 24 hours
-    r.expire(job_key, 86400)
-
-    print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
 
 
 async def process_discovery_job(job_data: dict):
