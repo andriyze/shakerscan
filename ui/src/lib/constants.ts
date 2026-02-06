@@ -92,7 +92,14 @@ export const TARGET_SORT_OPTIONS = [
 ] as const
 export type TargetSortOption = typeof TARGET_SORT_OPTIONS[number]['value']
 
-export const AGE_FILTER_OPTIONS = [
+export const LAST_SEEN_OPTIONS = [
+  { value: 7, label: 'Last 7 days' },
+  { value: 30, label: 'Last 30 days' },
+  { value: 60, label: 'Last 60 days' },
+  { value: 90, label: 'Last 90 days' },
+] as const
+
+export const CLEANUP_AGE_OPTIONS = [
   { value: 30, label: '30+ days' },
   { value: 60, label: '60+ days' },
   { value: 90, label: '90+ days' },

@@ -240,7 +240,7 @@ export async function getFindings(params?: {
   scan_id?: string
   target_id?: string
   search?: string
-  not_seen_since_days?: number
+  seen_within_days?: number
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
 }): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
@@ -253,7 +253,7 @@ export async function getFindings(params?: {
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.search) searchParams.set('search', params.search)
-  if (params?.not_seen_since_days) searchParams.set('not_seen_since_days', params.not_seen_since_days.toString())
+  if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 

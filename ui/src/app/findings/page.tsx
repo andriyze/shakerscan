@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
 import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, AGE_FILTER_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
+import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -17,7 +17,7 @@ interface FindingsFilters {
   scan_id?: string
   target_id?: string
   search?: string
-  age?: number
+  last_seen?: number
   sort_by?: string
   sort_order?: string
   page?: number
@@ -47,7 +47,7 @@ function FindingsContent() {
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
   const searchQuery = filters.search || ''
-  const ageFilter = filters.age ? Number(filters.age) : 0
+  const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
   const sortBy = (filters.sort_by || 'severity') as SortOption
   const sortOrder = (filters.sort_order || 'desc') as SortOrder
   // Page is 1-based in URL (page=1 is first page)
@@ -81,7 +81,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, ageFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -93,7 +93,7 @@ function FindingsContent() {
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
         search: searchQuery || undefined,
-        not_seen_since_days: ageFilter || undefined,
+        seen_within_days: lastSeenFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: PAGE_SIZE,
@@ -232,7 +232,7 @@ function FindingsContent() {
                 onChange={(e) => { setCleanupDays(Number(e.target.value)); setCleanupPreview(null) }}
                 className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
               >
-                {AGE_FILTER_OPTIONS.map((opt) => (
+                {CLEANUP_AGE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
               </select>
@@ -313,16 +313,16 @@ function FindingsContent() {
           </div>
         )}
 
-        {/* Age Filter */}
+        {/* Last Seen Filter */}
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Age:</label>
+          <label className="text-sm text-gray-400">Last seen:</label>
           <select
-            value={ageFilter || ''}
-            onChange={(e) => setFilter('age', e.target.value ? Number(e.target.value) : undefined)}
+            value={lastSeenFilter || ''}
+            onChange={(e) => setFilter('last_seen', e.target.value ? Number(e.target.value) : undefined)}
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
-            <option value="">Any age</option>
-            {AGE_FILTER_OPTIONS.map((opt) => (
+            <option value="">All time</option>
+            {LAST_SEEN_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>

@@ -1384,7 +1384,7 @@ async def list_findings(
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     search: Optional[str] = None,
-    not_seen_since_days: Optional[int] = Query(None, ge=1),
+    seen_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
     sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
     limit: int = Query(100, le=500),
@@ -1458,11 +1458,11 @@ async def list_findings(
             param_idx += 1
             count_param_idx += 1
 
-        if not_seen_since_days:
-            query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${param_idx}"
-            count_query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${count_param_idx}"
-            params.append(not_seen_since_days)
-            count_params.append(not_seen_since_days)
+        if seen_within_days:
+            query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
+            count_query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${count_param_idx}"
+            params.append(seen_within_days)
+            count_params.append(seen_within_days)
             param_idx += 1
             count_param_idx += 1
 
