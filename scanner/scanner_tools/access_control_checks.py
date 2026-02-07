@@ -13,6 +13,7 @@ All functions follow async patterns and return structured dictionaries.
 
 import asyncio
 import hashlib
+import json
 import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -1162,6 +1163,9 @@ async def check_bola(
     for endpoint_config in resource_endpoints:
         path_template = endpoint_config.get("path", "")
         ids_to_test = endpoint_config.get("ids", ["1", "2"])
+        endpoint_no_auth_candidates: list[dict[str, Any]] = []
+        endpoint_no_auth_statuses: set[int] = set()
+        endpoint_no_auth_fingerprints: set[str] = set()
 
         for resource_id in ids_to_test:
             # Replace {id} placeholder with actual ID
@@ -1185,31 +1189,22 @@ async def check_bola(
 
             no_auth_status = no_auth_response.get("status_code", 0)
             no_auth_body = no_auth_response.get("body", "")
+            endpoint_no_auth_statuses.add(no_auth_status)
 
             # Check if unauthenticated access returns data
             if no_auth_status == 200 and len(no_auth_body) > 50:
                 # Check if it looks like actual data (not error/login page)
                 if not any(x in no_auth_body.lower() for x in ["login", "sign in", "authenticate", "unauthorized"]):
-                    results["vulnerable"] = True
-                    results["access_violations"] += 1
-                    path_hash = hashlib.sha256(f"{path}:noauth".encode()).hexdigest()[:8]
-                    results["findings"].append({
-                        "id": f"bola:{path_hash}",
-                        "tool": "bola_check",
-                        "title": f"BOLA: Unauthenticated access to {path}",
-                        "severity": "critical",
-                        "evidence": {
+                    endpoint_no_auth_candidates.append(
+                        {
                             "url": url,
+                            "path": path,
                             "resource_id": resource_id,
                             "status_code": no_auth_status,
-                            "response_length": len(no_auth_body),
-                            "response_snippet": no_auth_body[:300],
-                        },
-                        "description": f"Resource at {path} is accessible without authentication.",
-                        "remediation": "Implement proper authentication and authorization. Verify the requesting user owns or has access to the resource.",
-                        "cwe": "CWE-639",
-                        "owasp": "API1:2023 - Broken Object Level Authorization",
-                    })
+                            "body": no_auth_body,
+                        }
+                    )
+                    endpoint_no_auth_fingerprints.add(_response_body_fingerprint(no_auth_body))
 
             # If we have both user sessions, check cross-user access
             if user1_response and user2_response:
@@ -1242,6 +1237,44 @@ async def check_bola(
                             "cwe": "CWE-639",
                             "owasp": "API1:2023 - Broken Object Level Authorization",
                         })
+
+        if endpoint_no_auth_candidates:
+            sample = endpoint_no_auth_candidates[0]
+            sample_body = sample.get("body", "")
+            id_sensitive = _id_parameter_affects_response(
+                status_codes=endpoint_no_auth_statuses,
+                body_fingerprints=endpoint_no_auth_fingerprints,
+                total_ids_tested=len(ids_to_test),
+            )
+            looks_like_resource = _looks_like_bola_resource_response(path_template, sample_body)
+
+            if id_sensitive and looks_like_resource:
+                results["vulnerable"] = True
+                results["access_violations"] += 1
+                path_hash = hashlib.sha256(f"{path_template}:noauth".encode()).hexdigest()[:8]
+                successful_ids = [item["resource_id"] for item in endpoint_no_auth_candidates]
+                results["findings"].append({
+                    "id": f"bola:{path_hash}",
+                    "tool": "bola_check",
+                    "title": f"BOLA: Unauthenticated access to {path_template}",
+                    "severity": "critical",
+                    "evidence": {
+                        "url": sample.get("url"),
+                        "successful_ids": successful_ids[:10],
+                        "successful_count": len(successful_ids),
+                        "status_codes_observed": sorted(endpoint_no_auth_statuses),
+                        "distinct_response_fingerprints": len(endpoint_no_auth_fingerprints),
+                        "response_length": len(sample_body),
+                        "response_snippet": sample_body[:300],
+                    },
+                    "description": (
+                        "Endpoint appears to expose object/resource data without authentication "
+                        "and response behavior changes across tested IDs."
+                    ),
+                    "remediation": "Implement authentication and object-level authorization checks.",
+                    "cwe": "CWE-639",
+                    "owasp": "API1:2023 - Broken Object Level Authorization",
+                })
 
     return results
 
@@ -1295,6 +1328,163 @@ SYNTH_PATH_SEGMENT_EXCLUSIONS = {
     "otp",
     "sso",
 }
+
+BOLA_RESOURCE_PATH_SEGMENTS = {
+    "user", "users", "account", "accounts", "profile", "profiles",
+    "order", "orders", "invoice", "invoices", "document", "documents",
+    "file", "files", "message", "messages", "payment", "payments",
+    "cart", "carts", "basket", "baskets", "customer", "customers",
+    "member", "members", "tenant", "tenants", "project", "projects",
+    "organization", "organizations", "org", "company", "companies",
+}
+
+BOLA_OPERATIONAL_PATH_SEGMENTS = {
+    "health", "healthz", "status", "metrics", "ping", "ready", "live",
+    "version", "heartbeat", "uptime", "rate-limit", "ratelimit",
+    "throttle", "csrf", "captcha", "swagger", "openapi", "docs",
+}
+
+BOLA_OPERATIONAL_KEYS = {
+    "used", "limit", "remaining", "reset", "resetat", "reset_at",
+    "retry_after", "window", "window_seconds", "status", "ok", "success",
+    "message", "timestamp", "time", "server_time", "now", "uptime",
+    "healthy", "health", "code",
+}
+
+BOLA_RESOURCE_STRONG_KEYS = {
+    "user_id", "userid", "owner_id", "ownerid", "account_id", "accountid",
+    "email", "username", "profile", "order_id", "orderid", "invoice_id",
+    "invoiceid", "document_id", "documentid", "payment_id", "paymentid",
+    "customer_id", "customerid", "member_id", "memberid",
+}
+
+BOLA_JSON_ENVELOPE_KEYS = {
+    "id", "status", "message", "code", "ok", "success", "data", "result", "errors",
+}
+
+
+def _collect_json_keys(value: Any, depth: int = 0, max_depth: int = 2) -> set[str]:
+    """Collect lowercase JSON keys from nested objects."""
+    if depth > max_depth:
+        return set()
+
+    keys: set[str] = set()
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if isinstance(key, str):
+                keys.add(key.lower())
+            keys.update(_collect_json_keys(nested, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(value, list):
+        for nested in value[:5]:
+            keys.update(_collect_json_keys(nested, depth=depth + 1, max_depth=max_depth))
+
+    return keys
+
+
+def _extract_json_keys(body: str) -> set[str]:
+    if not body:
+        return set()
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return set()
+    return _collect_json_keys(parsed)
+
+
+def _bola_path_segments(url_or_template: str) -> set[str]:
+    try:
+        path = urlsplit(url_or_template).path.lower()
+    except Exception:
+        path = str(url_or_template).lower()
+    return {segment for segment in path.split("/") if segment}
+
+
+def _is_operational_only_bola_endpoint(url_or_template: str) -> bool:
+    """
+    Return True for endpoints that look operational/public by design
+    (rate-limit, health, metrics, etc.) and not object-resource oriented.
+    """
+    segments = _bola_path_segments(url_or_template)
+    if not segments:
+        return False
+    has_resource_segment = bool(segments & BOLA_RESOURCE_PATH_SEGMENTS)
+    has_operational_segment = bool(segments & BOLA_OPERATIONAL_PATH_SEGMENTS)
+    return has_operational_segment and not has_resource_segment
+
+
+def _looks_like_bola_resource_response(url_or_template: str, body: str) -> bool:
+    """
+    Heuristic: true when response appears to represent object/resource data,
+    not generic operational metadata.
+    """
+    if not body:
+        return False
+
+    if _is_generic_html_page(body):
+        return False
+
+    if _is_operational_only_bola_endpoint(url_or_template):
+        return False
+
+    json_keys = _extract_json_keys(body)
+    path_segments = _bola_path_segments(url_or_template)
+    path_looks_resource = bool(path_segments & BOLA_RESOURCE_PATH_SEGMENTS)
+
+    if json_keys:
+        if json_keys.issubset(BOLA_OPERATIONAL_KEYS):
+            return False
+        if json_keys & BOLA_RESOURCE_STRONG_KEYS:
+            return True
+        if path_looks_resource:
+            non_operational_keys = json_keys - BOLA_OPERATIONAL_KEYS - BOLA_JSON_ENVELOPE_KEYS
+            if non_operational_keys:
+                return True
+            return "id" in json_keys
+        return False
+
+    body_lower = body[:5000].lower()
+    if any(
+        marker in body_lower
+        for marker in (
+            '"user_id"', '"owner_id"', '"account_id"', '"email"',
+            '"username"', '"profile"', '"order_id"', '"invoice_id"',
+            '"document_id"', '"payment_id"',
+        )
+    ):
+        return True
+
+    operational_markers = (
+        "rate limit", "rate_limit", "rate-limit", '"remaining"',
+        '"reset"', '"retry_after"', '"uptime"', '"healthy"',
+    )
+    if any(marker in body_lower for marker in operational_markers):
+        return False
+
+    return path_looks_resource
+
+
+def _response_body_fingerprint(body: str) -> str:
+    if not body:
+        return ""
+    normalized = " ".join(body.split())
+    return hashlib.sha256(normalized[:4000].encode()).hexdigest()
+
+
+def _id_parameter_affects_response(
+    status_codes: set[int],
+    body_fingerprints: set[str],
+    total_ids_tested: int,
+) -> bool:
+    """
+    Returns True when response behavior changes across tested IDs.
+    For single-ID templates (e.g. UUID-only discoveries), allow analysis.
+    """
+    if len(status_codes) > 1:
+        return True
+    if len(body_fingerprints) > 1:
+        return True
+    return total_ids_tested <= 1
 
 
 def _is_probable_id_param(param_name: str) -> bool:
@@ -1486,7 +1676,7 @@ async def smart_bola_test(
     }
 
     def build_headers(session):
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)"}
+        headers = {}
         if session and hasattr(session, 'config'):
             headers.update(session.config.headers or {})
             if session.config.cookies:
@@ -1550,6 +1740,9 @@ async def smart_bola_test(
 
     # Test each unique endpoint template
     for template, info in list(id_endpoints.items())[:max_endpoints]:
+        if _is_operational_only_bola_endpoint(template):
+            continue
+
         results["endpoints_analyzed"] += 1
         pattern_type = info['pattern_type']
         original_ids = list(info['original_ids'])
@@ -1576,6 +1769,10 @@ async def smart_bola_test(
 
         # Deduplicate test IDs
         test_ids = list(dict.fromkeys(test_ids))[:10]
+
+        template_no_auth_candidates: list[dict[str, Any]] = []
+        template_no_auth_statuses: set[int] = set()
+        template_no_auth_fingerprints: set[str] = set()
 
         # Test each ID
         for test_id in test_ids:
@@ -1634,33 +1831,61 @@ async def smart_bola_test(
             no_auth_resp = await fetch_with_capture(test_url, timeout=timeout, budget_key="bola")
             no_auth_status = no_auth_resp.get("status_code", 0)
             no_auth_body = no_auth_resp.get("body", "")
+            template_no_auth_statuses.add(no_auth_status)
 
             # If unauthenticated access returns data
             if no_auth_status == 200 and len(no_auth_body) > 50:
                 # Check if it looks like actual data
                 exclude_patterns = ['login', 'sign in', 'authenticate', 'unauthorized', '<!doctype', '<html']
                 if not any(p in no_auth_body.lower() for p in exclude_patterns):
-                    results["vulnerable"] = True
-                    results["access_violations"] += 1
-                    path_hash = hashlib.sha256(f"{test_url}:noauth".encode()).hexdigest()[:8]
-                    results["findings"].append({
-                        "id": f"smart_bola:{path_hash}",
-                        "tool": "smart_bola",
-                        "title": f"BOLA: Unauthenticated access to {template}",
-                        "severity": "critical",
-                        "evidence": {
+                    template_no_auth_candidates.append(
+                        {
                             "url": test_url,
                             "test_id": test_id,
-                            "pattern_type": pattern_type,
                             "status_code": no_auth_status,
-                            "response_length": len(no_auth_body),
-                            "response_snippet": no_auth_body[:300],
-                        },
-                        "description": f"Resource with ID {test_id} is accessible without authentication.",
-                        "remediation": "Require authentication for all resource access. Implement proper authorization.",
-                        "cwe": "CWE-639",
-                        "owasp": "API1:2023 - Broken Object Level Authorization",
-                    })
+                            "body": no_auth_body,
+                        }
+                    )
+                    template_no_auth_fingerprints.add(_response_body_fingerprint(no_auth_body))
+
+        if template_no_auth_candidates:
+            sample = template_no_auth_candidates[0]
+            sample_body = sample.get("body", "")
+            id_sensitive = _id_parameter_affects_response(
+                status_codes=template_no_auth_statuses,
+                body_fingerprints=template_no_auth_fingerprints,
+                total_ids_tested=len(test_ids),
+            )
+            looks_like_resource = _looks_like_bola_resource_response(template, sample_body)
+
+            if id_sensitive and looks_like_resource:
+                results["vulnerable"] = True
+                results["access_violations"] += 1
+                path_hash = hashlib.sha256(f"{template}:noauth".encode()).hexdigest()[:8]
+                successful_ids = [item["test_id"] for item in template_no_auth_candidates]
+                results["findings"].append({
+                    "id": f"smart_bola:{path_hash}",
+                    "tool": "smart_bola",
+                    "title": f"BOLA: Unauthenticated access to {template}",
+                    "severity": "critical",
+                    "evidence": {
+                        "url": sample.get("url"),
+                        "pattern_type": pattern_type,
+                        "successful_ids": successful_ids[:10],
+                        "successful_count": len(successful_ids),
+                        "status_codes_observed": sorted(template_no_auth_statuses),
+                        "distinct_response_fingerprints": len(template_no_auth_fingerprints),
+                        "response_length": len(sample_body),
+                        "response_snippet": sample_body[:300],
+                    },
+                    "description": (
+                        "Endpoint appears to expose object/resource data without authentication "
+                        "and response behavior changes across tested IDs."
+                    ),
+                    "remediation": "Require authentication and enforce object-level authorization checks.",
+                    "cwe": "CWE-639",
+                    "owasp": "API1:2023 - Broken Object Level Authorization",
+                })
 
         # Test method variations (PUT, DELETE, PATCH on GET endpoints)
         if user1_headers and results["endpoints_analyzed"] <= 10:  # Limit method testing
@@ -1799,6 +2024,9 @@ async def check_bola_multi_user(
     for endpoint_config in resource_endpoints:
         path_template = endpoint_config.get("path", "")
         ids_to_test = endpoint_config.get("ids", ["1", "2", "3"])
+        endpoint_no_auth_candidates: list[dict[str, Any]] = []
+        endpoint_no_auth_statuses: set[int] = set()
+        endpoint_no_auth_fingerprints: set[str] = set()
 
         for resource_id in ids_to_test:
             path = path_template.replace("{id}", str(resource_id))
@@ -1832,28 +2060,20 @@ async def check_bola_multi_user(
             unauth_response = user_responses[0]
             unauth_status = unauth_response.get("status_code", 0)
             unauth_body = unauth_response.get("body", "")
+            endpoint_no_auth_statuses.add(unauth_status)
 
             if unauth_status == 200 and len(unauth_body) > 50:
                 if not any(x in unauth_body.lower() for x in ["login", "sign in", "authenticate", "unauthorized"]):
-                    results["vulnerable"] = True
-                    results["access_violations"] += 1
-                    path_hash = hashlib.sha256(f"{path}:noauth:multi".encode()).hexdigest()[:8]
-                    results["findings"].append({
-                        "id": f"bola_multi:{path_hash}",
-                        "tool": "bola_multi_user",
-                        "title": f"BOLA: Unauthenticated access to {path}",
-                        "severity": "critical",
-                        "evidence": {
+                    endpoint_no_auth_candidates.append(
+                        {
                             "url": url,
+                            "path": path,
                             "resource_id": resource_id,
                             "status_code": unauth_status,
-                            "response_length": len(unauth_body),
-                        },
-                        "description": f"Resource at {path} accessible without authentication.",
-                        "remediation": "Implement authentication and object-level authorization.",
-                        "cwe": "CWE-639",
-                        "owasp": "API1:2023 - Broken Object Level Authorization",
-                    })
+                            "body": unauth_body,
+                        }
+                    )
+                    endpoint_no_auth_fingerprints.add(_response_body_fingerprint(unauth_body))
 
             # Check 2: Cross-user access (any authenticated user accessing another's resources)
             authenticated_responses = user_responses[1:]  # Skip unauthenticated
@@ -1924,6 +2144,43 @@ async def check_bola_multi_user(
                             "cwe": "CWE-639",
                             "owasp": "API1:2023 - Broken Object Level Authorization",
                         })
+
+        if endpoint_no_auth_candidates:
+            sample = endpoint_no_auth_candidates[0]
+            sample_body = sample.get("body", "")
+            id_sensitive = _id_parameter_affects_response(
+                status_codes=endpoint_no_auth_statuses,
+                body_fingerprints=endpoint_no_auth_fingerprints,
+                total_ids_tested=len(ids_to_test),
+            )
+            looks_like_resource = _looks_like_bola_resource_response(path_template, sample_body)
+
+            if id_sensitive and looks_like_resource:
+                results["vulnerable"] = True
+                results["access_violations"] += 1
+                path_hash = hashlib.sha256(f"{path_template}:noauth:multi".encode()).hexdigest()[:8]
+                successful_ids = [item["resource_id"] for item in endpoint_no_auth_candidates]
+                results["findings"].append({
+                    "id": f"bola_multi:{path_hash}",
+                    "tool": "bola_multi_user",
+                    "title": f"BOLA: Unauthenticated access to {path_template}",
+                    "severity": "critical",
+                    "evidence": {
+                        "url": sample.get("url"),
+                        "successful_ids": successful_ids[:10],
+                        "successful_count": len(successful_ids),
+                        "status_codes_observed": sorted(endpoint_no_auth_statuses),
+                        "distinct_response_fingerprints": len(endpoint_no_auth_fingerprints),
+                        "response_length": len(sample_body),
+                    },
+                    "description": (
+                        "Endpoint appears to expose object/resource data without authentication "
+                        "and response behavior changes across tested IDs."
+                    ),
+                    "remediation": "Implement authentication and object-level authorization checks.",
+                    "cwe": "CWE-639",
+                    "owasp": "API1:2023 - Broken Object Level Authorization",
+                })
 
     return results
 
