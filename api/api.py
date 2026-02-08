@@ -1940,6 +1940,47 @@ async def enqueue_finding_retest(
     return retest_id, job_id
 
 
+async def mark_retest_enqueue_failed(
+    conn,
+    *,
+    verification_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    error_message: str,
+):
+    """Mark a queued retest as failed when it cannot be enqueued to Redis."""
+    reason = (error_message or "Queue enqueue failed").strip()
+    await conn.execute(
+        """
+        UPDATE finding_verifications
+        SET status = 'failed',
+            result_status = 'error',
+            verdict = 'error',
+            verdict_reason = $2,
+            attempts_exhausted = TRUE,
+            retry_class = 'transient',
+            retryable = FALSE,
+            error_message = $2,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        verification_id,
+        reason,
+    )
+    await conn.execute(
+        """
+        UPDATE findings
+        SET last_verification_status = 'error',
+            last_verification_verdict = 'error',
+            last_verification_confidence = NULL,
+            last_verified_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        """,
+        finding_id,
+    )
+
+
 @app.get("/findings")
 async def list_findings(
     severity: Optional[str] = None,
@@ -2120,6 +2161,10 @@ async def retest_finding(
     """
     request = request or FindingRetestRequest()
     r = get_redis()
+    try:
+        r.ping()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Retest queue unavailable: {e}")
 
     async with db_pool.acquire() as conn:
         finding = await get_finding_record(conn, finding_id)
@@ -2173,6 +2218,13 @@ async def retest_finding(
         job_data["mode"] = mode
     valid, reason = validate_retest_job_payload(job_data)
     if not valid:
+        async with db_pool.acquire() as conn:
+            await mark_retest_enqueue_failed(
+                conn,
+                verification_id=retest_id,
+                finding_id=finding_data["id"],
+                error_message=f"Retest job payload failed contract validation: {reason}",
+            )
         raise HTTPException(
             status_code=500,
             detail={
@@ -2181,14 +2233,31 @@ async def retest_finding(
                 "reason": reason,
             },
         )
-    r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
-    r.hset(f"retest_job:{job_id}", mapping={
-        "status": "queued",
-        "verification_id": str(retest_id),
-        "finding_id": str(finding_data["id"]),
-        "queue_schema_version": str(job_data.get("queue_schema_version", "")),
-    })
-    r.expire(f"retest_job:{job_id}", 86400)
+    try:
+        r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+    except Exception as e:
+        async with db_pool.acquire() as conn:
+            await mark_retest_enqueue_failed(
+                conn,
+                verification_id=retest_id,
+                finding_id=finding_data["id"],
+                error_message=f"Retest queue enqueue failed: {type(e).__name__}: {e}",
+            )
+        raise HTTPException(status_code=503, detail=f"Retest queue unavailable: {e}")
+    try:
+        r.hset(
+            f"retest_job:{job_id}",
+            mapping={
+                "status": "queued",
+                "verification_id": str(retest_id),
+                "finding_id": str(finding_data["id"]),
+                "queue_schema_version": str(job_data.get("queue_schema_version", "")),
+            },
+        )
+        r.expire(f"retest_job:{job_id}", 86400)
+    except Exception:
+        # Non-critical metadata cache write; queue already has the job.
+        pass
 
     return {
         "retest_id": str(retest_id),
@@ -2254,6 +2323,11 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
         raise HTTPException(status_code=400, detail="mode must be 'ai' or 'deterministic'")
 
     r = get_redis()
+    try:
+        r.ping()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Retest queue unavailable: {e}")
+
     queued: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
 
@@ -2341,7 +2415,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
             params.append(request.limit)
             findings = await conn.fetch(query, *params)
 
-        for row in findings:
+        queue_failed_at: int | None = None
+        queue_error: str | None = None
+        for idx, row in enumerate(findings):
             finding_data = dict(row)
             retest_inputs = extract_retest_inputs(
                 finding_data,
@@ -2379,19 +2455,47 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 job_data["mode"] = request.mode
             valid, reason = validate_retest_job_payload(job_data)
             if not valid:
+                await mark_retest_enqueue_failed(
+                    conn,
+                    verification_id=retest_id,
+                    finding_id=finding_data["id"],
+                    error_message=f"Retest job payload failed contract validation: {reason}",
+                )
                 skipped.append({
                     "finding_id": str(finding_data["id"]),
                     "reason": f"invalid_job_payload:{reason}",
                 })
                 continue
-            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
-            r.hset(f"retest_job:{job_id}", mapping={
-                "status": "queued",
-                "verification_id": str(retest_id),
-                "finding_id": str(finding_data["id"]),
-                "queue_schema_version": str(job_data.get("queue_schema_version", "")),
-            })
-            r.expire(f"retest_job:{job_id}", 86400)
+            try:
+                r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+            except Exception as e:
+                await mark_retest_enqueue_failed(
+                    conn,
+                    verification_id=retest_id,
+                    finding_id=finding_data["id"],
+                    error_message=f"Retest queue enqueue failed: {type(e).__name__}: {e}",
+                )
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "queue_unavailable",
+                })
+                queue_failed_at = idx
+                queue_error = f"{type(e).__name__}: {e}"
+                break
+            try:
+                r.hset(
+                    f"retest_job:{job_id}",
+                    mapping={
+                        "status": "queued",
+                        "verification_id": str(retest_id),
+                        "finding_id": str(finding_data["id"]),
+                        "queue_schema_version": str(job_data.get("queue_schema_version", "")),
+                    },
+                )
+                r.expire(f"retest_job:{job_id}", 86400)
+            except Exception:
+                # Non-critical metadata cache write; queue already has the job.
+                pass
 
             queued.append({
                 "finding_id": str(finding_data["id"]),
@@ -2400,6 +2504,15 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 "finding_type": retest_inputs["finding_type"],
                 "replay_commands": build_replay_commands(retest_inputs),
             })
+
+        if queue_failed_at is not None:
+            for remaining in findings[queue_failed_at + 1:]:
+                skipped.append({
+                    "finding_id": str(remaining["id"]),
+                    "reason": "queue_unavailable",
+                })
+            if not queued:
+                raise HTTPException(status_code=503, detail=f"Retest queue unavailable: {queue_error or 'unknown error'}")
 
     return {
         "status": "queued",

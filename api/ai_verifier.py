@@ -18,6 +18,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 try:
     import aiohttp
@@ -49,6 +50,45 @@ MAX_RESPONSE_SNIPPET = 4000
 # Finding types we support for AI verification
 AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect", "cors"}
 
+# Enforce safe, same-origin HTTP replay behavior for AI-generated steps.
+ALLOWED_HTTP_METHODS = {"GET", "POST", "HEAD", "OPTIONS"}
+ALLOWED_STEP_SCHEMES = {"http", "https"}
+
+_REDACT_BODY_FN = None
+_REDACT_BODY_LOADED = False
+
+SENSITIVE_QUERY_KEYS = (
+    "token",
+    "key",
+    "secret",
+    "password",
+    "passwd",
+    "auth",
+    "session",
+    "jwt",
+    "cookie",
+)
+SENSITIVE_OBJECT_KEYS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "session",
+    "jwt",
+    "auth",
+)
+FALLBACK_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(api[_-]?key|apikey)[\"'=\s:]+[A-Za-z0-9_\-]{10,}", re.I), r"\1=[REDACTED]"),
+    (re.compile(r"(secret|token|password|passwd|pwd)[\"'=\s:]+[^\s\"'<>]{6,}", re.I), r"\1=[REDACTED]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+"), "[REDACTED_JWT]"),
+    (re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"), "[REDACTED_EMAIL]"),
+)
+
 
 # ---------------------------------------------------------------------------
 # LLM call helper (reuses ai_classifier.py patterns)
@@ -67,6 +107,141 @@ def _load_shared_call_ai_provider():
         except Exception as exc:
             import_errors.append(f"{module_name}: {type(exc).__name__}")
     return None, "; ".join(import_errors) if import_errors else "call_ai_provider not found"
+
+
+def _load_redact_body_function():
+    """Load shared response-body redactor from ai_classifier when available."""
+    global _REDACT_BODY_FN, _REDACT_BODY_LOADED
+    if _REDACT_BODY_LOADED:
+        return _REDACT_BODY_FN
+    _REDACT_BODY_LOADED = True
+    for module_name in ("scanner_tools.ai_classifier", "scanner.scanner_tools.ai_classifier"):
+        try:
+            module = importlib.import_module(module_name)
+            fn = getattr(module, "redact_response_body", None)
+            if callable(fn):
+                _REDACT_BODY_FN = fn
+                break
+        except Exception:
+            continue
+    return _REDACT_BODY_FN
+
+
+def _fallback_redact_text(value: str) -> str:
+    redacted = value
+    for pattern, replacement in FALLBACK_REDACTION_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def _redact_text_for_ai(value: Any) -> str:
+    if value is None:
+        return ""
+    raw = str(value)
+    if not raw:
+        return ""
+    shared_fn = _load_redact_body_function()
+    if callable(shared_fn):
+        try:
+            return str(shared_fn(raw))
+        except Exception:
+            pass
+    return _fallback_redact_text(raw)
+
+
+def _redact_url_for_ai(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return _redact_text_for_ai(url)
+    if not parsed.query:
+        return url
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    sanitized_pairs: list[tuple[str, str]] = []
+    for key, val in query_pairs:
+        lowered = key.lower()
+        if any(s in lowered for s in SENSITIVE_QUERY_KEYS):
+            sanitized_pairs.append((key, "[REDACTED]"))
+        else:
+            sanitized_pairs.append((key, val))
+    sanitized_query = urlencode(sanitized_pairs, doseq=True)
+    return urlunparse(parsed._replace(query=sanitized_query))
+
+
+def _redact_object_for_ai(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for key, value in obj.items():
+            key_str = str(key)
+            lowered = key_str.lower()
+            if any(s in lowered for s in SENSITIVE_OBJECT_KEYS):
+                out[key_str] = "[REDACTED]"
+            else:
+                out[key_str] = _redact_object_for_ai(value)
+        return out
+    if isinstance(obj, list):
+        return [_redact_object_for_ai(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_redact_object_for_ai(item) for item in obj)
+    if isinstance(obj, str):
+        return _redact_text_for_ai(obj)
+    return obj
+
+
+def _effective_port(parsed) -> int | None:
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def _resolve_and_validate_step_url(step_url: str, base_url: str) -> tuple[str | None, str | None]:
+    """
+    Resolve a possibly relative step URL and enforce same-origin policy.
+
+    This prevents LLM-generated plans from sending verification traffic to
+    off-target hosts or alternate schemes/ports.
+    """
+    base_candidate = base_url if "://" in (base_url or "") else f"https://{base_url}"
+    try:
+        base_parsed = urlparse(base_candidate)
+    except Exception:
+        return None, "Invalid base URL"
+
+    if base_parsed.scheme not in ALLOWED_STEP_SCHEMES or not base_parsed.hostname:
+        return None, "Invalid base URL for verification"
+
+    raw_step = (step_url or "/").strip() or "/"
+    if raw_step.startswith(("http://", "https://")):
+        resolved = raw_step
+    else:
+        resolved = urljoin(base_candidate.rstrip("/") + "/", raw_step)
+
+    try:
+        parsed = urlparse(resolved)
+    except Exception:
+        return None, "Invalid step URL"
+
+    if parsed.scheme not in ALLOWED_STEP_SCHEMES:
+        return None, f"Disallowed step URL scheme: {parsed.scheme or 'missing'}"
+    if not parsed.hostname:
+        return None, "Step URL missing host"
+
+    if parsed.hostname.lower() != base_parsed.hostname.lower():
+        return None, "Blocked cross-origin step URL"
+
+    if _effective_port(parsed) != _effective_port(base_parsed):
+        return None, "Blocked cross-origin step URL (port mismatch)"
+
+    if parsed.scheme != base_parsed.scheme:
+        return None, "Blocked cross-origin step URL (scheme mismatch)"
+
+    return urlunparse(parsed._replace(fragment="")), None
 
 
 async def _call_llm(
@@ -216,7 +391,7 @@ def _build_plan_prompt(finding: dict[str, Any], auth_context: dict[str, str] | N
 
     payload = evidence.get("payload") or finding.get("payload")
     if payload:
-        parts.append(f"**Original payload:** {payload}")
+        parts.append(f"**Original payload:** {_redact_text_for_ai(payload)}")
 
     method = evidence.get("method") or finding.get("method")
     if method:
@@ -225,11 +400,13 @@ def _build_plan_prompt(finding: dict[str, Any], auth_context: dict[str, str] | N
     # Response snippet from evidence
     response_snippet = evidence.get("response_snippet") or evidence.get("response")
     if response_snippet:
-        parts.append(f"\n**Response snippet:**\n```\n{str(response_snippet)[:2000]}\n```")
+        redacted_snippet = _redact_text_for_ai(response_snippet)
+        parts.append(f"\n**Response snippet:**\n```\n{redacted_snippet[:2000]}\n```")
 
     detail = evidence.get("detail")
     if isinstance(detail, dict):
-        parts.append(f"\n**Detail:** {json.dumps(detail, indent=2)[:2000]}")
+        safe_detail = _redact_object_for_ai(detail)
+        parts.append(f"\n**Detail:** {json.dumps(safe_detail, indent=2)[:2000]}")
 
     # Auth info
     if auth_context:
@@ -282,11 +459,12 @@ def _build_classify_prompt(
     for i, sr in enumerate(step_results):
         step = sr.get("step", {})
         result = sr.get("result", {})
+        safe_step_url = _redact_url_for_ai(str(step.get("url", "?")))
         parts.append(f"### Step {i+1}: {step.get('description', 'unknown')}")
-        parts.append(f"- **Request:** {step.get('method', 'GET')} {step.get('url', '?')}")
+        parts.append(f"- **Request:** {step.get('method', 'GET')} {safe_step_url}")
         parts.append(f"- **Status:** {result.get('status_code', 'N/A')}")
 
-        body = str(result.get("body", ""))[:MAX_RESPONSE_SNIPPET]
+        body = _redact_text_for_ai(result.get("body", ""))[:MAX_RESPONSE_SNIPPET]
         if body:
             parts.append(f"- **Response (truncated):**\n```\n{body}\n```")
 
@@ -325,16 +503,21 @@ async def _execute_http_step(
     except ImportError:
         return {"error": "proof_of_exploit module not available", "status_code": 0, "body": ""}
 
-    method = step.get("method", "GET").upper()
-    step_url = step.get("url", "")
+    method = str(step.get("method", "GET")).upper()
+    if method not in ALLOWED_HTTP_METHODS:
+        return {
+            "error": f"Disallowed HTTP method for AI verification: {method}",
+            "status_code": 0,
+            "body": "",
+        }
 
-    # Resolve relative URLs against base
-    if step_url.startswith("/"):
-        from urllib.parse import urlparse, urlunparse
-        parsed_base = urlparse(base_url)
-        step_url = urlunparse(parsed_base._replace(path=step_url.split("?")[0], query=step_url.split("?")[1] if "?" in step_url else ""))
-    elif not step_url.startswith("http"):
-        step_url = base_url.rstrip("/") + "/" + step_url.lstrip("/")
+    resolved_url, url_error = _resolve_and_validate_step_url(str(step.get("url", "") or "/"), base_url)
+    if url_error or not resolved_url:
+        return {
+            "error": url_error or "Invalid step URL",
+            "status_code": 0,
+            "body": "",
+        }
 
     body_data = step.get("body")
     headers = dict(auth_headers)  # copy
@@ -352,7 +535,7 @@ async def _execute_http_step(
         headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     result = await fetch_with_capture(
-        step_url,
+        resolved_url,
         method=method,
         data=body_data,
         headers=headers if headers else None,
@@ -579,8 +762,8 @@ def _sanitize_step_results(step_results: list[dict[str, Any]]) -> list[dict[str,
         result = sr.get("result", {})
         clean["result"]["status_code"] = result.get("status_code")
         clean["result"]["elapsed_ms"] = result.get("elapsed_ms")
-        clean["result"]["error"] = result.get("error")
-        body = str(result.get("body", ""))
+        clean["result"]["error"] = _redact_text_for_ai(result.get("error"))
+        body = _redact_text_for_ai(result.get("body", ""))
         clean["result"]["body_preview"] = body[:MAX_RESPONSE_SNIPPET] if body else ""
         sanitized.append(clean)
     return sanitized

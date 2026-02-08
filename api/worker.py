@@ -1131,6 +1131,10 @@ async def process_finding_retest_job(job_data: dict):
             r.expire(retest_key, 86400)
             async with db_pool.acquire() as conn:
                 try:
+                    finding_uuid = uuid.UUID(str(job_data.get("finding_id")))
+                except Exception:
+                    finding_uuid = None
+                try:
                     await conn.execute("""
                         UPDATE finding_verifications
                         SET status = 'failed',
@@ -1146,6 +1150,20 @@ async def process_finding_retest_job(job_data: dict):
                             updated_at = NOW()
                         WHERE id = $1
                     """, uuid.UUID(verification_id), attempt)
+                    if finding_uuid is not None:
+                        await conn.execute(
+                            """
+                            UPDATE findings
+                            SET last_verification_status = 'error',
+                                last_verification_verdict = 'error',
+                                last_verification_confidence = NULL,
+                                last_verified_at = NOW(),
+                                verification_count = COALESCE(verification_count, 0) + 1,
+                                updated_at = NOW()
+                            WHERE id = $1
+                            """,
+                            finding_uuid,
+                        )
                 except Exception:
                     pass
             print(
