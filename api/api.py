@@ -29,6 +29,15 @@ try:
 except ImportError:
     from scanner.constants import SMART_SCAN_BUDGETS
 
+from retest_contract import (
+    DEFAULT_REPLAY_PAYLOADS,
+    SUPPORTED_RETEST_TYPES,
+    SUPPORTED_RETEST_VERDICTS,
+    build_retest_job_payload,
+    normalize_retest_type,
+    validate_retest_job_payload,
+)
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -85,47 +94,6 @@ def generate_finding_fingerprint(finding: dict) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
-SUPPORTED_RETEST_TYPES = ("xss", "sqli", "ssrf", "path_traversal")
-SUPPORTED_RETEST_VERDICTS = (
-    "exploited",
-    "blocked_by_security",
-    "out_of_scope_internal",
-    "false_positive",
-    "likely_fixed",
-    "inconclusive",
-    "error",
-)
-RETEST_TYPE_ALIASES = {
-    "xss": "xss",
-    "cross-site-scripting": "xss",
-    "cross_site_scripting": "xss",
-    "sqli": "sqli",
-    "sql-injection": "sqli",
-    "sql_injection": "sqli",
-    "ssrf": "ssrf",
-    "server-side-request-forgery": "ssrf",
-    "server_side_request_forgery": "ssrf",
-    "path_traversal": "path_traversal",
-    "path-traversal": "path_traversal",
-    "lfi": "path_traversal",
-    "local-file-inclusion": "path_traversal",
-}
-
-DEFAULT_REPLAY_PAYLOADS = {
-    "xss": "<script>alert(1)</script>",
-    "sqli": "' OR '1'='1",
-    "ssrf": "http://127.0.0.1:80/",
-    "path_traversal": "../../../etc/passwd",
-}
-
-
-def normalize_retest_type(value: str | None) -> str | None:
-    if not value:
-        return None
-    key = str(value).strip().lower()
-    return RETEST_TYPE_ALIASES.get(key)
-
-
 def parse_json_field(value: Any) -> dict[str, Any]:
     if not value:
         return {}
@@ -161,6 +129,10 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
         return "ssrf"
     if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
         return "path_traversal"
+    if "open redirect" in title or "url redirect" in title:
+        return "open_redirect"
+    if "cors" in title:
+        return "cors"
 
     return None
 
@@ -318,6 +290,10 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
                 proof JSONB,
                 artifacts JSONB,
                 confidence NUMERIC(3,2),
+                attempt_count INTEGER DEFAULT 0,
+                attempts_exhausted BOOLEAN DEFAULT FALSE,
+                retry_class TEXT,
+                retryable BOOLEAN DEFAULT FALSE,
                 message TEXT,
                 error_message TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -331,7 +307,26 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
             ADD COLUMN IF NOT EXISTS verdict TEXT,
             ADD COLUMN IF NOT EXISTS verdict_reason TEXT,
             ADD COLUMN IF NOT EXISTS replay_commands JSONB,
-            ADD COLUMN IF NOT EXISTS artifacts JSONB
+            ADD COLUMN IF NOT EXISTS artifacts JSONB,
+            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS attempts_exhausted BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS retry_class TEXT,
+            ADD COLUMN IF NOT EXISTS retryable BOOLEAN DEFAULT FALSE
+        """)
+        await conn.execute("""
+            UPDATE finding_verifications
+            SET attempt_count = 0
+            WHERE attempt_count IS NULL
+        """)
+        await conn.execute("""
+            UPDATE finding_verifications
+            SET attempts_exhausted = FALSE
+            WHERE attempts_exhausted IS NULL
+        """)
+        await conn.execute("""
+            UPDATE finding_verifications
+            SET retryable = FALSE
+            WHERE retryable IS NULL
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_findings_last_verified_at
@@ -362,6 +357,11 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
             CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id
             ON finding_verifications(job_id)
             WHERE job_id IS NOT NULL
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_retry_class
+            ON finding_verifications(retry_class)
+            WHERE retry_class IS NOT NULL
         """)
 
 
@@ -864,6 +864,10 @@ class ScanOptions(BaseModel):
     # Format: "METHOD /path params" or just "/path"
     # Examples: "POST /api/login username,password", "/api/users", "GET /api/items?id=1"
     custom_endpoints: Optional[list[str]] = None
+    auth_scenario_json: Optional[str] = None  # JSON auth DSL with login flow/success condition/TOTP secret
+    focus_rules_json: Optional[str] = None  # JSON array of scope focus rules
+    avoid_rules_json: Optional[str] = None  # JSON array of scope avoid rules
+    verified_findings_only: bool = False
 
     # Smart scan tuning options
     no_early_stop: bool = False                    # Disable early stopping in smart scan
@@ -920,7 +924,7 @@ class FindingUpdate(BaseModel):
 
 
 class FindingRetestRequest(BaseModel):
-    finding_type: Optional[str] = None  # xss, sqli, ssrf, path_traversal
+    finding_type: Optional[str] = None  # xss, sqli, ssrf, path_traversal, open_redirect, cors
     target: Optional[str] = None
     original_url: Optional[str] = None
     param: Optional[str] = None
@@ -1276,7 +1280,7 @@ async def list_scans(
 
 
 @app.get("/scans/{scan_id}")
-async def get_scan(scan_id: str):
+async def get_scan(scan_id: str, verified_only: bool = False):
     """Get scan details."""
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow("""
@@ -1291,8 +1295,9 @@ async def get_scan(scan_id: str):
 
         # Get findings for this scan
         findings = await conn.fetch("""
-            SELECT id, title, severity, cvss_score, status, tool, url
+            SELECT id, title, severity, cvss_score, status, tool, url, last_verification_verdict
             FROM findings WHERE scan_id = $1
+            AND ($2::boolean = false OR last_verification_verdict = 'exploited')
             ORDER BY
                 CASE severity
                     WHEN 'critical' THEN 1
@@ -1301,7 +1306,7 @@ async def get_scan(scan_id: str):
                     WHEN 'low' THEN 4
                     ELSE 5
                 END
-        """, uuid.UUID(scan_id))
+        """, uuid.UUID(scan_id), verified_only)
 
     result = dict(scan)
     result['findings'] = [dict(f) for f in findings]
@@ -1753,6 +1758,8 @@ async def list_findings(
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
+    verification_verdict: Optional[str] = Query(None, regex="^(exploited|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verified_only: bool = False,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
@@ -1818,6 +1825,18 @@ async def list_findings(
             count_params.append(root_domain)
             param_idx += 1
             count_param_idx += 1
+
+        if verification_verdict:
+            query += f" AND f.last_verification_verdict = ${param_idx}"
+            count_query += f" AND f.last_verification_verdict = ${count_param_idx}"
+            params.append(verification_verdict)
+            count_params.append(verification_verdict)
+            param_idx += 1
+            count_param_idx += 1
+
+        if verified_only:
+            query += " AND f.last_verification_verdict = 'exploited'"
+            count_query += " AND f.last_verification_verdict = 'exploited'"
 
         if search:
             search_pattern = f"%{search}%"
@@ -1911,7 +1930,7 @@ async def retest_finding(finding_id: str, request: FindingRetestRequest | None =
                 status_code=400,
                 detail={
                     "error": "unsupported_finding_type",
-                    "message": "Could not infer retest type from finding. Supported types: xss, sqli, ssrf, path_traversal",
+                    "message": "Could not infer retest type from finding.",
                     "supported_types": list(SUPPORTED_RETEST_TYPES),
                 },
             )
@@ -1929,18 +1948,29 @@ async def retest_finding(finding_id: str, request: FindingRetestRequest | None =
             requested_by=request.requested_by or "api",
         )
 
-    job_data = {
-        "type": "finding_retest",
-        "job_id": job_id,
-        "verification_id": str(retest_id),
-        "finding_id": str(finding_data["id"]),
-        "submitted_at": datetime.utcnow().isoformat(),
-    }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    job_data = build_retest_job_payload(
+        job_id=job_id,
+        verification_id=str(retest_id),
+        finding_id=str(finding_data["id"]),
+        submitted_at=datetime.utcnow().isoformat(),
+        trigger=request.requested_by or "api",
+    )
+    valid, reason = validate_retest_job_payload(job_data)
+    if not valid:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "invalid_retest_job_payload",
+                "message": "Retest job payload failed contract validation",
+                "reason": reason,
+            },
+        )
+    r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
     r.hset(f"retest_job:{job_id}", mapping={
         "status": "queued",
         "verification_id": str(retest_id),
         "finding_id": str(finding_data["id"]),
+        "queue_schema_version": str(job_data.get("queue_schema_version", "")),
     })
     r.expire(f"retest_job:{job_id}", 86400)
 
@@ -2118,18 +2148,26 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 requested_by=request.requested_by or "api",
             )
 
-            job_data = {
-                "type": "finding_retest",
-                "job_id": job_id,
-                "verification_id": str(retest_id),
-                "finding_id": str(finding_data["id"]),
-                "submitted_at": datetime.utcnow().isoformat(),
-            }
+            job_data = build_retest_job_payload(
+                job_id=job_id,
+                verification_id=str(retest_id),
+                finding_id=str(finding_data["id"]),
+                submitted_at=datetime.utcnow().isoformat(),
+                trigger=request.requested_by or "api",
+            )
+            valid, reason = validate_retest_job_payload(job_data)
+            if not valid:
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": f"invalid_job_payload:{reason}",
+                })
+                continue
             r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
             r.hset(f"retest_job:{job_id}", mapping={
                 "status": "queued",
                 "verification_id": str(retest_id),
                 "finding_id": str(finding_data["id"]),
+                "queue_schema_version": str(job_data.get("queue_schema_version", "")),
             })
             r.expire(f"retest_job:{job_id}", 86400)
 

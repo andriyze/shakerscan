@@ -157,7 +157,7 @@ CREATE TABLE finding_verifications (
     verdict_reason TEXT,
 
     -- Retest inputs
-    finding_type TEXT NOT NULL,  -- xss, sqli, ssrf, path_traversal
+    finding_type TEXT NOT NULL,  -- xss, sqli, ssrf, path_traversal, open_redirect, cors
     target_url TEXT NOT NULL,
     original_url TEXT,
     param TEXT,
@@ -170,6 +170,10 @@ CREATE TABLE finding_verifications (
     proof JSONB,
     artifacts JSONB,
     confidence NUMERIC(3,2),
+    attempt_count INTEGER DEFAULT 0,
+    attempts_exhausted BOOLEAN DEFAULT FALSE,
+    retry_class TEXT,
+    retryable BOOLEAN DEFAULT FALSE,
     message TEXT,
     error_message TEXT,
 
@@ -270,6 +274,7 @@ CREATE INDEX idx_finding_verifications_status ON finding_verifications(status);
 CREATE INDEX idx_finding_verifications_result_status ON finding_verifications(result_status);
 CREATE INDEX idx_finding_verifications_verdict ON finding_verifications(verdict);
 CREATE INDEX idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX idx_finding_verifications_retry_class ON finding_verifications(retry_class) WHERE retry_class IS NOT NULL;
 
 -- Discovery
 CREATE INDEX idx_discovery_root_domain ON discovery_runs(root_domain);
