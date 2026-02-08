@@ -33,8 +33,13 @@ from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
     SUPPORTED_RETEST_VERDICTS,
+    build_replay_commands,
     build_retest_job_payload,
+    extract_auth_context,
+    infer_retest_inputs,
     normalize_retest_type,
+    parse_json_field,
+    run_schema_migrations,
     validate_retest_job_payload,
 )
 
@@ -92,20 +97,6 @@ def generate_finding_fingerprint(finding: dict) -> str:
     ]
     key_string = '|'.join(str(p) for p in key_parts)
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
-
-
-def parse_json_field(value: Any) -> dict[str, Any]:
-    if not value:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
 
 
 def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
@@ -170,48 +161,6 @@ def extract_retest_inputs(
     }
 
 
-def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
-    """Generate copy/paste replay commands for manual validation."""
-    finding_type = str(inputs.get("finding_type") or "").strip().lower()
-    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
-    method = str(inputs.get("method") or "GET").strip().upper()
-    param = str(inputs.get("param") or "").strip()
-    payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
-
-    if not target_url:
-        return []
-
-    commands: list[str] = []
-    quoted_url = urllib.parse.quote(target_url, safe=":/?&=%#.-_~")
-
-    # Baseline request for easy comparison.
-    commands.append(f"curl -i -k '{quoted_url}'")
-
-    if param:
-        if method == "POST":
-            commands.append(
-                "curl -i -k -X POST "
-                f"'{quoted_url}' "
-                "-H 'Content-Type: application/x-www-form-urlencoded' "
-                f"--data-urlencode '{param}={payload}'"
-            )
-        else:
-            parsed = urllib.parse.urlparse(target_url)
-            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            q[param] = [payload]
-            injected_query = urllib.parse.urlencode(q, doseq=True)
-            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
-            commands.append(f"curl -i -k '{injected_url}'")
-    else:
-        commands.append(
-            "curl -i -k -X POST "
-            f"'{quoted_url}' "
-            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
-        )
-
-    return commands
-
-
 async def get_finding_record(conn, finding_id: str):
     """Fetch finding by UUID or fingerprint (with backward-compatible suffix lookup)."""
     finding = None
@@ -253,116 +202,7 @@ async def get_finding_record(conn, finding_id: str):
 
 async def ensure_verification_schema(pool: asyncpg.Pool):
     """Ensure verification schema exists for upgraded installations."""
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            ALTER TABLE findings
-            ADD COLUMN IF NOT EXISTS last_verification_status TEXT,
-            ADD COLUMN IF NOT EXISTS last_verification_verdict TEXT,
-            ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
-            ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
-            ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0
-        """)
-        await conn.execute("""
-            UPDATE findings
-            SET verification_count = 0
-            WHERE verification_count IS NULL
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS finding_verifications (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
-                scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
-                target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
-                job_id TEXT,
-                requested_by TEXT DEFAULT 'api',
-                status TEXT NOT NULL DEFAULT 'queued',
-                result_status TEXT,
-                verdict TEXT,
-                verdict_reason TEXT,
-                finding_type TEXT NOT NULL,
-                target_url TEXT NOT NULL,
-                original_url TEXT,
-                param TEXT,
-                payload TEXT,
-                method TEXT,
-                request_body TEXT,
-                replay_commands JSONB,
-                proof JSONB,
-                artifacts JSONB,
-                confidence NUMERIC(3,2),
-                attempt_count INTEGER DEFAULT 0,
-                attempts_exhausted BOOLEAN DEFAULT FALSE,
-                retry_class TEXT,
-                retryable BOOLEAN DEFAULT FALSE,
-                message TEXT,
-                error_message TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                started_at TIMESTAMPTZ,
-                completed_at TIMESTAMPTZ,
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            ALTER TABLE finding_verifications
-            ADD COLUMN IF NOT EXISTS verdict TEXT,
-            ADD COLUMN IF NOT EXISTS verdict_reason TEXT,
-            ADD COLUMN IF NOT EXISTS replay_commands JSONB,
-            ADD COLUMN IF NOT EXISTS artifacts JSONB,
-            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS attempts_exhausted BOOLEAN DEFAULT FALSE,
-            ADD COLUMN IF NOT EXISTS retry_class TEXT,
-            ADD COLUMN IF NOT EXISTS retryable BOOLEAN DEFAULT FALSE
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET attempt_count = 0
-            WHERE attempt_count IS NULL
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET attempts_exhausted = FALSE
-            WHERE attempts_exhausted IS NULL
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET retryable = FALSE
-            WHERE retryable IS NULL
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_findings_last_verified_at
-            ON findings(last_verified_at DESC)
-            WHERE last_verified_at IS NOT NULL
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_findings_last_verification_verdict
-            ON findings(last_verification_verdict)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_finding_id
-            ON finding_verifications(finding_id, created_at DESC)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_status
-            ON finding_verifications(status)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_result_status
-            ON finding_verifications(result_status)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_verdict
-            ON finding_verifications(verdict)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id
-            ON finding_verifications(job_id)
-            WHERE job_id IS NOT NULL
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_finding_verifications_retry_class
-            ON finding_verifications(retry_class)
-            WHERE retry_class IS NOT NULL
-        """)
+    await run_schema_migrations(pool)
 
 
 async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.UUID, findings: list):
@@ -945,6 +785,7 @@ class FindingsBulkRetestRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
     finding_type: Optional[str] = None
     requested_by: Optional[str] = "api"
+    mode: Optional[str] = None  # "ai" or "deterministic"; None = tiered
 
 
 class ManualFindingCreate(BaseModel):
@@ -1708,20 +1549,36 @@ async def scan_target(target_id: str, options: ScanOptions = None):
 # FINDINGS
 # ============================================================
 
-async def enqueue_finding_retest(conn, finding: dict[str, Any], inputs: dict[str, Any], requested_by: str = "api"):
+async def enqueue_finding_retest(
+    conn,
+    finding: dict[str, Any],
+    inputs: dict[str, Any],
+    requested_by: str = "api",
+    auth_context: dict[str, str] | None = None,
+):
     """Create a queued finding retest record and return (retest_id, job_id)."""
     retest_id = uuid.uuid4()
     job_id = str(uuid.uuid4())
     replay_commands = build_replay_commands(inputs)
 
+    # If no auth_context provided, try to pull from the finding's scan
+    if auth_context is None and finding.get("scan_id"):
+        scan_row = await conn.fetchrow(
+            "SELECT options FROM scans WHERE id = $1", finding["scan_id"]
+        )
+        if scan_row:
+            auth_context = extract_auth_context(parse_json_field(scan_row["options"]))
+
+    auth_ctx_json = json.dumps(auth_context) if auth_context else None
+
     await conn.execute("""
         INSERT INTO finding_verifications (
             id, finding_id, scan_id, target_id, job_id, requested_by, status,
             finding_type, target_url, original_url, param, payload, method, request_body,
-            replay_commands
+            replay_commands, auth_context
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'queued',
-            $7, $8, $9, $10, $11, $12, $13, $14
+            $7, $8, $9, $10, $11, $12, $13, $14, $15
         )
     """,
         retest_id,
@@ -1738,6 +1595,7 @@ async def enqueue_finding_retest(conn, finding: dict[str, Any], inputs: dict[str
         inputs.get("method"),
         inputs.get("request_body"),
         json.dumps(replay_commands) if replay_commands else None,
+        auth_ctx_json,
     )
 
     await conn.execute("""
@@ -1759,6 +1617,7 @@ async def list_findings(
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     verification_verdict: Optional[str] = Query(None, regex="^(exploited|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verification_mode: Optional[str] = Query(None, regex="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
@@ -1838,6 +1697,22 @@ async def list_findings(
             query += " AND f.last_verification_verdict = 'exploited'"
             count_query += " AND f.last_verification_verdict = 'exploited'"
 
+        if verification_mode:
+            mode_filter = f""" AND EXISTS (
+                SELECT 1 FROM finding_verifications fv2
+                WHERE fv2.finding_id = f.id AND fv2.verification_mode = ${param_idx}
+            )"""
+            query += mode_filter
+            count_query_mode = f""" AND EXISTS (
+                SELECT 1 FROM finding_verifications fv2
+                WHERE fv2.finding_id = f.id AND fv2.verification_mode = ${count_param_idx}
+            )"""
+            count_query += count_query_mode
+            params.append(verification_mode)
+            count_params.append(verification_mode)
+            param_idx += 1
+            count_param_idx += 1
+
         if search:
             search_pattern = f"%{search}%"
             query += f" AND (f.title ILIKE ${param_idx} OR f.url ILIKE ${param_idx})"
@@ -1903,8 +1778,15 @@ async def get_finding(finding_id: str):
 
 
 @app.post("/findings/{finding_id:path}/retest")
-async def retest_finding(finding_id: str, request: FindingRetestRequest | None = None):
-    """Queue a retest for a finding and persist verification history."""
+async def retest_finding(
+    finding_id: str,
+    request: FindingRetestRequest | None = None,
+    mode: Optional[str] = Query(None, regex="^(ai|deterministic)$"),
+):
+    """Queue a retest for a finding and persist verification history.
+
+    Pass mode=ai to skip deterministic provers and go straight to AI verification.
+    """
     request = request or FindingRetestRequest()
     r = get_redis()
 
@@ -1955,6 +1837,9 @@ async def retest_finding(finding_id: str, request: FindingRetestRequest | None =
         submitted_at=datetime.utcnow().isoformat(),
         trigger=request.requested_by or "api",
     )
+    # Pass mode through to the worker
+    if mode:
+        job_data["mode"] = mode
     valid, reason = validate_retest_job_payload(job_data)
     if not valid:
         raise HTTPException(
@@ -1978,6 +1863,7 @@ async def retest_finding(finding_id: str, request: FindingRetestRequest | None =
         "retest_id": str(retest_id),
         "job_id": job_id,
         "status": "queued",
+        "mode": mode or "tiered",
         "finding_id": str(finding_data["id"]),
         "finding_type": retest_inputs["finding_type"],
         "target_url": retest_inputs["target_url"],
@@ -2155,6 +2041,8 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 submitted_at=datetime.utcnow().isoformat(),
                 trigger=request.requested_by or "api",
             )
+            if request.mode:
+                job_data["mode"] = request.mode
             valid, reason = validate_retest_job_payload(job_data)
             if not valid:
                 skipped.append({
@@ -2181,6 +2069,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
 
     return {
         "status": "queued",
+        "mode": request.mode or "tiered",
         "queued_count": len(queued),
         "skipped_count": len(skipped),
         "queued": queued,

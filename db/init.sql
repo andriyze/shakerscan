@@ -166,6 +166,9 @@ CREATE TABLE finding_verifications (
     request_body TEXT,
     replay_commands JSONB,
 
+    -- Auth context (forwarded from original scan for authenticated retests)
+    auth_context JSONB,
+
     -- Retest outputs
     proof JSONB,
     artifacts JSONB,
@@ -176,6 +179,11 @@ CREATE TABLE finding_verifications (
     retryable BOOLEAN DEFAULT FALSE,
     message TEXT,
     error_message TEXT,
+
+    -- AI verification (opt-in)
+    verification_mode TEXT DEFAULT 'deterministic',  -- deterministic, ai_driven
+    ai_plan JSONB,         -- LLM's exploitation plan (audit trail)
+    ai_reasoning TEXT,     -- LLM's reasoning about exploitability
 
     created_at TIMESTAMPTZ DEFAULT NOW(),
     started_at TIMESTAMPTZ,

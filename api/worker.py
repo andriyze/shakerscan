@@ -22,10 +22,16 @@ import redis
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
+    auth_context_to_headers,
+    build_replay_commands,
     build_retest_job_payload,
     classify_retry,
+    extract_auth_context,
     get_attempt_ladder,
+    infer_retest_inputs,
     normalize_retest_type,
+    parse_json_field,
+    run_schema_migrations,
     validate_retest_job_payload,
 )
 
@@ -64,6 +70,15 @@ AUTO_RETEST_MIN_SEVERITY = os.environ.get("AUTO_RETEST_MIN_SEVERITY", "high").lo
 AUTO_RETEST_MAX_PER_SCAN = max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25")))
 AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
 
+# AI verification (opt-in, Tier 2 after deterministic provers)
+AI_VERIFY_ENABLED = os.environ.get("AI_VERIFY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+AI_VERIFY_URL = os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", "")
+AI_VERIFY_API_KEY = os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", "")
+AI_VERIFY_MODEL = os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929")
+AI_VERIFY_MAX_PER_SCAN = max(0, int(os.environ.get("AI_VERIFY_MAX_PER_SCAN", "10")))
+AI_VERIFY_MIN_SEVERITY = os.environ.get("AI_VERIFY_MIN_SEVERITY", "high").lower()
+AI_VERIFY_USE_BROWSER = os.environ.get("AI_VERIFY_USE_BROWSER", "true").lower() in {"1", "true", "yes", "on"}
+
 SEVERITY_ORDER = {
     "critical": 5,
     "high": 4,
@@ -84,34 +99,7 @@ async def init_db():
     """Initialize database connection pool."""
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-    await ensure_worker_schema(db_pool)
-
-
-async def ensure_worker_schema(pool: asyncpg.Pool) -> None:
-    """Best-effort schema compatibility for worker-owned retest fields."""
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            ALTER TABLE finding_verifications
-            ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS attempts_exhausted BOOLEAN DEFAULT FALSE,
-            ADD COLUMN IF NOT EXISTS retry_class TEXT,
-            ADD COLUMN IF NOT EXISTS retryable BOOLEAN DEFAULT FALSE
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET attempt_count = 0
-            WHERE attempt_count IS NULL
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET attempts_exhausted = FALSE
-            WHERE attempts_exhausted IS NULL
-        """)
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET retryable = FALSE
-            WHERE retryable IS NULL
-        """)
+    await run_schema_migrations(db_pool)
 
 
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
@@ -500,15 +488,12 @@ def generate_finding_fingerprint(finding: dict) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
-async def save_findings(scan_id: str, target_id: str, findings: list):
-    """Save findings to database with deduplication and pipeline auto-retests."""
+async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
+    """Save findings to database with deduplication. Returns count of saved findings."""
     if not findings:
-        return {"saved": 0, "auto_retests_queued": 0, "auto_retests_skipped": 0}
+        return 0
 
-    r = get_redis()
     saved = 0
-    auto_queued = 0
-    auto_skipped = 0
     target_uuid = uuid.UUID(target_id)
     scan_uuid = uuid.UUID(scan_id)
 
@@ -516,16 +501,13 @@ async def save_findings(scan_id: str, target_id: str, findings: list):
         for finding in findings:
             fingerprint = generate_finding_fingerprint(finding)
 
-            # Check if this finding already exists for this target
             existing = await conn.fetchrow("""
                 SELECT id, status, resurfaced_count
                 FROM findings
                 WHERE target_id = $1 AND fingerprint = $2
             """, target_uuid, fingerprint)
 
-            finding_id = None
             if existing:
-                finding_id = existing["id"]
                 if existing['status'] == 'resolved':
                     await conn.execute("""
                         UPDATE findings SET
@@ -544,8 +526,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list):
                             updated_at = NOW()
                         WHERE id = $2
                     """, scan_uuid, existing['id'])
+                saved += 1
             else:
-                finding_id = await conn.fetchval("""
+                result = await conn.fetchval("""
                     INSERT INTO findings (
                         scan_id, target_id, fingerprint, title, description,
                         severity, cvss_score, tool, cwe, cwe_name, owasp,
@@ -571,223 +554,10 @@ async def save_findings(scan_id: str, target_id: str, findings: list):
                     finding.get('ai_rationale'),
                     json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
                 )
-            if not finding_id:
-                continue
-            saved += 1
+                if result:
+                    saved += 1
 
-            # Pipelined auto-retest: enqueue immediately as each finding is persisted.
-            if (
-                AUTO_RETEST_ON_SCAN_COMPLETE
-                and AUTO_RETEST_MAX_PER_SCAN > 0
-                and auto_queued < AUTO_RETEST_MAX_PER_SCAN
-                and _severity_allows_auto_retest(str(finding.get("severity") or ""))
-            ):
-                pending = await conn.fetchval("""
-                    SELECT 1
-                    FROM finding_verifications
-                    WHERE finding_id = $1
-                      AND status IN ('queued', 'running')
-                    LIMIT 1
-                """, finding_id)
-                if pending:
-                    auto_skipped += 1
-                    continue
-
-                inferred = infer_retest_inputs({
-                    "finding_type": finding.get("type"),
-                    "title": finding.get("title"),
-                    "tool": finding.get("tool"),
-                    "evidence": finding.get("evidence"),
-                    "url": finding.get("url"),
-                    "finding_url": finding.get("url"),
-                    "target_url": finding.get("url") or "",
-                })
-                finding_type = inferred.get("finding_type")
-                effective_target = inferred.get("target_url")
-                if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
-                    auto_skipped += 1
-                    continue
-
-                verification_id = uuid.uuid4()
-                retest_job_id = str(uuid.uuid4())
-                replay_commands = build_replay_commands(inferred)
-
-                await conn.execute("""
-                    INSERT INTO finding_verifications (
-                        id, finding_id, scan_id, target_id, job_id, requested_by, status,
-                        finding_type, target_url, original_url, param, payload, method, request_body, replay_commands,
-                        attempt_count, attempts_exhausted, retryable
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, 'queued',
-                        $7, $8, $9, $10, $11, $12, $13, $14,
-                        0, FALSE, FALSE
-                    )
-                """,
-                    verification_id,
-                    finding_id,
-                    scan_uuid,
-                    target_uuid,
-                    retest_job_id,
-                    AUTO_RETEST_REQUESTED_BY,
-                    finding_type,
-                    effective_target,
-                    inferred.get("original_url") or effective_target,
-                    inferred.get("param") or None,
-                    inferred.get("payload") or None,
-                    inferred.get("method") or "GET",
-                    inferred.get("request_body") or None,
-                    json.dumps(replay_commands) if replay_commands else None,
-                )
-
-                await conn.execute("""
-                    UPDATE findings
-                    SET last_verification_status = 'queued',
-                        last_verification_verdict = NULL,
-                        updated_at = NOW()
-                    WHERE id = $1
-                """, finding_id)
-
-                retest_job = build_retest_job_payload(
-                    job_id=retest_job_id,
-                    verification_id=str(verification_id),
-                    finding_id=str(finding_id),
-                    submitted_at=datetime.utcnow().isoformat(),
-                    trigger=AUTO_RETEST_REQUESTED_BY,
-                )
-                valid, reason = validate_retest_job_payload(retest_job)
-                if not valid:
-                    auto_skipped += 1
-                    await conn.execute("""
-                        UPDATE finding_verifications
-                        SET status = 'failed',
-                            result_status = 'error',
-                            verdict = 'error',
-                            verdict_reason = $2,
-                            attempts_exhausted = TRUE,
-                            retry_class = 'validation',
-                            retryable = FALSE,
-                            error_message = $2,
-                            completed_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = $1
-                    """, verification_id, f"Retest job payload invalid: {reason}")
-                    continue
-
-                r.rpush(RETEST_QUEUE_NAME, json.dumps(retest_job))
-                r.hset(f"retest_job:{retest_job_id}", mapping={
-                    "status": "queued",
-                    "verification_id": str(verification_id),
-                    "finding_id": str(finding_id),
-                    "trigger": AUTO_RETEST_REQUESTED_BY,
-                    "queue_schema_version": str(retest_job.get("queue_schema_version", "")),
-                    "attempt": str(retest_job.get("attempt", 1)),
-                })
-                r.expire(f"retest_job:{retest_job_id}", 86400)
-                auto_queued += 1
-            elif AUTO_RETEST_ON_SCAN_COMPLETE and AUTO_RETEST_MAX_PER_SCAN > 0:
-                auto_skipped += 1
-
-    return {
-        "saved": saved,
-        "auto_retests_queued": auto_queued,
-        "auto_retests_skipped": auto_skipped,
-    }
-
-
-def parse_json_field(value):
-    if not value:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def infer_retest_inputs(verification: dict) -> dict:
-    """Build effective retest inputs using verification row and finding evidence."""
-    evidence = parse_json_field(verification.get("evidence"))
-    title = str(verification.get("title", "")).lower()
-    tool = str(verification.get("tool", "")).lower()
-
-    finding_type = normalize_retest_type(verification.get("finding_type"))
-    if not finding_type:
-        finding_type = normalize_retest_type(evidence.get("type"))
-    if not finding_type:
-        if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss"}:
-            finding_type = "xss"
-        elif ("sql" in title and "inject" in title) or "sqli" in title or tool in {"sqlmap", "smart_sqli", "oob_sqli"}:
-            finding_type = "sqli"
-        elif "ssrf" in title or "server-side request forgery" in title:
-            finding_type = "ssrf"
-        elif any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
-            finding_type = "path_traversal"
-        elif "open redirect" in title or "url redirect" in title:
-            finding_type = "open_redirect"
-        elif "cors" in title:
-            finding_type = "cors"
-
-    target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
-    original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url
-    param = verification.get("param") or evidence.get("param") or evidence.get("parameter") or ""
-    payload = verification.get("payload") or evidence.get("payload") or ""
-    if not payload and isinstance(evidence.get("detail"), dict):
-        payload = evidence.get("detail", {}).get("payload") or ""
-    method = (verification.get("method") or evidence.get("method") or "GET").upper()
-    request_body = verification.get("request_body") or evidence.get("body") or ""
-
-    return {
-        "finding_type": finding_type,
-        "target_url": str(target_url).strip(),
-        "original_url": str(original_url).strip() if original_url else "",
-        "param": str(param).strip() if param else "",
-        "payload": str(payload) if payload else "",
-        "method": method,
-        "request_body": str(request_body) if request_body else "",
-        "evidence": evidence,
-    }
-
-
-def build_replay_commands(inputs: dict) -> list[str]:
-    """Generate copy/paste commands to replay a verification attempt."""
-    finding_type = str(inputs.get("finding_type") or "").strip().lower()
-    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
-    method = str(inputs.get("method") or "GET").strip().upper()
-    param = str(inputs.get("param") or "").strip()
-    payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
-
-    if not target_url:
-        return []
-
-    commands = [f"curl -i -k '{target_url}'"]
-
-    if param:
-        if method == "POST":
-            commands.append(
-                "curl -i -k -X POST "
-                f"'{target_url}' "
-                "-H 'Content-Type: application/x-www-form-urlencoded' "
-                f"--data-urlencode '{param}={payload}'"
-            )
-        else:
-            parsed = urllib.parse.urlparse(target_url)
-            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            q[param] = [payload]
-            injected_query = urllib.parse.urlencode(q, doseq=True)
-            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
-            commands.append(f"curl -i -k '{injected_url}'")
-    else:
-        commands.append(
-            "curl -i -k -X POST "
-            f"'{target_url}' "
-            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
-        )
-
-    return commands
+    return saved
 
 
 def _is_internal_target(url: str) -> bool:
@@ -1056,79 +826,67 @@ async def run_finding_retest(verification: dict) -> dict:
     verification_id = str(verification.get("id", "unknown"))
     session_id = f"retest-{verification_id}"
 
+    # Build auth headers from verification's auth_context
+    auth_ctx = parse_json_field(verification.get("auth_context"))
+    auth_headers = auth_context_to_headers(auth_ctx) if auth_ctx else None
+
+    # -- Attempt ladder execution --
+    # Iterate through escalating proof strategies, stop on first proven result.
+    proof = None
+    succeeded_step: str | None = None
+    last_error: str | None = None
+    steps_tried: list[str] = []
+
+    # Map ladder step names to prover calls
+    def _call_prover():
+        """Call the primary prover for this finding type."""
+        if finding_type == "xss":
+            return prove_xss(test_url, inputs.get("param", ""), "", inputs.get("payload") or None)
+        elif finding_type == "sqli":
+            return prove_sqli(test_url, inputs.get("param", ""), "", inputs.get("evidence", {}).get("dbms"))
+        elif finding_type == "ssrf":
+            return prove_ssrf(test_url, inputs.get("param", ""), "")
+        elif finding_type == "path_traversal":
+            return prove_path_traversal(test_url, inputs.get("param", ""), "")
+        elif finding_type == "open_redirect":
+            return prove_open_redirect(test_url, inputs.get("param", ""), "")
+        elif finding_type == "cors":
+            return prove_cors(test_url)
+        return None
+
     try:
         try:
-            start_scan_session(session_id)
+            start_scan_session(session_id, auth_headers=auth_headers)
         except Exception:
             pass
 
-        if finding_type == "xss":
-            proof = await prove_xss(
-                test_url,
-                inputs.get("param", ""),
-                "",
-                inputs.get("payload") or None,
-            )
-        elif finding_type == "sqli":
-            proof = await prove_sqli(
-                test_url,
-                inputs.get("param", ""),
-                "",
-                inputs.get("evidence", {}).get("dbms"),
-            )
-        elif finding_type == "ssrf":
-            proof = await prove_ssrf(
-                test_url,
-                inputs.get("param", ""),
-                "",
-            )
-        elif finding_type == "path_traversal":
-            proof = await prove_path_traversal(
-                test_url,
-                inputs.get("param", ""),
-                "",
-            )
-        elif finding_type == "open_redirect":
-            proof = await prove_open_redirect(
-                test_url,
-                inputs.get("param", ""),
-                "",
-            )
-        elif finding_type == "cors":
-            proof = await prove_cors(
-                test_url,
-            )
-        else:
-            # Defensive fallback
-            return {
-                "status": "failed",
-                "result_status": "error",
-                "verdict": "error",
-                "verdict_reason": "No matching prover function for finding type.",
-                "error_message": f"No prover for finding type: {finding_type}",
-                "confidence": None,
-                "proof": None,
-                "replay_commands": replay_commands,
-                "artifacts": {
-                    "started_at": started_at.isoformat(),
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "failure_stage": "prover_selection",
-                    "finding_type": finding_type,
-                    "tool_capabilities": capabilities,
-                },
-                "message": f"No prover for finding type: {finding_type}",
-                "attempt_ladder": attempt_ladder,
-                "attempts_exhausted": True,
-                "retry_class": "validation",
-                "retryable": False,
-            }
+        # If no ladder defined, do a single-shot proof call
+        effective_ladder = attempt_ladder if attempt_ladder else ["default"]
+
+        for step in effective_ladder:
+            # Skip AI step here — handled by the AI verifier tier in process_finding_retest_job
+            if step == "ai_reasoning":
+                continue
+
+            steps_tried.append(step)
+            try:
+                coro = _call_prover()
+                if coro is None:
+                    last_error = f"No prover for finding type: {finding_type}"
+                    break
+                proof = await coro
+
+                if proof and getattr(proof, "proven", False):
+                    succeeded_step = step
+                    break
+            except Exception as step_err:
+                last_error = str(step_err)
+                # Continue to next ladder step on failure
+                continue
+
     except Exception as e:
         result_status, verdict, verdict_reason = classify_retest_outcome(
-            proof=None,
-            proven=False,
-            confidence=None,
-            inputs=inputs,
-            error_message=str(e),
+            proof=None, proven=False, confidence=None, inputs=inputs, error_message=str(e),
         )
         retry_class, retryable = classify_retry(str(e))
         return {
@@ -1162,13 +920,21 @@ async def run_finding_retest(verification: dict) -> dict:
     proof_data = proof.to_dict() if proof else None
     still_vulnerable = bool(getattr(proof, "proven", False))
     confidence = getattr(proof, "confidence", None)
-    result_status, verdict, verdict_reason = classify_retest_outcome(
-        proof=proof_data,
-        proven=still_vulnerable,
-        confidence=confidence,
-        inputs=inputs,
-    )
-    message = verdict_reason
+
+    if not still_vulnerable and last_error and not proof:
+        result_status, verdict, verdict_reason = classify_retest_outcome(
+            proof=None, proven=False, confidence=None, inputs=inputs, error_message=last_error,
+        )
+    else:
+        result_status, verdict, verdict_reason = classify_retest_outcome(
+            proof=proof_data, proven=still_vulnerable, confidence=confidence, inputs=inputs,
+        )
+
+    # Deterministic ladder is exhausted only when all non-AI steps have been tried
+    deterministic_exhausted = not still_vulnerable and len(steps_tried) >= len([s for s in attempt_ladder if s != "ai_reasoning"])
+    # Check if AI step is available but not yet tried
+    has_ai_step = "ai_reasoning" in attempt_ladder
+
     completed_at = datetime.utcnow()
     artifacts = {
         "started_at": started_at.isoformat(),
@@ -1181,6 +947,8 @@ async def run_finding_retest(verification: dict) -> dict:
         "payload_used": inputs.get("payload") or DEFAULT_REPLAY_PAYLOADS.get(finding_type),
         "tool_capabilities": capabilities,
         "attempt_ladder": attempt_ladder,
+        "steps_tried": steps_tried,
+        "succeeded_step": succeeded_step,
     }
 
     return {
@@ -1188,16 +956,19 @@ async def run_finding_retest(verification: dict) -> dict:
         "result_status": result_status,
         "verdict": verdict,
         "verdict_reason": verdict_reason,
-        "error_message": None,
+        "error_message": last_error if not still_vulnerable else None,
         "confidence": confidence,
         "proof": proof_data,
         "replay_commands": replay_commands,
         "artifacts": artifacts,
-        "message": message,
+        "message": verdict_reason,
         "attempt_ladder": attempt_ladder,
-        "attempts_exhausted": not still_vulnerable,
+        "attempts_exhausted": deterministic_exhausted and not has_ai_step,
+        "deterministic_exhausted": deterministic_exhausted,
+        "has_ai_step": has_ai_step,
         "retry_class": "none",
         "retryable": False,
+        "verification_mode": "deterministic",
     }
 
 
@@ -1324,10 +1095,95 @@ async def process_finding_retest_job(job_data: dict):
                 WHERE id = $1
             """, verification["finding_id"])
 
-            result = await run_finding_retest(dict(verification))
-            completed_at = datetime.utcnow()
+            # Check if this is a forced AI-only retest (mode=ai from API)
+            force_ai = str(job_data.get("mode", "")).lower() == "ai"
 
-            if result["status"] == "completed":
+            # Tier 1: Deterministic proof (fast, free) — skip if forced AI
+            if not force_ai:
+                result = await run_finding_retest(dict(verification))
+            else:
+                result = {
+                    "status": "completed",
+                    "result_status": "inconclusive",
+                    "verdict": "inconclusive",
+                    "verdict_reason": "Skipped deterministic tier (mode=ai)",
+                    "deterministic_exhausted": True,
+                    "has_ai_step": True,
+                    "verification_mode": "ai_driven",
+                    "confidence": None,
+                    "proof": None,
+                    "replay_commands": [],
+                    "artifacts": {},
+                    "attempt_ladder": [],
+                    "retry_class": "none",
+                    "retryable": False,
+                }
+
+            # Tier 2: AI-driven verification — escalate when deterministic didn't prove it
+            ai_result = None
+            still_vulnerable_deterministic = result.get("verdict") == "exploited"
+            should_try_ai = (
+                not still_vulnerable_deterministic
+                and (result.get("has_ai_step") or force_ai)
+                and AI_VERIFY_ENABLED
+                and AI_VERIFY_URL
+                and AI_VERIFY_API_KEY
+            )
+
+            finding_severity = str(verification.get("severity") or "").lower()
+            if not finding_severity:
+                # Look up severity from the finding itself
+                f_row = await conn.fetchrow("SELECT severity FROM findings WHERE id = $1", verification["finding_id"])
+                finding_severity = str(f_row["severity"]).lower() if f_row else ""
+
+            severity_ok = SEVERITY_ORDER.get(finding_severity, 0) >= SEVERITY_ORDER.get(AI_VERIFY_MIN_SEVERITY, SEVERITY_ORDER["high"])
+
+            if should_try_ai and severity_ok:
+                try:
+                    from ai_verifier import ai_verify_finding, AI_VERIFIABLE_TYPES
+
+                    finding_type = str(verification.get("finding_type") or "")
+                    if finding_type in AI_VERIFIABLE_TYPES:
+                        auth_ctx = parse_json_field(verification.get("auth_context"))
+                        target = str(verification.get("target_url") or "")
+
+                        print(f"[retest:{job_id[:8]}] Escalating to AI verification", flush=True)
+                        ai_result = await ai_verify_finding(
+                            finding=dict(verification),
+                            auth_context=auth_ctx if auth_ctx else None,
+                            ai_url=AI_VERIFY_URL,
+                            ai_api_key=AI_VERIFY_API_KEY,
+                            model=AI_VERIFY_MODEL,
+                            target_url=target,
+                        )
+
+                        # If AI found it exploited, override the result
+                        if ai_result and ai_result.get("verdict") == "exploited":
+                            result["verdict"] = "exploited"
+                            result["result_status"] = "still_vulnerable"
+                            result["verdict_reason"] = ai_result.get("reasoning", "AI verification confirmed vulnerability")
+                            result["confidence"] = ai_result.get("confidence")
+                            result["verification_mode"] = "ai_driven"
+                        elif ai_result:
+                            # Use AI verdict if more informative than deterministic
+                            result["verification_mode"] = "ai_driven"
+                            if result.get("verdict") == "inconclusive" and ai_result.get("verdict") != "inconclusive":
+                                result["verdict"] = ai_result["verdict"]
+                                result["verdict_reason"] = ai_result.get("reasoning", "")
+                                result["confidence"] = ai_result.get("confidence")
+                                if ai_result["verdict"] in ("likely_fixed", "false_positive"):
+                                    result["result_status"] = ai_result["verdict"]
+                except ImportError:
+                    print(f"[retest:{job_id[:8]}] AI verifier module not available", flush=True)
+                except Exception as ai_err:
+                    print(f"[retest:{job_id[:8]}] AI verification error: {ai_err}", flush=True)
+
+            completed_at = datetime.utcnow()
+            verification_mode = result.get("verification_mode", "deterministic")
+            ai_plan_json = json.dumps(ai_result.get("ai_plan")) if ai_result and ai_result.get("ai_plan") else None
+            ai_reasoning = ai_result.get("reasoning") if ai_result else None
+
+            if result["status"] == "completed" or result.get("verdict") == "exploited":
                 await conn.execute("""
                     UPDATE finding_verifications
                     SET status = 'completed',
@@ -1345,8 +1201,11 @@ async def process_finding_retest_job(job_data: dict):
                         message = $12,
                         error_message = NULL,
                         completed_at = $13,
+                        verification_mode = $14,
+                        ai_plan = $15,
+                        ai_reasoning = $16,
                         updated_at = NOW()
-                    WHERE id = $14
+                    WHERE id = $17
                 """,
                     result.get("result_status"),
                     result.get("verdict"),
@@ -1361,6 +1220,9 @@ async def process_finding_retest_job(job_data: dict):
                     bool(result.get("retryable")),
                     result.get("message"),
                     completed_at,
+                    verification_mode,
+                    ai_plan_json,
+                    ai_reasoning,
                     verification["id"],
                 )
             else:
@@ -1381,8 +1243,11 @@ async def process_finding_retest_job(job_data: dict):
                         message = $12,
                         error_message = $13,
                         completed_at = $14,
+                        verification_mode = $15,
+                        ai_plan = $16,
+                        ai_reasoning = $17,
                         updated_at = NOW()
-                    WHERE id = $15
+                    WHERE id = $18
                 """,
                     result.get("result_status") or "error",
                     result.get("verdict") or "error",
@@ -1398,6 +1263,9 @@ async def process_finding_retest_job(job_data: dict):
                     result.get("message"),
                     result.get("error_message"),
                     completed_at,
+                    verification_mode,
+                    ai_plan_json,
+                    ai_reasoning,
                     verification["id"],
                 )
 
@@ -1411,17 +1279,18 @@ async def process_finding_retest_job(job_data: dict):
                     updated_at = NOW()
                 WHERE id = $5
             """,
-                result.get("result_status") if result.get("status") == "completed" else "error",
-                result.get("verdict") if result.get("status") == "completed" else "error",
+                result.get("result_status") if result.get("verdict") == "exploited" or result.get("status") == "completed" else "error",
+                result.get("verdict") if result.get("verdict") == "exploited" or result.get("status") == "completed" else "error",
                 result.get("confidence"),
                 completed_at,
                 verification["finding_id"],
             )
 
         r.hset(retest_key, mapping={
-            "status": "completed" if result["status"] == "completed" else "failed",
+            "status": "completed" if result.get("verdict") == "exploited" or result["status"] == "completed" else "failed",
             "result_status": result.get("result_status") or "error",
             "verdict": result.get("verdict") or "error",
+            "verification_mode": verification_mode,
             "retry_class": result.get("retry_class") or "none",
             "retryable": str(bool(result.get("retryable"))).lower(),
             "attempt": str(attempt),
@@ -1433,7 +1302,7 @@ async def process_finding_retest_job(job_data: dict):
 
         print(
             f"[retest:{job_id[:8]}] Completed retest {verification_id} -> "
-            f"{result.get('verdict') or result.get('result_status') or result.get('status')}",
+            f"{result.get('verdict') or result.get('result_status')} (mode={verification_mode})",
             flush=True,
         )
     finally:
@@ -1454,6 +1323,14 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
     skipped = 0
 
     async with db_pool.acquire() as conn:
+        # Look up scan options to extract auth context for retests
+        scan_row = await conn.fetchrow(
+            "SELECT options FROM scans WHERE id = $1", uuid.UUID(scan_id)
+        )
+        scan_options = parse_json_field(scan_row["options"]) if scan_row else {}
+        auth_ctx = extract_auth_context(scan_options)
+        auth_ctx_json = json.dumps(auth_ctx) if auth_ctx else None
+
         rows = await conn.fetch("""
             SELECT f.*, t.url as target_url
             FROM findings f
@@ -1509,10 +1386,11 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             await conn.execute("""
                 INSERT INTO finding_verifications (
                     id, finding_id, scan_id, target_id, job_id, requested_by, status,
-                    finding_type, target_url, original_url, param, payload, method, request_body, replay_commands
+                    finding_type, target_url, original_url, param, payload, method, request_body,
+                    replay_commands, auth_context
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, 'queued',
-                    $7, $8, $9, $10, $11, $12, $13, $14
+                    $7, $8, $9, $10, $11, $12, $13, $14, $15
                 )
             """,
                 verification_id,
@@ -1529,6 +1407,7 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                 inferred.get("method") or "GET",
                 inferred.get("request_body") or None,
                 json.dumps(replay_commands) if replay_commands else None,
+                auth_ctx_json,
             )
 
             await conn.execute("""
@@ -1775,18 +1654,21 @@ async def process_scan_job(job_data: dict):
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
 
-        auto_retests = {"queued": 0, "skipped": 0}
-
-        # Save findings
+        # Save findings (pure DB persistence)
+        saved_count = 0
         if target_id and findings:
             try:
-                finding_stats = await save_findings(scan_id, target_id, findings)
-                auto_retests = {
-                    "queued": finding_stats.get("auto_retests_queued", 0),
-                    "skipped": finding_stats.get("auto_retests_skipped", 0),
-                }
+                saved_count = await save_findings(scan_id, target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
+
+        # Auto-retest high-severity findings (separate from persistence)
+        auto_retests = {"queued": 0, "skipped": 0}
+        if target_id and findings and not error:
+            try:
+                auto_retests = await queue_auto_retests_for_scan(scan_id, target_id, target)
+            except Exception as e:
+                print(f"[{job_id[:8]}] auto-retest error: {e}", flush=True)
 
         # Update Redis
         status = 'failed' if error else 'completed'
@@ -1801,12 +1683,11 @@ async def process_scan_job(job_data: dict):
             'current_phase': status,
             'auto_retests_queued': str(auto_retests.get("queued", 0)),
         })
-        # Expire completed/failed job keys after 24 hours
         r.expire(job_key, 86400)
 
         print(
             f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | "
-            f"Findings: {len(findings)} | AutoRetests: {auto_retests.get('queued', 0)}",
+            f"Findings: {len(findings)} (saved: {saved_count}) | AutoRetests: {auto_retests.get('queued', 0)}",
             flush=True,
         )
     finally:

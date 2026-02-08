@@ -8,6 +8,8 @@ payload semantics, type normalization, and retry classification consistent.
 
 from __future__ import annotations
 
+import json
+import urllib.parse
 import uuid
 from datetime import datetime
 from typing import Any
@@ -67,12 +69,12 @@ DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
 # Ladder names intentionally use stable identifiers so UI/reporting can
 # consistently aggregate attempt strategy analytics across versions.
 ATTEMPT_LADDERS: dict[str, list[str]] = {
-    "xss": ["headless_dom_execution", "reflection_context", "alternate_payloads"],
-    "sqli": ["dbms_extraction", "boolean_diff", "timing_fallback"],
-    "ssrf": ["oob_callback", "internal_resource_access"],
-    "path_traversal": ["direct_traversal", "encoding_bypass"],
-    "open_redirect": ["query_redirect_param", "post_redirect_param", "location_header_check"],
-    "cors": ["origin_reflection_probe", "wildcard_credentials_probe"],
+    "xss": ["headless_dom_execution", "reflection_context", "alternate_payloads", "ai_reasoning"],
+    "sqli": ["dbms_extraction", "boolean_diff", "timing_fallback", "ai_reasoning"],
+    "ssrf": ["oob_callback", "internal_resource_access", "ai_reasoning"],
+    "path_traversal": ["direct_traversal", "encoding_bypass", "ai_reasoning"],
+    "open_redirect": ["query_redirect_param", "post_redirect_param", "location_header_check", "ai_reasoning"],
+    "cors": ["origin_reflection_probe", "wildcard_credentials_probe", "ai_reasoning"],
 }
 
 RETRY_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -108,6 +110,240 @@ def classify_retry(message: str | None) -> tuple[str, bool]:
         if any(p in raw for p in patterns):
             return retry_class, retry_class in RETRYABLE_CLASSES
     return "internal", False
+
+
+def parse_json_field(value: Any) -> dict[str, Any]:
+    """Parse a value into a dict, handling str/dict/None."""
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
+    """Build effective retest inputs using verification row and finding evidence."""
+    evidence = parse_json_field(verification.get("evidence"))
+    title = str(verification.get("title", "")).lower()
+    tool = str(verification.get("tool", "")).lower()
+
+    finding_type = normalize_retest_type(verification.get("finding_type"))
+    if not finding_type:
+        finding_type = normalize_retest_type(evidence.get("type"))
+    if not finding_type:
+        if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss", "custom_xss"}:
+            finding_type = "xss"
+        elif ("sql" in title and "inject" in title) or "sqli" in title or tool in {"sqlmap", "smart_sqli", "custom_sqli", "oob_sqli"}:
+            finding_type = "sqli"
+        elif "ssrf" in title or "server-side request forgery" in title:
+            finding_type = "ssrf"
+        elif any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+            finding_type = "path_traversal"
+        elif "open redirect" in title or "url redirect" in title:
+            finding_type = "open_redirect"
+        elif "cors" in title:
+            finding_type = "cors"
+
+    target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
+    original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url
+    param = verification.get("param") or evidence.get("param") or evidence.get("parameter") or ""
+    payload = verification.get("payload") or evidence.get("payload") or ""
+    if not payload and isinstance(evidence.get("detail"), dict):
+        payload = evidence.get("detail", {}).get("payload") or ""
+    method = (verification.get("method") or evidence.get("method") or "GET").upper()
+    request_body = verification.get("request_body") or evidence.get("body") or ""
+
+    return {
+        "finding_type": finding_type,
+        "target_url": str(target_url).strip(),
+        "original_url": str(original_url).strip() if original_url else "",
+        "param": str(param).strip() if param else "",
+        "payload": str(payload) if payload else "",
+        "method": method,
+        "request_body": str(request_body) if request_body else "",
+        "evidence": evidence,
+    }
+
+
+def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
+    """Generate copy/paste commands to replay a verification attempt."""
+    finding_type = str(inputs.get("finding_type") or "").strip().lower()
+    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
+    method = str(inputs.get("method") or "GET").strip().upper()
+    param = str(inputs.get("param") or "").strip()
+    payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
+
+    if not target_url:
+        return []
+
+    commands: list[str] = []
+    quoted_url = urllib.parse.quote(target_url, safe=":/?&=%#.-_~")
+
+    commands.append(f"curl -i -k '{quoted_url}'")
+
+    if param:
+        if method == "POST":
+            commands.append(
+                "curl -i -k -X POST "
+                f"'{quoted_url}' "
+                "-H 'Content-Type: application/x-www-form-urlencoded' "
+                f"--data-urlencode '{param}={payload}'"
+            )
+        else:
+            parsed = urllib.parse.urlparse(target_url)
+            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            q[param] = [payload]
+            injected_query = urllib.parse.urlencode(q, doseq=True)
+            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
+            commands.append(f"curl -i -k '{injected_url}'")
+    else:
+        commands.append(
+            "curl -i -k -X POST "
+            f"'{quoted_url}' "
+            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
+        )
+
+    return commands
+
+
+def extract_auth_context(scan_options: dict[str, Any] | None) -> dict[str, str] | None:
+    """Extract auth credentials from scan options for retest forwarding."""
+    if not scan_options:
+        return None
+    ctx: dict[str, str] = {}
+    for key in ("auth_header", "auth_cookies", "auth_headers_json",
+                "user2_header", "user2_cookies"):
+        val = scan_options.get(key)
+        if val:
+            ctx[key] = str(val)
+    if not ctx:
+        return None
+    return ctx
+
+
+def auth_context_to_headers(auth_context: dict[str, str] | None) -> dict[str, str]:
+    """Convert stored auth context into HTTP headers dict for proof functions."""
+    if not auth_context:
+        return {}
+    headers: dict[str, str] = {}
+    if auth_context.get("auth_header"):
+        headers["Authorization"] = auth_context["auth_header"]
+    if auth_context.get("auth_cookies"):
+        headers["Cookie"] = auth_context["auth_cookies"]
+    extra = auth_context.get("auth_headers_json")
+    if extra:
+        try:
+            parsed = json.loads(extra) if isinstance(extra, str) else extra
+            if isinstance(parsed, dict):
+                headers.update({str(k): str(v) for k, v in parsed.items()})
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return headers
+
+
+async def run_schema_migrations(pool) -> None:
+    """Run all retest-related schema migrations with advisory lock to avoid races.
+
+    Called from both API and worker startup. Uses pg_advisory_lock so only one
+    process actually executes the DDL statements.
+    """
+    async with pool.acquire() as conn:
+        # Advisory lock key: arbitrary 64-bit int unique to this migration set
+        await conn.execute("SELECT pg_advisory_lock(8675309)")
+        try:
+            # findings table verification columns
+            await conn.execute("""
+                ALTER TABLE findings
+                ADD COLUMN IF NOT EXISTS last_verification_status TEXT,
+                ADD COLUMN IF NOT EXISTS last_verification_verdict TEXT,
+                ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
+                ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0
+            """)
+            await conn.execute("""
+                UPDATE findings SET verification_count = 0
+                WHERE verification_count IS NULL
+            """)
+
+            # finding_verifications table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS finding_verifications (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+                    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    job_id TEXT,
+                    requested_by TEXT DEFAULT 'api',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    result_status TEXT,
+                    verdict TEXT,
+                    verdict_reason TEXT,
+                    finding_type TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    original_url TEXT,
+                    param TEXT,
+                    payload TEXT,
+                    method TEXT,
+                    request_body TEXT,
+                    replay_commands JSONB,
+                    proof JSONB,
+                    artifacts JSONB,
+                    confidence NUMERIC(3,2),
+                    attempt_count INTEGER DEFAULT 0,
+                    attempts_exhausted BOOLEAN DEFAULT FALSE,
+                    retry_class TEXT,
+                    retryable BOOLEAN DEFAULT FALSE,
+                    message TEXT,
+                    error_message TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+
+            # Additional columns added after initial schema
+            await conn.execute("""
+                ALTER TABLE finding_verifications
+                ADD COLUMN IF NOT EXISTS verdict TEXT,
+                ADD COLUMN IF NOT EXISTS verdict_reason TEXT,
+                ADD COLUMN IF NOT EXISTS replay_commands JSONB,
+                ADD COLUMN IF NOT EXISTS artifacts JSONB,
+                ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS attempts_exhausted BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS retry_class TEXT,
+                ADD COLUMN IF NOT EXISTS retryable BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS auth_context JSONB,
+                ADD COLUMN IF NOT EXISTS verification_mode TEXT DEFAULT 'deterministic',
+                ADD COLUMN IF NOT EXISTS ai_plan JSONB,
+                ADD COLUMN IF NOT EXISTS ai_reasoning TEXT
+            """)
+
+            # Backfill NULLs to defaults
+            await conn.execute("UPDATE finding_verifications SET attempt_count = 0 WHERE attempt_count IS NULL")
+            await conn.execute("UPDATE finding_verifications SET attempts_exhausted = FALSE WHERE attempts_exhausted IS NULL")
+            await conn.execute("UPDATE finding_verifications SET retryable = FALSE WHERE retryable IS NULL")
+
+            # Indexes (idempotent)
+            for stmt in [
+                "CREATE INDEX IF NOT EXISTS idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_findings_last_verification_verdict ON findings(last_verification_verdict)",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_status ON finding_verifications(status)",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_result_status ON finding_verifications(result_status)",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_verdict ON finding_verifications(verdict)",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_finding_verifications_retry_class ON finding_verifications(retry_class) WHERE retry_class IS NOT NULL",
+            ]:
+                await conn.execute(stmt)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
 
 def build_retest_job_payload(
