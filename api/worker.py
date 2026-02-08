@@ -744,7 +744,9 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_path_traversal,
             prove_sqli,
             prove_ssrf,
+            prove_ssrf_oob,
             prove_xss,
+            prove_xss_headless,
             start_scan_session,
         )
     except ImportError as e:
@@ -847,6 +849,10 @@ async def run_finding_retest(verification: dict) -> dict:
 
         if finding_type == "xss":
             payload = inputs.get("payload") or None
+            if step_name == "headless_dom_execution":
+                payload = payload or "<script>alert(1)</script>"
+                step_meta["payload"] = payload
+                return prove_xss_headless(test_url, param, payload), step_meta
             if step_name == "reflection_context":
                 payload = "<script>alert(1)</script>"
             elif step_name == "alternate_payloads":
@@ -863,6 +869,8 @@ async def run_finding_retest(verification: dict) -> dict:
             return prove_sqli(test_url, param, "", dbms_hint), step_meta
         if finding_type == "ssrf":
             step_meta["strategy"] = step_name
+            if step_name == "oob_callback":
+                return prove_ssrf_oob(test_url, param, ""), step_meta
             return prove_ssrf(test_url, param, ""), step_meta
         if finding_type == "path_traversal":
             step_meta["strategy"] = step_name
