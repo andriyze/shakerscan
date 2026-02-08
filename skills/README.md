@@ -38,13 +38,17 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | `/scans/{id}/result` | GET | Get full scan result JSON |
 | `/scans/{id}/logs` | GET | Get live scan logs tail (limit param, default 200, max 1000) |
 | `/scans/{id}/cancel` | POST | Cancel a running or pending scan |
-| `/findings` | GET | List findings (filter by severity, status, seen_within_days, domain, search) |
+| `/findings` | GET | List findings (filter by severity, status, seen_within_days, domain, search, verification filters) |
 | `/findings/{id}` | GET | Get finding details |
 | `/findings/{id}` | PATCH | Update finding status and notes |
 | `/findings/{id}` | DELETE | Delete a finding |
+| `/findings/{id}/retest` | POST | Queue retest for one finding (`mode=ai` or `mode=deterministic` optional) |
+| `/findings/retest` | POST | Queue bulk retests by IDs or filters |
 | `/findings/cleanup` | POST | Bulk delete old findings (dry_run support) |
 | `/findings/bulk` | POST | Bulk update finding statuses |
 | `/findings/manual` | POST | Create manual finding |
+| `/retests/finding/{id}` | GET | List retest history for a finding |
+| `/retests/{id}` | GET | Get one retest record with proof/artifacts/AI metadata |
 | `/targets` | GET/POST | List/create targets |
 | `/targets/grouped` | GET | Hierarchical targets view (root + subdomains, with filtering/sorting) |
 | `/targets/{id}` | GET | Get target details with recent scans |
@@ -106,6 +110,19 @@ curl -X POST http://localhost:8080/scans \
 
 # List findings (with recency filter)
 curl "http://localhost:8080/findings?severity=critical&status=active&seen_within_days=30"
+
+# Filter to verified and AI-driven findings
+curl "http://localhost:8080/findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true"
+
+# Queue retest (tiered)
+curl -X POST http://localhost:8080/findings/{finding_id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+
+# Force AI-only retest
+curl -X POST "http://localhost:8080/findings/{finding_id}/retest?mode=ai" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
 
 # Delete a finding
 curl -X DELETE http://localhost:8080/findings/{finding_id}
@@ -175,6 +192,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_username` | Form login username |
 | `login_password` | Form login password |
 | `login_url` | Login page URL (auto-detected) |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `user2_header` | Second user auth for BOLA testing |
 | `user2_cookies` | Second user cookies for BOLA testing |
 
@@ -183,6 +201,14 @@ curl -X POST http://localhost:8080/scans \
 | Option | Description |
 |--------|-------------|
 | `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains always appear in `result.attack_chains.chains`. |
+
+## Scope/Output Options
+
+| Option | Description |
+|--------|-------------|
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
 
 ## Focused Active Checks (API)
 

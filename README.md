@@ -401,6 +401,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_username` | Username for form-based login |
 | `login_password` | Password for form-based login |
 | `login_url` | Login page URL (auto-detected if not provided) |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `auto_auth` | Attempt API login on JSON endpoints using provided credentials |
 | `user2_header` | Second user auth for BOLA/IDOR testing |
 | `user2_cookies` | Second user cookies for BOLA/IDOR testing |
@@ -415,6 +416,9 @@ Auth is propagated to discovery (Playwright crawl, JSON link following), Nuclei,
 | `options_method_discovery` | Use HTTP OPTIONS to enumerate allowed methods |
 | `grpc_discovery` | Use gRPC reflection to list services/methods (requires grpcurl) |
 | `custom_endpoints` | Manual endpoint list with params for testing (see format below). **Include params or endpoints won't be tested for SQLi/XSS** |
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
 
 **Active Check Filters:**
 
@@ -479,6 +483,7 @@ GET /scans/{scan_id}
 ```bash
 # List with filters
 GET /findings?severity=critical&status=active&seen_within_days=30&sort_by=cvss
+GET /findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true
 
 # Update status and notes
 PATCH /findings/{finding_id}
@@ -494,7 +499,30 @@ POST /findings/cleanup
 # Bulk update statuses
 POST /findings/bulk
 {"finding_ids": ["id1", "id2"], "status": "false_positive"}
+
+# Queue retest for one finding (tiered)
+POST /findings/{finding_id}/retest
+{"requested_by": "api"}
+
+# Force AI-only retest for one finding
+POST /findings/{finding_id}/retest?mode=ai
+{"requested_by": "api"}
+
+# Bulk retest by IDs or filters
+POST /findings/retest
+{"severity":"high","status":"active","limit":25,"mode":"deterministic"}
+
+# Retest history/details
+GET /retests/finding/{finding_id}?limit=20
+GET /retests/{retest_id}
 ```
+
+Findings filters also support:
+- `verification_verdict`: `exploited`, `blocked_by_security`, `out_of_scope_internal`, `false_positive`, `likely_fixed`, `inconclusive`, `error`
+- `verification_mode`: `deterministic` or `ai_driven`
+- `verified_only=true`: only findings with latest verdict `exploited`
+
+Retest records (`/retests/*`) include `verification_mode`, `ai_plan`, `ai_reasoning`, `proof`, `artifacts`, and replay commands.
 
 ### Targets
 

@@ -18,10 +18,23 @@ interface FindingsFilters {
   target_id?: string
   search?: string
   last_seen?: number
+  verification_verdict?: string
+  verification_mode?: string
+  verified_only?: string
   sort_by?: string
   sort_order?: string
   page?: number
 }
+
+const VERIFICATION_VERDICTS = [
+  'exploited',
+  'blocked_by_security',
+  'out_of_scope_internal',
+  'false_positive',
+  'likely_fixed',
+  'inconclusive',
+  'error'
+] as const
 
 function FindingsContent() {
   const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
@@ -48,6 +61,9 @@ function FindingsContent() {
   const targetIdFilter = filters.target_id || ''
   const searchQuery = filters.search || ''
   const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
+  const verificationVerdictFilter = filters.verification_verdict || ''
+  const verificationModeFilter = filters.verification_mode || ''
+  const verifiedOnlyFilter = filters.verified_only === 'true'
   const sortBy = (filters.sort_by || 'severity') as SortOption
   const sortOrder = (filters.sort_order || 'desc') as SortOrder
   // Page is 1-based in URL (page=1 is first page)
@@ -81,7 +97,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -94,6 +110,9 @@ function FindingsContent() {
         target_id: targetIdFilter || undefined,
         search: searchQuery || undefined,
         seen_within_days: lastSeenFilter || undefined,
+        verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
+        verification_mode: verificationModeFilter ? (verificationModeFilter as 'deterministic' | 'ai_driven') : undefined,
+        verified_only: verifiedOnlyFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: PAGE_SIZE,
@@ -170,6 +189,9 @@ function FindingsContent() {
     if (scanIdFilter) params.set('return_scan_id', scanIdFilter)
     if (targetIdFilter) params.set('return_target_id', targetIdFilter)
     if (searchQuery) params.set('return_search', searchQuery)
+    if (verificationVerdictFilter) params.set('return_verification_verdict', verificationVerdictFilter)
+    if (verificationModeFilter) params.set('return_verification_mode', verificationModeFilter)
+    if (verifiedOnlyFilter) params.set('return_verified_only', 'true')
     if (sortBy !== 'severity') params.set('return_sort_by', sortBy)
     if (sortOrder !== 'desc') params.set('return_sort_order', sortOrder)
     if (page > 1) params.set('return_page', String(page))
@@ -348,6 +370,46 @@ function FindingsContent() {
             {sortOrder === 'desc' ? '\u2193' : '\u2191'}
           </button>
         </div>
+
+        {/* Verification Verdict Filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400">Verdict:</label>
+          <select
+            value={verificationVerdictFilter}
+            onChange={(e) => setFilter('verification_verdict', e.target.value || undefined)}
+            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All</option>
+            {VERIFICATION_VERDICTS.map((verdict) => (
+              <option key={verdict} value={verdict}>{verdict.replaceAll('_', ' ')}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Verification Mode Filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400">Mode:</label>
+          <select
+            value={verificationModeFilter}
+            onChange={(e) => setFilter('verification_mode', e.target.value || undefined)}
+            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="">All</option>
+            <option value="deterministic">deterministic</option>
+            <option value="ai_driven">ai driven</option>
+          </select>
+        </div>
+
+        {/* Verified Only */}
+        <label className="flex items-center gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={verifiedOnlyFilter}
+            onChange={(e) => setFilter('verified_only', e.target.checked ? 'true' : undefined)}
+            className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+          />
+          exploited only
+        </label>
 
         {/* Search */}
         <div className="relative flex-1 min-w-[200px]">

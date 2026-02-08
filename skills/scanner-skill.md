@@ -80,6 +80,9 @@ curl -X POST http://localhost:8080/scans \
 | `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
 | `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
 | `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
 
@@ -165,6 +168,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_password` | Password for form-based login |
 | `login_url` | Login page URL (auto-detected if not provided) |
 | `login_extra_fields` | Extra form fields as JSON |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `user2_header` | Second user auth for BOLA/IDOR testing |
 | `user2_cookies` | Second user cookies for BOLA/IDOR testing |
 
@@ -188,6 +192,7 @@ curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 # List with filters
 curl "http://localhost:8080/findings?status=active"
 curl "http://localhost:8080/findings?severity=critical&seen_within_days=30&sort_by=cvss&sort_order=desc"
+curl "http://localhost:8080/findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true"
 
 # Update status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
@@ -211,11 +216,30 @@ curl -X POST http://localhost:8080/findings/cleanup \
 curl -X POST http://localhost:8080/findings/bulk \
   -H "Content-Type: application/json" \
   -d '{"finding_ids": ["id1", "id2"], "status": "false_positive"}'
+
+# Queue retest for one finding (tiered)
+curl -X POST http://localhost:8080/findings/{id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+
+# Force AI-only retest
+curl -X POST "http://localhost:8080/findings/{id}/retest?mode=ai" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+
+# Bulk retest by filters
+curl -X POST http://localhost:8080/findings/retest \
+  -H "Content-Type: application/json" \
+  -d '{"severity":"high","status":"active","limit":25,"mode":"deterministic"}'
+
+# Retest history/details
+curl "http://localhost:8080/retests/finding/{id}?limit=20"
+curl "http://localhost:8080/retests/{retest_id}"
 ```
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-**Query Parameters:** `status`, `severity`, `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
+**Query Parameters:** `status`, `severity`, `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `verification_verdict`, `verification_mode`, `verified_only`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
 
 ### Target Management
 

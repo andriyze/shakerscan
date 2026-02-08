@@ -162,6 +162,27 @@ curl -X POST http://localhost:8080/findings/bulk \
   -H "Content-Type: application/json" \
   -d '{"finding_ids": ["id1", "id2"], "status": "false_positive", "notes": "Verified non-issue"}'
 
+# Queue retest for one finding (tiered: deterministic then optional AI escalation)
+curl -X POST http://localhost:8080/findings/{id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by": "api"}'
+
+# Force AI-only retest for one finding
+curl -X POST "http://localhost:8080/findings/{id}/retest?mode=ai" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by": "api"}'
+
+# Bulk retest by IDs or filters (supports mode: ai|deterministic)
+curl -X POST http://localhost:8080/findings/retest \
+  -H "Content-Type: application/json" \
+  -d '{"severity": "high", "status": "active", "limit": 25, "mode": "deterministic"}'
+
+# List retest history for one finding
+curl "http://localhost:8080/retests/finding/{id}?limit=20"
+
+# Get one retest record with proof/artifacts/AI metadata
+curl "http://localhost:8080/retests/{retest_id}"
+
 # Create manual finding (from manual testing)
 curl -X POST http://localhost:8080/findings/manual \
   -H "Content-Type: application/json" \
@@ -201,11 +222,16 @@ Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
 | `scan_id` | Filter by scan ID |
+| `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
+| `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
+| `verified_only` | If true, only return findings with `last_verification_verdict = exploited` |
 | `search` | Search by title or URL |
 | `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
 | `sort_order` | asc or desc (default: desc) |
 | `limit` | Results per page (default: 100, max: 500) |
 | `offset` | Pagination offset |
+
+Retest history records (`/retests/*`) include: `verification_mode`, `ai_plan`, `ai_reasoning`, `proof`, `artifacts`, and replay commands.
 
 **Cleanup Parameters:**
 
@@ -451,6 +477,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_password` | Password for form-based login |
 | `login_url` | Login page URL (auto-detected if not provided) |
 | `login_extra_fields` | Extra form fields as JSON (e.g., '{"remember": "true"}') |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `user2_cookies` | Second user cookies for BOLA/IDOR comparison testing |
 | `user2_header` | Second user auth header for BOLA/IDOR comparison testing |
 
@@ -618,6 +645,9 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
 | `custom_endpoints` | Array of endpoints with params to test (see format above) |
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings that have exploit verification evidence |
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
 | `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |

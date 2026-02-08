@@ -87,6 +87,7 @@ function FindingDetailContent() {
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
+  const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
 
   // Build back URL with preserved filters
@@ -152,7 +153,8 @@ function FindingDetailContent() {
     try {
       setRetestLoading(true)
       setRetestMessage(null)
-      const queued = await retestFinding(finding.id, { requested_by: 'ui' })
+      const mode = retestMode === 'tiered' ? undefined : retestMode
+      const queued = await retestFinding(finding.id, { requested_by: 'ui' }, mode)
       setRetestMessage(`Retest queued (${queued.retest_id.slice(0, 8)}...)`)
       const history = await getFindingRetests(finding.id, 10)
       setRetestHistory(history.retests || [])
@@ -207,6 +209,16 @@ function FindingDetailContent() {
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
         <div className="flex items-center gap-2">
+          <select
+            value={retestMode}
+            onChange={(e) => setRetestMode(e.target.value as 'tiered' | 'deterministic' | 'ai')}
+            className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+            title="Retest mode"
+          >
+            <option value="tiered">Tiered</option>
+            <option value="deterministic">Deterministic only</option>
+            <option value="ai">AI only</option>
+          </select>
           <button
             onClick={handleRetest}
             disabled={retestLoading}
@@ -382,6 +394,11 @@ function FindingDetailContent() {
                         : 'N/A'}
                     </div>
                   </div>
+                  {entry.verification_mode && (
+                    <div className="text-gray-400 mt-1">
+                      mode: {entry.verification_mode.replaceAll('_', ' ')}
+                    </div>
+                  )}
                   {typeof entry.confidence === 'number' && (
                     <div className="text-gray-400 mt-1">
                       confidence: {Math.round(entry.confidence * 100)}%
@@ -389,6 +406,17 @@ function FindingDetailContent() {
                   )}
                   {entry.verdict_reason && <div className="text-gray-400 mt-1">{entry.verdict_reason}</div>}
                   {!entry.verdict_reason && entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
+                  {entry.ai_reasoning && (
+                    <div className="text-gray-400 mt-1">
+                      ai: {entry.ai_reasoning}
+                    </div>
+                  )}
+                  {entry.ai_plan && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-blue-300">AI plan</summary>
+                      <pre className="mt-1 text-[11px] text-gray-300 whitespace-pre-wrap break-all">{JSON.stringify(entry.ai_plan, null, 2)}</pre>
+                    </details>
+                  )}
                   {Array.isArray(entry.replay_commands) && entry.replay_commands.length > 0 && (
                     <div className="mt-2 space-y-1">
                       {entry.replay_commands.slice(0, 3).map((command, idx) => (

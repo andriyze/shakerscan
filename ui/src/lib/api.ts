@@ -110,6 +110,7 @@ export interface RetestRecord {
   result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error'
   verdict?: 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
   verdict_reason?: string
+  verification_mode?: 'deterministic' | 'ai_driven'
   finding_type: string
   target_url: string
   original_url?: string
@@ -120,6 +121,9 @@ export interface RetestRecord {
   replay_commands?: string[] | null
   proof?: Record<string, unknown> | null
   artifacts?: Record<string, unknown> | null
+  auth_context?: Record<string, unknown> | null
+  ai_plan?: Record<string, unknown> | null
+  ai_reasoning?: string | null
   confidence?: number | null
   message?: string
   error_message?: string
@@ -274,6 +278,9 @@ export async function getFindings(params?: {
   target_id?: string
   search?: string
   seen_within_days?: number
+  verification_verdict?: 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  verification_mode?: 'deterministic' | 'ai_driven'
+  verified_only?: boolean
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
 }): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
@@ -287,6 +294,9 @@ export async function getFindings(params?: {
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
+  if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
+  if (params?.verification_mode) searchParams.set('verification_mode', params.verification_mode)
+  if (params?.verified_only) searchParams.set('verified_only', 'true')
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
@@ -319,17 +329,20 @@ export async function retestFinding(
     method?: string
     request_body?: string
     requested_by?: string
-  } = {}
+  } = {},
+  mode?: 'ai' | 'deterministic'
 ): Promise<{
   retest_id: string
   job_id: string
   status: string
+  mode?: string
   finding_id: string
   finding_type: string
   target_url: string
   replay_commands?: string[]
 }> {
-  const res = await fetch(`${API_URL}/findings/${id}/retest`, {
+  const query = mode ? `?mode=${mode}` : ''
+  const res = await fetch(`${API_URL}/findings/${id}/retest${query}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params)
