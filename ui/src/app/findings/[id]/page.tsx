@@ -4,7 +4,17 @@ import { useEffect, useMemo, useState, useCallback, Suspense } from 'react'
 import { Check, Copy, ExternalLink } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { formatDate, getFinding, updateFinding, deleteFinding, getSeverityBg, type Finding } from '@/lib/api'
+import {
+  formatDate,
+  getFinding,
+  getFindingRetests,
+  retestFinding,
+  updateFinding,
+  deleteFinding,
+  getSeverityBg,
+  type Finding,
+  type RetestRecord
+} from '@/lib/api'
 import { FINDING_STATUSES } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 
@@ -75,6 +85,9 @@ function FindingDetailContent() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
+  const [retestLoading, setRetestLoading] = useState(false)
+  const [retestMessage, setRetestMessage] = useState<string | null>(null)
+  const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
 
   // Build back URL with preserved filters
   const backUrl = useMemo(() => {
@@ -90,8 +103,14 @@ function FindingDetailContent() {
 
   const fetchFinding = useCallback(async () => {
     try {
-      const data = await getFinding(findingId)
+      const [data, retestData] = await Promise.all([
+        getFinding(findingId),
+        getFindingRetests(findingId, 10).catch(() => null)
+      ])
       setFinding(data)
+      if (retestData) {
+        setRetestHistory(retestData.retests || [])
+      }
       setError(null)
     } catch {
       setError('Failed to load finding details')
@@ -125,6 +144,24 @@ function FindingDetailContent() {
       router.push(backUrl)
     } catch (err) {
       console.error('Failed to delete finding:', err)
+    }
+  }
+
+  async function handleRetest() {
+    if (!finding || retestLoading) return
+    try {
+      setRetestLoading(true)
+      setRetestMessage(null)
+      const queued = await retestFinding(finding.id, { requested_by: 'ui' })
+      setRetestMessage(`Retest queued (${queued.retest_id.slice(0, 8)}...)`)
+      const history = await getFindingRetests(finding.id, 10)
+      setRetestHistory(history.retests || [])
+      await fetchFinding()
+    } catch (err) {
+      console.error('Failed to queue retest:', err)
+      setRetestMessage('Failed to queue retest')
+    } finally {
+      setRetestLoading(false)
     }
   }
 
@@ -169,12 +206,21 @@ function FindingDetailContent() {
           </Link>
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
-        <button
-          onClick={handleDelete}
-          className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
-        >
-          Delete
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleRetest}
+            disabled={retestLoading}
+            className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50"
+          >
+            {retestLoading ? 'Queueing...' : 'Retest Finding'}
+          </button>
+          <button
+            onClick={handleDelete}
+            className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
+          >
+            Delete
+          </button>
+        </div>
       </div>
 
       <SectionCard title="Overview">
@@ -285,6 +331,66 @@ function FindingDetailContent() {
           )}
           {finding.resurfaced_count !== undefined && (
             <InfoItem label="Resurfaced count">{finding.resurfaced_count}</InfoItem>
+          )}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Retest Verification">
+        <div className="space-y-3">
+          {retestMessage && (
+            <div className={`text-xs rounded px-2 py-1 ${
+              retestMessage.includes('Failed')
+                ? 'bg-red-900/30 text-red-300 border border-red-900/60'
+                : 'bg-blue-900/30 text-blue-300 border border-blue-900/60'
+            }`}>
+              {retestMessage}
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <InfoItem label="Last status">
+              <span className="capitalize">{finding.last_verification_status || 'not tested'}</span>
+            </InfoItem>
+            <InfoItem label="Last confidence">
+              {typeof finding.last_verification_confidence === 'number'
+                ? `${Math.round(finding.last_verification_confidence * 100)}%`
+                : 'N/A'}
+            </InfoItem>
+            <InfoItem label="Last verified">
+              {finding.last_verified_at ? formatDate(finding.last_verified_at) : 'N/A'}
+            </InfoItem>
+            <InfoItem label="Verification count">
+              {finding.verification_count ?? 0}
+            </InfoItem>
+          </div>
+
+          {retestHistory.length > 0 ? (
+            <div className="space-y-2">
+              {retestHistory.map((entry) => (
+                <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-gray-300">
+                      {entry.finding_type} • {entry.result_status || entry.status}
+                    </div>
+                    <div className="text-gray-500">
+                      {entry.completed_at
+                        ? formatDate(entry.completed_at)
+                        : entry.created_at
+                        ? formatDate(entry.created_at)
+                        : 'N/A'}
+                    </div>
+                  </div>
+                  {typeof entry.confidence === 'number' && (
+                    <div className="text-gray-400 mt-1">
+                      confidence: {Math.round(entry.confidence * 100)}%
+                    </div>
+                  )}
+                  {entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
+                  {entry.error_message && <div className="text-red-300 mt-1">{entry.error_message}</div>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500">No retests recorded yet.</p>
           )}
         </div>
       </SectionCard>

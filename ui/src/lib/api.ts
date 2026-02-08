@@ -92,8 +92,35 @@ export interface Finding {
   last_seen_at: string
   resolved_at?: string
   resurfaced_count?: number
+  last_verification_status?: string
+  last_verification_confidence?: number
+  last_verified_at?: string
+  verification_count?: number
   created_at?: string
   updated_at?: string
+}
+
+export interface RetestRecord {
+  id: string
+  finding_id: string
+  job_id?: string
+  requested_by?: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error'
+  finding_type: string
+  target_url: string
+  original_url?: string
+  param?: string
+  payload?: string
+  method?: string
+  request_body?: string
+  proof?: Record<string, unknown> | null
+  confidence?: number | null
+  message?: string
+  error_message?: string
+  created_at?: string
+  started_at?: string | null
+  completed_at?: string | null
 }
 
 export interface QueueStats {
@@ -273,6 +300,47 @@ export async function getDomains(): Promise<{ domains: string[] }> {
 export async function getFinding(id: string): Promise<Finding> {
   const res = await fetch(`${API_URL}/findings/${id}`)
   if (!res.ok) throw new Error('Failed to fetch finding')
+  return res.json()
+}
+
+export async function retestFinding(
+  id: string,
+  params: {
+    finding_type?: string
+    target?: string
+    original_url?: string
+    param?: string
+    payload?: string
+    method?: string
+    request_body?: string
+    requested_by?: string
+  } = {}
+): Promise<{
+  retest_id: string
+  job_id: string
+  status: string
+  finding_id: string
+  finding_type: string
+  target_url: string
+}> {
+  const res = await fetch(`${API_URL}/findings/${id}/retest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to queue retest'))
+  }
+  return res.json()
+}
+
+export async function getFindingRetests(id: string, limit: number = 20): Promise<{
+  finding_id: string
+  retests: RetestRecord[]
+  count: number
+}> {
+  const res = await fetch(`${API_URL}/retests/finding/${id}?limit=${limit}`)
+  if (!res.ok) throw new Error('Failed to fetch retest history')
   return res.json()
 }
 

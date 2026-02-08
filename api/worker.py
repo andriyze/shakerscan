@@ -39,6 +39,23 @@ MAX_SCAN_DURATION = {
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 
+SUPPORTED_RETEST_TYPES = {"xss", "sqli", "ssrf", "path_traversal"}
+RETEST_TYPE_ALIASES = {
+    "xss": "xss",
+    "cross-site-scripting": "xss",
+    "cross_site_scripting": "xss",
+    "sqli": "sqli",
+    "sql-injection": "sqli",
+    "sql_injection": "sqli",
+    "ssrf": "ssrf",
+    "server-side-request-forgery": "ssrf",
+    "server_side_request_forgery": "ssrf",
+    "path_traversal": "path_traversal",
+    "path-traversal": "path_traversal",
+    "lfi": "path_traversal",
+    "local-file-inclusion": "path_traversal",
+}
+
 # Database pool (initialized in main)
 db_pool = None
 
@@ -498,6 +515,314 @@ async def save_findings(scan_id: str, target_id: str, findings: list):
                 )
 
 
+def normalize_retest_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    return RETEST_TYPE_ALIASES.get(str(value).strip().lower())
+
+
+def parse_json_field(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def infer_retest_inputs(verification: dict) -> dict:
+    """Build effective retest inputs using verification row and finding evidence."""
+    evidence = parse_json_field(verification.get("evidence"))
+    title = str(verification.get("title", "")).lower()
+    tool = str(verification.get("tool", "")).lower()
+
+    finding_type = normalize_retest_type(verification.get("finding_type"))
+    if not finding_type:
+        finding_type = normalize_retest_type(evidence.get("type"))
+    if not finding_type:
+        if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss"}:
+            finding_type = "xss"
+        elif ("sql" in title and "inject" in title) or "sqli" in title or tool in {"sqlmap", "smart_sqli", "oob_sqli"}:
+            finding_type = "sqli"
+        elif "ssrf" in title or "server-side request forgery" in title:
+            finding_type = "ssrf"
+        elif any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+            finding_type = "path_traversal"
+
+    target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
+    original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url
+    param = verification.get("param") or evidence.get("param") or evidence.get("parameter") or ""
+    payload = verification.get("payload") or evidence.get("payload") or ""
+    if not payload and isinstance(evidence.get("detail"), dict):
+        payload = evidence.get("detail", {}).get("payload") or ""
+    method = (verification.get("method") or evidence.get("method") or "GET").upper()
+    request_body = verification.get("request_body") or evidence.get("body") or ""
+
+    return {
+        "finding_type": finding_type,
+        "target_url": str(target_url).strip(),
+        "original_url": str(original_url).strip() if original_url else "",
+        "param": str(param).strip() if param else "",
+        "payload": str(payload) if payload else "",
+        "method": method,
+        "request_body": str(request_body) if request_body else "",
+        "evidence": evidence,
+    }
+
+
+async def run_finding_retest(verification: dict) -> dict:
+    """Execute a proof-based retest for a finding verification record."""
+    try:
+        from scanner_tools.proof_of_exploit import (
+            prove_path_traversal,
+            prove_sqli,
+            prove_ssrf,
+            prove_xss,
+            start_scan_session,
+            end_scan_session,
+        )
+    except ImportError as e:
+        return {
+            "status": "failed",
+            "result_status": "error",
+            "error_message": f"Proof module unavailable: {e}",
+            "confidence": None,
+            "proof": None,
+            "message": "Retest could not run because proof module is unavailable",
+        }
+
+    inputs = infer_retest_inputs(verification)
+    finding_type = inputs.get("finding_type")
+    if finding_type not in SUPPORTED_RETEST_TYPES:
+        return {
+            "status": "failed",
+            "result_status": "error",
+            "error_message": f"Unsupported finding type: {finding_type}",
+            "confidence": None,
+            "proof": None,
+            "message": f"Unsupported finding type: {finding_type}",
+        }
+
+    test_url = inputs.get("original_url") or inputs.get("target_url")
+    if not test_url:
+        return {
+            "status": "failed",
+            "result_status": "error",
+            "error_message": "Missing target/original URL for retest",
+            "confidence": None,
+            "proof": None,
+            "message": "Missing target/original URL for retest",
+        }
+
+    verification_id = str(verification.get("id", "unknown"))
+    session_id = f"retest-{verification_id}"
+
+    try:
+        try:
+            start_scan_session(session_id)
+        except Exception:
+            pass
+
+        if finding_type == "xss":
+            proof = await prove_xss(
+                test_url,
+                inputs.get("param", ""),
+                "",
+                inputs.get("payload") or None,
+            )
+        elif finding_type == "sqli":
+            proof = await prove_sqli(
+                test_url,
+                inputs.get("param", ""),
+                "",
+                inputs.get("evidence", {}).get("dbms"),
+            )
+        elif finding_type == "ssrf":
+            proof = await prove_ssrf(
+                test_url,
+                inputs.get("param", ""),
+                "",
+            )
+        elif finding_type == "path_traversal":
+            proof = await prove_path_traversal(
+                test_url,
+                inputs.get("param", ""),
+                "",
+            )
+        else:
+            # Defensive fallback
+            return {
+                "status": "failed",
+                "result_status": "error",
+                "error_message": f"No prover for finding type: {finding_type}",
+                "confidence": None,
+                "proof": None,
+                "message": f"No prover for finding type: {finding_type}",
+            }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "result_status": "error",
+            "error_message": f"Retest execution failed: {e}",
+            "confidence": None,
+            "proof": None,
+            "message": "Retest execution failed",
+        }
+    finally:
+        try:
+            end_scan_session(session_id)
+        except Exception:
+            pass
+
+    proof_data = proof.to_dict() if proof else None
+    still_vulnerable = bool(getattr(proof, "proven", False))
+    confidence = getattr(proof, "confidence", None)
+
+    result_status = "still_vulnerable" if still_vulnerable else "likely_fixed"
+    message = (
+        "The vulnerability is still present and reproducible."
+        if still_vulnerable
+        else "The vulnerability could not be reproduced during retest."
+    )
+
+    return {
+        "status": "completed",
+        "result_status": result_status,
+        "error_message": None,
+        "confidence": confidence,
+        "proof": proof_data,
+        "message": message,
+    }
+
+
+async def process_finding_retest_job(job_data: dict):
+    """Process a queued finding retest job."""
+    job_id = job_data.get("job_id", "unknown")
+    verification_id = job_data.get("verification_id")
+    if not verification_id:
+        print(f"[retest:{job_id[:8]}] Missing verification_id", flush=True)
+        return
+
+    print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
+    r = get_redis()
+    now = datetime.utcnow()
+
+    retest_key = f"retest_job:{job_id}"
+    r.hset(retest_key, mapping={
+        "status": "running",
+        "verification_id": verification_id,
+        "started_at": now.isoformat(),
+    })
+
+    async with db_pool.acquire() as conn:
+        verification = await conn.fetchrow("""
+            SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url
+            FROM finding_verifications fv
+            JOIN findings f ON fv.finding_id = f.id
+            WHERE fv.id = $1
+        """, uuid.UUID(verification_id))
+
+        if not verification:
+            r.hset(retest_key, mapping={
+                "status": "failed",
+                "error": "verification_not_found",
+            })
+            r.expire(retest_key, 86400)
+            print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
+            return
+
+        await conn.execute("""
+            UPDATE finding_verifications
+            SET status = 'running', started_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+        """, verification["id"])
+        await conn.execute("""
+            UPDATE findings
+            SET last_verification_status = 'running', updated_at = NOW()
+            WHERE id = $1
+        """, verification["finding_id"])
+
+        result = await run_finding_retest(dict(verification))
+        completed_at = datetime.utcnow()
+
+        if result["status"] == "completed":
+            await conn.execute("""
+                UPDATE finding_verifications
+                SET status = 'completed',
+                    result_status = $1,
+                    proof = $2,
+                    confidence = $3,
+                    message = $4,
+                    error_message = NULL,
+                    completed_at = $5,
+                    updated_at = NOW()
+                WHERE id = $6
+            """,
+                result.get("result_status"),
+                json.dumps(result.get("proof")) if result.get("proof") else None,
+                result.get("confidence"),
+                result.get("message"),
+                completed_at,
+                verification["id"],
+            )
+        else:
+            await conn.execute("""
+                UPDATE finding_verifications
+                SET status = 'failed',
+                    result_status = $1,
+                    proof = $2,
+                    confidence = $3,
+                    message = $4,
+                    error_message = $5,
+                    completed_at = $6,
+                    updated_at = NOW()
+                WHERE id = $7
+            """,
+                result.get("result_status") or "error",
+                json.dumps(result.get("proof")) if result.get("proof") else None,
+                result.get("confidence"),
+                result.get("message"),
+                result.get("error_message"),
+                completed_at,
+                verification["id"],
+            )
+
+        await conn.execute("""
+            UPDATE findings
+            SET last_verification_status = $1,
+                last_verification_confidence = $2,
+                last_verified_at = $3,
+                verification_count = COALESCE(verification_count, 0) + 1,
+                updated_at = NOW()
+            WHERE id = $4
+        """,
+            result.get("result_status") if result.get("status") == "completed" else "error",
+            result.get("confidence"),
+            completed_at,
+            verification["finding_id"],
+        )
+
+    r.hset(retest_key, mapping={
+        "status": "completed" if result["status"] == "completed" else "failed",
+        "result_status": result.get("result_status") or "error",
+        "completed_at": completed_at.isoformat(),
+    })
+    if result.get("error_message"):
+        r.hset(retest_key, "error", result["error_message"])
+    r.expire(retest_key, 86400)
+
+    print(
+        f"[retest:{job_id[:8]}] Completed retest {verification_id} -> "
+        f"{result.get('result_status') or result.get('status')}",
+        flush=True,
+    )
+
+
 def save_result_file(result: dict, job_id: str) -> str:
     """Save scan result to JSON file."""
     target = result.get('input', {}).get('normalized_host', 'unknown')
@@ -795,6 +1120,8 @@ async def process_job(job_data: dict):
 
     if job_type == 'discovery':
         await process_discovery_job(job_data)
+    elif job_type == 'finding_retest':
+        await process_finding_retest_job(job_data)
     else:
         await process_scan_job(job_data)
 

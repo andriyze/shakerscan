@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -80,6 +80,208 @@ def generate_finding_fingerprint(finding: dict) -> str:
     ]
     key_string = '|'.join(str(p) for p in key_parts)
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+
+
+SUPPORTED_RETEST_TYPES = ("xss", "sqli", "ssrf", "path_traversal")
+RETEST_TYPE_ALIASES = {
+    "xss": "xss",
+    "cross-site-scripting": "xss",
+    "cross_site_scripting": "xss",
+    "sqli": "sqli",
+    "sql-injection": "sqli",
+    "sql_injection": "sqli",
+    "ssrf": "ssrf",
+    "server-side-request-forgery": "ssrf",
+    "server_side_request_forgery": "ssrf",
+    "path_traversal": "path_traversal",
+    "path-traversal": "path_traversal",
+    "lfi": "path_traversal",
+    "local-file-inclusion": "path_traversal",
+}
+
+
+def normalize_retest_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    key = str(value).strip().lower()
+    return RETEST_TYPE_ALIASES.get(key)
+
+
+def parse_json_field(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
+    normalized = normalize_retest_type(override_type)
+    if normalized:
+        return normalized
+
+    evidence_type = normalize_retest_type(evidence.get("type"))
+    if evidence_type:
+        return evidence_type
+
+    title = str(finding.get("title", "")).lower()
+    tool = str(finding.get("tool", "")).lower()
+
+    if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss", "custom_xss"}:
+        return "xss"
+    if (("sql" in title and "inject" in title) or "sqli" in title or
+            tool in {"sqlmap", "smart_sqli", "custom_sqli", "oob_sqli"}):
+        return "sqli"
+    if "ssrf" in title or "server-side request forgery" in title:
+        return "ssrf"
+    if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+        return "path_traversal"
+
+    return None
+
+
+def extract_retest_inputs(
+    finding: dict[str, Any],
+    override_type: str | None = None,
+    override_target: str | None = None,
+    override_original_url: str | None = None,
+    override_param: str | None = None,
+    override_payload: str | None = None,
+    override_method: str | None = None,
+    override_request_body: str | None = None,
+) -> dict[str, Any]:
+    evidence = parse_json_field(finding.get("evidence"))
+    finding_type = infer_retest_type(finding, evidence, override_type=override_type)
+
+    target_url = override_target or finding.get("target_url") or finding.get("url") or evidence.get("target") or ""
+    original_url = override_original_url or finding.get("url") or evidence.get("url") or target_url
+    param = override_param or finding.get("param") or evidence.get("param") or evidence.get("parameter") or ""
+    payload = override_payload or finding.get("payload") or evidence.get("payload") or ""
+    if not payload and isinstance(evidence.get("detail"), dict):
+        payload = evidence.get("detail", {}).get("payload") or ""
+    method = (override_method or finding.get("method") or evidence.get("method") or "GET").upper()
+    request_body = override_request_body or finding.get("body") or evidence.get("body") or ""
+
+    return {
+        "finding_type": finding_type,
+        "target_url": str(target_url).strip(),
+        "original_url": str(original_url).strip() if original_url else None,
+        "param": str(param).strip() if param else None,
+        "payload": str(payload) if payload else None,
+        "method": method,
+        "request_body": str(request_body) if request_body else None,
+    }
+
+
+async def get_finding_record(conn, finding_id: str):
+    """Fetch finding by UUID or fingerprint (with backward-compatible suffix lookup)."""
+    finding = None
+
+    try:
+        finding_uuid = uuid.UUID(finding_id)
+        finding = await conn.fetchrow("""
+            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE f.id = $1
+        """, finding_uuid)
+    except ValueError:
+        pass
+
+    if not finding:
+        finding = await conn.fetchrow("""
+            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE f.fingerprint = $1
+            ORDER BY f.last_seen_at DESC
+            LIMIT 1
+        """, finding_id)
+
+    if not finding and ':' in finding_id:
+        suffix = finding_id.split(':')[-1]
+        finding = await conn.fetchrow("""
+            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE f.fingerprint = $1
+            ORDER BY f.last_seen_at DESC
+            LIMIT 1
+        """, suffix)
+
+    return finding
+
+
+async def ensure_verification_schema(pool: asyncpg.Pool):
+    """Ensure verification schema exists for upgraded installations."""
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            ALTER TABLE findings
+            ADD COLUMN IF NOT EXISTS last_verification_status TEXT,
+            ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
+            ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0
+        """)
+        await conn.execute("""
+            UPDATE findings
+            SET verification_count = 0
+            WHERE verification_count IS NULL
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS finding_verifications (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+                scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                job_id TEXT,
+                requested_by TEXT DEFAULT 'api',
+                status TEXT NOT NULL DEFAULT 'queued',
+                result_status TEXT,
+                finding_type TEXT NOT NULL,
+                target_url TEXT NOT NULL,
+                original_url TEXT,
+                param TEXT,
+                payload TEXT,
+                method TEXT,
+                request_body TEXT,
+                proof JSONB,
+                confidence NUMERIC(3,2),
+                message TEXT,
+                error_message TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_findings_last_verified_at
+            ON findings(last_verified_at DESC)
+            WHERE last_verified_at IS NOT NULL
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_finding_id
+            ON finding_verifications(finding_id, created_at DESC)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_status
+            ON finding_verifications(status)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_result_status
+            ON finding_verifications(result_status)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id
+            ON finding_verifications(job_id)
+            WHERE job_id IS NOT NULL
+        """)
 
 
 async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.UUID, findings: list):
@@ -481,6 +683,7 @@ async def lifespan(app: FastAPI):
     """Manage database connection pool lifecycle and background tasks."""
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    await ensure_verification_schema(db_pool)
 
     # Start background tasks
     cleanup_task = asyncio.create_task(stale_scan_checker(db_pool))
@@ -633,6 +836,30 @@ class TargetUpdate(BaseModel):
 class FindingUpdate(BaseModel):
     status: str  # active, resolved, false_positive, accepted_risk
     notes: Optional[str] = None
+
+
+class FindingRetestRequest(BaseModel):
+    finding_type: Optional[str] = None  # xss, sqli, ssrf, path_traversal
+    target: Optional[str] = None
+    original_url: Optional[str] = None
+    param: Optional[str] = None
+    payload: Optional[str] = None
+    method: Optional[str] = None
+    request_body: Optional[str] = None
+    requested_by: Optional[str] = "api"
+
+
+class FindingsBulkRetestRequest(BaseModel):
+    finding_ids: Optional[list[str]] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    target_id: Optional[str] = None
+    scan_id: Optional[str] = None
+    root_domain: Optional[str] = None
+    search: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=200)
+    finding_type: Optional[str] = None
+    requested_by: Optional[str] = "api"
 
 
 class ManualFindingCreate(BaseModel):
@@ -1395,6 +1622,45 @@ async def scan_target(target_id: str, options: ScanOptions = None):
 # FINDINGS
 # ============================================================
 
+async def enqueue_finding_retest(conn, finding: dict[str, Any], inputs: dict[str, Any], requested_by: str = "api"):
+    """Create a queued finding retest record and return (retest_id, job_id)."""
+    retest_id = uuid.uuid4()
+    job_id = str(uuid.uuid4())
+
+    await conn.execute("""
+        INSERT INTO finding_verifications (
+            id, finding_id, scan_id, target_id, job_id, requested_by, status,
+            finding_type, target_url, original_url, param, payload, method, request_body
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, 'queued',
+            $7, $8, $9, $10, $11, $12, $13
+        )
+    """,
+        retest_id,
+        finding["id"],
+        finding.get("scan_id"),
+        finding.get("target_id"),
+        job_id,
+        requested_by or "api",
+        inputs["finding_type"],
+        inputs["target_url"],
+        inputs.get("original_url"),
+        inputs.get("param"),
+        inputs.get("payload"),
+        inputs.get("method"),
+        inputs.get("request_body"),
+    )
+
+    await conn.execute("""
+        UPDATE findings
+        SET last_verification_status = 'queued',
+            updated_at = NOW()
+        WHERE id = $1
+    """, finding["id"])
+
+    return retest_id, job_id
+
+
 @app.get("/findings")
 async def list_findings(
     severity: Optional[str] = None,
@@ -1525,47 +1791,276 @@ async def list_findings(
 async def get_finding(finding_id: str):
     """Get finding details by ID or fingerprint."""
     async with db_pool.acquire() as conn:
-        finding = None
-
-        # Try UUID first
-        try:
-            finding_uuid = uuid.UUID(finding_id)
-            finding = await conn.fetchrow("""
-                SELECT f.*, t.url as target_url, t.name as target_name
-                FROM findings f
-                LEFT JOIN targets t ON f.target_id = t.id
-                WHERE f.id = $1
-            """, finding_uuid)
-        except ValueError:
-            pass
-
-        # Try full scanner ID as fingerprint (new format: "tool:hash")
-        if not finding:
-            finding = await conn.fetchrow("""
-                SELECT f.*, t.url as target_url, t.name as target_name
-                FROM findings f
-                LEFT JOIN targets t ON f.target_id = t.id
-                WHERE f.fingerprint = $1
-                ORDER BY f.last_seen_at DESC
-                LIMIT 1
-            """, finding_id)
-
-        # Backward compat: try suffix-only for old findings stored with hash-only fingerprint
-        if not finding and ':' in finding_id:
-            suffix = finding_id.split(':')[-1]
-            finding = await conn.fetchrow("""
-                SELECT f.*, t.url as target_url, t.name as target_name
-                FROM findings f
-                LEFT JOIN targets t ON f.target_id = t.id
-                WHERE f.fingerprint = $1
-                ORDER BY f.last_seen_at DESC
-                LIMIT 1
-            """, suffix)
-
+        finding = await get_finding_record(conn, finding_id)
         if not finding:
             raise HTTPException(status_code=404, detail="Finding not found")
 
     return dict(finding)
+
+
+@app.post("/findings/{finding_id:path}/retest")
+async def retest_finding(finding_id: str, request: FindingRetestRequest | None = None):
+    """Queue a retest for a finding and persist verification history."""
+    request = request or FindingRetestRequest()
+    r = get_redis()
+
+    async with db_pool.acquire() as conn:
+        finding = await get_finding_record(conn, finding_id)
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
+
+        finding_data = dict(finding)
+        retest_inputs = extract_retest_inputs(
+            finding_data,
+            override_type=request.finding_type,
+            override_target=request.target,
+            override_original_url=request.original_url,
+            override_param=request.param,
+            override_payload=request.payload,
+            override_method=request.method,
+            override_request_body=request.request_body,
+        )
+
+        if not retest_inputs.get("finding_type"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unsupported_finding_type",
+                    "message": "Could not infer retest type from finding. Supported types: xss, sqli, ssrf, path_traversal",
+                    "supported_types": list(SUPPORTED_RETEST_TYPES),
+                },
+            )
+
+        if not retest_inputs.get("target_url"):
+            raise HTTPException(
+                status_code=400,
+                detail="Finding is missing target URL context required for retest"
+            )
+
+        retest_id, job_id = await enqueue_finding_retest(
+            conn,
+            finding_data,
+            retest_inputs,
+            requested_by=request.requested_by or "api",
+        )
+
+    job_data = {
+        "type": "finding_retest",
+        "job_id": job_id,
+        "verification_id": str(retest_id),
+        "finding_id": str(finding_data["id"]),
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    r.hset(f"retest_job:{job_id}", mapping={
+        "status": "queued",
+        "verification_id": str(retest_id),
+        "finding_id": str(finding_data["id"]),
+    })
+    r.expire(f"retest_job:{job_id}", 86400)
+
+    return {
+        "retest_id": str(retest_id),
+        "job_id": job_id,
+        "status": "queued",
+        "finding_id": str(finding_data["id"]),
+        "finding_type": retest_inputs["finding_type"],
+        "target_url": retest_inputs["target_url"],
+    }
+
+
+@app.get("/retests/finding/{finding_id:path}")
+async def list_finding_retests(finding_id: str, limit: int = Query(20, ge=1, le=200)):
+    """List retest history for a finding."""
+    async with db_pool.acquire() as conn:
+        finding = await get_finding_record(conn, finding_id)
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
+
+        rows = await conn.fetch("""
+            SELECT *
+            FROM finding_verifications
+            WHERE finding_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, finding["id"], limit)
+
+    return {
+        "finding_id": str(finding["id"]),
+        "retests": [row_to_dict(r) for r in rows],
+        "count": len(rows),
+    }
+
+
+@app.get("/retests/{retest_id}")
+async def get_retest(retest_id: str):
+    """Get a single retest record by ID."""
+    async with db_pool.acquire() as conn:
+        try:
+            retest_uuid = uuid.UUID(retest_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid retest ID")
+
+        row = await conn.fetchrow("""
+            SELECT fv.*, f.title, f.severity, f.fingerprint
+            FROM finding_verifications fv
+            JOIN findings f ON fv.finding_id = f.id
+            WHERE fv.id = $1
+        """, retest_uuid)
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Retest not found")
+
+    return row_to_dict(row)
+
+
+@app.post("/findings/retest")
+async def bulk_retest_findings(request: FindingsBulkRetestRequest):
+    """Queue retests for multiple findings by IDs or filters."""
+    r = get_redis()
+    queued: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+
+    async with db_pool.acquire() as conn:
+        findings: list[Any] = []
+
+        if request.finding_ids:
+            for fid in request.finding_ids:
+                finding = await get_finding_record(conn, fid)
+                if finding:
+                    findings.append(finding)
+                else:
+                    skipped.append({"finding_id": fid, "reason": "not_found"})
+        else:
+            scoped = any([
+                request.severity,
+                request.status,
+                request.target_id,
+                request.scan_id,
+                request.root_domain,
+                request.search,
+            ])
+            if not scoped:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide finding_ids or at least one filter to scope bulk retest request"
+                )
+
+            query = """
+                SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+                FROM findings f
+                LEFT JOIN targets t ON f.target_id = t.id
+                WHERE 1=1
+            """
+            params: list[Any] = []
+            idx = 1
+
+            if request.severity:
+                query += f" AND f.severity = ${idx}"
+                params.append(request.severity)
+                idx += 1
+            if request.status:
+                query += f" AND f.status = ${idx}"
+                params.append(request.status)
+                idx += 1
+            else:
+                query += " AND f.status = 'active'"
+            if request.target_id:
+                try:
+                    target_uuid = uuid.UUID(request.target_id)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid target_id")
+                query += f" AND f.target_id = ${idx}"
+                params.append(target_uuid)
+                idx += 1
+            if request.scan_id:
+                try:
+                    scan_uuid = uuid.UUID(request.scan_id)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid scan_id")
+                query += f" AND f.scan_id = ${idx}"
+                params.append(scan_uuid)
+                idx += 1
+            if request.root_domain:
+                query += f" AND t.root_domain = ${idx}"
+                params.append(request.root_domain)
+                idx += 1
+            if request.search:
+                query += f" AND (f.title ILIKE ${idx} OR f.url ILIKE ${idx})"
+                params.append(f"%{request.search}%")
+                idx += 1
+
+            query += f"""
+                ORDER BY
+                    CASE f.severity
+                        WHEN 'critical' THEN 1
+                        WHEN 'high' THEN 2
+                        WHEN 'medium' THEN 3
+                        WHEN 'low' THEN 4
+                        ELSE 5
+                    END,
+                    f.last_seen_at DESC
+                LIMIT ${idx}
+            """
+            params.append(request.limit)
+            findings = await conn.fetch(query, *params)
+
+        for row in findings:
+            finding_data = dict(row)
+            retest_inputs = extract_retest_inputs(
+                finding_data,
+                override_type=request.finding_type,
+            )
+
+            if not retest_inputs.get("finding_type"):
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "unsupported_type",
+                })
+                continue
+            if not retest_inputs.get("target_url"):
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "missing_target_url",
+                })
+                continue
+
+            retest_id, job_id = await enqueue_finding_retest(
+                conn,
+                finding_data,
+                retest_inputs,
+                requested_by=request.requested_by or "api",
+            )
+
+            job_data = {
+                "type": "finding_retest",
+                "job_id": job_id,
+                "verification_id": str(retest_id),
+                "finding_id": str(finding_data["id"]),
+                "submitted_at": datetime.utcnow().isoformat(),
+            }
+            r.rpush(QUEUE_NAME, json.dumps(job_data))
+            r.hset(f"retest_job:{job_id}", mapping={
+                "status": "queued",
+                "verification_id": str(retest_id),
+                "finding_id": str(finding_data["id"]),
+            })
+            r.expire(f"retest_job:{job_id}", 86400)
+
+            queued.append({
+                "finding_id": str(finding_data["id"]),
+                "retest_id": str(retest_id),
+                "job_id": job_id,
+                "finding_type": retest_inputs["finding_type"],
+            })
+
+    return {
+        "status": "queued",
+        "queued_count": len(queued),
+        "skipped_count": len(skipped),
+        "queued": queued,
+        "skipped": skipped,
+    }
 
 
 @app.patch("/findings/{finding_id:path}")
