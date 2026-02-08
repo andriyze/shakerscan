@@ -593,10 +593,12 @@ PUT /settings/ai
   "ai_url": "https://api.openai.com/v1/chat/completions",
   "ai_api_key": "sk-...",
   "ai_model": "gpt-4o-mini",
+  "ai_model_fallback": "moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet",
   "ai_verify_enabled": true,
   "ai_verify_url": "https://api.openai.com/v1/chat/completions",
   "ai_verify_api_key": "sk-...",
   "ai_verify_model": "gpt-4o-mini",
+  "ai_verify_model_fallback": "openai/gpt-4o-mini,anthropic/claude-3-5-sonnet",
   "ai_verify_min_severity": "high",
   "persist_to_env": false
 }
@@ -606,9 +608,26 @@ PUT /settings/ai
 {
   "ai_url": "",
   "ai_api_key": "",
+  "ai_model_fallback": "",
   "ai_verify_url": "",
   "ai_verify_api_key": "",
+  "ai_verify_model_fallback": "",
   "persist_to_env": true
+}
+
+# Probe provider/model settings for scan AI (uses current settings by default)
+POST /settings/ai/test
+{
+  "scope": "scan"
+}
+
+# Probe retest AI with explicit overrides (without saving)
+POST /settings/ai/test
+{
+  "scope": "verify",
+  "ai_url": "https://api.openai.com/v1/chat/completions",
+  "ai_model": "gpt-4o-mini",
+  "ai_fallback_model": "moonshotai/kimi-k2.5"
 }
 ```
 
@@ -649,6 +668,7 @@ Create a `.env` file to customize settings:
 AI_URL=https://api.openai.com/v1/chat/completions
 AI_API_KEY=sk-...
 AI_MODEL=gpt-4o
+AI_FALLBACK_MODEL=moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet
 AI_MASK_HOST=example.com
 
 # AI Retest Verification (optional, runtime override via /settings/ai)
@@ -656,6 +676,7 @@ AI_VERIFY_ENABLED=false
 AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
 AI_VERIFY_API_KEY=sk-...
 AI_VERIFY_MODEL=gpt-4o-mini
+AI_VERIFY_FALLBACK_MODEL=moonshotai/kimi-k2.5,openai/gpt-4o-mini
 AI_VERIFY_MIN_SEVERITY=high
 
 # Optional path used when /settings/ai persist_to_env=true

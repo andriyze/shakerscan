@@ -349,10 +349,12 @@ curl -X PUT http://localhost:8080/settings/ai \
     "ai_url": "https://api.openai.com/v1/chat/completions",
     "ai_api_key": "sk-...",
     "ai_model": "gpt-4o-mini",
+    "ai_model_fallback": "moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet",
     "ai_verify_enabled": true,
     "ai_verify_url": "https://api.openai.com/v1/chat/completions",
     "ai_verify_api_key": "sk-...",
     "ai_verify_model": "gpt-4o-mini",
+    "ai_verify_model_fallback": "openai/gpt-4o-mini,anthropic/claude-3-5-sonnet",
     "ai_verify_min_severity": "high",
     "persist_to_env": false
   }'
@@ -363,9 +365,25 @@ curl -X PUT http://localhost:8080/settings/ai \
   -d '{
     "ai_url": "",
     "ai_api_key": "",
+    "ai_model_fallback": "",
     "ai_verify_url": "",
     "ai_verify_api_key": "",
+    "ai_verify_model_fallback": "",
     "persist_to_env": true
+  }'
+
+# Probe active settings for scan AI
+curl -X POST http://localhost:8080/settings/ai/test \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"scan"}'
+
+# Probe retest AI with temporary override values (without persisting)
+curl -X POST http://localhost:8080/settings/ai/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scope":"verify",
+    "ai_model":"gpt-4o-mini",
+    "ai_fallback_model":"moonshotai/kimi-k2.5"
   }'
 ```
 

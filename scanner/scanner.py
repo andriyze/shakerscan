@@ -9054,7 +9054,16 @@ async def build_report(target: str,
 # Note: Config findings emitters and AI helpers moved to reporting.py module
 
 
-async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: str | None, ai_api_key: str | None, exploit_level: str = "safe", public_only: bool = False, mask_host: str = "example.com") -> dict[str, Any]:
+async def ai_review_findings(
+    report: dict[str, Any],
+    model: str | None,
+    ai_url: str | None,
+    ai_api_key: str | None,
+    exploit_level: str = "safe",
+    public_only: bool = False,
+    mask_host: str = "example.com",
+    ai_fallback_model: str | None = None,
+) -> dict[str, Any]:
     """Attach AI analysis per finding and aggregate logs.
 
     Uses external AI provider if configured for enhanced classification,
@@ -9091,19 +9100,30 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
     provider_error = None
     provider_latency_ms = None
     ai_meta: dict[str, Any] | None = None
+    provider_models_used: list[str] = []
+    provider_partial = False
 
     if ai_url and ai_api_key and model and findings:
         provider_attempted = True
         try:
             # Use the new classify_findings_batch function that actually parses AI responses
             ai_results, error, latency, ai_meta = await classify_findings_batch(
-                findings, scan_context, ai_url, ai_api_key, model, mask_host
+                findings,
+                scan_context,
+                ai_url,
+                ai_api_key,
+                model,
+                mask_host,
+                fallback_models=ai_fallback_model,
             )
             provider_latency_ms = latency
+            provider_used = bool(ai_meta.get("provider_used")) if isinstance(ai_meta, dict) else False
+            if isinstance(ai_meta, dict):
+                provider_models_used = [m for m in (ai_meta.get("used_models") or []) if isinstance(m, str)]
+                provider_partial = bool(ai_meta.get("chunks_fallback", 0))
             if error:
                 provider_error = error
-            else:
-                provider_used = True
+            if provider_used:
                 provider_status = 200
                 if ai_meta:
                     report["ai_correlations"] = {
@@ -9252,7 +9272,13 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
             # Get real host from report to unmask in final output
             real_host = report.get("input", {}).get("normalized_host")
             exec_result, exec_error, exec_latency = await generate_executive_summary_ai(
-                report, ai_url, ai_api_key, model, mask_host, real_host=real_host
+                report,
+                ai_url,
+                ai_api_key,
+                model,
+                mask_host,
+                real_host=real_host,
+                fallback_models=ai_fallback_model,
             )
             if exec_error:
                 exec_summary_error = exec_error
@@ -9275,12 +9301,15 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
         "counts": {"true_positive": tp, "false_positive": fp, "unclear": unc},
         "avg_confidence": round((sum(confs) / len(confs)) if confs else 0.0, 2),
         "model": model or os.environ.get("AI_MODEL"),
+        "model_fallback": ai_fallback_model or os.environ.get("AI_FALLBACK_MODEL"),
         "provider_url": ai_url or os.environ.get("AI_URL"),
         "used_provider": provider_used,
         "provider_status": provider_status,
         "provider_attempted": provider_attempted,
         "provider_error": provider_error,
         "provider_latency_ms": provider_latency_ms,
+        "provider_models_used": provider_models_used,
+        "provider_partial": provider_partial,
         "masking": {"enabled": True, "replacement_host": mask_host},
         "executive_summary": executive_summary,
         "executive_summary_error": exec_summary_error,
@@ -9325,6 +9354,7 @@ async def cli_main():
     # AI-enabled review
     ap.add_argument("--ai", action="store_true", help="Enable AI-assisted verification of findings (non-invasive)")
     ap.add_argument("--model", help="AI model identifier (provider specific)")
+    ap.add_argument("--ai-fallback-model", dest="ai_fallback_model", help="Comma-separated fallback AI model IDs")
     ap.add_argument("--ai-url", dest="ai_url", help="AI provider URL (HTTP endpoint)")
     ap.add_argument("--ai-api-key", dest="ai_api_key", help="AI provider API key")
     ap.add_argument("--ai-mask-host", dest="ai_mask_host", default="example.com", help="Replacement host sent to AI instead of the real target (default: example.com)")
@@ -9634,6 +9664,7 @@ async def cli_main():
                        exploit_level: str = "safe",
                        ai: bool = False,
                        model: str | None = None,
+                       ai_fallback_model: str | None = Query(default=None, alias="ai-fallback-model"),
                        ai_url: str | None = Query(default=None, alias="ai-url"),
                        ai_api_key: str | None = Query(default=None, alias="ai-api-key"),
                        ai_mask_host: str | None = Query(default="example.com", alias="ai-mask-host"),
@@ -9954,7 +9985,16 @@ async def cli_main():
             )
             if ai:
                 try:
-                    rep["ai_logs"] = await ai_review_findings(rep, model, ai_url, ai_api_key, exploit_level=exploit_level, public_only=public, mask_host=ai_mask_host or "example.com")
+                    rep["ai_logs"] = await ai_review_findings(
+                        rep,
+                        model,
+                        ai_url,
+                        ai_api_key,
+                        exploit_level=exploit_level,
+                        public_only=public,
+                        mask_host=ai_mask_host or "example.com",
+                        ai_fallback_model=ai_fallback_model,
+                    )
                     # Recompute grade now that AI has set ai_verdict on findings
                     rep["result"] = grade(rep)
                 except Exception as e:
@@ -10474,7 +10514,16 @@ async def cli_main():
     # Optional AI review attachment (batch classification + executive summary)
     if args.ai:
         try:
-            ai = await ai_review_findings(report, args.model, args.ai_url, args.ai_api_key, exploit_level=args.exploit_level, public_only=args.public, mask_host=args.ai_mask_host)
+            ai = await ai_review_findings(
+                report,
+                args.model,
+                args.ai_url,
+                args.ai_api_key,
+                exploit_level=args.exploit_level,
+                public_only=args.public,
+                mask_host=args.ai_mask_host,
+                ai_fallback_model=getattr(args, "ai_fallback_model", None),
+            )
             report["ai_logs"] = ai
             # Surface AI errors in result.notes for visibility
             ai_summary = ai.get("summary", {})

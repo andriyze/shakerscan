@@ -56,6 +56,18 @@ services:
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
+      # AI options (optional - set in .env file)
+      - AI_URL=${AI_URL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-}
+      - AI_FALLBACK_MODEL=${AI_FALLBACK_MODEL:-}
+      - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
+      - AI_VERIFY_ENABLED=${AI_VERIFY_ENABLED:-false}
+      - AI_VERIFY_URL=${AI_VERIFY_URL:-}
+      - AI_VERIFY_API_KEY=${AI_VERIFY_API_KEY:-}
+      - AI_VERIFY_MODEL=${AI_VERIFY_MODEL:-}
+      - AI_VERIFY_FALLBACK_MODEL=${AI_VERIFY_FALLBACK_MODEL:-}
+      - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
     volumes:
       - ./api/api.py:/app/api.py:ro
       - ./api/session_manager.py:/app/session_manager.py:ro
@@ -93,7 +105,14 @@ services:
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
+      - AI_FALLBACK_MODEL=${AI_FALLBACK_MODEL:-}
       - AI_MASK_HOST=${AI_MASK_HOST:-example.com}
+      - AI_VERIFY_ENABLED=${AI_VERIFY_ENABLED:-false}
+      - AI_VERIFY_URL=${AI_VERIFY_URL:-}
+      - AI_VERIFY_API_KEY=${AI_VERIFY_API_KEY:-}
+      - AI_VERIFY_MODEL=${AI_VERIFY_MODEL:-}
+      - AI_VERIFY_FALLBACK_MODEL=${AI_VERIFY_FALLBACK_MODEL:-}
+      - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
     volumes:
       - ./api/worker.py:/app/worker.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro

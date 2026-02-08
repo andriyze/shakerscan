@@ -77,6 +77,7 @@ AI_VERIFY_ENABLED = os.environ.get("AI_VERIFY_ENABLED", "false").lower() in {"1"
 AI_VERIFY_URL = os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", "")
 AI_VERIFY_API_KEY = os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", "")
 AI_VERIFY_MODEL = os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929")
+AI_VERIFY_FALLBACK_MODEL = os.environ.get("AI_VERIFY_FALLBACK_MODEL", "")
 AI_VERIFY_MAX_PER_SCAN = max(0, int(os.environ.get("AI_VERIFY_MAX_PER_SCAN", "10")))
 AI_VERIFY_MIN_SEVERITY = os.environ.get("AI_VERIFY_MIN_SEVERITY", "high").lower()
 AI_VERIFY_USE_BROWSER = os.environ.get("AI_VERIFY_USE_BROWSER", "true").lower() in {"1", "true", "yes", "on"}
@@ -121,11 +122,13 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_url": os.environ.get("AI_URL", ""),
         "ai_api_key": os.environ.get("AI_API_KEY", ""),
         "ai_model": os.environ.get("AI_MODEL", ""),
+        "ai_model_fallback": os.environ.get("AI_FALLBACK_MODEL", ""),
         "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
         "ai_verify_enabled": AI_VERIFY_ENABLED,
         "ai_verify_url": os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", ""),
         "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", ""),
         "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", AI_VERIFY_MODEL),
+        "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", AI_VERIFY_FALLBACK_MODEL),
         "ai_verify_min_severity": os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
     }
     try:
@@ -138,10 +141,12 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_url",
         "ai_api_key",
         "ai_model",
+        "ai_model_fallback",
         "ai_mask_host",
         "ai_verify_url",
         "ai_verify_api_key",
         "ai_verify_model",
+        "ai_verify_model_fallback",
         "ai_verify_min_severity",
     ):
         if key in overrides:
@@ -260,6 +265,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     ai_url = options.get('ai_url') or ai_runtime.get("ai_url")
     ai_api_key = options.get('ai_api_key') or ai_runtime.get("ai_api_key")
     model = options.get('model') or ai_runtime.get("ai_model")
+    ai_fallback_model = (
+        options.get("ai_fallback_model")
+        or options.get("ai_model_fallback")
+        or ai_runtime.get("ai_model_fallback")
+    )
     ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
 
     if ai_url and ai_api_key and model:
@@ -267,6 +277,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.extend(['--ai-url', ai_url])
         cmd.extend(['--ai-api-key', ai_api_key])
         cmd.extend(['--model', model])
+        if ai_fallback_model:
+            cmd.extend(['--ai-fallback-model', str(ai_fallback_model)])
         cmd.extend(['--ai-mask-host', ai_mask_host])
 
     # Authentication options
@@ -1212,6 +1224,11 @@ async def process_finding_retest_job(job_data: dict):
             ai_verify_url = str(ai_runtime.get("ai_verify_url") or ai_runtime.get("ai_url") or "")
             ai_verify_api_key = str(ai_runtime.get("ai_verify_api_key") or ai_runtime.get("ai_api_key") or "")
             ai_verify_model = str(ai_runtime.get("ai_verify_model") or ai_runtime.get("ai_model") or AI_VERIFY_MODEL)
+            ai_verify_fallback_model = str(
+                ai_runtime.get("ai_verify_model_fallback")
+                or ai_runtime.get("ai_model_fallback")
+                or AI_VERIFY_FALLBACK_MODEL
+            )
             ai_verify_min_severity = str(ai_runtime.get("ai_verify_min_severity") or AI_VERIFY_MIN_SEVERITY).lower()
             ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
@@ -1292,6 +1309,7 @@ async def process_finding_retest_job(job_data: dict):
                             ai_url=ai_verify_url,
                             ai_api_key=ai_verify_api_key,
                             model=ai_verify_model,
+                            fallback_models=ai_verify_fallback_model or None,
                             target_url=target,
                         )
 

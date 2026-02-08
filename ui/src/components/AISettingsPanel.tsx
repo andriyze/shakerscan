@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import {
   getAISettings,
+  testAISettings,
   updateAISettings,
   type AISettings,
   type AISettingsUpdate,
@@ -23,24 +24,33 @@ export default function AISettingsPanel() {
   const [persistAIToEnv, setPersistAIToEnv] = useState(false)
   const [aiURLInput, setAIURLInput] = useState('')
   const [aiModelInput, setAIModelInput] = useState('')
+  const [aiModelFallbackInput, setAIModelFallbackInput] = useState('')
   const [aiMaskHostInput, setAIMaskHostInput] = useState('')
   const [aiVerifyEnabledInput, setAIVerifyEnabledInput] = useState(false)
   const [aiVerifyURLInput, setAIVerifyURLInput] = useState('')
   const [aiVerifyModelInput, setAIVerifyModelInput] = useState('')
+  const [aiVerifyModelFallbackInput, setAIVerifyModelFallbackInput] = useState('')
   const [aiVerifyMinSeverityInput, setAIVerifyMinSeverityInput] = useState<Severity>('high')
+  const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
+  const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
+  const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
 
   const applyAISettingsToForm = (settings: AISettings) => {
     setAIURLInput(settings.ai_url || '')
     setAIModelInput(settings.ai_model || '')
+    setAIModelFallbackInput(settings.ai_model_fallback || '')
     setAIMaskHostInput(settings.ai_mask_host || '')
     setAIVerifyEnabledInput(Boolean(settings.ai_verify_enabled))
     setAIVerifyURLInput(settings.ai_verify_url || '')
     setAIVerifyModelInput(settings.ai_verify_model || '')
+    setAIVerifyModelFallbackInput(settings.ai_verify_model_fallback || '')
     setAIVerifyMinSeverityInput(settings.ai_verify_min_severity || 'high')
     setScanAPIKeyInput('')
     setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
     setClearVerifyAPIKey(false)
+    setScanProbeMessage(null)
+    setVerifyProbeMessage(null)
   }
 
   const fetchAISettings = async () => {
@@ -70,10 +80,12 @@ export default function AISettingsPanel() {
       const payload: AISettingsUpdate = {
         ai_url: aiURLInput,
         ai_model: aiModelInput,
+        ai_model_fallback: aiModelFallbackInput,
         ai_mask_host: aiMaskHostInput,
         ai_verify_enabled: aiVerifyEnabledInput,
         ai_verify_url: aiVerifyURLInput,
         ai_verify_model: aiVerifyModelInput,
+        ai_verify_model_fallback: aiVerifyModelFallbackInput,
         ai_verify_min_severity: aiVerifyMinSeverityInput,
         persist_to_env: persistAIToEnv,
       }
@@ -103,6 +115,53 @@ export default function AISettingsPanel() {
       setAISettingsError(message)
     } finally {
       setAISaving(false)
+    }
+  }
+
+  const handleTestAISettings = async (scope: 'scan' | 'verify') => {
+    if (aiSaving || testingScope) return
+    setAISettingsError(null)
+    if (scope === 'scan') {
+      setScanProbeMessage(null)
+    } else {
+      setVerifyProbeMessage(null)
+    }
+    setTestingScope(scope)
+    try {
+      const result = await testAISettings({
+        scope,
+        ai_url: scope === 'scan' ? aiURLInput || undefined : aiVerifyURLInput || undefined,
+        ai_api_key: scope === 'scan' ? scanAPIKeyInput.trim() || undefined : verifyAPIKeyInput.trim() || undefined,
+        ai_model: scope === 'scan' ? aiModelInput || undefined : aiVerifyModelInput || undefined,
+        ai_fallback_model:
+          scope === 'scan'
+            ? aiModelFallbackInput || undefined
+            : aiVerifyModelFallbackInput || undefined,
+      })
+
+      const usedModel = String(result.probe?.provider_meta?.model_used || '').trim()
+      const latency = result.probe?.latency_ms
+      const detail = usedModel ? `model ${usedModel}` : 'provider responded'
+      const latencyLabel = typeof latency === 'number' ? ` in ${latency}ms` : ''
+      const message = result.status === 'ok'
+        ? `Probe succeeded (${detail}${latencyLabel}).`
+        : `Probe failed: ${result.probe?.error || 'unknown error'}`
+
+      if (scope === 'scan') {
+        setScanProbeMessage(message)
+      } else {
+        setVerifyProbeMessage(message)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to test AI settings'
+      if (scope === 'scan') {
+        setScanProbeMessage(`Probe failed: ${message}`)
+      } else {
+        setVerifyProbeMessage(`Probe failed: ${message}`)
+      }
+      setAISettingsError(message)
+    } finally {
+      setTestingScope(null)
     }
   }
 
@@ -148,6 +207,16 @@ export default function AISettingsPanel() {
             />
           </label>
           <label className="block">
+            <span className="text-xs text-gray-400">Fallback Models (comma-separated)</span>
+            <input
+              type="text"
+              value={aiModelFallbackInput}
+              onChange={(e) => setAIModelFallbackInput(e.target.value)}
+              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              placeholder="moonshotai/kimi-k2.5,openai/gpt-4o-mini"
+            />
+          </label>
+          <label className="block">
             <span className="text-xs text-gray-400">Mask Host</span>
             <input
               type="text"
@@ -176,6 +245,20 @@ export default function AISettingsPanel() {
             />
             Clear scan AI API key
           </label>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={() => handleTestAISettings('scan')}
+              disabled={loading || aiSaving || testingScope !== null}
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+            >
+              {testingScope === 'scan' ? 'Testing scan AI...' : 'Test Scan AI'}
+            </button>
+            {scanProbeMessage && (
+              <span className={`text-xs ${scanProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
+                {scanProbeMessage}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="space-y-2">
@@ -207,6 +290,16 @@ export default function AISettingsPanel() {
               onChange={(e) => setAIVerifyModelInput(e.target.value)}
               className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
               placeholder="claude-sonnet-4-5-20250929"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Verify Fallback Models (comma-separated)</span>
+            <input
+              type="text"
+              value={aiVerifyModelFallbackInput}
+              onChange={(e) => setAIVerifyModelFallbackInput(e.target.value)}
+              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              placeholder="openai/gpt-4o-mini,anthropic/claude-3-5-sonnet"
             />
           </label>
           <label className="block">
@@ -242,6 +335,20 @@ export default function AISettingsPanel() {
             />
             Clear retest AI API key
           </label>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={() => handleTestAISettings('verify')}
+              disabled={loading || aiSaving || testingScope !== null}
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+            >
+              {testingScope === 'verify' ? 'Testing retest AI...' : 'Test Retest AI'}
+            </button>
+            {verifyProbeMessage && (
+              <span className={`text-xs ${verifyProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
+                {verifyProbeMessage}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 

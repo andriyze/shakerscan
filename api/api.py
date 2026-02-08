@@ -121,11 +121,13 @@ def _default_ai_settings() -> dict[str, Any]:
         "ai_url": os.environ.get("AI_URL", ""),
         "ai_api_key": os.environ.get("AI_API_KEY", ""),
         "ai_model": os.environ.get("AI_MODEL", ""),
+        "ai_model_fallback": os.environ.get("AI_FALLBACK_MODEL", ""),
         "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
         "ai_verify_enabled": _is_truthy(os.environ.get("AI_VERIFY_ENABLED", "false"), default=False),
         "ai_verify_url": os.environ.get("AI_VERIFY_URL", ""),
         "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", ""),
         "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929"),
+        "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", ""),
         "ai_verify_min_severity": _normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
     }
 
@@ -144,6 +146,8 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["ai_api_key"] = str(overrides.get("ai_api_key") or "")
     if "ai_model" in overrides:
         settings["ai_model"] = str(overrides.get("ai_model") or "")
+    if "ai_model_fallback" in overrides:
+        settings["ai_model_fallback"] = str(overrides.get("ai_model_fallback") or "")
     if "ai_mask_host" in overrides:
         settings["ai_mask_host"] = str(overrides.get("ai_mask_host") or "")
     if "ai_verify_enabled" in overrides:
@@ -154,6 +158,8 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["ai_verify_api_key"] = str(overrides.get("ai_verify_api_key") or "")
     if "ai_verify_model" in overrides:
         settings["ai_verify_model"] = str(overrides.get("ai_verify_model") or "")
+    if "ai_verify_model_fallback" in overrides:
+        settings["ai_verify_model_fallback"] = str(overrides.get("ai_verify_model_fallback") or "")
     if "ai_verify_min_severity" in overrides:
         settings["ai_verify_min_severity"] = _normalize_severity(
             overrides.get("ai_verify_min_severity"), default=settings["ai_verify_min_severity"]
@@ -165,12 +171,14 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
     return {
         "ai_url": settings.get("ai_url") or "",
         "ai_model": settings.get("ai_model") or "",
+        "ai_model_fallback": settings.get("ai_model_fallback") or "",
         "ai_mask_host": settings.get("ai_mask_host") or "",
         "ai_api_key_configured": bool(settings.get("ai_api_key")),
         "ai_api_key_masked": _mask_secret(str(settings.get("ai_api_key") or "")),
         "ai_verify_enabled": bool(settings.get("ai_verify_enabled")),
         "ai_verify_url": settings.get("ai_verify_url") or "",
         "ai_verify_model": settings.get("ai_verify_model") or "",
+        "ai_verify_model_fallback": settings.get("ai_verify_model_fallback") or "",
         "ai_verify_min_severity": settings.get("ai_verify_min_severity") or "high",
         "ai_verify_api_key_configured": bool(settings.get("ai_verify_api_key")),
         "ai_verify_api_key_masked": _mask_secret(str(settings.get("ai_verify_api_key") or "")),
@@ -212,6 +220,53 @@ def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> t
         return True, f"Persisted settings to {env_path}"
     except Exception as e:
         return False, f"Failed to persist .env: {e}"
+
+
+def _load_probe_ai_provider():
+    import importlib
+
+    import_errors: list[str] = []
+    for module_name in ("scanner_tools.ai_classifier", "scanner.scanner_tools.ai_classifier"):
+        try:
+            module = importlib.import_module(module_name)
+            fn = getattr(module, "probe_ai_provider", None)
+            if callable(fn):
+                return fn, None
+        except Exception as exc:
+            import_errors.append(f"{module_name}: {type(exc).__name__}")
+    return None, "; ".join(import_errors) if import_errors else "probe function not found"
+
+
+async def _probe_ai_provider(
+    ai_url: str,
+    ai_api_key: str,
+    model: str,
+    fallback_models: str | None = None,
+) -> dict[str, Any]:
+    probe_fn, probe_import_error = _load_probe_ai_provider()
+    if probe_fn is None:
+        return {
+            "ok": False,
+            "error": f"AI probe unavailable ({probe_import_error})",
+            "latency_ms": None,
+            "provider_meta": {},
+            "response": None,
+        }
+    try:
+        return await probe_fn(
+            ai_url=ai_url,
+            ai_api_key=ai_api_key,
+            model=model,
+            fallback_models=fallback_models,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"AI probe failed: {type(exc).__name__}: {str(exc)[:160]}",
+            "latency_ms": None,
+            "provider_meta": {},
+            "response": None,
+        }
 
 
 def generate_finding_fingerprint(finding: dict) -> str:
@@ -979,13 +1034,23 @@ class AISettingsUpdate(BaseModel):
     ai_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
+    ai_model_fallback: Optional[str] = None
     ai_mask_host: Optional[str] = None
     ai_verify_enabled: Optional[bool] = None
     ai_verify_url: Optional[str] = None
     ai_verify_api_key: Optional[str] = None
     ai_verify_model: Optional[str] = None
+    ai_verify_model_fallback: Optional[str] = None
     ai_verify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     persist_to_env: bool = False
+
+
+class AISettingsProbeRequest(BaseModel):
+    scope: str = Field(default="scan", pattern="^(scan|verify)$")
+    ai_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_fallback_model: Optional[str] = None
 
 
 # ============================================================
@@ -1053,10 +1118,12 @@ async def update_ai_settings(request: AISettingsUpdate):
         "ai_url",
         "ai_api_key",
         "ai_model",
+        "ai_model_fallback",
         "ai_mask_host",
         "ai_verify_url",
         "ai_verify_api_key",
         "ai_verify_model",
+        "ai_verify_model_fallback",
     )
 
     updates: dict[str, str] = {}
@@ -1091,11 +1158,13 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AI_URL": effective.get("ai_url") or None,
             "AI_API_KEY": effective.get("ai_api_key") or None,
             "AI_MODEL": effective.get("ai_model") or None,
+            "AI_FALLBACK_MODEL": effective.get("ai_model_fallback") or None,
             "AI_MASK_HOST": effective.get("ai_mask_host") or None,
             "AI_VERIFY_ENABLED": "true" if effective.get("ai_verify_enabled") else "false",
             "AI_VERIFY_URL": effective.get("ai_verify_url") or None,
             "AI_VERIFY_API_KEY": effective.get("ai_verify_api_key") or None,
             "AI_VERIFY_MODEL": effective.get("ai_verify_model") or None,
+            "AI_VERIFY_FALLBACK_MODEL": effective.get("ai_verify_model_fallback") or None,
             "AI_VERIFY_MIN_SEVERITY": effective.get("ai_verify_min_severity") or "high",
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
@@ -1105,6 +1174,51 @@ async def update_ai_settings(request: AISettingsUpdate):
         "persisted_to_env": persisted_to_env,
         "persist_message": persist_message,
         "settings": _sanitize_ai_settings_response(_load_effective_ai_settings()),
+    }
+
+
+@app.post("/settings/ai/test")
+async def test_ai_settings(request: AISettingsProbeRequest):
+    """Test AI provider connectivity/parsing for scan or verify scope."""
+    effective = _load_effective_ai_settings()
+    scope = request.scope
+
+    if scope == "verify":
+        ai_url = (request.ai_url or effective.get("ai_verify_url") or effective.get("ai_url") or "").strip()
+        ai_api_key = (request.ai_api_key or effective.get("ai_verify_api_key") or effective.get("ai_api_key") or "").strip()
+        ai_model = (request.ai_model or effective.get("ai_verify_model") or effective.get("ai_model") or "").strip()
+        fallback_models = request.ai_fallback_model
+        if fallback_models is None:
+            fallback_models = (
+                effective.get("ai_verify_model_fallback")
+                or effective.get("ai_model_fallback")
+                or ""
+            )
+    else:
+        ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
+        ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
+        ai_model = (request.ai_model or effective.get("ai_model") or "").strip()
+        fallback_models = request.ai_fallback_model
+        if fallback_models is None:
+            fallback_models = effective.get("ai_model_fallback") or ""
+
+    if not ai_url:
+        raise HTTPException(status_code=400, detail="AI URL is required for probe")
+    if not ai_api_key:
+        raise HTTPException(status_code=400, detail="AI API key is required for probe")
+    if not ai_model:
+        raise HTTPException(status_code=400, detail="AI model is required for probe")
+
+    probe = await _probe_ai_provider(
+        ai_url=ai_url,
+        ai_api_key=ai_api_key,
+        model=ai_model,
+        fallback_models=(fallback_models or "").strip() or None,
+    )
+    return {
+        "status": "ok" if probe.get("ok") else "failed",
+        "scope": scope,
+        "probe": probe,
     }
 
 

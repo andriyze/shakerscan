@@ -12,6 +12,7 @@ Opt-in via AI_VERIFY_ENABLED=true. Sits as Tier 2 behind deterministic provers.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -52,6 +53,22 @@ AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect",
 # ---------------------------------------------------------------------------
 # LLM call helper (reuses ai_classifier.py patterns)
 # ---------------------------------------------------------------------------
+
+
+def _load_shared_call_ai_provider():
+    """Load shared provider client from scanner module if available."""
+    import_errors: list[str] = []
+    for module_name in ("scanner_tools.ai_classifier", "scanner.scanner_tools.ai_classifier"):
+        try:
+            module = importlib.import_module(module_name)
+            fn = getattr(module, "call_ai_provider", None)
+            if callable(fn):
+                return fn, None
+        except Exception as exc:
+            import_errors.append(f"{module_name}: {type(exc).__name__}")
+    return None, "; ".join(import_errors) if import_errors else "call_ai_provider not found"
+
+
 async def _call_llm(
     ai_url: str,
     ai_api_key: str,
@@ -60,11 +77,31 @@ async def _call_llm(
     timeout_seconds: int = 60,
     max_tokens: int = 4000,
     temperature: float = 0.2,
+    fallback_models: str | list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Call OpenAI-compatible API and parse JSON response.
 
     Returns (parsed_json, error_message).
     """
+    shared_call, _shared_err = _load_shared_call_ai_provider()
+    if shared_call:
+        try:
+            response, error, _latency_ms = await shared_call(
+                ai_url=ai_url,
+                ai_api_key=ai_api_key,
+                model=model,
+                messages=messages,
+                timeout_seconds=timeout_seconds,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                fallback_models=fallback_models,
+            )
+            if isinstance(response, dict):
+                response.pop("_provider_meta", None)
+            return response, error
+        except Exception as exc:
+            logger.warning(f"Shared AI provider call failed in verifier, using local fallback: {type(exc).__name__}")
+
     if aiohttp is None:
         return None, "aiohttp not installed"
 
@@ -383,6 +420,7 @@ async def ai_verify_finding(
     ai_api_key: str,
     model: str,
     target_url: str,
+    fallback_models: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """
     DAST-only AI verification.
@@ -405,7 +443,13 @@ async def ai_verify_finding(
         {"role": "user", "content": plan_prompt},
     ]
 
-    plan, plan_error = await _call_llm(ai_url, ai_api_key, model, messages)
+    plan, plan_error = await _call_llm(
+        ai_url,
+        ai_api_key,
+        model,
+        messages,
+        fallback_models=fallback_models,
+    )
 
     if plan_error or not plan:
         return {
@@ -478,6 +522,7 @@ async def ai_verify_finding(
     classification, classify_error = await _call_llm(
         ai_url, ai_api_key, model, classify_messages,
         max_tokens=1000,
+        fallback_models=fallback_models,
     )
 
     if classify_error or not classification:
