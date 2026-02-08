@@ -15,6 +15,7 @@ import urllib.parse
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 import redis
@@ -836,23 +837,43 @@ async def run_finding_retest(verification: dict) -> dict:
     succeeded_step: str | None = None
     last_error: str | None = None
     steps_tried: list[str] = []
+    step_attempts: list[dict[str, Any]] = []
 
-    # Map ladder step names to prover calls
-    def _call_prover():
-        """Call the primary prover for this finding type."""
+    # Map ladder step names to prover calls.
+    # Steps intentionally vary inputs so ladder stages are not no-op retries.
+    def _call_prover(step_name: str):
+        step_meta: dict[str, Any] = {"step": step_name}
+        param = inputs.get("param", "")
+
         if finding_type == "xss":
-            return prove_xss(test_url, inputs.get("param", ""), "", inputs.get("payload") or None)
-        elif finding_type == "sqli":
-            return prove_sqli(test_url, inputs.get("param", ""), "", inputs.get("evidence", {}).get("dbms"))
-        elif finding_type == "ssrf":
-            return prove_ssrf(test_url, inputs.get("param", ""), "")
-        elif finding_type == "path_traversal":
-            return prove_path_traversal(test_url, inputs.get("param", ""), "")
-        elif finding_type == "open_redirect":
-            return prove_open_redirect(test_url, inputs.get("param", ""), "")
-        elif finding_type == "cors":
-            return prove_cors(test_url)
-        return None
+            payload = inputs.get("payload") or None
+            if step_name == "reflection_context":
+                payload = "<script>alert(1)</script>"
+            elif step_name == "alternate_payloads":
+                payload = "<svg onload=alert(1)>"
+            step_meta["payload"] = payload or ""
+            return prove_xss(test_url, param, "", payload), step_meta
+        if finding_type == "sqli":
+            dbms_hint = inputs.get("evidence", {}).get("dbms")
+            if step_name == "boolean_diff":
+                dbms_hint = None
+            elif step_name == "timing_fallback":
+                dbms_hint = "generic"
+            step_meta["dbms_hint"] = dbms_hint or "auto"
+            return prove_sqli(test_url, param, "", dbms_hint), step_meta
+        if finding_type == "ssrf":
+            step_meta["strategy"] = step_name
+            return prove_ssrf(test_url, param, ""), step_meta
+        if finding_type == "path_traversal":
+            step_meta["strategy"] = step_name
+            return prove_path_traversal(test_url, param, ""), step_meta
+        if finding_type == "open_redirect":
+            step_meta["strategy"] = step_name
+            return prove_open_redirect(test_url, param, ""), step_meta
+        if finding_type == "cors":
+            step_meta["strategy"] = step_name
+            return prove_cors(test_url), step_meta
+        return None, step_meta
 
     try:
         try:
@@ -870,17 +891,32 @@ async def run_finding_retest(verification: dict) -> dict:
 
             steps_tried.append(step)
             try:
-                coro = _call_prover()
+                coro, step_meta = _call_prover(step)
                 if coro is None:
                     last_error = f"No prover for finding type: {finding_type}"
+                    step_attempts.append({
+                        "step": step,
+                        "error": last_error,
+                    })
                     break
                 proof = await coro
+                step_attempts.append({
+                    "step": step,
+                    "meta": step_meta,
+                    "proven": bool(getattr(proof, "proven", False)) if proof else False,
+                    "confidence": getattr(proof, "confidence", None) if proof else None,
+                    "technique": getattr(proof, "technique", None) if proof else None,
+                })
 
                 if proof and getattr(proof, "proven", False):
                     succeeded_step = step
                     break
             except Exception as step_err:
                 last_error = str(step_err)
+                step_attempts.append({
+                    "step": step,
+                    "error": last_error,
+                })
                 # Continue to next ladder step on failure
                 continue
 
@@ -948,6 +984,7 @@ async def run_finding_retest(verification: dict) -> dict:
         "tool_capabilities": capabilities,
         "attempt_ladder": attempt_ladder,
         "steps_tried": steps_tried,
+        "step_attempts": step_attempts,
         "succeeded_step": succeeded_step,
     }
 
@@ -982,6 +1019,7 @@ async def process_finding_retest_job(job_data: dict):
     except (TypeError, ValueError):
         attempt = 1
     trigger = str(job_data.get("trigger") or "unspecified")
+    requested_mode = str(job_data.get("mode") or "").strip().lower()
     r = get_redis()
     retest_key = f"retest_job:{job_id}"
 
@@ -1042,6 +1080,8 @@ async def process_finding_retest_job(job_data: dict):
             trigger=trigger,
             attempt=next_attempt,
         )
+        if requested_mode in {"ai", "deterministic"}:
+            requeued_payload["mode"] = requested_mode
         r.hset(retest_key, mapping={
             "status": "queued",
             "verification_id": verification_id,
@@ -1096,10 +1136,31 @@ async def process_finding_retest_job(job_data: dict):
             """, verification["finding_id"])
 
             # Check if this is a forced AI-only retest (mode=ai from API)
-            force_ai = str(job_data.get("mode", "")).lower() == "ai"
+            force_ai = requested_mode == "ai"
+            ai_config_ready = bool(AI_VERIFY_ENABLED and AI_VERIFY_URL and AI_VERIFY_API_KEY)
 
             # Tier 1: Deterministic proof (fast, free) — skip if forced AI
-            if not force_ai:
+            if force_ai and not ai_config_ready:
+                result = {
+                    "status": "failed",
+                    "result_status": "error",
+                    "verdict": "error",
+                    "verdict_reason": "AI verification requested but AI verifier is not configured",
+                    "deterministic_exhausted": True,
+                    "has_ai_step": True,
+                    "verification_mode": "ai_driven",
+                    "confidence": None,
+                    "proof": None,
+                    "replay_commands": [],
+                    "artifacts": {},
+                    "attempt_ladder": [],
+                    "attempts_exhausted": True,
+                    "retry_class": "config",
+                    "retryable": False,
+                    "message": "AI retest requested but AI verifier is disabled or missing credentials",
+                    "error_message": "AI verifier not configured",
+                }
+            elif not force_ai:
                 result = await run_finding_retest(dict(verification))
             else:
                 result = {
@@ -1125,9 +1186,7 @@ async def process_finding_retest_job(job_data: dict):
             should_try_ai = (
                 not still_vulnerable_deterministic
                 and (result.get("has_ai_step") or force_ai)
-                and AI_VERIFY_ENABLED
-                and AI_VERIFY_URL
-                and AI_VERIFY_API_KEY
+                and ai_config_ready
             )
 
             finding_severity = str(verification.get("severity") or "").lower()
@@ -1136,7 +1195,10 @@ async def process_finding_retest_job(job_data: dict):
                 f_row = await conn.fetchrow("SELECT severity FROM findings WHERE id = $1", verification["finding_id"])
                 finding_severity = str(f_row["severity"]).lower() if f_row else ""
 
-            severity_ok = SEVERITY_ORDER.get(finding_severity, 0) >= SEVERITY_ORDER.get(AI_VERIFY_MIN_SEVERITY, SEVERITY_ORDER["high"])
+            severity_ok = force_ai or (
+                SEVERITY_ORDER.get(finding_severity, 0)
+                >= SEVERITY_ORDER.get(AI_VERIFY_MIN_SEVERITY, SEVERITY_ORDER["high"])
+            )
 
             if should_try_ai and severity_ok:
                 try:

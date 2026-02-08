@@ -1919,6 +1919,9 @@ async def get_retest(retest_id: str):
 @app.post("/findings/retest")
 async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     """Queue retests for multiple findings by IDs or filters."""
+    if request.mode and request.mode not in {"ai", "deterministic"}:
+        raise HTTPException(status_code=400, detail="mode must be 'ai' or 'deterministic'")
+
     r = get_redis()
     queued: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []

@@ -302,6 +302,13 @@ async def _execute_http_step(
     body_data = step.get("body")
     headers = dict(auth_headers)  # copy
     content_type = step.get("content_type")
+    if isinstance(body_data, (dict, list)):
+        body_data = json.dumps(body_data)
+        if not content_type and "Content-Type" not in headers:
+            content_type = "application/json"
+    elif body_data is not None and not isinstance(body_data, str):
+        body_data = str(body_data)
+
     if content_type:
         headers["Content-Type"] = content_type
     elif body_data and "Content-Type" not in headers:
