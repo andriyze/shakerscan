@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import random
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -33,7 +34,9 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
+RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 HEARTBEAT_TIMEOUT_MINUTES = 5  # Mark scan stale if no heartbeat for this long
+RETEST_RUNNING_TIMEOUT_MINUTES = int(os.environ.get("RETEST_RUNNING_TIMEOUT_MINUTES", "30"))
 FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
     os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "15")
 )
@@ -83,6 +86,15 @@ def generate_finding_fingerprint(finding: dict) -> str:
 
 
 SUPPORTED_RETEST_TYPES = ("xss", "sqli", "ssrf", "path_traversal")
+SUPPORTED_RETEST_VERDICTS = (
+    "exploited",
+    "blocked_by_security",
+    "out_of_scope_internal",
+    "false_positive",
+    "likely_fixed",
+    "inconclusive",
+    "error",
+)
 RETEST_TYPE_ALIASES = {
     "xss": "xss",
     "cross-site-scripting": "xss",
@@ -97,6 +109,13 @@ RETEST_TYPE_ALIASES = {
     "path-traversal": "path_traversal",
     "lfi": "path_traversal",
     "local-file-inclusion": "path_traversal",
+}
+
+DEFAULT_REPLAY_PAYLOADS = {
+    "xss": "<script>alert(1)</script>",
+    "sqli": "' OR '1'='1",
+    "ssrf": "http://127.0.0.1:80/",
+    "path_traversal": "../../../etc/passwd",
 }
 
 
@@ -179,6 +198,48 @@ def extract_retest_inputs(
     }
 
 
+def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
+    """Generate copy/paste replay commands for manual validation."""
+    finding_type = str(inputs.get("finding_type") or "").strip().lower()
+    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
+    method = str(inputs.get("method") or "GET").strip().upper()
+    param = str(inputs.get("param") or "").strip()
+    payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
+
+    if not target_url:
+        return []
+
+    commands: list[str] = []
+    quoted_url = urllib.parse.quote(target_url, safe=":/?&=%#.-_~")
+
+    # Baseline request for easy comparison.
+    commands.append(f"curl -i -k '{quoted_url}'")
+
+    if param:
+        if method == "POST":
+            commands.append(
+                "curl -i -k -X POST "
+                f"'{quoted_url}' "
+                "-H 'Content-Type: application/x-www-form-urlencoded' "
+                f"--data-urlencode '{param}={payload}'"
+            )
+        else:
+            parsed = urllib.parse.urlparse(target_url)
+            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            q[param] = [payload]
+            injected_query = urllib.parse.urlencode(q, doseq=True)
+            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
+            commands.append(f"curl -i -k '{injected_url}'")
+    else:
+        commands.append(
+            "curl -i -k -X POST "
+            f"'{quoted_url}' "
+            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
+        )
+
+    return commands
+
+
 async def get_finding_record(conn, finding_id: str):
     """Fetch finding by UUID or fingerprint (with backward-compatible suffix lookup)."""
     finding = None
@@ -224,6 +285,7 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
         await conn.execute("""
             ALTER TABLE findings
             ADD COLUMN IF NOT EXISTS last_verification_status TEXT,
+            ADD COLUMN IF NOT EXISTS last_verification_verdict TEXT,
             ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
             ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0
@@ -243,6 +305,8 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
                 requested_by TEXT DEFAULT 'api',
                 status TEXT NOT NULL DEFAULT 'queued',
                 result_status TEXT,
+                verdict TEXT,
+                verdict_reason TEXT,
                 finding_type TEXT NOT NULL,
                 target_url TEXT NOT NULL,
                 original_url TEXT,
@@ -250,7 +314,9 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
                 payload TEXT,
                 method TEXT,
                 request_body TEXT,
+                replay_commands JSONB,
                 proof JSONB,
+                artifacts JSONB,
                 confidence NUMERIC(3,2),
                 message TEXT,
                 error_message TEXT,
@@ -261,9 +327,20 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
             )
         """)
         await conn.execute("""
+            ALTER TABLE finding_verifications
+            ADD COLUMN IF NOT EXISTS verdict TEXT,
+            ADD COLUMN IF NOT EXISTS verdict_reason TEXT,
+            ADD COLUMN IF NOT EXISTS replay_commands JSONB,
+            ADD COLUMN IF NOT EXISTS artifacts JSONB
+        """)
+        await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_findings_last_verified_at
             ON findings(last_verified_at DESC)
             WHERE last_verified_at IS NOT NULL
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_findings_last_verification_verdict
+            ON findings(last_verification_verdict)
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_finding_verifications_finding_id
@@ -276,6 +353,10 @@ async def ensure_verification_schema(pool: asyncpg.Pool):
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_finding_verifications_result_status
             ON finding_verifications(result_status)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_finding_verifications_verdict
+            ON finding_verifications(verdict)
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id
@@ -1626,14 +1707,16 @@ async def enqueue_finding_retest(conn, finding: dict[str, Any], inputs: dict[str
     """Create a queued finding retest record and return (retest_id, job_id)."""
     retest_id = uuid.uuid4()
     job_id = str(uuid.uuid4())
+    replay_commands = build_replay_commands(inputs)
 
     await conn.execute("""
         INSERT INTO finding_verifications (
             id, finding_id, scan_id, target_id, job_id, requested_by, status,
-            finding_type, target_url, original_url, param, payload, method, request_body
+            finding_type, target_url, original_url, param, payload, method, request_body,
+            replay_commands
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'queued',
-            $7, $8, $9, $10, $11, $12, $13
+            $7, $8, $9, $10, $11, $12, $13, $14
         )
     """,
         retest_id,
@@ -1649,11 +1732,13 @@ async def enqueue_finding_retest(conn, finding: dict[str, Any], inputs: dict[str
         inputs.get("payload"),
         inputs.get("method"),
         inputs.get("request_body"),
+        json.dumps(replay_commands) if replay_commands else None,
     )
 
     await conn.execute("""
         UPDATE findings
         SET last_verification_status = 'queued',
+            last_verification_verdict = NULL,
             updated_at = NOW()
         WHERE id = $1
     """, finding["id"])
@@ -1866,6 +1951,7 @@ async def retest_finding(finding_id: str, request: FindingRetestRequest | None =
         "finding_id": str(finding_data["id"]),
         "finding_type": retest_inputs["finding_type"],
         "target_url": retest_inputs["target_url"],
+        "replay_commands": build_replay_commands(retest_inputs),
     }
 
 
@@ -2039,7 +2125,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 "finding_id": str(finding_data["id"]),
                 "submitted_at": datetime.utcnow().isoformat(),
             }
-            r.rpush(QUEUE_NAME, json.dumps(job_data))
+            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
             r.hset(f"retest_job:{job_id}", mapping={
                 "status": "queued",
                 "verification_id": str(retest_id),
@@ -2052,6 +2138,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 "retest_id": str(retest_id),
                 "job_id": job_id,
                 "finding_type": retest_inputs["finding_type"],
+                "replay_commands": build_replay_commands(retest_inputs),
             })
 
     return {
@@ -3559,6 +3646,10 @@ async def queue_stats():
     running = 0
     queued = 0
     failed = 0
+    retest_completed = 0
+    retest_running = 0
+    retest_queued = 0
+    retest_failed = 0
 
     for key in r.scan_iter("job:*"):
         job_data = r.hgetall(key)
@@ -3588,12 +3679,46 @@ async def queue_stats():
         elif status_str == 'failed':
             failed += 1
 
+    for key in r.scan_iter("retest_job:*"):
+        job_data = r.hgetall(key)
+        if not job_data:
+            continue
+
+        status_str = job_data.get('status', '')
+
+        if status_str == 'running':
+            started_at = job_data.get('started_at', '')
+            if started_at:
+                try:
+                    started = datetime.fromisoformat(started_at)
+                    if now - started > timedelta(minutes=RETEST_RUNNING_TIMEOUT_MINUTES):
+                        r.hset(key, mapping={
+                            'status': 'failed',
+                            'error': 'Retest worker did not complete in time',
+                        })
+                        retest_failed += 1
+                        continue
+                except ValueError:
+                    pass
+            retest_running += 1
+        elif status_str == 'completed':
+            retest_completed += 1
+        elif status_str == 'queued':
+            retest_queued += 1
+        elif status_str == 'failed':
+            retest_failed += 1
+
     result = {
         'pending': r.llen(QUEUE_NAME),
         'queued': queued,
         'running': running,
         'completed': completed,
-        'failed': failed
+        'failed': failed,
+        'retest_pending': r.llen(RETEST_QUEUE_NAME),
+        'retest_queued': retest_queued,
+        'retest_running': retest_running,
+        'retest_completed': retest_completed,
+        'retest_failed': retest_failed,
     }
     try:
         r.setex("queue:stats_cache", 5, json.dumps(result))
@@ -3603,12 +3728,16 @@ async def queue_stats():
 
 
 @app.delete("/queue/clear")
-async def clear_queue():
-    """Clear all pending jobs."""
+async def clear_queue(include_retests: bool = False):
+    """Clear all pending scan jobs. Optionally clear retest jobs too."""
     r = get_redis()
     count = r.llen(QUEUE_NAME)
     r.delete(QUEUE_NAME)
-    return {'cleared': count}
+    retest_cleared = 0
+    if include_retests:
+        retest_cleared = r.llen(RETEST_QUEUE_NAME)
+        r.delete(RETEST_QUEUE_NAME)
+    return {'cleared': count, 'retest_cleared': retest_cleared}
 
 
 # ============================================================

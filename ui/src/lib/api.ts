@@ -93,6 +93,7 @@ export interface Finding {
   resolved_at?: string
   resurfaced_count?: number
   last_verification_status?: string
+  last_verification_verdict?: string
   last_verification_confidence?: number
   last_verified_at?: string
   verification_count?: number
@@ -107,6 +108,8 @@ export interface RetestRecord {
   requested_by?: string
   status: 'queued' | 'running' | 'completed' | 'failed'
   result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error'
+  verdict?: 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  verdict_reason?: string
   finding_type: string
   target_url: string
   original_url?: string
@@ -114,7 +117,9 @@ export interface RetestRecord {
   payload?: string
   method?: string
   request_body?: string
+  replay_commands?: string[] | null
   proof?: Record<string, unknown> | null
+  artifacts?: Record<string, unknown> | null
   confidence?: number | null
   message?: string
   error_message?: string
@@ -322,6 +327,7 @@ export async function retestFinding(
   finding_id: string
   finding_type: string
   target_url: string
+  replay_commands?: string[]
 }> {
   const res = await fetch(`${API_URL}/findings/${id}/retest`, {
     method: 'POST',

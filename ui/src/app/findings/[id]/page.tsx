@@ -350,6 +350,9 @@ function FindingDetailContent() {
             <InfoItem label="Last status">
               <span className="capitalize">{finding.last_verification_status || 'not tested'}</span>
             </InfoItem>
+            <InfoItem label="Last verdict">
+              <span className="capitalize">{(finding.last_verification_verdict || 'n/a').replaceAll('_', ' ')}</span>
+            </InfoItem>
             <InfoItem label="Last confidence">
               {typeof finding.last_verification_confidence === 'number'
                 ? `${Math.round(finding.last_verification_confidence * 100)}%`
@@ -369,7 +372,7 @@ function FindingDetailContent() {
                 <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-gray-300">
-                      {entry.finding_type} • {entry.result_status || entry.status}
+                      {entry.finding_type} • {(entry.verdict || entry.result_status || entry.status).replaceAll('_', ' ')}
                     </div>
                     <div className="text-gray-500">
                       {entry.completed_at
@@ -384,7 +387,18 @@ function FindingDetailContent() {
                       confidence: {Math.round(entry.confidence * 100)}%
                     </div>
                   )}
-                  {entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
+                  {entry.verdict_reason && <div className="text-gray-400 mt-1">{entry.verdict_reason}</div>}
+                  {!entry.verdict_reason && entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
+                  {Array.isArray(entry.replay_commands) && entry.replay_commands.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {entry.replay_commands.slice(0, 3).map((command, idx) => (
+                        <div key={idx} className="flex items-start gap-1">
+                          <code className="text-[11px] text-blue-300 break-all flex-1">{command}</code>
+                          <CopyButton text={command} label="Copy replay command" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {entry.error_message && <div className="text-red-300 mt-1">{entry.error_message}</div>}
                 </div>
               ))}

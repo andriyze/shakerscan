@@ -125,6 +125,7 @@ CREATE TABLE findings (
 
     -- Verification summary (latest retest state)
     last_verification_status TEXT,  -- queued, running, still_vulnerable, likely_fixed, inconclusive, error
+    last_verification_verdict TEXT,  -- exploited, blocked_by_security, out_of_scope_internal, false_positive, likely_fixed, inconclusive, error
     last_verification_confidence NUMERIC(3,2),
     last_verified_at TIMESTAMPTZ,
     verification_count INTEGER DEFAULT 0,
@@ -152,6 +153,8 @@ CREATE TABLE finding_verifications (
     requested_by TEXT DEFAULT 'api',
     status TEXT NOT NULL DEFAULT 'queued',  -- queued, running, completed, failed
     result_status TEXT,  -- still_vulnerable, likely_fixed, inconclusive, error
+    verdict TEXT,  -- exploited, blocked_by_security, out_of_scope_internal, false_positive, likely_fixed, inconclusive, error
+    verdict_reason TEXT,
 
     -- Retest inputs
     finding_type TEXT NOT NULL,  -- xss, sqli, ssrf, path_traversal
@@ -161,9 +164,11 @@ CREATE TABLE finding_verifications (
     payload TEXT,
     method TEXT,
     request_body TEXT,
+    replay_commands JSONB,
 
     -- Retest outputs
     proof JSONB,
+    artifacts JSONB,
     confidence NUMERIC(3,2),
     message TEXT,
     error_message TEXT,
@@ -257,11 +262,13 @@ CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
 CREATE INDEX idx_findings_source ON findings(source);
 CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL;
+CREATE INDEX idx_findings_last_verification_verdict ON findings(last_verification_verdict);
 
 -- Finding verifications
 CREATE INDEX idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC);
 CREATE INDEX idx_finding_verifications_status ON finding_verifications(status);
 CREATE INDEX idx_finding_verifications_result_status ON finding_verifications(result_status);
+CREATE INDEX idx_finding_verifications_verdict ON finding_verifications(verdict);
 CREATE INDEX idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL;
 
 -- Discovery

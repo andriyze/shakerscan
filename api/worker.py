@@ -6,10 +6,12 @@ Redis-based job worker with PostgreSQL persistence.
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import threading
+import urllib.parse
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
+RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
@@ -38,6 +41,25 @@ MAX_SCAN_DURATION = {
 }
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
+RETEST_MAX_PARALLEL = max(1, int(os.environ.get("RETEST_MAX_PARALLEL", "2")))
+RETEST_SLOT_KEY = os.environ.get("RETEST_SLOT_KEY", "retest:active_workers")
+RETEST_SLOT_TTL_SECONDS = int(os.environ.get("RETEST_SLOT_TTL_SECONDS", "120"))
+RETEST_REQUEUE_DELAY_SECONDS = int(os.environ.get("RETEST_REQUEUE_DELAY_SECONDS", "2"))
+
+AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
+    "1", "true", "yes", "on"
+}
+AUTO_RETEST_MIN_SEVERITY = os.environ.get("AUTO_RETEST_MIN_SEVERITY", "high").lower()
+AUTO_RETEST_MAX_PER_SCAN = max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25")))
+AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
+
+SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
 
 SUPPORTED_RETEST_TYPES = {"xss", "sqli", "ssrf", "path_traversal"}
 RETEST_TYPE_ALIASES = {
@@ -54,6 +76,23 @@ RETEST_TYPE_ALIASES = {
     "path-traversal": "path_traversal",
     "lfi": "path_traversal",
     "local-file-inclusion": "path_traversal",
+}
+
+SUPPORTED_RETEST_VERDICTS = {
+    "exploited",
+    "blocked_by_security",
+    "out_of_scope_internal",
+    "false_positive",
+    "likely_fixed",
+    "inconclusive",
+    "error",
+}
+
+DEFAULT_REPLAY_PAYLOADS = {
+    "xss": "<script>alert(1)</script>",
+    "sqli": "' OR '1'='1",
+    "ssrf": "http://127.0.0.1:80/",
+    "path_traversal": "../../../etc/passwd",
 }
 
 # Database pool (initialized in main)
@@ -575,8 +614,192 @@ def infer_retest_inputs(verification: dict) -> dict:
     }
 
 
+def build_replay_commands(inputs: dict) -> list[str]:
+    """Generate copy/paste commands to replay a verification attempt."""
+    finding_type = str(inputs.get("finding_type") or "").strip().lower()
+    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "").strip()
+    method = str(inputs.get("method") or "GET").strip().upper()
+    param = str(inputs.get("param") or "").strip()
+    payload = str(inputs.get("payload") or "").strip() or DEFAULT_REPLAY_PAYLOADS.get(finding_type, "test")
+
+    if not target_url:
+        return []
+
+    commands = [f"curl -i -k '{target_url}'"]
+
+    if param:
+        if method == "POST":
+            commands.append(
+                "curl -i -k -X POST "
+                f"'{target_url}' "
+                "-H 'Content-Type: application/x-www-form-urlencoded' "
+                f"--data-urlencode '{param}={payload}'"
+            )
+        else:
+            parsed = urllib.parse.urlparse(target_url)
+            q = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            q[param] = [payload]
+            injected_query = urllib.parse.urlencode(q, doseq=True)
+            injected_url = urllib.parse.urlunparse(parsed._replace(query=injected_query))
+            commands.append(f"curl -i -k '{injected_url}'")
+    else:
+        commands.append(
+            "curl -i -k -X POST "
+            f"'{target_url}' "
+            f"-H 'Content-Type: application/x-www-form-urlencoded' --data 'payload={urllib.parse.quote_plus(payload)}'"
+        )
+
+    return commands
+
+
+def _is_internal_target(url: str) -> bool:
+    """Heuristic check for internal-only hosts."""
+    if not url:
+        return False
+
+    try:
+        parsed = urllib.parse.urlparse(url if "://" in url else f"http://{url}")
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        host = str(url).lower()
+
+    if not host:
+        return False
+
+    if host in {"localhost", "host.docker.internal"}:
+        return True
+    if host.endswith(".local") or host.endswith(".internal"):
+        return True
+
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+            return True
+    except ValueError:
+        pass
+
+    return False
+
+
+def _detect_security_block_text(*parts: str | None) -> bool:
+    """Best-effort detection for WAF/edge blocks from response text."""
+    merged = " ".join([p for p in parts if p]).lower()
+    if not merged:
+        return False
+
+    patterns = (
+        "forbidden",
+        "access denied",
+        "request blocked",
+        "blocked by",
+        "blocked",
+        "waf",
+        "modsecurity",
+        "cloudflare",
+        "security policy",
+        "captcha",
+        "too many requests",
+        "rate limit",
+        "not allowed",
+    )
+    return any(p in merged for p in patterns)
+
+
+def classify_retest_outcome(
+    *,
+    proof: dict | None,
+    proven: bool,
+    confidence: float | None,
+    inputs: dict,
+    error_message: str | None = None,
+) -> tuple[str, str, str]:
+    """
+    Return (result_status, verdict, verdict_reason).
+
+    result_status keeps backwards-compatible semantics.
+    verdict introduces Shannon-style classification.
+    """
+    if proven:
+        return (
+            "still_vulnerable",
+            "exploited",
+            "Proof-of-exploit succeeded and impact was reproduced.",
+        )
+
+    if error_message:
+        return (
+            "error",
+            "error",
+            f"Retest execution error: {error_message}",
+        )
+
+    evidence_type = str((proof or {}).get("evidence_type") or "")
+    response_snippet = str((proof or {}).get("response_snippet") or "")
+    extracted_data = str((proof or {}).get("extracted_data") or "")
+    target_url = str(inputs.get("original_url") or inputs.get("target_url") or "")
+
+    if _is_internal_target(target_url):
+        return (
+            "inconclusive",
+            "out_of_scope_internal",
+            "Target appears internal/private and could require internal network access.",
+        )
+
+    if _detect_security_block_text(response_snippet, extracted_data):
+        return (
+            "inconclusive",
+            "blocked_by_security",
+            "Exploit path appears blocked by security controls or edge filtering.",
+        )
+
+    if evidence_type in {"no_url", "unsupported_vulnerability_type"}:
+        return (
+            "inconclusive",
+            "false_positive",
+            "Finding lacks replayable exploit context for this verifier.",
+        )
+
+    if confidence is not None and confidence <= 0.2:
+        return (
+            "inconclusive",
+            "false_positive",
+            "Low-confidence retest with no exploit evidence after replay.",
+        )
+
+    return (
+        "likely_fixed",
+        "likely_fixed",
+        "Retest could not reproduce exploit behavior with available inputs.",
+    )
+
+
+def _severity_allows_auto_retest(severity: str) -> bool:
+    min_rank = SEVERITY_ORDER.get(AUTO_RETEST_MIN_SEVERITY, SEVERITY_ORDER["high"])
+    sev_rank = SEVERITY_ORDER.get(str(severity or "").lower(), 0)
+    return sev_rank >= min_rank
+
+
+def _try_acquire_retest_slot(r) -> bool:
+    active = r.incr(RETEST_SLOT_KEY)
+    if active <= RETEST_MAX_PARALLEL:
+        r.expire(RETEST_SLOT_KEY, RETEST_SLOT_TTL_SECONDS)
+        return True
+    r.decr(RETEST_SLOT_KEY)
+    return False
+
+
+def _release_retest_slot(r) -> None:
+    try:
+        remaining = r.decr(RETEST_SLOT_KEY)
+        if remaining <= 0:
+            r.delete(RETEST_SLOT_KEY)
+    except Exception:
+        pass
+
+
 async def run_finding_retest(verification: dict) -> dict:
     """Execute a proof-based retest for a finding verification record."""
+    started_at = datetime.utcnow()
     try:
         from scanner_tools.proof_of_exploit import (
             prove_path_traversal,
@@ -587,24 +810,43 @@ async def run_finding_retest(verification: dict) -> dict:
             end_scan_session,
         )
     except ImportError as e:
+        replay_commands = build_replay_commands(infer_retest_inputs(verification))
         return {
             "status": "failed",
             "result_status": "error",
+            "verdict": "error",
+            "verdict_reason": "Proof module unavailable in worker runtime.",
             "error_message": f"Proof module unavailable: {e}",
             "confidence": None,
             "proof": None,
+            "replay_commands": replay_commands,
+            "artifacts": {
+                "started_at": started_at.isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "failure_stage": "module_import",
+            },
             "message": "Retest could not run because proof module is unavailable",
         }
 
     inputs = infer_retest_inputs(verification)
+    replay_commands = build_replay_commands(inputs)
     finding_type = inputs.get("finding_type")
     if finding_type not in SUPPORTED_RETEST_TYPES:
         return {
             "status": "failed",
             "result_status": "error",
+            "verdict": "error",
+            "verdict_reason": "Finding type is unsupported by proof engine.",
             "error_message": f"Unsupported finding type: {finding_type}",
             "confidence": None,
             "proof": None,
+            "replay_commands": replay_commands,
+            "artifacts": {
+                "started_at": started_at.isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "failure_stage": "type_check",
+                "finding_type": finding_type,
+            },
             "message": f"Unsupported finding type: {finding_type}",
         }
 
@@ -613,9 +855,17 @@ async def run_finding_retest(verification: dict) -> dict:
         return {
             "status": "failed",
             "result_status": "error",
+            "verdict": "error",
+            "verdict_reason": "Missing replay URL for verification.",
             "error_message": "Missing target/original URL for retest",
             "confidence": None,
             "proof": None,
+            "replay_commands": replay_commands,
+            "artifacts": {
+                "started_at": started_at.isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "failure_stage": "input_validation",
+            },
             "message": "Missing target/original URL for retest",
         }
 
@@ -659,18 +909,43 @@ async def run_finding_retest(verification: dict) -> dict:
             return {
                 "status": "failed",
                 "result_status": "error",
+                "verdict": "error",
+                "verdict_reason": "No matching prover function for finding type.",
                 "error_message": f"No prover for finding type: {finding_type}",
                 "confidence": None,
                 "proof": None,
+                "replay_commands": replay_commands,
+                "artifacts": {
+                    "started_at": started_at.isoformat(),
+                    "completed_at": datetime.utcnow().isoformat(),
+                    "failure_stage": "prover_selection",
+                    "finding_type": finding_type,
+                },
                 "message": f"No prover for finding type: {finding_type}",
             }
     except Exception as e:
+        result_status, verdict, verdict_reason = classify_retest_outcome(
+            proof=None,
+            proven=False,
+            confidence=None,
+            inputs=inputs,
+            error_message=str(e),
+        )
         return {
             "status": "failed",
-            "result_status": "error",
+            "result_status": result_status,
+            "verdict": verdict,
+            "verdict_reason": verdict_reason,
             "error_message": f"Retest execution failed: {e}",
             "confidence": None,
             "proof": None,
+            "replay_commands": replay_commands,
+            "artifacts": {
+                "started_at": started_at.isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "failure_stage": "execution",
+                "finding_type": finding_type,
+            },
             "message": "Retest execution failed",
         }
     finally:
@@ -682,20 +957,35 @@ async def run_finding_retest(verification: dict) -> dict:
     proof_data = proof.to_dict() if proof else None
     still_vulnerable = bool(getattr(proof, "proven", False))
     confidence = getattr(proof, "confidence", None)
-
-    result_status = "still_vulnerable" if still_vulnerable else "likely_fixed"
-    message = (
-        "The vulnerability is still present and reproducible."
-        if still_vulnerable
-        else "The vulnerability could not be reproduced during retest."
+    result_status, verdict, verdict_reason = classify_retest_outcome(
+        proof=proof_data,
+        proven=still_vulnerable,
+        confidence=confidence,
+        inputs=inputs,
     )
+    message = verdict_reason
+    completed_at = datetime.utcnow()
+    artifacts = {
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "finding_type": finding_type,
+        "target_url": test_url,
+        "attempted_url": (proof_data or {}).get("request"),
+        "technique": (proof_data or {}).get("technique"),
+        "evidence_type": (proof_data or {}).get("evidence_type"),
+        "payload_used": inputs.get("payload") or DEFAULT_REPLAY_PAYLOADS.get(finding_type),
+    }
 
     return {
         "status": "completed",
         "result_status": result_status,
+        "verdict": verdict,
+        "verdict_reason": verdict_reason,
         "error_message": None,
         "confidence": confidence,
         "proof": proof_data,
+        "replay_commands": replay_commands,
+        "artifacts": artifacts,
         "message": message,
     }
 
@@ -713,114 +1003,271 @@ async def process_finding_retest_job(job_data: dict):
     now = datetime.utcnow()
 
     retest_key = f"retest_job:{job_id}"
-    r.hset(retest_key, mapping={
-        "status": "running",
-        "verification_id": verification_id,
-        "started_at": now.isoformat(),
-    })
+    if not _try_acquire_retest_slot(r):
+        # Requeue to avoid global retest saturation across workers.
+        r.hset(retest_key, mapping={
+            "status": "queued",
+            "verification_id": verification_id,
+            "requeued_at": now.isoformat(),
+            "note": "waiting_for_retest_slot",
+        })
+        r.rpush(RETEST_QUEUE_NAME, json.dumps(job_data))
+        r.expire(retest_key, 86400)
+        await asyncio.sleep(RETEST_REQUEUE_DELAY_SECONDS)
+        return
+
+    try:
+        r.hset(retest_key, mapping={
+            "status": "running",
+            "verification_id": verification_id,
+            "started_at": now.isoformat(),
+        })
+
+        async with db_pool.acquire() as conn:
+            verification = await conn.fetchrow("""
+                SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url
+                FROM finding_verifications fv
+                JOIN findings f ON fv.finding_id = f.id
+                WHERE fv.id = $1
+            """, uuid.UUID(verification_id))
+
+            if not verification:
+                r.hset(retest_key, mapping={
+                    "status": "failed",
+                    "error": "verification_not_found",
+                })
+                r.expire(retest_key, 86400)
+                print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
+                return
+
+            await conn.execute("""
+                UPDATE finding_verifications
+                SET status = 'running', started_at = NOW(), updated_at = NOW()
+                WHERE id = $1
+            """, verification["id"])
+            await conn.execute("""
+                UPDATE findings
+                SET last_verification_status = 'running',
+                    last_verification_verdict = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+            """, verification["finding_id"])
+
+            result = await run_finding_retest(dict(verification))
+            completed_at = datetime.utcnow()
+
+            if result["status"] == "completed":
+                await conn.execute("""
+                    UPDATE finding_verifications
+                    SET status = 'completed',
+                        result_status = $1,
+                        verdict = $2,
+                        verdict_reason = $3,
+                        replay_commands = $4,
+                        proof = $5,
+                        artifacts = $6,
+                        confidence = $7,
+                        message = $8,
+                        error_message = NULL,
+                        completed_at = $9,
+                        updated_at = NOW()
+                    WHERE id = $10
+                """,
+                    result.get("result_status"),
+                    result.get("verdict"),
+                    result.get("verdict_reason"),
+                    json.dumps(result.get("replay_commands")) if result.get("replay_commands") else None,
+                    json.dumps(result.get("proof")) if result.get("proof") else None,
+                    json.dumps(result.get("artifacts")) if result.get("artifacts") else None,
+                    result.get("confidence"),
+                    result.get("message"),
+                    completed_at,
+                    verification["id"],
+                )
+            else:
+                await conn.execute("""
+                    UPDATE finding_verifications
+                    SET status = 'failed',
+                        result_status = $1,
+                        verdict = $2,
+                        verdict_reason = $3,
+                        replay_commands = $4,
+                        proof = $5,
+                        artifacts = $6,
+                        confidence = $7,
+                        message = $8,
+                        error_message = $9,
+                        completed_at = $10,
+                        updated_at = NOW()
+                    WHERE id = $11
+                """,
+                    result.get("result_status") or "error",
+                    result.get("verdict") or "error",
+                    result.get("verdict_reason"),
+                    json.dumps(result.get("replay_commands")) if result.get("replay_commands") else None,
+                    json.dumps(result.get("proof")) if result.get("proof") else None,
+                    json.dumps(result.get("artifacts")) if result.get("artifacts") else None,
+                    result.get("confidence"),
+                    result.get("message"),
+                    result.get("error_message"),
+                    completed_at,
+                    verification["id"],
+                )
+
+            await conn.execute("""
+                UPDATE findings
+                SET last_verification_status = $1,
+                    last_verification_verdict = $2,
+                    last_verification_confidence = $3,
+                    last_verified_at = $4,
+                    verification_count = COALESCE(verification_count, 0) + 1,
+                    updated_at = NOW()
+                WHERE id = $5
+            """,
+                result.get("result_status") if result.get("status") == "completed" else "error",
+                result.get("verdict") if result.get("status") == "completed" else "error",
+                result.get("confidence"),
+                completed_at,
+                verification["finding_id"],
+            )
+
+        r.hset(retest_key, mapping={
+            "status": "completed" if result["status"] == "completed" else "failed",
+            "result_status": result.get("result_status") or "error",
+            "verdict": result.get("verdict") or "error",
+            "completed_at": completed_at.isoformat(),
+        })
+        if result.get("error_message"):
+            r.hset(retest_key, "error", result["error_message"])
+        r.expire(retest_key, 86400)
+
+        print(
+            f"[retest:{job_id[:8]}] Completed retest {verification_id} -> "
+            f"{result.get('verdict') or result.get('result_status') or result.get('status')}",
+            flush=True,
+        )
+    finally:
+        _release_retest_slot(r)
+
+
+async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, target_url: str | None) -> dict[str, int]:
+    """
+    Auto-enqueue retests for high-risk findings from a completed scan.
+
+    This is a best-effort policy hook and should never fail the scan job itself.
+    """
+    if not AUTO_RETEST_ON_SCAN_COMPLETE or AUTO_RETEST_MAX_PER_SCAN <= 0:
+        return {"queued": 0, "skipped": 0}
+
+    r = get_redis()
+    queued = 0
+    skipped = 0
 
     async with db_pool.acquire() as conn:
-        verification = await conn.fetchrow("""
-            SELECT fv.*, f.title, f.tool, f.evidence, f.url as finding_url
-            FROM finding_verifications fv
-            JOIN findings f ON fv.finding_id = f.id
-            WHERE fv.id = $1
-        """, uuid.UUID(verification_id))
+        rows = await conn.fetch("""
+            SELECT f.*, t.url as target_url
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            WHERE f.scan_id = $1 AND f.status = 'active'
+            ORDER BY
+                CASE f.severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    ELSE 5
+                END,
+                f.last_seen_at DESC
+        """, uuid.UUID(scan_id))
 
-        if not verification:
-            r.hset(retest_key, mapping={
-                "status": "failed",
-                "error": "verification_not_found",
+        for row in rows:
+            if queued >= AUTO_RETEST_MAX_PER_SCAN:
+                break
+
+            finding = dict(row)
+            if not _severity_allows_auto_retest(str(finding.get("severity") or "")):
+                skipped += 1
+                continue
+
+            pending = await conn.fetchval("""
+                SELECT 1
+                FROM finding_verifications
+                WHERE finding_id = $1
+                  AND status IN ('queued', 'running')
+                LIMIT 1
+            """, finding["id"])
+            if pending:
+                skipped += 1
+                continue
+
+            inferred = infer_retest_inputs({
+                **finding,
+                "finding_url": finding.get("url"),
+                "target_url": finding.get("target_url") or target_url or "",
             })
-            r.expire(retest_key, 86400)
-            print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
-            return
+            finding_type = inferred.get("finding_type")
+            effective_target = inferred.get("target_url") or target_url or ""
 
-        await conn.execute("""
-            UPDATE finding_verifications
-            SET status = 'running', started_at = NOW(), updated_at = NOW()
-            WHERE id = $1
-        """, verification["id"])
-        await conn.execute("""
-            UPDATE findings
-            SET last_verification_status = 'running', updated_at = NOW()
-            WHERE id = $1
-        """, verification["finding_id"])
+            if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
+                skipped += 1
+                continue
 
-        result = await run_finding_retest(dict(verification))
-        completed_at = datetime.utcnow()
+            replay_commands = build_replay_commands(inferred)
+            verification_id = uuid.uuid4()
+            job_id = str(uuid.uuid4())
 
-        if result["status"] == "completed":
             await conn.execute("""
-                UPDATE finding_verifications
-                SET status = 'completed',
-                    result_status = $1,
-                    proof = $2,
-                    confidence = $3,
-                    message = $4,
-                    error_message = NULL,
-                    completed_at = $5,
-                    updated_at = NOW()
-                WHERE id = $6
+                INSERT INTO finding_verifications (
+                    id, finding_id, scan_id, target_id, job_id, requested_by, status,
+                    finding_type, target_url, original_url, param, payload, method, request_body, replay_commands
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, 'queued',
+                    $7, $8, $9, $10, $11, $12, $13, $14
+                )
             """,
-                result.get("result_status"),
-                json.dumps(result.get("proof")) if result.get("proof") else None,
-                result.get("confidence"),
-                result.get("message"),
-                completed_at,
-                verification["id"],
-            )
-        else:
-            await conn.execute("""
-                UPDATE finding_verifications
-                SET status = 'failed',
-                    result_status = $1,
-                    proof = $2,
-                    confidence = $3,
-                    message = $4,
-                    error_message = $5,
-                    completed_at = $6,
-                    updated_at = NOW()
-                WHERE id = $7
-            """,
-                result.get("result_status") or "error",
-                json.dumps(result.get("proof")) if result.get("proof") else None,
-                result.get("confidence"),
-                result.get("message"),
-                result.get("error_message"),
-                completed_at,
-                verification["id"],
+                verification_id,
+                finding["id"],
+                finding.get("scan_id"),
+                finding.get("target_id") or (uuid.UUID(target_id) if target_id else None),
+                job_id,
+                AUTO_RETEST_REQUESTED_BY,
+                finding_type,
+                effective_target,
+                inferred.get("original_url") or effective_target,
+                inferred.get("param") or None,
+                inferred.get("payload") or None,
+                inferred.get("method") or "GET",
+                inferred.get("request_body") or None,
+                json.dumps(replay_commands) if replay_commands else None,
             )
 
-        await conn.execute("""
-            UPDATE findings
-            SET last_verification_status = $1,
-                last_verification_confidence = $2,
-                last_verified_at = $3,
-                verification_count = COALESCE(verification_count, 0) + 1,
-                updated_at = NOW()
-            WHERE id = $4
-        """,
-            result.get("result_status") if result.get("status") == "completed" else "error",
-            result.get("confidence"),
-            completed_at,
-            verification["finding_id"],
-        )
+            await conn.execute("""
+                UPDATE findings
+                SET last_verification_status = 'queued',
+                    last_verification_verdict = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+            """, finding["id"])
 
-    r.hset(retest_key, mapping={
-        "status": "completed" if result["status"] == "completed" else "failed",
-        "result_status": result.get("result_status") or "error",
-        "completed_at": completed_at.isoformat(),
-    })
-    if result.get("error_message"):
-        r.hset(retest_key, "error", result["error_message"])
-    r.expire(retest_key, 86400)
+            job_payload = {
+                "type": "finding_retest",
+                "job_id": job_id,
+                "verification_id": str(verification_id),
+                "finding_id": str(finding["id"]),
+                "submitted_at": datetime.utcnow().isoformat(),
+                "trigger": AUTO_RETEST_REQUESTED_BY,
+            }
+            r.rpush(RETEST_QUEUE_NAME, json.dumps(job_payload))
+            r.hset(f"retest_job:{job_id}", mapping={
+                "status": "queued",
+                "verification_id": str(verification_id),
+                "finding_id": str(finding["id"]),
+                "trigger": AUTO_RETEST_REQUESTED_BY,
+            })
+            r.expire(f"retest_job:{job_id}", 86400)
+            queued += 1
 
-    print(
-        f"[retest:{job_id[:8]}] Completed retest {verification_id} -> "
-        f"{result.get('result_status') or result.get('status')}",
-        flush=True,
-    )
+    return {"queued": queued, "skipped": skipped}
 
 
 def save_result_file(result: dict, job_id: str) -> str:
@@ -1019,9 +1466,16 @@ async def process_scan_job(job_data: dict):
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
 
+        auto_retests = {"queued": 0, "skipped": 0}
+
         # Save findings
         if target_id and findings:
             await save_findings(scan_id, target_id, findings)
+            if not error:
+                try:
+                    auto_retests = await queue_auto_retests_for_scan(scan_id, target_id, target)
+                except Exception as e:
+                    print(f"[{job_id[:8]}] Auto-retest queueing error: {e}", flush=True)
 
         # Update Redis
         status = 'failed' if error else 'completed'
@@ -1033,12 +1487,17 @@ async def process_scan_job(job_data: dict):
             'grade': str(grade) if grade else 'N/A',
             'completed_at': completed_at.isoformat(),
             'progress': '100',
-            'current_phase': status
+            'current_phase': status,
+            'auto_retests_queued': str(auto_retests.get("queued", 0)),
         })
         # Expire completed/failed job keys after 24 hours
         r.expire(job_key, 86400)
 
-        print(f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | Findings: {len(findings)}", flush=True)
+        print(
+            f"[{job_id[:8]}] Completed: {target} | Score: {score} | Grade: {grade} | "
+            f"Findings: {len(findings)} | AutoRetests: {auto_retests.get('queued', 0)}",
+            flush=True,
+        )
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
@@ -1134,7 +1593,12 @@ async def async_main():
     await init_db()
 
     r = get_redis()
-    print(f"Worker started, listening on queue: {QUEUE_NAME}", flush=True)
+    queue_keys = [QUEUE_NAME] if RETEST_QUEUE_NAME == QUEUE_NAME else [QUEUE_NAME, RETEST_QUEUE_NAME]
+    print(
+        f"Worker started, listening on queues: {', '.join(queue_keys)} "
+        f"(retest max parallel: {RETEST_MAX_PARALLEL})",
+        flush=True,
+    )
 
     loop = asyncio.get_event_loop()
 
@@ -1142,7 +1606,7 @@ async def async_main():
         while True:
             try:
                 # Use run_in_executor for blocking Redis pop
-                result = await loop.run_in_executor(None, lambda: r.blpop(QUEUE_NAME, timeout=30))
+                result = await loop.run_in_executor(None, lambda: r.blpop(queue_keys, timeout=30))
                 if result is None:
                     continue  # Timeout, continue polling
 
