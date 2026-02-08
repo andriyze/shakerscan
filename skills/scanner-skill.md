@@ -286,6 +286,10 @@ POST /scans/batch
 GET /workers
 POST /workers  # {"count": 5}
 
+# AI settings
+GET /settings/ai
+PUT /settings/ai
+
 # Schedules
 GET /schedules
 POST /schedules

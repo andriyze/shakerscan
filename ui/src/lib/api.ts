@@ -153,6 +153,33 @@ export interface WorkerStats {
   error?: string
 }
 
+export interface AISettings {
+  ai_url: string
+  ai_model: string
+  ai_mask_host: string
+  ai_api_key_configured: boolean
+  ai_api_key_masked?: string
+  ai_verify_enabled: boolean
+  ai_verify_url: string
+  ai_verify_model: string
+  ai_verify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_verify_api_key_configured: boolean
+  ai_verify_api_key_masked?: string
+}
+
+export interface AISettingsUpdate {
+  ai_url?: string
+  ai_api_key?: string
+  ai_model?: string
+  ai_mask_host?: string
+  ai_verify_enabled?: boolean
+  ai_verify_url?: string
+  ai_verify_api_key?: string
+  ai_verify_model?: string
+  ai_verify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  persist_to_env?: boolean
+}
+
 // Dashboard
 export async function getDashboard() {
   const res = await fetch(`${API_URL}/dashboard`)
@@ -410,6 +437,31 @@ export async function getQueueStats(): Promise<QueueStats> {
 export async function getHealth() {
   const res = await fetch(`${API_URL}/health`)
   if (!res.ok) throw new Error('API not healthy')
+  return res.json()
+}
+
+export async function getAISettings(): Promise<AISettings> {
+  const res = await fetch(`${API_URL}/settings/ai`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI settings'))
+  }
+  return res.json()
+}
+
+export async function updateAISettings(data: AISettingsUpdate): Promise<{
+  status: string
+  persisted_to_env: boolean
+  persist_message?: string
+  settings: AISettings
+}> {
+  const res = await fetch(`${API_URL}/settings/ai`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update AI settings'))
+  }
   return res.json()
 }
 

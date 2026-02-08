@@ -334,6 +334,45 @@ curl -X POST http://localhost:8080/workers \
 
 Worker limits: 1-20 workers. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
 
+### AI Settings
+
+Configure scan AI and AI retest verification at runtime (stored in Redis), with optional local `.env` persistence:
+
+```bash
+# Get effective AI settings (API keys are masked)
+curl http://localhost:8080/settings/ai
+
+# Update runtime settings only (takes effect for new jobs immediately)
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ai_url": "https://api.openai.com/v1/chat/completions",
+    "ai_api_key": "sk-...",
+    "ai_model": "gpt-4o-mini",
+    "ai_verify_enabled": true,
+    "ai_verify_url": "https://api.openai.com/v1/chat/completions",
+    "ai_verify_api_key": "sk-...",
+    "ai_verify_model": "gpt-4o-mini",
+    "ai_verify_min_severity": "high",
+    "persist_to_env": false
+  }'
+
+# Clear keys and persist to local .env (if API has LOCAL_ENV_FILE access)
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ai_url": "",
+    "ai_api_key": "",
+    "ai_verify_url": "",
+    "ai_verify_api_key": "",
+    "persist_to_env": true
+  }'
+```
+
+Notes:
+- Runtime settings apply to **new scans/retests** without restarting services.
+- `persist_to_env: true` writes values to `LOCAL_ENV_FILE` (default `/workspace/.env` in Docker).
+
 ### Schedules (Recurring Scans)
 
 ```bash

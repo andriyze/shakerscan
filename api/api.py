@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
@@ -56,6 +57,8 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
+AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
+LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
 
 # Maximum allowed duration per scan type (minutes) - safety net
 MAX_SCAN_DURATION = {
@@ -65,6 +68,14 @@ MAX_SCAN_DURATION = {
     'full': 600,       # 10 hours
     'aggressive': 600,  # 10 hours
     'smart': 360,
+}
+
+SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
 }
 
 
@@ -82,6 +93,125 @@ def row_to_dict(row) -> dict:
 def get_redis():
     """Get Redis connection."""
     return redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _is_truthy(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_severity(value: Any, default: str = "high") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in SEVERITY_ORDER:
+        return candidate
+    return default
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _default_ai_settings() -> dict[str, Any]:
+    return {
+        "ai_url": os.environ.get("AI_URL", ""),
+        "ai_api_key": os.environ.get("AI_API_KEY", ""),
+        "ai_model": os.environ.get("AI_MODEL", ""),
+        "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
+        "ai_verify_enabled": _is_truthy(os.environ.get("AI_VERIFY_ENABLED", "false"), default=False),
+        "ai_verify_url": os.environ.get("AI_VERIFY_URL", ""),
+        "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", ""),
+        "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929"),
+        "ai_verify_min_severity": _normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
+    }
+
+
+def _load_effective_ai_settings() -> dict[str, Any]:
+    settings = _default_ai_settings()
+    try:
+        r = get_redis()
+        overrides = r.hgetall(AI_SETTINGS_KEY) or {}
+    except Exception:
+        overrides = {}
+
+    if "ai_url" in overrides:
+        settings["ai_url"] = str(overrides.get("ai_url") or "")
+    if "ai_api_key" in overrides:
+        settings["ai_api_key"] = str(overrides.get("ai_api_key") or "")
+    if "ai_model" in overrides:
+        settings["ai_model"] = str(overrides.get("ai_model") or "")
+    if "ai_mask_host" in overrides:
+        settings["ai_mask_host"] = str(overrides.get("ai_mask_host") or "")
+    if "ai_verify_enabled" in overrides:
+        settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=settings["ai_verify_enabled"])
+    if "ai_verify_url" in overrides:
+        settings["ai_verify_url"] = str(overrides.get("ai_verify_url") or "")
+    if "ai_verify_api_key" in overrides:
+        settings["ai_verify_api_key"] = str(overrides.get("ai_verify_api_key") or "")
+    if "ai_verify_model" in overrides:
+        settings["ai_verify_model"] = str(overrides.get("ai_verify_model") or "")
+    if "ai_verify_min_severity" in overrides:
+        settings["ai_verify_min_severity"] = _normalize_severity(
+            overrides.get("ai_verify_min_severity"), default=settings["ai_verify_min_severity"]
+        )
+    return settings
+
+
+def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ai_url": settings.get("ai_url") or "",
+        "ai_model": settings.get("ai_model") or "",
+        "ai_mask_host": settings.get("ai_mask_host") or "",
+        "ai_api_key_configured": bool(settings.get("ai_api_key")),
+        "ai_api_key_masked": _mask_secret(str(settings.get("ai_api_key") or "")),
+        "ai_verify_enabled": bool(settings.get("ai_verify_enabled")),
+        "ai_verify_url": settings.get("ai_verify_url") or "",
+        "ai_verify_model": settings.get("ai_verify_model") or "",
+        "ai_verify_min_severity": settings.get("ai_verify_min_severity") or "high",
+        "ai_verify_api_key_configured": bool(settings.get("ai_verify_api_key")),
+        "ai_verify_api_key_masked": _mask_secret(str(settings.get("ai_verify_api_key") or "")),
+    }
+
+
+def _normalize_env_value(value: str) -> str:
+    return value.replace("\n", "\\n")
+
+
+def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> tuple[bool, str]:
+    try:
+        if env_path.exists():
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        else:
+            lines = []
+            if not env_path.parent.exists():
+                env_path.parent.mkdir(parents=True, exist_ok=True)
+
+        indexed: dict[str, int] = {}
+        key_pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+        for idx, line in enumerate(lines):
+            m = key_pattern.match(line)
+            if m:
+                indexed[m.group(1)] = idx
+
+        for key, raw_value in updates.items():
+            if raw_value is None:
+                if key in indexed:
+                    lines[indexed[key]] = f"# {key}=  # removed by settings API"
+                continue
+            line = f"{key}={_normalize_env_value(raw_value)}"
+            if key in indexed:
+                lines[indexed[key]] = line
+            else:
+                lines.append(line)
+
+        env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return True, f"Persisted settings to {env_path}"
+    except Exception as e:
+        return False, f"Failed to persist .env: {e}"
 
 
 def generate_finding_fingerprint(finding: dict) -> str:
@@ -845,6 +975,19 @@ class ScheduleUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class AISettingsUpdate(BaseModel):
+    ai_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_mask_host: Optional[str] = None
+    ai_verify_enabled: Optional[bool] = None
+    ai_verify_url: Optional[str] = None
+    ai_verify_api_key: Optional[str] = None
+    ai_verify_model: Optional[str] = None
+    ai_verify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    persist_to_env: bool = False
+
+
 # ============================================================
 # HEALTH & INFO
 # ============================================================
@@ -888,6 +1031,80 @@ async def health():
         "status": "healthy" if db_ok and redis_ok else "degraded",
         "database": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error"
+    }
+
+
+@app.get("/settings/ai")
+async def get_ai_settings():
+    """Get effective AI settings (secrets masked)."""
+    settings = _load_effective_ai_settings()
+    return _sanitize_ai_settings_response(settings)
+
+
+@app.put("/settings/ai")
+async def update_ai_settings(request: AISettingsUpdate):
+    """Update runtime AI settings, optionally persisting to local .env."""
+    try:
+        r = get_redis()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
+
+    string_fields = (
+        "ai_url",
+        "ai_api_key",
+        "ai_model",
+        "ai_mask_host",
+        "ai_verify_url",
+        "ai_verify_api_key",
+        "ai_verify_model",
+    )
+
+    updates: dict[str, str] = {}
+    deletes: list[str] = []
+
+    for field in string_fields:
+        value = getattr(request, field)
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if normalized == "":
+            deletes.append(field)
+        else:
+            updates[field] = normalized
+
+    if request.ai_verify_enabled is not None:
+        updates["ai_verify_enabled"] = "true" if request.ai_verify_enabled else "false"
+
+    if request.ai_verify_min_severity is not None:
+        updates["ai_verify_min_severity"] = _normalize_severity(request.ai_verify_min_severity, default="high")
+
+    if updates:
+        r.hset(AI_SETTINGS_KEY, mapping=updates)
+    if deletes:
+        r.hdel(AI_SETTINGS_KEY, *deletes)
+
+    persisted_to_env = False
+    persist_message = "Runtime settings updated"
+    if request.persist_to_env:
+        effective = _load_effective_ai_settings()
+        env_updates: dict[str, Optional[str]] = {
+            "AI_URL": effective.get("ai_url") or None,
+            "AI_API_KEY": effective.get("ai_api_key") or None,
+            "AI_MODEL": effective.get("ai_model") or None,
+            "AI_MASK_HOST": effective.get("ai_mask_host") or None,
+            "AI_VERIFY_ENABLED": "true" if effective.get("ai_verify_enabled") else "false",
+            "AI_VERIFY_URL": effective.get("ai_verify_url") or None,
+            "AI_VERIFY_API_KEY": effective.get("ai_verify_api_key") or None,
+            "AI_VERIFY_MODEL": effective.get("ai_verify_model") or None,
+            "AI_VERIFY_MIN_SEVERITY": effective.get("ai_verify_min_severity") or "high",
+        }
+        persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
+
+    return {
+        "status": "updated",
+        "persisted_to_env": persisted_to_env,
+        "persist_message": persist_message,
+        "settings": _sanitize_ai_settings_response(_load_effective_ai_settings()),
     }
 
 

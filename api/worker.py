@@ -63,6 +63,7 @@ RETEST_SLOT_KEY = os.environ.get("RETEST_SLOT_KEY", "retest:active_workers")
 RETEST_SLOT_TTL_SECONDS = int(os.environ.get("RETEST_SLOT_TTL_SECONDS", "120"))
 RETEST_REQUEUE_DELAY_SECONDS = int(os.environ.get("RETEST_REQUEUE_DELAY_SECONDS", "2"))
 RETEST_QUEUE_MAX_RETRIES = max(1, int(os.environ.get("RETEST_QUEUE_MAX_RETRIES", "5")))
+AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 
 AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
     "1", "true", "yes", "on"
@@ -94,6 +95,66 @@ db_pool = None
 
 def get_redis():
     return redis.from_url(REDIS_URL)
+
+
+def _is_truthy(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _decode_redis_hash(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    decoded: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(key, bytes):
+            key = key.decode("utf-8", errors="ignore")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        decoded[str(key)] = str(value)
+    return decoded
+
+
+def _load_runtime_ai_settings() -> dict[str, Any]:
+    settings: dict[str, Any] = {
+        "ai_url": os.environ.get("AI_URL", ""),
+        "ai_api_key": os.environ.get("AI_API_KEY", ""),
+        "ai_model": os.environ.get("AI_MODEL", ""),
+        "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
+        "ai_verify_enabled": AI_VERIFY_ENABLED,
+        "ai_verify_url": os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", ""),
+        "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", ""),
+        "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", AI_VERIFY_MODEL),
+        "ai_verify_min_severity": os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
+    }
+    try:
+        r = get_redis()
+        overrides = _decode_redis_hash(r.hgetall(AI_SETTINGS_KEY))
+    except Exception:
+        overrides = {}
+
+    for key in (
+        "ai_url",
+        "ai_api_key",
+        "ai_model",
+        "ai_mask_host",
+        "ai_verify_url",
+        "ai_verify_api_key",
+        "ai_verify_model",
+        "ai_verify_min_severity",
+    ):
+        if key in overrides:
+            settings[key] = overrides.get(key) or ""
+
+    if "ai_verify_enabled" in overrides:
+        settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=AI_VERIFY_ENABLED)
+
+    severity = str(settings.get("ai_verify_min_severity") or "high").lower()
+    if severity not in SEVERITY_ORDER:
+        severity = "high"
+    settings["ai_verify_min_severity"] = severity
+    return settings
 
 
 async def init_db():
@@ -195,10 +256,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.extend(['--oob-max-findings', str(oob_max)])
 
     # AI options
-    ai_url = options.get('ai_url') or os.environ.get('AI_URL')
-    ai_api_key = options.get('ai_api_key') or os.environ.get('AI_API_KEY')
-    model = options.get('model') or os.environ.get('AI_MODEL')
-    ai_mask_host = options.get('ai_mask_host') or os.environ.get('AI_MASK_HOST', 'example.com')
+    ai_runtime = _load_runtime_ai_settings()
+    ai_url = options.get('ai_url') or ai_runtime.get("ai_url")
+    ai_api_key = options.get('ai_api_key') or ai_runtime.get("ai_api_key")
+    model = options.get('model') or ai_runtime.get("ai_model")
+    ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
 
     if ai_url and ai_api_key and model:
         cmd.append('--ai')
@@ -1144,8 +1206,14 @@ async def process_finding_retest_job(job_data: dict):
             """, verification["finding_id"])
 
             # Check if this is a forced AI-only retest (mode=ai from API)
+            ai_runtime = _load_runtime_ai_settings()
             force_ai = requested_mode == "ai"
-            ai_config_ready = bool(AI_VERIFY_ENABLED and AI_VERIFY_URL and AI_VERIFY_API_KEY)
+            ai_verify_enabled = bool(ai_runtime.get("ai_verify_enabled"))
+            ai_verify_url = str(ai_runtime.get("ai_verify_url") or ai_runtime.get("ai_url") or "")
+            ai_verify_api_key = str(ai_runtime.get("ai_verify_api_key") or ai_runtime.get("ai_api_key") or "")
+            ai_verify_model = str(ai_runtime.get("ai_verify_model") or ai_runtime.get("ai_model") or AI_VERIFY_MODEL)
+            ai_verify_min_severity = str(ai_runtime.get("ai_verify_min_severity") or AI_VERIFY_MIN_SEVERITY).lower()
+            ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
             # Tier 1: Deterministic proof (fast, free) — skip if forced AI
             if force_ai and not ai_config_ready:
@@ -1205,7 +1273,7 @@ async def process_finding_retest_job(job_data: dict):
 
             severity_ok = force_ai or (
                 SEVERITY_ORDER.get(finding_severity, 0)
-                >= SEVERITY_ORDER.get(AI_VERIFY_MIN_SEVERITY, SEVERITY_ORDER["high"])
+                >= SEVERITY_ORDER.get(ai_verify_min_severity, SEVERITY_ORDER["high"])
             )
 
             if should_try_ai and severity_ok:
@@ -1221,9 +1289,9 @@ async def process_finding_retest_job(job_data: dict):
                         ai_result = await ai_verify_finding(
                             finding=dict(verification),
                             auth_context=auth_ctx if auth_ctx else None,
-                            ai_url=AI_VERIFY_URL,
-                            ai_api_key=AI_VERIFY_API_KEY,
-                            model=AI_VERIFY_MODEL,
+                            ai_url=ai_verify_url,
+                            ai_api_key=ai_verify_api_key,
+                            model=ai_verify_model,
                             target_url=target,
                         )
 

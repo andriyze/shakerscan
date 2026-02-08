@@ -63,6 +63,7 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | `/schedules/{id}` | GET | Get schedule details |
 | `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
 | `/workers` | GET/POST | View/scale worker count (1-20) |
+| `/settings/ai` | GET/PUT | View/update runtime AI settings (optional `.env` persistence) |
 | `/gungnir/status` | GET | CT monitor status |
 | `/gungnir/start` | POST | Start CT monitor |
 | `/gungnir/stop` | POST | Stop CT monitor |
@@ -137,6 +138,12 @@ curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
 
 # Cancel a scan
 curl -X POST http://localhost:8080/scans/{scan_id}/cancel
+
+# AI runtime settings (keys masked on read)
+curl http://localhost:8080/settings/ai
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{"ai_verify_enabled": true, "ai_verify_min_severity": "high", "persist_to_env": false}'
 
 # Authenticated scan (Bearer token)
 curl -X POST http://localhost:8080/scans \

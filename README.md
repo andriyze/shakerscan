@@ -581,6 +581,41 @@ POST /workers
 }
 ```
 
+### AI Settings
+
+```bash
+# Get effective AI settings (keys masked)
+GET /settings/ai
+
+# Update runtime AI settings (applies to new jobs immediately)
+PUT /settings/ai
+{
+  "ai_url": "https://api.openai.com/v1/chat/completions",
+  "ai_api_key": "sk-...",
+  "ai_model": "gpt-4o-mini",
+  "ai_verify_enabled": true,
+  "ai_verify_url": "https://api.openai.com/v1/chat/completions",
+  "ai_verify_api_key": "sk-...",
+  "ai_verify_model": "gpt-4o-mini",
+  "ai_verify_min_severity": "high",
+  "persist_to_env": false
+}
+
+# Clear keys and persist to local .env
+PUT /settings/ai
+{
+  "ai_url": "",
+  "ai_api_key": "",
+  "ai_verify_url": "",
+  "ai_verify_api_key": "",
+  "persist_to_env": true
+}
+```
+
+Notes:
+- Runtime settings are stored in Redis and picked up by workers for **new** scans/retests.
+- `persist_to_env: true` writes to `LOCAL_ENV_FILE` (default `/workspace/.env` in Docker).
+
 ### Gungnir CT Monitor
 
 ```bash
@@ -615,6 +650,16 @@ AI_URL=https://api.openai.com/v1/chat/completions
 AI_API_KEY=sk-...
 AI_MODEL=gpt-4o
 AI_MASK_HOST=example.com
+
+# AI Retest Verification (optional, runtime override via /settings/ai)
+AI_VERIFY_ENABLED=false
+AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
+AI_VERIFY_API_KEY=sk-...
+AI_VERIFY_MODEL=gpt-4o-mini
+AI_VERIFY_MIN_SEVERITY=high
+
+# Optional path used when /settings/ai persist_to_env=true
+# LOCAL_ENV_FILE=/workspace/.env
 
 # Database (defaults work out of the box)
 # DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner

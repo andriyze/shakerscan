@@ -53,6 +53,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
       - RESULTS_DIR=/results
+      - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
     volumes:
@@ -61,6 +62,7 @@ services:
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
       - ./results:/results
+      - ./:/workspace
       # Docker socket for worker scaling
       - /var/run/docker.sock:/var/run/docker.sock
       - ./docker-compose.yml:/app/docker-compose.yml:ro
