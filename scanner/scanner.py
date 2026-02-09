@@ -9053,6 +9053,23 @@ async def build_report(target: str,
 # ---------- AI review ----------
 # Note: Config findings emitters and AI helpers moved to reporting.py module
 
+AI_CLASSIFICATION_SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
+
+
+def _normalize_ai_classification_min_severity(value: str | None, default: str = "high") -> str:
+    severity = str(value or "").strip().lower()
+    if severity not in AI_CLASSIFICATION_SEVERITY_ORDER:
+        severity = str(default or "").strip().lower()
+    if severity not in AI_CLASSIFICATION_SEVERITY_ORDER:
+        severity = "high"
+    return severity
+
 
 async def ai_review_findings(
     report: dict[str, Any],
@@ -9077,6 +9094,22 @@ async def ai_review_findings(
     base_url = report.get("http", {}).get("final_url") or (f"https://{host}" if host else "https://example.com")
     http_status = report.get("http", {}).get("status")
     findings = report.get("findings", [])
+    ai_min_severity = _normalize_ai_classification_min_severity(
+        os.environ.get("AI_CLASSIFY_MIN_SEVERITY"),
+        default=os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"),
+    )
+    min_rank = AI_CLASSIFICATION_SEVERITY_ORDER[ai_min_severity]
+    ai_eligible_findings: list[dict[str, Any]] = []
+    ai_skipped_due_to_severity_ids: set[str] = set()
+    for finding in findings:
+        finding_severity = str(finding.get("severity") or "").lower()
+        finding_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(finding_severity, 0)
+        if finding_rank >= min_rank:
+            ai_eligible_findings.append(finding)
+            continue
+        finding_id = finding.get("id")
+        if isinstance(finding_id, str) and finding_id:
+            ai_skipped_due_to_severity_ids.add(finding_id)
 
     ai_logs: list[dict[str, Any]] = []
     tp = fp = unc = 0
@@ -9106,12 +9139,12 @@ async def ai_review_findings(
     fallback_finding_ids: set[str] = set()
     classification_source_counts = {"provider": 0, "heuristic_fallback": 0, "heuristic_only": 0}
 
-    if ai_url and ai_api_key and model and findings:
+    if ai_url and ai_api_key and model and ai_eligible_findings:
         provider_attempted = True
         try:
             # Use the new classify_findings_batch function that actually parses AI responses
             ai_results, error, latency, ai_meta = await classify_findings_batch(
-                findings,
+                ai_eligible_findings,
                 scan_context,
                 ai_url,
                 ai_api_key,
@@ -9187,6 +9220,8 @@ async def ai_review_findings(
             classification_source = "provider"
         elif isinstance(finding_id, str) and finding_id in fallback_finding_ids:
             classification_source = "heuristic_fallback"
+        elif isinstance(finding_id, str) and finding_id in ai_skipped_due_to_severity_ids:
+            classification_source = "heuristic_only"
         elif ai_result and hasattr(ai_result, "classification_source"):
             classification_source = str(getattr(ai_result, "classification_source") or "heuristic_fallback")
         elif provider_attempted:
@@ -9334,6 +9369,9 @@ async def ai_review_findings(
         "provider_models_used": provider_models_used,
         "provider_partial": provider_partial,
         "classification_source_counts": classification_source_counts,
+        "classification_min_severity": ai_min_severity,
+        "classification_eligible_findings": len(ai_eligible_findings),
+        "classification_skipped_by_min_severity": len(ai_skipped_due_to_severity_ids),
         "masking": {"enabled": True, "replacement_host": mask_host},
         "executive_summary": executive_summary,
         "executive_summary_error": exec_summary_error,

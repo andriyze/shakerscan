@@ -305,6 +305,17 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         or ai_runtime.get("ai_model_fallback")
     )
     ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
+    ai_classify_min_severity = str(
+        options.get("ai_classify_min_severity")
+        or options.get("ai_min_severity")
+        or ai_runtime.get("ai_classify_min_severity")
+        or ai_runtime.get("ai_verify_min_severity")
+        or AI_VERIFY_MIN_SEVERITY
+    ).lower()
+    if ai_classify_min_severity not in SEVERITY_ORDER:
+        ai_classify_min_severity = str(ai_runtime.get("ai_verify_min_severity") or AI_VERIFY_MIN_SEVERITY).lower()
+    if ai_classify_min_severity not in SEVERITY_ORDER:
+        ai_classify_min_severity = "high"
 
     if ai_url and ai_api_key and model:
         cmd.append('--ai')
@@ -370,6 +381,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
+    # Keep scan-time AI classification aligned with runtime severity gating.
+    scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
