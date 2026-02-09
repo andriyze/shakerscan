@@ -13,7 +13,7 @@ import re
 import threading
 import urllib.parse
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,20 @@ RETEST_REQUEUE_DELAY_SECONDS = int(os.environ.get("RETEST_REQUEUE_DELAY_SECONDS"
 RETEST_QUEUE_MAX_RETRIES = max(1, int(os.environ.get("RETEST_QUEUE_MAX_RETRIES", "5")))
 # Maximum wall-clock time to wait for a retest slot before marking verification failed.
 RETEST_SLOT_WAIT_MAX_SECONDS = max(30, int(os.environ.get("RETEST_SLOT_WAIT_MAX_SECONDS", "900")))
+# Maximum time budget for one AI verifier attempt per retest job.
+RETEST_AI_BUDGET_SECONDS = max(15, int(os.environ.get("RETEST_AI_BUDGET_SECONDS", "120")))
+# AI verification circuit breaker controls for transient upstream/provider failures.
+RETEST_AI_CIRCUIT_KEY = os.environ.get("RETEST_AI_CIRCUIT_KEY", "retest:ai:circuit")
+RETEST_AI_CIRCUIT_WINDOW_SECONDS = max(30, int(os.environ.get("RETEST_AI_CIRCUIT_WINDOW_SECONDS", "300")))
+RETEST_AI_CIRCUIT_ERROR_THRESHOLD = max(1, int(os.environ.get("RETEST_AI_CIRCUIT_ERROR_THRESHOLD", "5")))
+RETEST_AI_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("RETEST_AI_CIRCUIT_COOLDOWN_SECONDS", "180")))
+# Watchdog for stale retests stuck in running status.
+RETEST_STALE_CHECK_INTERVAL_SECONDS = max(10, int(os.environ.get("RETEST_STALE_CHECK_INTERVAL_SECONDS", "30")))
+RETEST_RUNNING_STALE_SECONDS = max(30, int(os.environ.get("RETEST_RUNNING_STALE_SECONDS", "600")))
+RETEST_STALE_BATCH_SIZE = max(1, int(os.environ.get("RETEST_STALE_BATCH_SIZE", "25")))
+RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIMIT", "1")))
+RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:watchdog:lock")
+RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 
 AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
@@ -956,6 +970,94 @@ def _slot_wait_backoff_seconds(wait_cycles: int) -> int:
     return max(1, min(base * (2 ** min(max(wait_cycles - 1, 0), 4)), 30))
 
 
+RETRYABLE_AI_ERROR_PATTERNS: tuple[str, ...] = (
+    "network error",
+    "connection",
+    "connection closed",
+    "connection reset",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+)
+
+
+def _is_retryable_ai_error(error_text: str | None) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    return any(pattern in text for pattern in RETRYABLE_AI_ERROR_PATTERNS)
+
+
+def _should_open_ai_circuit(error_count: int) -> bool:
+    return int(error_count) >= RETEST_AI_CIRCUIT_ERROR_THRESHOLD
+
+
+def _is_ai_circuit_open(open_until: datetime | None, now: datetime) -> bool:
+    return bool(open_until and open_until > now)
+
+
+def _get_ai_circuit_state(r, now: datetime) -> dict[str, Any]:
+    state: dict[str, Any] = {"error_count": 0, "open_until": None, "is_open": False}
+    try:
+        raw = _decode_redis_hash(r.hgetall(RETEST_AI_CIRCUIT_KEY))
+    except Exception:
+        return state
+    try:
+        state["error_count"] = max(0, int(raw.get("error_count") or 0))
+    except (TypeError, ValueError):
+        state["error_count"] = 0
+    state["open_until"] = _parse_iso_datetime(raw.get("open_until"))
+    state["is_open"] = _is_ai_circuit_open(state["open_until"], now)
+    return state
+
+
+def _register_ai_circuit_failure(r, error_text: str, now: datetime) -> tuple[bool, int]:
+    if not _is_retryable_ai_error(error_text):
+        return False, 0
+
+    try:
+        error_count = max(0, int(r.hincrby(RETEST_AI_CIRCUIT_KEY, "error_count", 1)))
+        r.hset(
+            RETEST_AI_CIRCUIT_KEY,
+            mapping={
+                "last_error": str(error_text)[:400],
+                "last_error_at": now.isoformat(),
+            },
+        )
+        if _should_open_ai_circuit(error_count):
+            open_until = now + timedelta(seconds=RETEST_AI_CIRCUIT_COOLDOWN_SECONDS)
+            r.hset(
+                RETEST_AI_CIRCUIT_KEY,
+                mapping={
+                    "open_until": open_until.isoformat(),
+                    "opened_at": now.isoformat(),
+                },
+            )
+            r.expire(RETEST_AI_CIRCUIT_KEY, max(RETEST_AI_CIRCUIT_WINDOW_SECONDS, RETEST_AI_CIRCUIT_COOLDOWN_SECONDS * 2))
+            return True, error_count
+        r.expire(RETEST_AI_CIRCUIT_KEY, RETEST_AI_CIRCUIT_WINDOW_SECONDS)
+        return False, error_count
+    except Exception:
+        return False, 0
+
+
+def _clear_ai_circuit_state(r) -> None:
+    try:
+        r.delete(RETEST_AI_CIRCUIT_KEY)
+    except Exception:
+        pass
+
+
+def _stale_retest_should_requeue(attempt_count: int) -> bool:
+    return int(attempt_count) <= RETEST_STALE_REQUEUE_LIMIT
+
+
 def _current_retest_capabilities() -> dict[str, bool]:
     """
     Snapshot proof-engine capabilities for standardized observability.
@@ -1515,6 +1617,7 @@ async def process_finding_retest_job(job_data: dict):
 
             # Tier 2: AI-driven verification — escalate when deterministic didn't prove it
             ai_result = None
+            ai_failure_error: str | None = None
             still_vulnerable_deterministic = result.get("verdict") == "exploited"
             should_try_ai = (
                 not still_vulnerable_deterministic
@@ -1534,31 +1637,95 @@ async def process_finding_retest_job(job_data: dict):
             )
 
             if should_try_ai and severity_ok:
-                try:
-                    from ai_verifier import ai_verify_finding, AI_VERIFIABLE_TYPES
+                circuit_state = _get_ai_circuit_state(r, datetime.utcnow())
+                if circuit_state.get("is_open"):
+                    open_until = circuit_state.get("open_until")
+                    open_until_text = open_until.isoformat() if isinstance(open_until, datetime) else "unknown"
+                    ai_failure_error = f"AI verification bypassed: circuit open until {open_until_text}"
+                    result.update({
+                        "status": "completed",
+                        "result_status": "inconclusive",
+                        "verdict": "inconclusive",
+                        "verdict_reason": ai_failure_error,
+                        "message": ai_failure_error,
+                        "retry_class": "transient",
+                        "retryable": True,
+                        "attempts_exhausted": False,
+                    })
+                    if force_ai:
+                        result["verification_mode"] = "ai_driven"
+                    print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                else:
+                    try:
+                        from ai_verifier import ai_verify_finding, AI_VERIFIABLE_TYPES
 
-                    finding_type = str(verification.get("finding_type") or "")
-                    if finding_type in AI_VERIFIABLE_TYPES:
-                        auth_ctx = parse_json_field(verification.get("auth_context"))
-                        target = str(verification.get("target_url") or "")
+                        finding_type = str(verification.get("finding_type") or "")
+                        if finding_type in AI_VERIFIABLE_TYPES:
+                            auth_ctx = parse_json_field(verification.get("auth_context"))
+                            target = str(verification.get("target_url") or "")
 
-                        print(f"[retest:{job_id[:8]}] Escalating to AI verification", flush=True)
-                        ai_result = await ai_verify_finding(
-                            finding=dict(verification),
-                            auth_context=auth_ctx if auth_ctx else None,
-                            ai_url=ai_verify_url,
-                            ai_api_key=ai_verify_api_key,
-                            model=ai_verify_model,
-                            fallback_models=ai_verify_fallback_model or None,
-                            target_url=target,
+                            print(
+                                f"[retest:{job_id[:8]}] Escalating to AI verification "
+                                f"(budget={RETEST_AI_BUDGET_SECONDS}s)",
+                                flush=True,
+                            )
+                            ai_result = await asyncio.wait_for(
+                                ai_verify_finding(
+                                    finding=dict(verification),
+                                    auth_context=auth_ctx if auth_ctx else None,
+                                    ai_url=ai_verify_url,
+                                    ai_api_key=ai_verify_api_key,
+                                    model=ai_verify_model,
+                                    fallback_models=ai_verify_fallback_model or None,
+                                    target_url=target,
+                                ),
+                                timeout=RETEST_AI_BUDGET_SECONDS,
+                            )
+
+                            if ai_result and ai_result.get("error"):
+                                ai_failure_error = str(ai_result.get("error"))
+                            if ai_result:
+                                result = _merge_ai_result_into_retest_result(result, ai_result)
+                        else:
+                            ai_failure_error = f"AI verifier does not support finding_type={finding_type}"
+                    except asyncio.TimeoutError:
+                        ai_failure_error = (
+                            f"AI verification timeout: exceeded {RETEST_AI_BUDGET_SECONDS}s budget"
                         )
+                        ai_result = {
+                            "verdict": "inconclusive",
+                            "confidence": None,
+                            "reasoning": ai_failure_error,
+                            "error": ai_failure_error,
+                        }
+                        result = _merge_ai_result_into_retest_result(result, ai_result)
+                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                    except ImportError:
+                        ai_failure_error = "AI verifier module not available"
+                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                    except Exception as ai_err:
+                        ai_failure_error = f"AI verification error: {type(ai_err).__name__}: {ai_err}"
+                        ai_result = {
+                            "verdict": "inconclusive",
+                            "confidence": None,
+                            "reasoning": ai_failure_error,
+                            "error": ai_failure_error,
+                        }
+                        result = _merge_ai_result_into_retest_result(result, ai_result)
+                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
 
-                        if ai_result:
-                            result = _merge_ai_result_into_retest_result(result, ai_result)
-                except ImportError:
-                    print(f"[retest:{job_id[:8]}] AI verifier module not available", flush=True)
-                except Exception as ai_err:
-                    print(f"[retest:{job_id[:8]}] AI verification error: {ai_err}", flush=True)
+                    if ai_failure_error and _is_retryable_ai_error(ai_failure_error):
+                        opened, error_count = _register_ai_circuit_failure(r, ai_failure_error, datetime.utcnow())
+                        result["retry_class"] = "transient"
+                        result["retryable"] = True
+                        result["attempts_exhausted"] = False
+                        if opened:
+                            print(
+                                f"[retest:{job_id[:8]}] AI circuit opened after {error_count} retryable errors",
+                                flush=True,
+                            )
+                    elif ai_result and not ai_result.get("error"):
+                        _clear_ai_circuit_state(r)
 
             completed_at = datetime.utcnow()
             verification_mode = result.get("verification_mode", "deterministic")
@@ -1848,6 +2015,184 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             queued += 1
 
     return {"queued": queued, "skipped": skipped}
+
+
+async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
+    """
+    Recover retests stuck in `running` state beyond SLA.
+
+    For stale rows we either requeue once (bounded by RETEST_STALE_REQUEUE_LIMIT)
+    or fail them explicitly to prevent permanent `running` noise.
+    """
+    if RETEST_RUNNING_STALE_SECONDS <= 0:
+        return {"requeued": 0, "failed": 0}
+
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(seconds=RETEST_RUNNING_STALE_SECONDS)
+    r = get_redis()
+
+    # Best-effort distributed lock across worker replicas.
+    lock_token = str(uuid.uuid4())
+    try:
+        acquired = bool(r.set(RETEST_WATCHDOG_LOCK_KEY, lock_token, nx=True, ex=RETEST_WATCHDOG_LOCK_SECONDS))
+    except Exception:
+        acquired = False
+    if not acquired:
+        return {"requeued": 0, "failed": 0}
+
+    requeued = 0
+    failed = 0
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, finding_id, job_id, attempt_count
+            FROM finding_verifications
+            WHERE status = 'running'
+              AND started_at IS NOT NULL
+              AND started_at < $1
+            ORDER BY started_at ASC
+            LIMIT $2
+            """,
+            cutoff,
+            RETEST_STALE_BATCH_SIZE,
+        )
+
+        for row in rows:
+            verification_id = row["id"]
+            finding_id = row["finding_id"]
+            old_job_id = str(row["job_id"] or "")
+            attempt_count = max(1, int(row["attempt_count"] or 1))
+            stale_reason = (
+                f"Retest watchdog detected stale running job "
+                f"(>{RETEST_RUNNING_STALE_SECONDS}s)."
+            )
+
+            if _stale_retest_should_requeue(attempt_count):
+                new_job_id = str(uuid.uuid4())
+                next_attempt = attempt_count + 1
+                payload = build_retest_job_payload(
+                    job_id=new_job_id,
+                    verification_id=str(verification_id),
+                    finding_id=str(finding_id),
+                    submitted_at=now.isoformat(),
+                    trigger="stale_watchdog_requeue",
+                    attempt=next_attempt,
+                )
+                valid, reason = validate_retest_job_payload(payload)
+                if valid:
+                    await conn.execute(
+                        """
+                        UPDATE finding_verifications
+                        SET status = 'queued',
+                            job_id = $2,
+                            started_at = NULL,
+                            completed_at = NULL,
+                            result_status = NULL,
+                            verdict = NULL,
+                            verdict_reason = $3,
+                            message = $3,
+                            error_message = NULL,
+                            attempt_count = $4,
+                            attempts_exhausted = FALSE,
+                            retry_class = 'transient',
+                            retryable = TRUE,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        verification_id,
+                        new_job_id,
+                        stale_reason,
+                        next_attempt,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE findings
+                        SET last_verification_status = 'queued',
+                            last_verification_verdict = NULL,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        finding_id,
+                    )
+
+                    r.rpush(RETEST_QUEUE_NAME, json.dumps(payload))
+                    r.hset(
+                        f"retest_job:{new_job_id}",
+                        mapping={
+                            "status": "queued",
+                            "verification_id": str(verification_id),
+                            "finding_id": str(finding_id),
+                            "trigger": "stale_watchdog_requeue",
+                            "queue_schema_version": str(payload.get("queue_schema_version", "")),
+                            "attempt": str(payload.get("attempt", next_attempt)),
+                        },
+                    )
+                    r.expire(f"retest_job:{new_job_id}", 86400)
+                    if old_job_id:
+                        r.hset(
+                            f"retest_job:{old_job_id}",
+                            mapping={
+                                "status": "failed",
+                                "error": "stale_job_requeued",
+                                "completed_at": now.isoformat(),
+                            },
+                        )
+                        r.expire(f"retest_job:{old_job_id}", 86400)
+                    requeued += 1
+                    continue
+                stale_reason = f"{stale_reason} Requeue blocked: {reason}"
+
+            await conn.execute(
+                """
+                UPDATE finding_verifications
+                SET status = 'failed',
+                    result_status = 'error',
+                    verdict = 'error',
+                    verdict_reason = $2,
+                    message = $2,
+                    error_message = $2,
+                    attempts_exhausted = TRUE,
+                    retry_class = 'transient',
+                    retryable = FALSE,
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                verification_id,
+                stale_reason,
+            )
+            await conn.execute(
+                """
+                UPDATE findings
+                SET last_verification_status = 'error',
+                    last_verification_verdict = 'error',
+                    last_verification_confidence = NULL,
+                    last_verified_at = NOW(),
+                    verification_count = COALESCE(verification_count, 0) + 1,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                finding_id,
+            )
+            if old_job_id:
+                r.hset(
+                    f"retest_job:{old_job_id}",
+                    mapping={
+                        "status": "failed",
+                        "error": "stale_retest_failed",
+                        "completed_at": now.isoformat(),
+                    },
+                )
+                r.expire(f"retest_job:{old_job_id}", 86400)
+            failed += 1
+
+    if requeued or failed:
+        print(
+            f"[watchdog] stale retests recovered: requeued={requeued}, failed={failed}",
+            flush=True,
+        )
+    return {"requeued": requeued, "failed": failed}
 
 
 def save_result_file(result: dict, job_id: str) -> str:
@@ -2185,10 +2530,23 @@ async def async_main():
     )
 
     loop = asyncio.get_event_loop()
+    last_stale_check_monotonic = 0.0
 
     try:
         while True:
             try:
+                now_mono = loop.time()
+                if (
+                    RETEST_STALE_CHECK_INTERVAL_SECONDS > 0
+                    and now_mono - last_stale_check_monotonic >= RETEST_STALE_CHECK_INTERVAL_SECONDS
+                ):
+                    try:
+                        await reap_stale_retests()
+                    except Exception as stale_err:
+                        print(f"[watchdog] stale retest sweep error: {stale_err}", flush=True)
+                    finally:
+                        last_stale_check_monotonic = now_mono
+
                 # Use run_in_executor for blocking Redis pop
                 result = await loop.run_in_executor(None, lambda: r.blpop(queue_keys, timeout=30))
                 if result is None:

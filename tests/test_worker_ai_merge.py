@@ -5,7 +5,7 @@ Unit tests for merging AI retest verdicts into deterministic outcomes.
 import os
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -14,9 +14,15 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 
 from worker import (  # noqa: E402
     _merge_ai_result_into_retest_result,
+    _is_ai_circuit_open,
+    _is_retryable_ai_error,
     _result_status_for_verdict,
+    _should_open_ai_circuit,
     _slot_wait_backoff_seconds,
     _slot_wait_state,
+    _stale_retest_should_requeue,
+    RETEST_AI_CIRCUIT_ERROR_THRESHOLD,
+    RETEST_STALE_REQUEUE_LIMIT,
 )
 
 
@@ -121,3 +127,27 @@ def test_slot_wait_backoff_is_exponential_and_capped():
     assert _slot_wait_backoff_seconds(2) >= _slot_wait_backoff_seconds(1)
     assert _slot_wait_backoff_seconds(3) >= _slot_wait_backoff_seconds(2)
     assert _slot_wait_backoff_seconds(50) <= 30
+
+
+def test_retryable_ai_error_detection():
+    assert _is_retryable_ai_error("Network error: ClientConnectionError: Connection closed")
+    assert _is_retryable_ai_error("Timeout after 60s")
+    assert _is_retryable_ai_error("HTTP 503: upstream unavailable")
+    assert not _is_retryable_ai_error("No steps in plan")
+
+
+def test_ai_circuit_open_predicate():
+    now = datetime(2026, 2, 9, 6, 0, 0)
+    assert _is_ai_circuit_open(now + timedelta(seconds=60), now)
+    assert not _is_ai_circuit_open(now - timedelta(seconds=1), now)
+    assert not _is_ai_circuit_open(None, now)
+
+
+def test_ai_circuit_threshold_predicate():
+    assert not _should_open_ai_circuit(max(0, RETEST_AI_CIRCUIT_ERROR_THRESHOLD - 1))
+    assert _should_open_ai_circuit(RETEST_AI_CIRCUIT_ERROR_THRESHOLD)
+
+
+def test_stale_retest_requeue_limit_predicate():
+    assert _stale_retest_should_requeue(RETEST_STALE_REQUEUE_LIMIT)
+    assert not _stale_retest_should_requeue(RETEST_STALE_REQUEUE_LIMIT + 1)
