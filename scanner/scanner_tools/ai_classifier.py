@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,10 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_MAX_FINDINGS_PER_BATCH = max(1, int(os.environ.get("AI_CLASSIFY_MAX_FINDINGS_PER_BATCH", "12")))
 DEFAULT_MAX_PROMPT_CHARS = max(4000, int(os.environ.get("AI_CLASSIFY_MAX_PROMPT_CHARS", "24000")))
 MAX_REASONING_RETRY_TOKENS = max(4000, int(os.environ.get("AI_REASONING_RETRY_MAX_TOKENS", "12000")))
+AI_CLASSIFY_CHAIN_BUDGET_SECONDS = max(0, int(os.environ.get("AI_CLASSIFY_CHAIN_BUDGET_SECONDS", "120")))
+AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS", "300")))
+AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD = max(1, int(os.environ.get("AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD", "5")))
+AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS", "180")))
 
 RESPONSE_FORMAT_UNSUPPORTED_PATTERNS = (
     "response_format",
@@ -40,6 +45,31 @@ RESPONSE_FORMAT_UNSUPPORTED_PATTERNS = (
     "not support",
     "invalid_request_error",
 )
+
+RETRYABLE_PROVIDER_ERROR_PATTERNS = (
+    "network error",
+    "connection",
+    "connection closed",
+    "connection reset",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "budget exceeded",
+)
+
+_AI_CLASSIFY_CIRCUIT_STATE: dict[str, Any] = {
+    "error_count": 0,
+    "window_started_monotonic": None,
+    "open_until_monotonic": None,
+    "last_error": None,
+}
+_AI_CLASSIFY_CIRCUIT_LOCK = threading.Lock()
 
 # Models that support strict structured outputs (json_schema mode)
 STRUCTURED_OUTPUT_MODELS = frozenset([
@@ -708,6 +738,109 @@ def _error_mentions_response_format(error_text: str) -> bool:
     return any(pat in text for pat in RESPONSE_FORMAT_UNSUPPORTED_PATTERNS)
 
 
+def _is_retryable_provider_error(error_text: str | None) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    return any(pattern in text for pattern in RETRYABLE_PROVIDER_ERROR_PATTERNS)
+
+
+def _should_open_provider_circuit(error_count: int) -> bool:
+    return int(error_count) >= AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD
+
+
+def _is_provider_circuit_open(open_until_monotonic: float | None, now_monotonic: float) -> bool:
+    return bool(open_until_monotonic and open_until_monotonic > now_monotonic)
+
+
+def _refresh_provider_circuit_locked(now_monotonic: float) -> None:
+    open_until = _AI_CLASSIFY_CIRCUIT_STATE.get("open_until_monotonic")
+    if isinstance(open_until, (int, float)) and open_until <= now_monotonic:
+        _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = None
+
+    window_started = _AI_CLASSIFY_CIRCUIT_STATE.get("window_started_monotonic")
+    if not isinstance(window_started, (int, float)):
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = now_monotonic
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+        return
+
+    if now_monotonic - float(window_started) > AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS:
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = now_monotonic
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+
+
+def _get_provider_circuit_state(now_monotonic: float | None = None) -> dict[str, Any]:
+    now_value = now_monotonic if isinstance(now_monotonic, (int, float)) else time.monotonic()
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _refresh_provider_circuit_locked(now_value)
+        open_until = _AI_CLASSIFY_CIRCUIT_STATE.get("open_until_monotonic")
+        is_open = _is_provider_circuit_open(
+            float(open_until) if isinstance(open_until, (int, float)) else None,
+            now_value,
+        )
+        remaining = 0
+        if is_open and isinstance(open_until, (int, float)):
+            remaining = max(0, int(open_until - now_value))
+        return {
+            "error_count": max(0, int(_AI_CLASSIFY_CIRCUIT_STATE.get("error_count") or 0)),
+            "is_open": is_open,
+            "open_until_monotonic": open_until if isinstance(open_until, (int, float)) else None,
+            "cooldown_remaining_seconds": remaining,
+            "last_error": _AI_CLASSIFY_CIRCUIT_STATE.get("last_error"),
+        }
+
+
+def _register_provider_circuit_failure(error_text: str, now_monotonic: float | None = None) -> tuple[bool, int]:
+    if not _is_retryable_provider_error(error_text):
+        return False, 0
+    now_value = now_monotonic if isinstance(now_monotonic, (int, float)) else time.monotonic()
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _refresh_provider_circuit_locked(now_value)
+        error_count = max(0, int(_AI_CLASSIFY_CIRCUIT_STATE.get("error_count") or 0)) + 1
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = error_count
+        _AI_CLASSIFY_CIRCUIT_STATE["last_error"] = str(error_text)[:400]
+        if _should_open_provider_circuit(error_count):
+            _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = now_value + AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS
+            return True, error_count
+        return False, error_count
+
+
+def _clear_provider_circuit_state() -> None:
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = time.monotonic()
+        _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = None
+        _AI_CLASSIFY_CIRCUIT_STATE["last_error"] = None
+
+
+def _remaining_budget_seconds(deadline_monotonic: float | None) -> float | None:
+    if deadline_monotonic is None:
+        return None
+    return max(0.0, float(deadline_monotonic) - time.monotonic())
+
+
+def _is_budget_exhausted(deadline_monotonic: float | None) -> bool:
+    remaining = _remaining_budget_seconds(deadline_monotonic)
+    return bool(remaining is not None and remaining <= 0.0)
+
+
+async def _sleep_with_budget(delay_seconds: float, deadline_monotonic: float | None) -> bool:
+    sleep_for = max(0.0, float(delay_seconds))
+    if sleep_for <= 0.0:
+        return True
+
+    remaining = _remaining_budget_seconds(deadline_monotonic)
+    if remaining is not None:
+        if remaining <= 0.0:
+            return False
+        sleep_for = min(sleep_for, remaining)
+        if sleep_for <= 0.0:
+            return False
+
+    await asyncio.sleep(sleep_for)
+    return True
+
+
 async def call_ai_provider(
     ai_url: str,
     ai_api_key: str,
@@ -718,6 +851,8 @@ async def call_ai_provider(
     temperature: float = 0.3,
     json_schema: dict[str, Any] | None = None,
     fallback_models: str | list[str] | None = None,
+    overall_budget_seconds: int | None = None,
+    use_circuit_breaker: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     """
     Call AI provider and parse JSON response with model/mode fallback.
@@ -729,6 +864,8 @@ async def call_ai_provider(
         json_schema: Optional strict JSON schema for structured outputs.
                     Only used for compatible chat-completions models.
         fallback_models: Optional comma-separated string or list of fallback model IDs.
+        overall_budget_seconds: Optional hard cap for the entire model/mode fallback chain.
+        use_circuit_breaker: When true, fail fast while transient provider failures are cooling down.
 
     Returns:
         Tuple of (parsed_response, error_message, latency_ms)
@@ -744,23 +881,59 @@ async def call_ai_provider(
     if not model_chain:
         return None, "AI model not configured", None
 
+    effective_budget_seconds = (
+        AI_CLASSIFY_CHAIN_BUDGET_SECONDS
+        if overall_budget_seconds is None
+        else max(0, int(overall_budget_seconds))
+    )
+    budget_deadline_monotonic = (
+        time.monotonic() + effective_budget_seconds
+        if effective_budget_seconds > 0
+        else None
+    )
+
+    if use_circuit_breaker:
+        circuit_state = _get_provider_circuit_state()
+        if circuit_state.get("is_open"):
+            cooldown = int(circuit_state.get("cooldown_remaining_seconds") or 0)
+            error = (
+                f"AI provider circuit open ({cooldown}s remaining) "
+                "after repeated transient failures"
+            )
+            logger.warning(error)
+            return None, error, 0
+
     provider_kind = _provider_kind_from_url(ai_url)
     headers = _build_request_headers(ai_api_key, provider_kind)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     total_start = time.time()
     cumulative_latency_ms = 0
     attempt_errors: list[str] = []
+    budget_error: str | None = None
 
     for model_name in model_chain:
+        if _is_budget_exhausted(budget_deadline_monotonic):
+            budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+            break
+
         if provider_kind == "anthropic_messages":
             mode_candidates = [("none", None)]
         else:
             mode_candidates = _build_response_format_candidates(model_name, json_schema)
+
         for mode_name, response_format in mode_candidates:
+            if _is_budget_exhausted(budget_deadline_monotonic):
+                budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                break
+
             mode_error: str | None = None
             strict_retry = False
 
             for attempt in range(AI_RETRY_ATTEMPTS):
+                if _is_budget_exhausted(budget_deadline_monotonic):
+                    mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                    budget_error = mode_error
+                    break
+
                 start = time.time()
                 messages_for_attempt = _clone_messages(messages)
                 max_tokens_for_attempt = max_tokens
@@ -781,6 +954,17 @@ async def call_ai_provider(
                 )
 
                 try:
+                    remaining_budget = _remaining_budget_seconds(budget_deadline_monotonic)
+                    if remaining_budget is not None and remaining_budget <= 0.0:
+                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                        budget_error = mode_error
+                        break
+
+                    request_timeout_seconds = float(timeout_seconds)
+                    if remaining_budget is not None:
+                        request_timeout_seconds = max(1.0, min(request_timeout_seconds, remaining_budget))
+
+                    timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
                     async with aiohttp.ClientSession(timeout=timeout) as sess:
                         async with sess.post(ai_url, json=body, headers=headers) as resp:
                             latency_ms = int((time.time() - start) * 1000)
@@ -796,7 +980,10 @@ async def call_ai_provider(
                                         f"AI provider HTTP {resp.status}, retrying in {delay:.1f}s "
                                         f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
                                     )
-                                    await asyncio.sleep(delay)
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
                                     continue
 
                                 # Auth errors are definitive; no point rotating models.
@@ -818,7 +1005,10 @@ async def call_ai_provider(
                                 mode_error = f"Invalid JSON response envelope: {raw_text}"
                                 if attempt < AI_RETRY_ATTEMPTS - 1:
                                     delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
-                                    await asyncio.sleep(delay)
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
                                     continue
                                 break
 
@@ -836,7 +1026,10 @@ async def call_ai_provider(
                                         "AI response parse failed, retrying with stricter JSON prompt "
                                         f"(model={model_name}, mode={mode_name})"
                                     )
-                                    await asyncio.sleep(delay)
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
                                     continue
                                 break
 
@@ -851,6 +1044,8 @@ async def call_ai_provider(
                                 "latency_ms": latency_ms,
                                 "reasoning_present": bool(reasoning_text),
                             }
+                            if use_circuit_breaker:
+                                _clear_provider_circuit_state()
                             return parsed, None, cumulative_latency_ms
 
                 except (TimeoutError, asyncio.TimeoutError):
@@ -863,7 +1058,10 @@ async def call_ai_provider(
                             f"AI provider timeout, retrying in {delay:.1f}s "
                             f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
                         )
-                        await asyncio.sleep(delay)
+                        if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                            mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                            budget_error = mode_error
+                            break
                         continue
                     break
 
@@ -877,7 +1075,10 @@ async def call_ai_provider(
                             f"AI provider network error ({type(e).__name__}), retrying in {delay:.1f}s "
                             f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
                         )
-                        await asyncio.sleep(delay)
+                        if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                            mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                            budget_error = mode_error
+                            break
                         continue
                     break
 
@@ -889,18 +1090,34 @@ async def call_ai_provider(
 
             if mode_error:
                 attempt_errors.append(f"{model_name} [{mode_name}]: {mode_error}")
+            if budget_error:
+                break
+        if budget_error:
+            break
 
     total_latency = int((time.time() - total_start) * 1000)
     unique_errors: list[str] = []
     for err in attempt_errors:
         if err not in unique_errors:
             unique_errors.append(err)
+    if budget_error and budget_error not in unique_errors:
+        unique_errors.append(budget_error)
     if unique_errors:
         compact_error = "; ".join(unique_errors[:3])
         if len(unique_errors) > 3:
             compact_error += f"; +{len(unique_errors) - 3} more"
     else:
         compact_error = "All retries exhausted"
+
+    if use_circuit_breaker:
+        circuit_opened, error_count = _register_provider_circuit_failure(compact_error)
+        if circuit_opened:
+            logger.warning(
+                "AI provider circuit opened for %ss after %s transient errors",
+                AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS,
+                error_count,
+            )
+
     logger.warning(f"AI provider call failed after model/mode fallback chain: {compact_error}")
     return None, compact_error, cumulative_latency_ms or total_latency
 
@@ -926,6 +1143,8 @@ async def probe_ai_provider(
         max_tokens=300,
         temperature=0.0,
         fallback_models=fallback_models,
+        overall_budget_seconds=max(10, timeout_seconds),
+        use_circuit_breaker=False,
     )
     provider_meta = {}
     parsed_response: dict[str, Any] | None = None
