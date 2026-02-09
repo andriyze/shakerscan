@@ -97,6 +97,10 @@ AI_VERIFY_FALLBACK_MODEL = os.environ.get("AI_VERIFY_FALLBACK_MODEL", "")
 AI_VERIFY_MAX_PER_SCAN = max(0, int(os.environ.get("AI_VERIFY_MAX_PER_SCAN", "10")))
 AI_VERIFY_MIN_SEVERITY = os.environ.get("AI_VERIFY_MIN_SEVERITY", "high").lower()
 AI_VERIFY_USE_BROWSER = os.environ.get("AI_VERIFY_USE_BROWSER", "true").lower() in {"1", "true", "yes", "on"}
+AI_SCAN_CLASSIFICATION_ENABLED = os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on"
+}
+AI_CLASSIFY_MIN_SEVERITY = os.environ.get("AI_CLASSIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY).lower()
 
 SEVERITY_ORDER = {
     "critical": 5,
@@ -146,6 +150,11 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", AI_VERIFY_MODEL),
         "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", AI_VERIFY_FALLBACK_MODEL),
         "ai_verify_min_severity": os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
+        "ai_scan_classification_enabled": _is_truthy(
+            os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false"),
+            default=AI_SCAN_CLASSIFICATION_ENABLED,
+        ),
+        "ai_classify_min_severity": os.environ.get("AI_CLASSIFY_MIN_SEVERITY", AI_CLASSIFY_MIN_SEVERITY),
         "auto_retest_on_scan_complete": AUTO_RETEST_ON_SCAN_COMPLETE,
         "auto_retest_min_severity": os.environ.get("AUTO_RETEST_MIN_SEVERITY", AUTO_RETEST_MIN_SEVERITY),
         "auto_retest_max_per_scan": max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", str(AUTO_RETEST_MAX_PER_SCAN)))),
@@ -167,6 +176,7 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_verify_model",
         "ai_verify_model_fallback",
         "ai_verify_min_severity",
+        "ai_classify_min_severity",
         "auto_retest_min_severity",
     ):
         if key in overrides:
@@ -179,6 +189,11 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
             overrides.get("auto_retest_on_scan_complete"),
             default=AUTO_RETEST_ON_SCAN_COMPLETE,
         )
+    if "ai_scan_classification_enabled" in overrides:
+        settings["ai_scan_classification_enabled"] = _is_truthy(
+            overrides.get("ai_scan_classification_enabled"),
+            default=AI_SCAN_CLASSIFICATION_ENABLED,
+        )
     if "auto_retest_max_per_scan" in overrides:
         try:
             settings["auto_retest_max_per_scan"] = max(0, int(str(overrides.get("auto_retest_max_per_scan") or "0")))
@@ -189,6 +204,12 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     if severity not in SEVERITY_ORDER:
         severity = "high"
     settings["ai_verify_min_severity"] = severity
+    if "ai_classify_min_severity" not in overrides:
+        settings["ai_classify_min_severity"] = severity
+    classify_severity = str(settings.get("ai_classify_min_severity") or severity).lower()
+    if classify_severity not in SEVERITY_ORDER:
+        classify_severity = severity
+    settings["ai_classify_min_severity"] = classify_severity
     auto_retest_severity = str(settings.get("auto_retest_min_severity") or AUTO_RETEST_MIN_SEVERITY).lower()
     if auto_retest_severity not in SEVERITY_ORDER:
         auto_retest_severity = AUTO_RETEST_MIN_SEVERITY
@@ -305,6 +326,12 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         or ai_runtime.get("ai_model_fallback")
     )
     ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
+    if "ai_scan_classification_enabled" in options:
+        ai_scan_classify_enabled = _is_truthy(options.get("ai_scan_classification_enabled"), default=False)
+    elif "ai_classify_enabled" in options:
+        ai_scan_classify_enabled = _is_truthy(options.get("ai_classify_enabled"), default=False)
+    else:
+        ai_scan_classify_enabled = bool(ai_runtime.get("ai_scan_classification_enabled"))
     ai_classify_min_severity = str(
         options.get("ai_classify_min_severity")
         or options.get("ai_min_severity")
@@ -381,7 +408,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
-    # Keep scan-time AI classification aligned with runtime severity gating.
+    # Scan-time AI classification is opt-in and severity-gated.
+    scan_env["AI_SCAN_CLASSIFICATION_ENABLED"] = "true" if ai_scan_classify_enabled else "false"
     scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"

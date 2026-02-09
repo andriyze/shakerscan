@@ -9062,6 +9062,12 @@ AI_CLASSIFICATION_SEVERITY_ORDER = {
 }
 
 
+def _is_truthy_env(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalize_ai_classification_min_severity(value: str | None, default: str = "high") -> str:
     severity = str(value or "").strip().lower()
     if severity not in AI_CLASSIFICATION_SEVERITY_ORDER:
@@ -9094,6 +9100,10 @@ async def ai_review_findings(
     base_url = report.get("http", {}).get("final_url") or (f"https://{host}" if host else "https://example.com")
     http_status = report.get("http", {}).get("status")
     findings = report.get("findings", [])
+    ai_scan_classification_enabled = _is_truthy_env(
+        os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
+        default=False,
+    )
     ai_min_severity = _normalize_ai_classification_min_severity(
         os.environ.get("AI_CLASSIFY_MIN_SEVERITY"),
         default=os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"),
@@ -9102,12 +9112,16 @@ async def ai_review_findings(
     ai_eligible_findings: list[dict[str, Any]] = []
     ai_skipped_due_to_severity_ids: set[str] = set()
     for finding in findings:
+        finding_id = finding.get("id")
+        if not ai_scan_classification_enabled:
+            if isinstance(finding_id, str) and finding_id:
+                ai_skipped_due_to_severity_ids.add(finding_id)
+            continue
         finding_severity = str(finding.get("severity") or "").lower()
         finding_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(finding_severity, 0)
         if finding_rank >= min_rank:
             ai_eligible_findings.append(finding)
             continue
-        finding_id = finding.get("id")
         if isinstance(finding_id, str) and finding_id:
             ai_skipped_due_to_severity_ids.add(finding_id)
 
@@ -9137,9 +9151,14 @@ async def ai_review_findings(
     provider_partial = False
     provider_finding_ids: set[str] = set()
     fallback_finding_ids: set[str] = set()
-    classification_source_counts = {"provider": 0, "heuristic_fallback": 0, "heuristic_only": 0}
+    classification_source_counts = {
+        "provider": 0,
+        "heuristic_fallback": 0,
+        "heuristic_only": 0,
+        "disabled": 0,
+    }
 
-    if ai_url and ai_api_key and model and ai_eligible_findings:
+    if ai_scan_classification_enabled and ai_url and ai_api_key and model and ai_eligible_findings:
         provider_attempted = True
         try:
             # Use the new classify_findings_batch function that actually parses AI responses
@@ -9216,7 +9235,9 @@ async def ai_review_findings(
         # Get AI result if available
         ai_result = ai_results.get(finding_id) if ai_results else None
         classification_source = "heuristic_only"
-        if isinstance(finding_id, str) and finding_id in provider_finding_ids:
+        if not ai_scan_classification_enabled:
+            classification_source = "disabled"
+        elif isinstance(finding_id, str) and finding_id in provider_finding_ids:
             classification_source = "provider"
         elif isinstance(finding_id, str) and finding_id in fallback_finding_ids:
             classification_source = "heuristic_fallback"
@@ -9286,12 +9307,13 @@ async def ai_review_findings(
         if ai_result and hasattr(ai_result, 'verification_steps') and ai_result.verification_steps:
             ai_rec["ai_verification_steps"] = ai_result.verification_steps
 
-        # Annotate finding
-        f["ai_verdict"] = final_verdict
-        f["ai_confidence"] = round(final_conf, 2)
-        f["ai_confidence_percent"] = int(round(final_conf * 100))
-        f["ai_classification_source"] = classification_source
-        f["ai_recommendations"] = ai_rec
+        # Annotate finding only when scan-time AI classification is enabled.
+        if ai_scan_classification_enabled:
+            f["ai_verdict"] = final_verdict
+            f["ai_confidence"] = round(final_conf, 2)
+            f["ai_confidence_percent"] = int(round(final_conf * 100))
+            f["ai_classification_source"] = classification_source
+            f["ai_recommendations"] = ai_rec
         if classification_source in classification_source_counts:
             classification_source_counts[classification_source] += 1
         else:
@@ -9369,6 +9391,7 @@ async def ai_review_findings(
         "provider_models_used": provider_models_used,
         "provider_partial": provider_partial,
         "classification_source_counts": classification_source_counts,
+        "classification_enabled": ai_scan_classification_enabled,
         "classification_min_severity": ai_min_severity,
         "classification_eligible_findings": len(ai_eligible_findings),
         "classification_skipped_by_min_severity": len(ai_skipped_due_to_severity_ids),

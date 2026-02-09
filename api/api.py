@@ -130,6 +130,14 @@ def _default_ai_settings() -> dict[str, Any]:
         "ai_model": os.environ.get("AI_MODEL", ""),
         "ai_model_fallback": os.environ.get("AI_FALLBACK_MODEL", ""),
         "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
+        "ai_scan_classification_enabled": _is_truthy(
+            os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false"),
+            default=False,
+        ),
+        "ai_classify_min_severity": _normalize_severity(
+            os.environ.get("AI_CLASSIFY_MIN_SEVERITY", os.environ.get("AI_VERIFY_MIN_SEVERITY", "high")),
+            default=_normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
+        ),
         "ai_verify_enabled": _is_truthy(os.environ.get("AI_VERIFY_ENABLED", "false"), default=False),
         "ai_verify_url": os.environ.get("AI_VERIFY_URL", ""),
         "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", ""),
@@ -169,6 +177,16 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["ai_model_fallback"] = str(overrides.get("ai_model_fallback") or "")
     if "ai_mask_host" in overrides:
         settings["ai_mask_host"] = str(overrides.get("ai_mask_host") or "")
+    if "ai_scan_classification_enabled" in overrides:
+        settings["ai_scan_classification_enabled"] = _is_truthy(
+            overrides.get("ai_scan_classification_enabled"),
+            default=settings["ai_scan_classification_enabled"],
+        )
+    if "ai_classify_min_severity" in overrides:
+        settings["ai_classify_min_severity"] = _normalize_severity(
+            overrides.get("ai_classify_min_severity"),
+            default=settings["ai_classify_min_severity"],
+        )
     if "ai_verify_enabled" in overrides:
         settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=settings["ai_verify_enabled"])
     if "ai_verify_url" in overrides:
@@ -183,6 +201,8 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["ai_verify_min_severity"] = _normalize_severity(
             overrides.get("ai_verify_min_severity"), default=settings["ai_verify_min_severity"]
         )
+    if "ai_classify_min_severity" not in overrides:
+        settings["ai_classify_min_severity"] = settings["ai_verify_min_severity"]
     if "auto_retest_on_scan_complete" in overrides:
         settings["auto_retest_on_scan_complete"] = _is_truthy(
             overrides.get("auto_retest_on_scan_complete"),
@@ -198,6 +218,10 @@ def _load_effective_ai_settings() -> dict[str, Any]:
             overrides.get("auto_retest_max_per_scan"),
             default=int(settings["auto_retest_max_per_scan"]),
         )
+    settings["ai_classify_min_severity"] = _normalize_severity(
+        settings.get("ai_classify_min_severity"),
+        default=settings.get("ai_verify_min_severity") or "high",
+    )
     return settings
 
 
@@ -207,6 +231,8 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "ai_model": settings.get("ai_model") or "",
         "ai_model_fallback": settings.get("ai_model_fallback") or "",
         "ai_mask_host": settings.get("ai_mask_host") or "",
+        "ai_scan_classification_enabled": bool(settings.get("ai_scan_classification_enabled")),
+        "ai_classify_min_severity": settings.get("ai_classify_min_severity") or settings.get("ai_verify_min_severity") or "high",
         "ai_api_key_configured": bool(settings.get("ai_api_key")),
         "ai_api_key_masked": _mask_secret(str(settings.get("ai_api_key") or "")),
         "ai_verify_enabled": bool(settings.get("ai_verify_enabled")),
@@ -1149,6 +1175,8 @@ class AISettingsUpdate(BaseModel):
     ai_model: Optional[str] = None
     ai_model_fallback: Optional[str] = None
     ai_mask_host: Optional[str] = None
+    ai_scan_classification_enabled: Optional[bool] = None
+    ai_classify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     ai_verify_enabled: Optional[bool] = None
     ai_verify_url: Optional[str] = None
     ai_verify_api_key: Optional[str] = None
@@ -1261,6 +1289,17 @@ async def update_ai_settings(request: AISettingsUpdate):
     if request.ai_verify_min_severity is not None:
         updates["ai_verify_min_severity"] = _normalize_severity(request.ai_verify_min_severity, default="high")
 
+    if request.ai_scan_classification_enabled is not None:
+        updates["ai_scan_classification_enabled"] = "true" if request.ai_scan_classification_enabled else "false"
+
+    if request.ai_classify_min_severity is not None:
+        updates["ai_classify_min_severity"] = _normalize_severity(
+            request.ai_classify_min_severity,
+            default=_normalize_severity(request.ai_verify_min_severity, default="high")
+            if request.ai_verify_min_severity is not None
+            else "high",
+        )
+
     if request.auto_retest_on_scan_complete is not None:
         updates["auto_retest_on_scan_complete"] = "true" if request.auto_retest_on_scan_complete else "false"
 
@@ -1285,6 +1324,8 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AI_MODEL": effective.get("ai_model") or None,
             "AI_FALLBACK_MODEL": effective.get("ai_model_fallback") or None,
             "AI_MASK_HOST": effective.get("ai_mask_host") or None,
+            "AI_SCAN_CLASSIFICATION_ENABLED": "true" if effective.get("ai_scan_classification_enabled") else "false",
+            "AI_CLASSIFY_MIN_SEVERITY": effective.get("ai_classify_min_severity") or effective.get("ai_verify_min_severity") or "high",
             "AI_VERIFY_ENABLED": "true" if effective.get("ai_verify_enabled") else "false",
             "AI_VERIFY_URL": effective.get("ai_verify_url") or None,
             "AI_VERIFY_API_KEY": effective.get("ai_verify_api_key") or None,
