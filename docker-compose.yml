@@ -68,6 +68,9 @@ services:
       - AI_VERIFY_MODEL=${AI_VERIFY_MODEL:-}
       - AI_VERIFY_FALLBACK_MODEL=${AI_VERIFY_FALLBACK_MODEL:-}
       - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=${AUTO_RETEST_ON_SCAN_COMPLETE:-true}
+      - AUTO_RETEST_MIN_SEVERITY=${AUTO_RETEST_MIN_SEVERITY:-medium}
+      - AUTO_RETEST_MAX_PER_SCAN=${AUTO_RETEST_MAX_PER_SCAN:-25}
     volumes:
       - ./api/api.py:/app/api.py:ro
       - ./api/session_manager.py:/app/session_manager.py:ro
@@ -113,6 +116,9 @@ services:
       - AI_VERIFY_MODEL=${AI_VERIFY_MODEL:-}
       - AI_VERIFY_FALLBACK_MODEL=${AI_VERIFY_FALLBACK_MODEL:-}
       - AI_VERIFY_MIN_SEVERITY=${AI_VERIFY_MIN_SEVERITY:-high}
+      - AUTO_RETEST_ON_SCAN_COMPLETE=${AUTO_RETEST_ON_SCAN_COMPLETE:-true}
+      - AUTO_RETEST_MIN_SEVERITY=${AUTO_RETEST_MIN_SEVERITY:-medium}
+      - AUTO_RETEST_MAX_PER_SCAN=${AUTO_RETEST_MAX_PER_SCAN:-25}
     volumes:
       - ./api/worker.py:/app/worker.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro

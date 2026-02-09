@@ -68,7 +68,7 @@ AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
     "1", "true", "yes", "on"
 }
-AUTO_RETEST_MIN_SEVERITY = os.environ.get("AUTO_RETEST_MIN_SEVERITY", "high").lower()
+AUTO_RETEST_MIN_SEVERITY = os.environ.get("AUTO_RETEST_MIN_SEVERITY", "medium").lower()
 AUTO_RETEST_MAX_PER_SCAN = max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25")))
 AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
 
@@ -130,6 +130,9 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", AI_VERIFY_MODEL),
         "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", AI_VERIFY_FALLBACK_MODEL),
         "ai_verify_min_severity": os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
+        "auto_retest_on_scan_complete": AUTO_RETEST_ON_SCAN_COMPLETE,
+        "auto_retest_min_severity": os.environ.get("AUTO_RETEST_MIN_SEVERITY", AUTO_RETEST_MIN_SEVERITY),
+        "auto_retest_max_per_scan": max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", str(AUTO_RETEST_MAX_PER_SCAN)))),
     }
     try:
         r = get_redis()
@@ -148,17 +151,32 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_verify_model",
         "ai_verify_model_fallback",
         "ai_verify_min_severity",
+        "auto_retest_min_severity",
     ):
         if key in overrides:
             settings[key] = overrides.get(key) or ""
 
     if "ai_verify_enabled" in overrides:
         settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=AI_VERIFY_ENABLED)
+    if "auto_retest_on_scan_complete" in overrides:
+        settings["auto_retest_on_scan_complete"] = _is_truthy(
+            overrides.get("auto_retest_on_scan_complete"),
+            default=AUTO_RETEST_ON_SCAN_COMPLETE,
+        )
+    if "auto_retest_max_per_scan" in overrides:
+        try:
+            settings["auto_retest_max_per_scan"] = max(0, int(str(overrides.get("auto_retest_max_per_scan") or "0")))
+        except (TypeError, ValueError):
+            settings["auto_retest_max_per_scan"] = AUTO_RETEST_MAX_PER_SCAN
 
     severity = str(settings.get("ai_verify_min_severity") or "high").lower()
     if severity not in SEVERITY_ORDER:
         severity = "high"
     settings["ai_verify_min_severity"] = severity
+    auto_retest_severity = str(settings.get("auto_retest_min_severity") or AUTO_RETEST_MIN_SEVERITY).lower()
+    if auto_retest_severity not in SEVERITY_ORDER:
+        auto_retest_severity = AUTO_RETEST_MIN_SEVERITY
+    settings["auto_retest_min_severity"] = auto_retest_severity
     return settings
 
 
@@ -575,6 +593,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     async with db_pool.acquire() as conn:
         for finding in findings:
             fingerprint = generate_finding_fingerprint(finding)
+            evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+            ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+            ai_classification_source = finding.get('ai_classification_source')
 
             existing = await conn.fetchrow("""
                 SELECT id, status, resurfaced_count
@@ -590,25 +611,92 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             last_seen_at = NOW(),
                             resurfaced_count = $1,
                             scan_id = $2,
+                            title = $3,
+                            description = $4,
+                            severity = $5,
+                            cvss_score = $6,
+                            tool = $7,
+                            cwe = $8,
+                            cwe_name = $9,
+                            owasp = $10,
+                            url = $11,
+                            evidence = $12,
+                            ai_verdict = $13,
+                            ai_confidence = $14,
+                            ai_rationale = $15,
+                            ai_recommendations = $16,
+                            ai_classification_source = $17,
                             updated_at = NOW()
-                        WHERE id = $3
-                    """, existing['resurfaced_count'] + 1, scan_uuid, existing['id'])
+                        WHERE id = $18
+                    """,
+                        existing['resurfaced_count'] + 1,
+                        scan_uuid,
+                        finding.get('title'),
+                        finding.get('description'),
+                        finding.get('severity', 'info'),
+                        finding.get('cvss_score'),
+                        finding.get('tool'),
+                        finding.get('cwe'),
+                        finding.get('cwe_name'),
+                        finding.get('owasp'),
+                        finding.get('url'),
+                        evidence_json,
+                        finding.get('ai_verdict'),
+                        finding.get('ai_confidence'),
+                        finding.get('ai_rationale'),
+                        ai_recommendations_json,
+                        ai_classification_source,
+                        existing['id'],
+                    )
                 else:
                     await conn.execute("""
                         UPDATE findings SET
                             last_seen_at = NOW(),
                             scan_id = $1,
+                            title = $2,
+                            description = $3,
+                            severity = $4,
+                            cvss_score = $5,
+                            tool = $6,
+                            cwe = $7,
+                            cwe_name = $8,
+                            owasp = $9,
+                            url = $10,
+                            evidence = $11,
+                            ai_verdict = $12,
+                            ai_confidence = $13,
+                            ai_rationale = $14,
+                            ai_recommendations = $15,
+                            ai_classification_source = $16,
                             updated_at = NOW()
-                        WHERE id = $2
-                    """, scan_uuid, existing['id'])
+                        WHERE id = $17
+                    """,
+                        scan_uuid,
+                        finding.get('title'),
+                        finding.get('description'),
+                        finding.get('severity', 'info'),
+                        finding.get('cvss_score'),
+                        finding.get('tool'),
+                        finding.get('cwe'),
+                        finding.get('cwe_name'),
+                        finding.get('owasp'),
+                        finding.get('url'),
+                        evidence_json,
+                        finding.get('ai_verdict'),
+                        finding.get('ai_confidence'),
+                        finding.get('ai_rationale'),
+                        ai_recommendations_json,
+                        ai_classification_source,
+                        existing['id'],
+                    )
                 saved += 1
             else:
                 result = await conn.fetchval("""
                     INSERT INTO findings (
                         scan_id, target_id, fingerprint, title, description,
                         severity, cvss_score, tool, cwe, cwe_name, owasp,
-                        url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                        url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                     RETURNING id
                 """,
                     scan_uuid,
@@ -623,11 +711,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     finding.get('cwe_name'),
                     finding.get('owasp'),
                     finding.get('url'),
-                    json.dumps(finding.get('evidence')) if finding.get('evidence') else None,
+                    evidence_json,
                     finding.get('ai_verdict'),
                     finding.get('ai_confidence'),
                     finding.get('ai_rationale'),
-                    json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+                    ai_recommendations_json,
+                    ai_classification_source,
                 )
                 if result:
                     saved += 1
@@ -756,8 +845,8 @@ def classify_retest_outcome(
     )
 
 
-def _severity_allows_auto_retest(severity: str) -> bool:
-    min_rank = SEVERITY_ORDER.get(AUTO_RETEST_MIN_SEVERITY, SEVERITY_ORDER["high"])
+def _severity_allows_auto_retest(severity: str, min_severity: str) -> bool:
+    min_rank = SEVERITY_ORDER.get(min_severity, SEVERITY_ORDER["high"])
     sev_rank = SEVERITY_ORDER.get(str(severity or "").lower(), 0)
     return sev_rank >= min_rank
 
@@ -898,6 +987,42 @@ async def run_finding_retest(verification: dict) -> dict:
             "attempts_exhausted": True,
             "retry_class": "validation",
             "retryable": False,
+        }
+
+    # 2FA bypass currently relies on AI reasoning (Tier 2) rather than a deterministic prover.
+    # Return a deterministic "inconclusive" base result that explicitly allows AI escalation.
+    if finding_type == "2fa_bypass":
+        completed_at = datetime.utcnow()
+        has_ai_step = "ai_reasoning" in attempt_ladder
+        return {
+            "status": "completed",
+            "result_status": "inconclusive",
+            "verdict": "inconclusive",
+            "verdict_reason": "No deterministic prover available for 2FA bypass; escalating to AI reasoning.",
+            "error_message": None,
+            "confidence": None,
+            "proof": None,
+            "replay_commands": replay_commands,
+            "artifacts": {
+                "started_at": started_at.isoformat(),
+                "completed_at": completed_at.isoformat(),
+                "finding_type": finding_type,
+                "target_url": test_url,
+                "tool_capabilities": capabilities,
+                "attempt_ladder": attempt_ladder,
+                "steps_tried": [],
+                "step_attempts": [],
+                "succeeded_step": None,
+                "deterministic_skipped_reason": "ai_only_type",
+            },
+            "message": "Deterministic 2FA bypass prover unavailable; AI verification required.",
+            "attempt_ladder": attempt_ladder,
+            "attempts_exhausted": False,
+            "deterministic_exhausted": True,
+            "has_ai_step": has_ai_step,
+            "retry_class": "none",
+            "retryable": False,
+            "verification_mode": "deterministic",
         }
 
     verification_id = str(verification.get("id", "unknown"))
@@ -1341,7 +1466,10 @@ async def process_finding_retest_job(job_data: dict):
                         elif ai_result:
                             # Use AI verdict if more informative than deterministic
                             result["verification_mode"] = "ai_driven"
-                            if result.get("verdict") == "inconclusive" and ai_result.get("verdict") != "inconclusive":
+                            if (
+                                result.get("verdict") in {"inconclusive", "error", None}
+                                and ai_result.get("verdict") != "inconclusive"
+                            ):
                                 result["verdict"] = ai_result["verdict"]
                                 result["verdict_reason"] = ai_result.get("reasoning", "")
                                 result["confidence"] = ai_result.get("confidence")
@@ -1489,7 +1617,14 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
 
     This is a best-effort policy hook and should never fail the scan job itself.
     """
-    if not AUTO_RETEST_ON_SCAN_COMPLETE or AUTO_RETEST_MAX_PER_SCAN <= 0:
+    runtime_settings = _load_runtime_ai_settings()
+    auto_retest_enabled = bool(runtime_settings.get("auto_retest_on_scan_complete"))
+    auto_retest_max_per_scan = max(0, int(runtime_settings.get("auto_retest_max_per_scan") or 0))
+    auto_retest_min_severity = str(runtime_settings.get("auto_retest_min_severity") or AUTO_RETEST_MIN_SEVERITY).lower()
+    if auto_retest_min_severity not in SEVERITY_ORDER:
+        auto_retest_min_severity = AUTO_RETEST_MIN_SEVERITY
+
+    if not auto_retest_enabled or auto_retest_max_per_scan <= 0:
         return {"queued": 0, "skipped": 0}
 
     r = get_redis()
@@ -1522,11 +1657,14 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
         """, uuid.UUID(scan_id))
 
         for row in rows:
-            if queued >= AUTO_RETEST_MAX_PER_SCAN:
+            if queued >= auto_retest_max_per_scan:
                 break
 
             finding = dict(row)
-            if not _severity_allows_auto_retest(str(finding.get("severity") or "")):
+            if not _severity_allows_auto_retest(
+                str(finding.get("severity") or ""),
+                auto_retest_min_severity,
+            ):
                 skipped += 1
                 continue
 

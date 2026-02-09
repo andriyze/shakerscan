@@ -9,6 +9,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from ai_verifier import (  # noqa: E402
+    _extract_content_from_response,
+    _extract_direct_parsed_json,
+    _extract_json_payload,
     _redact_object_for_ai,
     _redact_text_for_ai,
     _redact_url_for_ai,
@@ -83,3 +86,49 @@ class TestAiVerifierRedaction:
         assert redacted["request"]["headers"]["Authorization"] == "[REDACTED]"
         assert redacted["request"]["password"] == "[REDACTED]"
         assert "REDACTED" in redacted["note"]
+
+
+class TestAiVerifierResponseParsing:
+    def test_extracts_direct_parsed_json(self):
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "parsed": {
+                            "verdict": "exploited",
+                            "confidence": 0.9,
+                            "reasoning": "ok",
+                        }
+                    }
+                }
+            ]
+        }
+        parsed = _extract_direct_parsed_json(payload)
+        assert isinstance(parsed, dict)
+        assert parsed["verdict"] == "exploited"
+
+    def test_extracts_json_from_list_content_blocks(self):
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": '{"verdict":"likely_fixed","confidence":0.8,"reasoning":"no repro"}'}
+                        ]
+                    }
+                }
+            ]
+        }
+        content = _extract_content_from_response(payload)
+        parsed = _extract_json_payload(content)
+        assert isinstance(parsed, dict)
+        assert parsed["verdict"] == "likely_fixed"
+
+    def test_extracts_json_from_fenced_output_text(self):
+        payload = {
+            "output_text": "```json\n{\"verdict\":\"inconclusive\",\"confidence\":0.5,\"reasoning\":\"unclear\"}\n```"
+        }
+        content = _extract_content_from_response(payload)
+        parsed = _extract_json_payload(content)
+        assert isinstance(parsed, dict)
+        assert parsed["verdict"] == "inconclusive"

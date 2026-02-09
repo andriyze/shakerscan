@@ -185,6 +185,7 @@ class AIClassificationResult:
     remediation: list[str] = field(default_factory=list)
     attack_narrative: str | None = None
     severity_adjustment: str | None = None  # "upgrade", "downgrade", None
+    classification_source: str = "provider"  # provider | heuristic_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1291,8 @@ def fallback_classify_finding(finding: dict[str, Any]) -> AIClassificationResult
         verification_steps=verification_steps,
         remediation=[],
         attack_narrative=None,
-        severity_adjustment=None
+        severity_adjustment=None,
+        classification_source="heuristic_fallback",
     )
 
 
@@ -1398,6 +1400,7 @@ def _parse_ai_classification_results(response: dict[str, Any]) -> dict[str, AICl
             remediation=ai_finding.get("remediation", []),
             attack_narrative=ai_finding.get("attack_narrative"),
             severity_adjustment=ai_finding.get("severity_adjustment"),
+            classification_source="provider",
         )
 
     return parsed
@@ -1432,6 +1435,8 @@ async def classify_findings_batch(
     total_latency_ms = 0
     cross_finding_correlations: list[str] = []
     overall_risk_assessment: str | None = None
+    provider_finding_ids: set[str] = set()
+    fallback_finding_ids: set[str] = set()
 
     finding_chunks = _chunk_findings_for_classification(findings, scan_context, mask_host)
     for chunk_idx, chunk in enumerate(finding_chunks, start=1):
@@ -1459,7 +1464,9 @@ async def classify_findings_batch(
             for finding in chunk:
                 finding_id = finding.get("id")
                 if finding_id and finding_id not in results:
-                    results[str(finding_id)] = fallback_classify_finding(finding)
+                    fid = str(finding_id)
+                    results[fid] = fallback_classify_finding(finding)
+                    fallback_finding_ids.add(fid)
             continue
 
         chunk_results = _parse_ai_classification_results(response)
@@ -1478,8 +1485,10 @@ async def classify_findings_batch(
             fid = str(finding_id)
             if fid in chunk_results:
                 results[fid] = chunk_results[fid]
+                provider_finding_ids.add(fid)
             else:
                 results[fid] = fallback_classify_finding(finding)
+                fallback_finding_ids.add(fid)
                 chunk_errors.append(f"chunk {chunk_idx}/{len(finding_chunks)}: missing AI verdict for finding {fid}")
 
         corr = response.get("cross_finding_correlations", [])
@@ -1496,7 +1505,9 @@ async def classify_findings_batch(
     for finding in findings:
         finding_id = finding.get("id")
         if finding_id and str(finding_id) not in results:
-            results[str(finding_id)] = fallback_classify_finding(finding)
+            fid = str(finding_id)
+            results[fid] = fallback_classify_finding(finding)
+            fallback_finding_ids.add(fid)
 
     latency_out = total_latency_ms or None
     if not provider_used:
@@ -1507,6 +1518,8 @@ async def classify_findings_batch(
             "chunks_total": len(finding_chunks),
             "chunks_with_ai": 0,
             "chunks_fallback": len(finding_chunks),
+            "provider_finding_ids": [],
+            "fallback_finding_ids": sorted(fallback_finding_ids),
             "errors": chunk_errors[:5],
             "cross_finding_correlations": cross_finding_correlations,
             "overall_risk_assessment": overall_risk_assessment,
@@ -1524,6 +1537,8 @@ async def classify_findings_batch(
         "chunks_total": len(finding_chunks),
         "chunks_with_ai": ai_chunks,
         "chunks_fallback": len(finding_chunks) - ai_chunks,
+        "provider_finding_ids": sorted(provider_finding_ids),
+        "fallback_finding_ids": sorted(fallback_finding_ids),
         "errors": chunk_errors[:5],
         "cross_finding_correlations": cross_finding_correlations,
         "overall_risk_assessment": overall_risk_assessment,

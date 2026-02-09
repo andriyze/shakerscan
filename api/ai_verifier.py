@@ -48,7 +48,7 @@ MAX_PLAN_STEPS = 8
 MAX_RESPONSE_SNIPPET = 4000
 
 # Finding types we support for AI verification
-AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect", "cors"}
+AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect", "cors", "2fa_bypass"}
 
 # Enforce safe, same-origin HTTP replay behavior for AI-generated steps.
 ALLOWED_HTTP_METHODS = {"GET", "POST", "HEAD", "OPTIONS"}
@@ -244,6 +244,97 @@ def _resolve_and_validate_step_url(step_url: str, base_url: str) -> tuple[str | 
     return urlunparse(parsed._replace(fragment="")), None
 
 
+def _extract_text_chunks(value: Any) -> list[str]:
+    chunks: list[str] = []
+    if value is None:
+        return chunks
+    if isinstance(value, str):
+        if value.strip():
+            chunks.append(value)
+        return chunks
+    if isinstance(value, list):
+        for item in value:
+            chunks.extend(_extract_text_chunks(item))
+        return chunks
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "output_text", "completion", "output"):
+            if key in value:
+                chunks.extend(_extract_text_chunks(value.get(key)))
+        if not chunks:
+            for nested in value.values():
+                if isinstance(nested, (str, list, dict)):
+                    chunks.extend(_extract_text_chunks(nested))
+        return chunks
+    return chunks
+
+
+def _strip_markdown_fences(content: str) -> str:
+    text = content.strip()
+    if text.startswith("```"):
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if match:
+            return match.group(1).strip()
+    return text
+
+
+def _extract_json_payload(content: str) -> Any | None:
+    if not content:
+        return None
+    stripped = _strip_markdown_fences(content)
+    if not stripped:
+        return None
+
+    decoder = json.JSONDecoder()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    for idx, ch in enumerate(stripped):
+        if ch not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(stripped[idx:])
+            return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _extract_direct_parsed_json(response_data: dict[str, Any]) -> Any | None:
+    choices = response_data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(message, dict):
+            parsed = message.get("parsed")
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _extract_content_from_response(response_data: dict[str, Any]) -> str:
+    content_chunks: list[str] = []
+
+    choices = response_data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(message, dict):
+            content_chunks.extend(_extract_text_chunks(message.get("content")))
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            if isinstance(delta, dict):
+                content_chunks.extend(_extract_text_chunks(delta.get("content")))
+
+    content_chunks.extend(_extract_text_chunks(response_data.get("content")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("output_text")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("completion")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("output")))
+
+    return "\n".join(chunk for chunk in content_chunks if chunk).strip()
+
+
 async def _call_llm(
     ai_url: str,
     ai_api_key: str,
@@ -310,22 +401,18 @@ async def _call_llm(
                             continue
                         return None, f"HTTP {resp.status}: {error_text}"
 
-                    response_data = await resp.json()
-                    choices = response_data.get("choices", [])
-                    if not choices:
-                        return None, "No choices in response"
+                    response_data = await resp.json(content_type=None)
+                    parsed = _extract_direct_parsed_json(response_data)
+                    if parsed is None:
+                        content = _extract_content_from_response(response_data)
+                        if not content:
+                            return None, "Empty content in response"
+                        parsed = _extract_json_payload(content)
 
-                    content = choices[0].get("message", {}).get("content", "")
-                    if not content:
-                        return None, "Empty content in response"
-
-                    # Strip markdown fences
-                    if content.strip().startswith("```"):
-                        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
-                        if match:
-                            content = match.group(1)
-
-                    parsed = json.loads(content.strip())
+                    if parsed is None:
+                        return None, "Invalid JSON in response"
+                    if not isinstance(parsed, dict):
+                        return None, "AI response JSON is not an object"
                     return parsed, None
 
         except (TimeoutError, asyncio.TimeoutError):

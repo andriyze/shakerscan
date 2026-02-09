@@ -31,6 +31,9 @@ export default function AISettingsPanel() {
   const [aiVerifyModelInput, setAIVerifyModelInput] = useState('')
   const [aiVerifyModelFallbackInput, setAIVerifyModelFallbackInput] = useState('')
   const [aiVerifyMinSeverityInput, setAIVerifyMinSeverityInput] = useState<Severity>('high')
+  const [autoRetestEnabledInput, setAutoRetestEnabledInput] = useState(true)
+  const [autoRetestMinSeverityInput, setAutoRetestMinSeverityInput] = useState<Severity>('medium')
+  const [autoRetestMaxPerScanInput, setAutoRetestMaxPerScanInput] = useState('25')
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
   const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
@@ -45,6 +48,9 @@ export default function AISettingsPanel() {
     setAIVerifyModelInput(settings.ai_verify_model || '')
     setAIVerifyModelFallbackInput(settings.ai_verify_model_fallback || '')
     setAIVerifyMinSeverityInput(settings.ai_verify_min_severity || 'high')
+    setAutoRetestEnabledInput(Boolean(settings.auto_retest_on_scan_complete))
+    setAutoRetestMinSeverityInput(settings.auto_retest_min_severity || 'medium')
+    setAutoRetestMaxPerScanInput(String(settings.auto_retest_max_per_scan ?? 25))
     setScanAPIKeyInput('')
     setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
@@ -87,6 +93,9 @@ export default function AISettingsPanel() {
         ai_verify_model: aiVerifyModelInput,
         ai_verify_model_fallback: aiVerifyModelFallbackInput,
         ai_verify_min_severity: aiVerifyMinSeverityInput,
+        auto_retest_on_scan_complete: autoRetestEnabledInput,
+        auto_retest_min_severity: autoRetestMinSeverityInput,
+        auto_retest_max_per_scan: Math.max(0, Number.parseInt(autoRetestMaxPerScanInput || '0', 10) || 0),
         persist_to_env: persistAIToEnv,
       }
 
@@ -335,6 +344,43 @@ export default function AISettingsPanel() {
             />
             Clear retest AI API key
           </label>
+          <div className="pt-2 border-t border-gray-800 mt-2 space-y-2">
+            <h4 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Auto Retest Policy</h4>
+            <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+              <input
+                type="checkbox"
+                checked={autoRetestEnabledInput}
+                onChange={(e) => setAutoRetestEnabledInput(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              />
+              Auto-queue retests after each scan
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Auto Retest Min Severity</span>
+              <select
+                value={autoRetestMinSeverityInput}
+                onChange={(e) => setAutoRetestMinSeverityInput(e.target.value as Severity)}
+                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="critical">critical</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="info">info</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Auto Retest Max Findings Per Scan</span>
+              <input
+                type="number"
+                min={0}
+                max={500}
+                value={autoRetestMaxPerScanInput}
+                onChange={(e) => setAutoRetestMaxPerScanInput(e.target.value)}
+                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              />
+            </label>
+          </div>
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => handleTestAISettings('verify')}

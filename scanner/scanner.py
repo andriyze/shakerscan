@@ -9102,6 +9102,9 @@ async def ai_review_findings(
     ai_meta: dict[str, Any] | None = None
     provider_models_used: list[str] = []
     provider_partial = False
+    provider_finding_ids: set[str] = set()
+    fallback_finding_ids: set[str] = set()
+    classification_source_counts = {"provider": 0, "heuristic_fallback": 0, "heuristic_only": 0}
 
     if ai_url and ai_api_key and model and findings:
         provider_attempted = True
@@ -9121,6 +9124,8 @@ async def ai_review_findings(
             if isinstance(ai_meta, dict):
                 provider_models_used = [m for m in (ai_meta.get("used_models") or []) if isinstance(m, str)]
                 provider_partial = bool(ai_meta.get("chunks_fallback", 0))
+                provider_finding_ids = {str(fid) for fid in (ai_meta.get("provider_finding_ids") or []) if isinstance(fid, str)}
+                fallback_finding_ids = {str(fid) for fid in (ai_meta.get("fallback_finding_ids") or []) if isinstance(fid, str)}
             if error:
                 provider_error = error
             if provider_used:
@@ -9177,6 +9182,15 @@ async def ai_review_findings(
 
         # Get AI result if available
         ai_result = ai_results.get(finding_id) if ai_results else None
+        classification_source = "heuristic_only"
+        if isinstance(finding_id, str) and finding_id in provider_finding_ids:
+            classification_source = "provider"
+        elif isinstance(finding_id, str) and finding_id in fallback_finding_ids:
+            classification_source = "heuristic_fallback"
+        elif ai_result and hasattr(ai_result, "classification_source"):
+            classification_source = str(getattr(ai_result, "classification_source") or "heuristic_fallback")
+        elif provider_attempted:
+            classification_source = "heuristic_fallback"
 
         # Calculate hybrid confidence (combines heuristics + AI)
         if ai_result and hasattr(ai_result, 'verdict'):
@@ -9241,7 +9255,12 @@ async def ai_review_findings(
         f["ai_verdict"] = final_verdict
         f["ai_confidence"] = round(final_conf, 2)
         f["ai_confidence_percent"] = int(round(final_conf * 100))
+        f["ai_classification_source"] = classification_source
         f["ai_recommendations"] = ai_rec
+        if classification_source in classification_source_counts:
+            classification_source_counts[classification_source] += 1
+        else:
+            classification_source_counts["heuristic_only"] += 1
 
         # Per-finding log entry
         log_entry: dict[str, Any] = {
@@ -9255,12 +9274,16 @@ async def ai_review_findings(
             "rationale": final_rationale,
             "commands": commands,
             "plan": plan,
+            "classification_source": classification_source,
         }
 
         # Include AI verdict for comparison if available
-        if ai_result and hasattr(ai_result, 'verdict'):
+        if ai_result and hasattr(ai_result, 'verdict') and classification_source == "provider":
             log_entry["ai_verdict_raw"] = ai_result.verdict
             log_entry["ai_confidence_raw"] = round(ai_result.confidence, 2) if hasattr(ai_result, 'confidence') else None
+        elif ai_result and hasattr(ai_result, 'verdict'):
+            log_entry["fallback_verdict_raw"] = ai_result.verdict
+            log_entry["fallback_confidence_raw"] = round(ai_result.confidence, 2) if hasattr(ai_result, 'confidence') else None
 
         ai_logs.append(log_entry)
 
@@ -9310,6 +9333,7 @@ async def ai_review_findings(
         "provider_latency_ms": provider_latency_ms,
         "provider_models_used": provider_models_used,
         "provider_partial": provider_partial,
+        "classification_source_counts": classification_source_counts,
         "masking": {"enabled": True, "replacement_host": mask_host},
         "executive_summary": executive_summary,
         "executive_summary_error": exec_summary_error,

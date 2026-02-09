@@ -87,6 +87,7 @@ export interface Finding {
   ai_confidence?: number
   ai_rationale?: string
   ai_recommendations?: string[] | Record<string, unknown> | null
+  ai_classification_source?: 'provider' | 'heuristic_fallback' | 'heuristic_only' | string
   notes?: string
   first_seen_at: string
   last_seen_at: string
@@ -167,6 +168,9 @@ export interface AISettings {
   ai_verify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_verify_api_key_configured: boolean
   ai_verify_api_key_masked?: string
+  auto_retest_on_scan_complete: boolean
+  auto_retest_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_max_per_scan: number
 }
 
 export interface AISettingsUpdate {
@@ -181,6 +185,9 @@ export interface AISettingsUpdate {
   ai_verify_model?: string
   ai_verify_model_fallback?: string
   ai_verify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_on_scan_complete?: boolean
+  auto_retest_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_max_per_scan?: number
   persist_to_env?: boolean
 }
 

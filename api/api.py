@@ -108,6 +108,13 @@ def _normalize_severity(value: Any, default: str = "high") -> str:
     return default
 
 
+def _normalize_non_negative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(str(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -129,6 +136,18 @@ def _default_ai_settings() -> dict[str, Any]:
         "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929"),
         "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", ""),
         "ai_verify_min_severity": _normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
+        "auto_retest_on_scan_complete": _is_truthy(
+            os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true"),
+            default=True,
+        ),
+        "auto_retest_min_severity": _normalize_severity(
+            os.environ.get("AUTO_RETEST_MIN_SEVERITY", "medium"),
+            default="medium",
+        ),
+        "auto_retest_max_per_scan": _normalize_non_negative_int(
+            os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25"),
+            default=25,
+        ),
     }
 
 
@@ -164,6 +183,21 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["ai_verify_min_severity"] = _normalize_severity(
             overrides.get("ai_verify_min_severity"), default=settings["ai_verify_min_severity"]
         )
+    if "auto_retest_on_scan_complete" in overrides:
+        settings["auto_retest_on_scan_complete"] = _is_truthy(
+            overrides.get("auto_retest_on_scan_complete"),
+            default=settings["auto_retest_on_scan_complete"],
+        )
+    if "auto_retest_min_severity" in overrides:
+        settings["auto_retest_min_severity"] = _normalize_severity(
+            overrides.get("auto_retest_min_severity"),
+            default=settings["auto_retest_min_severity"],
+        )
+    if "auto_retest_max_per_scan" in overrides:
+        settings["auto_retest_max_per_scan"] = _normalize_non_negative_int(
+            overrides.get("auto_retest_max_per_scan"),
+            default=int(settings["auto_retest_max_per_scan"]),
+        )
     return settings
 
 
@@ -182,6 +216,12 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "ai_verify_min_severity": settings.get("ai_verify_min_severity") or "high",
         "ai_verify_api_key_configured": bool(settings.get("ai_verify_api_key")),
         "ai_verify_api_key_masked": _mask_secret(str(settings.get("ai_verify_api_key") or "")),
+        "auto_retest_on_scan_complete": bool(settings.get("auto_retest_on_scan_complete")),
+        "auto_retest_min_severity": settings.get("auto_retest_min_severity") or "medium",
+        "auto_retest_max_per_scan": _normalize_non_negative_int(
+            settings.get("auto_retest_max_per_scan"),
+            default=0,
+        ),
     }
 
 
@@ -309,6 +349,8 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
         return "open_redirect"
     if "cors" in title:
         return "cors"
+    if "2fa bypass" in title or "mfa bypass" in title or tool in {"2fa_bypass", "mfa_bypass"}:
+        return "2fa_bypass"
 
     return None
 
@@ -398,6 +440,9 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
     saved_count = 0
     for finding in findings:
         fingerprint = generate_finding_fingerprint(finding)
+        evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+        ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+        ai_classification_source = finding.get('ai_classification_source')
 
         # Check if this finding already exists for this target
         existing = await conn.fetchrow("""
@@ -415,17 +460,84 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
                         last_seen_at = NOW(),
                         resurfaced_count = $1,
                         scan_id = $2,
+                        title = $3,
+                        description = $4,
+                        severity = $5,
+                        cvss_score = $6,
+                        tool = $7,
+                        cwe = $8,
+                        cwe_name = $9,
+                        owasp = $10,
+                        url = $11,
+                        evidence = $12,
+                        ai_verdict = $13,
+                        ai_confidence = $14,
+                        ai_rationale = $15,
+                        ai_recommendations = $16,
+                        ai_classification_source = $17,
                         updated_at = NOW()
-                    WHERE id = $3
-                """, existing['resurfaced_count'] + 1, scan_id, existing['id'])
+                    WHERE id = $18
+                """,
+                    existing['resurfaced_count'] + 1,
+                    scan_id,
+                    finding.get('title'),
+                    finding.get('description'),
+                    finding.get('severity', 'info'),
+                    finding.get('cvss_score'),
+                    finding.get('tool'),
+                    finding.get('cwe'),
+                    finding.get('cwe_name'),
+                    finding.get('owasp'),
+                    finding.get('url'),
+                    evidence_json,
+                    finding.get('ai_verdict'),
+                    finding.get('ai_confidence'),
+                    finding.get('ai_rationale'),
+                    ai_recommendations_json,
+                    ai_classification_source,
+                    existing['id'],
+                )
             else:
                 await conn.execute("""
                     UPDATE findings SET
                         last_seen_at = NOW(),
                         scan_id = $1,
+                        title = $2,
+                        description = $3,
+                        severity = $4,
+                        cvss_score = $5,
+                        tool = $6,
+                        cwe = $7,
+                        cwe_name = $8,
+                        owasp = $9,
+                        url = $10,
+                        evidence = $11,
+                        ai_verdict = $12,
+                        ai_confidence = $13,
+                        ai_rationale = $14,
+                        ai_recommendations = $15,
+                        ai_classification_source = $16,
                         updated_at = NOW()
-                    WHERE id = $2
-                """, scan_id, existing['id'])
+                    WHERE id = $17
+                """,
+                    scan_id,
+                    finding.get('title'),
+                    finding.get('description'),
+                    finding.get('severity', 'info'),
+                    finding.get('cvss_score'),
+                    finding.get('tool'),
+                    finding.get('cwe'),
+                    finding.get('cwe_name'),
+                    finding.get('owasp'),
+                    finding.get('url'),
+                    evidence_json,
+                    finding.get('ai_verdict'),
+                    finding.get('ai_confidence'),
+                    finding.get('ai_rationale'),
+                    ai_recommendations_json,
+                    ai_classification_source,
+                    existing['id'],
+                )
             saved_count += 1
         else:
             # Insert new finding
@@ -433,8 +545,8 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
                 INSERT INTO findings (
                     scan_id, target_id, fingerprint, title, description,
                     severity, cvss_score, tool, cwe, cwe_name, owasp,
-                    url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             """,
                 scan_id,
                 target_id,
@@ -448,11 +560,12 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
                 finding.get('cwe_name'),
                 finding.get('owasp'),
                 finding.get('url'),
-                json.dumps(finding.get('evidence')) if finding.get('evidence') else None,
+                evidence_json,
                 finding.get('ai_verdict'),
                 finding.get('ai_confidence'),
                 finding.get('ai_rationale'),
-                json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+                ai_recommendations_json,
+                ai_classification_source,
             )
             saved_count += 1
 
@@ -1042,6 +1155,9 @@ class AISettingsUpdate(BaseModel):
     ai_verify_model: Optional[str] = None
     ai_verify_model_fallback: Optional[str] = None
     ai_verify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    auto_retest_on_scan_complete: Optional[bool] = None
+    auto_retest_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    auto_retest_max_per_scan: Optional[int] = Field(default=None, ge=0, le=500)
     persist_to_env: bool = False
 
 
@@ -1145,6 +1261,15 @@ async def update_ai_settings(request: AISettingsUpdate):
     if request.ai_verify_min_severity is not None:
         updates["ai_verify_min_severity"] = _normalize_severity(request.ai_verify_min_severity, default="high")
 
+    if request.auto_retest_on_scan_complete is not None:
+        updates["auto_retest_on_scan_complete"] = "true" if request.auto_retest_on_scan_complete else "false"
+
+    if request.auto_retest_min_severity is not None:
+        updates["auto_retest_min_severity"] = _normalize_severity(request.auto_retest_min_severity, default="medium")
+
+    if request.auto_retest_max_per_scan is not None:
+        updates["auto_retest_max_per_scan"] = str(max(0, int(request.auto_retest_max_per_scan)))
+
     if updates:
         r.hset(AI_SETTINGS_KEY, mapping=updates)
     if deletes:
@@ -1166,6 +1291,9 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AI_VERIFY_MODEL": effective.get("ai_verify_model") or None,
             "AI_VERIFY_FALLBACK_MODEL": effective.get("ai_verify_model_fallback") or None,
             "AI_VERIFY_MIN_SEVERITY": effective.get("ai_verify_min_severity") or "high",
+            "AUTO_RETEST_ON_SCAN_COMPLETE": "true" if effective.get("auto_retest_on_scan_complete") else "false",
+            "AUTO_RETEST_MIN_SEVERITY": effective.get("auto_retest_min_severity") or "medium",
+            "AUTO_RETEST_MAX_PER_SCAN": str(max(0, int(effective.get("auto_retest_max_per_scan") or 0))),
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
 

@@ -23,6 +23,7 @@ SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "path_traversal",
     "open_redirect",
     "cors",
+    "2fa_bypass",
 )
 
 SUPPORTED_RETEST_VERDICTS: tuple[str, ...] = (
@@ -55,6 +56,12 @@ RETEST_TYPE_ALIASES: dict[str, str] = {
     "url-redirect": "open_redirect",
     "cors": "cors",
     "cors_misconfiguration": "cors",
+    "2fa_bypass": "2fa_bypass",
+    "2fa-bypass": "2fa_bypass",
+    "mfa_bypass": "2fa_bypass",
+    "mfa-bypass": "2fa_bypass",
+    "otp_bypass": "2fa_bypass",
+    "otp-bypass": "2fa_bypass",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
@@ -64,6 +71,7 @@ DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "path_traversal": "../../../etc/passwd",
     "open_redirect": "https://example.org/",
     "cors": "https://evil.example.org",
+    "2fa_bypass": "000000",
 }
 
 # Ladder names intentionally use stable identifiers so UI/reporting can
@@ -75,6 +83,7 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "path_traversal": ["direct_traversal", "encoding_bypass", "ai_reasoning"],
     "open_redirect": ["query_redirect_param", "post_redirect_param", "location_header_check", "ai_reasoning"],
     "cors": ["origin_reflection_probe", "wildcard_credentials_probe", "ai_reasoning"],
+    "2fa_bypass": ["otp_bruteforce_window", "ai_reasoning"],
 }
 
 RETRY_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -149,6 +158,8 @@ def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
             finding_type = "open_redirect"
         elif "cors" in title:
             finding_type = "cors"
+        elif "2fa bypass" in title or "mfa bypass" in title or tool in {"2fa_bypass", "mfa_bypass"}:
+            finding_type = "2fa_bypass"
 
     target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
     original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url
@@ -264,7 +275,8 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS last_verification_verdict TEXT,
                 ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
                 ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0
+                ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS ai_classification_source TEXT
             """)
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
