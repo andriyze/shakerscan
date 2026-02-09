@@ -159,6 +159,8 @@ export interface AISettings {
   ai_model: string
   ai_model_fallback: string
   ai_mask_host: string
+  ai_scan_classification_enabled: boolean
+  ai_classify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_api_key_configured: boolean
   ai_api_key_masked?: string
   ai_verify_enabled: boolean
@@ -179,6 +181,8 @@ export interface AISettingsUpdate {
   ai_model?: string
   ai_model_fallback?: string
   ai_mask_host?: string
+  ai_scan_classification_enabled?: boolean
+  ai_classify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_verify_enabled?: boolean
   ai_verify_url?: string
   ai_verify_api_key?: string

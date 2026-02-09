@@ -26,6 +26,8 @@ export default function AISettingsPanel() {
   const [aiModelInput, setAIModelInput] = useState('')
   const [aiModelFallbackInput, setAIModelFallbackInput] = useState('')
   const [aiMaskHostInput, setAIMaskHostInput] = useState('')
+  const [aiScanClassificationEnabledInput, setAIScanClassificationEnabledInput] = useState(false)
+  const [aiClassifyMinSeverityInput, setAIClassifyMinSeverityInput] = useState<Severity>('high')
   const [aiVerifyEnabledInput, setAIVerifyEnabledInput] = useState(false)
   const [aiVerifyURLInput, setAIVerifyURLInput] = useState('')
   const [aiVerifyModelInput, setAIVerifyModelInput] = useState('')
@@ -43,6 +45,8 @@ export default function AISettingsPanel() {
     setAIModelInput(settings.ai_model || '')
     setAIModelFallbackInput(settings.ai_model_fallback || '')
     setAIMaskHostInput(settings.ai_mask_host || '')
+    setAIScanClassificationEnabledInput(Boolean(settings.ai_scan_classification_enabled))
+    setAIClassifyMinSeverityInput(settings.ai_classify_min_severity || settings.ai_verify_min_severity || 'high')
     setAIVerifyEnabledInput(Boolean(settings.ai_verify_enabled))
     setAIVerifyURLInput(settings.ai_verify_url || '')
     setAIVerifyModelInput(settings.ai_verify_model || '')
@@ -88,6 +92,8 @@ export default function AISettingsPanel() {
         ai_model: aiModelInput,
         ai_model_fallback: aiModelFallbackInput,
         ai_mask_host: aiMaskHostInput,
+        ai_scan_classification_enabled: aiScanClassificationEnabledInput,
+        ai_classify_min_severity: aiClassifyMinSeverityInput,
         ai_verify_enabled: aiVerifyEnabledInput,
         ai_verify_url: aiVerifyURLInput,
         ai_verify_model: aiVerifyModelInput,
@@ -180,7 +186,8 @@ export default function AISettingsPanel() {
         <div>
           <h2 className="text-sm font-medium text-gray-400">AI Settings</h2>
           <p className="text-xs text-gray-500 mt-1">
-            Configure scan AI and retest AI verification. Changes apply to new jobs immediately.
+            Retest AI verification is authoritative. Scan-time AI classification is optional pre-triage.
+            Changes apply to new jobs immediately.
           </p>
         </div>
         <button
@@ -194,7 +201,10 @@ export default function AISettingsPanel() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Scan AI</h3>
+          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Shared Provider + Optional Scan Classification</h3>
+          <p className="text-xs text-gray-500">
+            Used as the shared provider defaults. Scan-time AI classification runs only when enabled below.
+          </p>
           <label className="block">
             <span className="text-xs text-gray-400">AI URL</span>
             <input
@@ -235,6 +245,30 @@ export default function AISettingsPanel() {
               placeholder="example.com"
             />
           </label>
+          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={aiScanClassificationEnabledInput}
+              onChange={(e) => setAIScanClassificationEnabledInput(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+            />
+            Enable scan-time AI classification
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Scan Classification Min Severity</span>
+            <select
+              value={aiClassifyMinSeverityInput}
+              onChange={(e) => setAIClassifyMinSeverityInput(e.target.value as Severity)}
+              disabled={!aiScanClassificationEnabledInput}
+              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+            >
+              <option value="critical">critical</option>
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+              <option value="info">info</option>
+            </select>
+          </label>
           <label className="block">
             <span className="text-xs text-gray-400">AI API Key</span>
             <input
@@ -252,7 +286,7 @@ export default function AISettingsPanel() {
               onChange={(e) => setClearScanAPIKey(e.target.checked)}
               className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
             />
-            Clear scan AI API key
+            Clear shared provider API key
           </label>
           <div className="flex items-center gap-2 pt-1">
             <button
@@ -260,7 +294,7 @@ export default function AISettingsPanel() {
               disabled={loading || aiSaving || testingScope !== null}
               className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
             >
-              {testingScope === 'scan' ? 'Testing scan AI...' : 'Test Scan AI'}
+              {testingScope === 'scan' ? 'Testing shared provider...' : 'Test Shared Provider'}
             </button>
             {scanProbeMessage && (
               <span className={`text-xs ${scanProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
@@ -271,7 +305,7 @@ export default function AISettingsPanel() {
         </div>
 
         <div className="space-y-2">
-          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Retest AI Verification</h3>
+          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Retest AI Verification (Authoritative)</h3>
           <label className="inline-flex items-center gap-2 text-xs text-gray-300">
             <input
               type="checkbox"
@@ -288,7 +322,7 @@ export default function AISettingsPanel() {
               value={aiVerifyURLInput}
               onChange={(e) => setAIVerifyURLInput(e.target.value)}
               className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              placeholder="Leave empty to fall back to Scan AI URL"
+              placeholder="Leave empty to fall back to shared AI URL"
             />
           </label>
           <label className="block">
@@ -312,7 +346,7 @@ export default function AISettingsPanel() {
             />
           </label>
           <label className="block">
-            <span className="text-xs text-gray-400">Min Severity</span>
+            <span className="text-xs text-gray-400">Verification Min Severity</span>
             <select
               value={aiVerifyMinSeverityInput}
               onChange={(e) => setAIVerifyMinSeverityInput(e.target.value as Severity)}
@@ -419,8 +453,9 @@ export default function AISettingsPanel() {
 
       {aiSettings && (
         <p className="text-xs text-gray-500">
-          Scan key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'} · Retest key:{' '}
-          {aiSettings.ai_verify_api_key_configured ? 'configured' : 'not set'}
+          Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'} · Retest key:{' '}
+          {aiSettings.ai_verify_api_key_configured ? 'configured' : 'not set'} · Scan classification:{' '}
+          {aiSettings.ai_scan_classification_enabled ? `enabled (${aiSettings.ai_classify_min_severity}+)` : 'disabled'}
         </p>
       )}
       {aiSettingsMessage && <p className="text-xs text-green-400">{aiSettingsMessage}</p>}
