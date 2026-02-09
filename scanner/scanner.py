@@ -2211,6 +2211,16 @@ async def build_report(target: str,
 
     focus_rules = parse_scope_rules_json(focus_rules_json, "focus")
     avoid_rules = parse_scope_rules_json(avoid_rules_json, "avoid")
+    # Runtime AI controls are injected by worker env and should drive scan behavior.
+    scan_ai_classification_enabled = _is_truthy_env(
+        os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
+        default=ai_validation,
+    )
+    pipeline_ai_enabled = bool(ai_validation and ai_api_key and scan_ai_classification_enabled)
+    verify_min_severity = _normalize_ai_classification_min_severity(
+        os.environ.get("AI_VERIFY_MIN_SEVERITY"),
+        default="high",
+    )
     scope_stats = {
         "focus_rule_count": len(focus_rules),
         "avoid_rule_count": len(avoid_rules),
@@ -2467,7 +2477,9 @@ async def build_report(target: str,
                 "options": {
                     "public_only": public_only,
                     "active_checks_requested": active_checks,
-                    "ai_validation_enabled": ai_validation,
+                    "ai_validation_enabled": pipeline_ai_enabled,
+                    "ai_scan_classification_enabled": scan_ai_classification_enabled,
+                    "ai_verify_min_severity": verify_min_severity,
                 },
                 "checks_skipped": checks_skipped,
                 "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
@@ -8571,7 +8583,7 @@ async def build_report(target: str,
             enable_heuristics=True,
             enable_poe=True,
             poe_safe_mode=True,
-            enable_ai=ai_validation and bool(ai_api_key),
+            enable_ai=pipeline_ai_enabled,
             ai_url=ai_url or os.environ.get("AI_URL", ""),
             ai_api_key=ai_api_key or os.environ.get("AI_API_KEY", ""),
             ai_model=ai_model,
@@ -8651,16 +8663,27 @@ async def build_report(target: str,
     report["coverage"] = coverage
 
     # =========================================================================
-    # VERIFICATION PHASE: Verify high-severity findings before grading
+    # VERIFICATION PHASE: Verify findings at/above configured severity before grading
     # =========================================================================
     # Run verification BEFORE grading so downgraded severities are reflected
     # in the final grade. Only run in smart mode to avoid slowing down standard scans.
     if smart_mode:
         pre_verification_findings = report.get("findings", [])
-        high_sev_count = sum(1 for f in pre_verification_findings if f.get("severity") in ("high", "critical"))
+        verify_min_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(
+            verify_min_severity,
+            AI_CLASSIFICATION_SEVERITY_ORDER["high"],
+        )
+        verifiable_count = sum(
+            1
+            for f in pre_verification_findings
+            if AI_CLASSIFICATION_SEVERITY_ORDER.get(str(f.get("severity") or "").lower(), 0) >= verify_min_rank
+        )
 
-        if high_sev_count > 0:
-            print(f"[verification] Verifying {high_sev_count} high-severity findings...", file=sys.stderr)
+        if verifiable_count > 0:
+            print(
+                f"[verification] Verifying {verifiable_count} findings (min severity: {verify_min_severity})...",
+                file=sys.stderr,
+            )
             try:
                 verified_findings = await verify_high_severity_findings(
                     findings=pre_verification_findings,
@@ -8668,6 +8691,7 @@ async def build_report(target: str,
                     verify_xss=True,
                     verify_sqli=True,
                     max_verification_attempts=3,
+                    min_severity=verify_min_severity,
                 )
                 report["findings"] = verified_findings
             except Exception as e:
@@ -8809,7 +8833,9 @@ async def build_report(target: str,
         "options": {
             "public_only": public_only,
             "active_checks_requested": active_checks,
-            "ai_validation_enabled": ai_validation,
+            "ai_validation_enabled": pipeline_ai_enabled,
+            "ai_scan_classification_enabled": scan_ai_classification_enabled,
+            "ai_verify_min_severity": verify_min_severity,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -8908,7 +8934,7 @@ async def build_report(target: str,
         "severity_distribution": severity_counts,
         "confidence_distribution": confidence_distribution,
         "ai_validation": {
-            "enabled": ai_validation,
+            "enabled": pipeline_ai_enabled,
             "verdicts": ai_verdicts,
         },
         "tools_with_findings": sorted(list(tools_with_findings)),
@@ -9111,11 +9137,12 @@ async def ai_review_findings(
     min_rank = AI_CLASSIFICATION_SEVERITY_ORDER[ai_min_severity]
     ai_eligible_findings: list[dict[str, Any]] = []
     ai_skipped_due_to_severity_ids: set[str] = set()
+    ai_skipped_due_to_disabled_ids: set[str] = set()
     for finding in findings:
         finding_id = finding.get("id")
         if not ai_scan_classification_enabled:
             if isinstance(finding_id, str) and finding_id:
-                ai_skipped_due_to_severity_ids.add(finding_id)
+                ai_skipped_due_to_disabled_ids.add(finding_id)
             continue
         finding_severity = str(finding.get("severity") or "").lower()
         finding_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(finding_severity, 0)
@@ -9394,6 +9421,7 @@ async def ai_review_findings(
         "classification_enabled": ai_scan_classification_enabled,
         "classification_min_severity": ai_min_severity,
         "classification_eligible_findings": len(ai_eligible_findings),
+        "classification_skipped_disabled": len(ai_skipped_due_to_disabled_ids),
         "classification_skipped_by_min_severity": len(ai_skipped_due_to_severity_ids),
         "masking": {"enabled": True, "replacement_host": mask_host},
         "executive_summary": executive_summary,

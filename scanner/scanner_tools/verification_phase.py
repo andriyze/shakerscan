@@ -21,6 +21,21 @@ from typing import Any
 
 from .common import run, get_auth_curl_args
 
+SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
+
+
+def _normalize_min_severity(value: str | None, default: str = "high") -> str:
+    severity = str(value or "").strip().lower()
+    if severity in SEVERITY_ORDER:
+        return severity
+    return default
+
 
 def _coerce_header_value(value: Any) -> str:
     if value is None:
@@ -83,12 +98,12 @@ async def verify_high_severity_findings(
     verify_xss: bool = True,
     verify_sqli: bool = True,
     max_verification_attempts: int = 3,
+    min_severity: str = "high",
 ) -> list[dict]:
     """
-    Attempt to verify High/Critical findings before final report.
+    Attempt to verify findings at/above the configured severity before final report.
 
-    Findings that cannot be verified are:
-    - Downgraded to Medium severity
+    Findings that cannot be verified are downgraded where supported and:
     - Marked with verification_attempted=True
 
     Findings that are verified are:
@@ -101,6 +116,7 @@ async def verify_high_severity_findings(
         verify_xss: Whether to verify XSS findings with browser proof
         verify_sqli: Whether to verify SQLi findings with statistical timing
         max_verification_attempts: Max verification attempts per finding
+        min_severity: Lowest severity eligible for verification (critical/high/medium/low/info)
 
     Returns:
         List of findings with verification status and adjusted severity/confidence
@@ -120,13 +136,15 @@ async def verify_high_severity_findings(
         has_timing_test = False
 
     verified_findings = []
+    normalized_min_severity = _normalize_min_severity(min_severity, default="high")
+    min_rank = SEVERITY_ORDER[normalized_min_severity]
 
     for finding in findings:
         severity = finding.get("severity", "info").lower()
         vuln_type = finding.get("type", "").lower()
 
-        # Only verify high/critical findings
-        if severity not in ("high", "critical"):
+        # Verify findings at or above configured severity threshold.
+        if SEVERITY_ORDER.get(severity, 0) < min_rank:
             verified_findings.append(finding)
             continue
 
@@ -180,7 +198,7 @@ async def verify_high_severity_findings(
 
     if verified_count > 0 or downgraded_count > 0:
         print(
-            f"[verification] Verified {verified_count} findings, downgraded {downgraded_count}",
+            f"[verification] Verified {verified_count} findings, downgraded {downgraded_count} (scope: {normalized_min_severity}+)",
             file=sys.stderr
         )
 

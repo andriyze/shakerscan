@@ -124,6 +124,13 @@ def _is_truthy(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalize_severity(value: Any, default: str = "high") -> str:
+    severity = str(value or "").strip().lower()
+    if severity in SEVERITY_ORDER:
+        return severity
+    return default
+
+
 def _decode_redis_hash(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
@@ -339,12 +346,19 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         or ai_runtime.get("ai_verify_min_severity")
         or AI_VERIFY_MIN_SEVERITY
     ).lower()
-    if ai_classify_min_severity not in SEVERITY_ORDER:
-        ai_classify_min_severity = str(ai_runtime.get("ai_verify_min_severity") or AI_VERIFY_MIN_SEVERITY).lower()
-    if ai_classify_min_severity not in SEVERITY_ORDER:
-        ai_classify_min_severity = "high"
+    ai_classify_min_severity = _normalize_severity(
+        ai_classify_min_severity,
+        default=_normalize_severity(ai_runtime.get("ai_verify_min_severity"), default="high"),
+    )
+    ai_verify_min_severity = _normalize_severity(
+        options.get("ai_verify_min_severity") or ai_runtime.get("ai_verify_min_severity"),
+        default="high",
+    )
 
-    if ai_url and ai_api_key and model:
+    # Scan-time AI should only run when scan classification is explicitly enabled.
+    scan_ai_enabled = bool(ai_scan_classify_enabled)
+
+    if scan_ai_enabled and ai_url and ai_api_key and model:
         cmd.append('--ai')
         cmd.extend(['--ai-url', ai_url])
         cmd.extend(['--ai-api-key', ai_api_key])
@@ -409,8 +423,9 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     checkpoint_file = None
     scan_env = os.environ.copy()
     # Scan-time AI classification is opt-in and severity-gated.
-    scan_env["AI_SCAN_CLASSIFICATION_ENABLED"] = "true" if ai_scan_classify_enabled else "false"
+    scan_env["AI_SCAN_CLASSIFICATION_ENABLED"] = "true" if scan_ai_enabled else "false"
     scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
+    scan_env["AI_VERIFY_MIN_SEVERITY"] = ai_verify_min_severity
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
@@ -2440,7 +2455,7 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
 
-        # Auto-retest high-severity findings (separate from persistence)
+        # Auto-retest severity-gated findings (separate from persistence)
         auto_retests = {"queued": 0, "skipped": 0}
         if target_id and findings and not error:
             try:

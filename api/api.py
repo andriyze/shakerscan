@@ -115,6 +115,18 @@ def _normalize_non_negative_int(value: Any, default: int) -> int:
         return default
 
 
+def _decode_json_value(value: Any) -> Any:
+    """Decode JSON strings returned from JSON/JSONB columns when needed."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
 def _mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -1006,6 +1018,9 @@ class ScanOptions(BaseModel):
     ai_api_key: Optional[str] = None
     model: Optional[str] = None
     ai_mask_host: Optional[str] = None
+    ai_scan_classification_enabled: Optional[bool] = None
+    ai_classify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    ai_verify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
 
     # Authentication options (for authenticated scanning)
     # Session-based auth
@@ -1651,10 +1666,10 @@ async def get_scan(scan_id: str, verified_only: bool = False):
 
     result = dict(scan)
     result['findings'] = [dict(f) for f in findings]
-    if result.get('result') and isinstance(result['result'], str):
-        result['result'] = json.loads(result['result'])
-    if result.get('options') and isinstance(result['options'], str):
-        result['options'] = json.loads(result['options'])
+    if result.get('result') is not None:
+        result['result'] = _decode_json_value(result['result'])
+    if result.get('options') is not None:
+        result['options'] = _decode_json_value(result['options'])
     return result
 
 
@@ -1667,7 +1682,7 @@ async def get_scan_result(scan_id: str):
         )
         if not scan or not scan['result']:
             raise HTTPException(status_code=404, detail="Scan result not found")
-        return scan['result']
+        return _decode_json_value(scan['result'])
 
 
 @app.get("/scans/{scan_id}/logs")
