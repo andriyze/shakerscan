@@ -5,6 +5,7 @@ Unit tests for merging AI retest verdicts into deterministic outcomes.
 import os
 import sys
 import types
+from datetime import datetime
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -14,6 +15,8 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 from worker import (  # noqa: E402
     _merge_ai_result_into_retest_result,
     _result_status_for_verdict,
+    _slot_wait_backoff_seconds,
+    _slot_wait_state,
 )
 
 
@@ -91,3 +94,30 @@ def test_ai_false_positive_does_not_override_existing_non_error_verdict():
     assert merged["verification_mode"] == "deterministic"
     assert merged["verdict"] == "likely_fixed"
     assert merged["result_status"] == "likely_fixed"
+
+
+def test_slot_wait_state_defaults_to_now_and_first_cycle():
+    now = datetime(2026, 2, 9, 6, 0, 0)
+    started_at, cycles, waited = _slot_wait_state({}, now)
+    assert started_at == now
+    assert cycles == 1
+    assert waited == 0
+
+
+def test_slot_wait_state_parses_existing_started_at_and_increments_cycles():
+    started = datetime(2026, 2, 9, 5, 59, 30)
+    now = datetime(2026, 2, 9, 6, 0, 0)
+    started_at, cycles, waited = _slot_wait_state(
+        {"slot_wait_started_at": started.isoformat(), "slot_wait_cycles": 3},
+        now,
+    )
+    assert started_at == started
+    assert cycles == 4
+    assert waited == 30
+
+
+def test_slot_wait_backoff_is_exponential_and_capped():
+    assert _slot_wait_backoff_seconds(1) >= 1
+    assert _slot_wait_backoff_seconds(2) >= _slot_wait_backoff_seconds(1)
+    assert _slot_wait_backoff_seconds(3) >= _slot_wait_backoff_seconds(2)
+    assert _slot_wait_backoff_seconds(50) <= 30

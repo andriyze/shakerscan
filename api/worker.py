@@ -63,6 +63,8 @@ RETEST_SLOT_KEY = os.environ.get("RETEST_SLOT_KEY", "retest:active_workers")
 RETEST_SLOT_TTL_SECONDS = int(os.environ.get("RETEST_SLOT_TTL_SECONDS", "120"))
 RETEST_REQUEUE_DELAY_SECONDS = int(os.environ.get("RETEST_REQUEUE_DELAY_SECONDS", "2"))
 RETEST_QUEUE_MAX_RETRIES = max(1, int(os.environ.get("RETEST_QUEUE_MAX_RETRIES", "5")))
+# Maximum wall-clock time to wait for a retest slot before marking verification failed.
+RETEST_SLOT_WAIT_MAX_SECONDS = max(30, int(os.environ.get("RETEST_SLOT_WAIT_MAX_SECONDS", "900")))
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 
 AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
@@ -920,6 +922,40 @@ def _release_retest_slot(r) -> None:
         pass
 
 
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _slot_wait_state(job_data: dict[str, Any], now: datetime) -> tuple[datetime, int, int]:
+    """
+    Return (wait_started_at, wait_cycles, waited_seconds) for slot contention handling.
+    """
+    wait_started_at = _parse_iso_datetime(job_data.get("slot_wait_started_at")) or now
+    try:
+        previous_cycles = int(job_data.get("slot_wait_cycles") or 0)
+    except (TypeError, ValueError):
+        previous_cycles = 0
+    wait_cycles = max(1, previous_cycles + 1)
+    waited_seconds = max(0, int((now - wait_started_at).total_seconds()))
+    return wait_started_at, wait_cycles, waited_seconds
+
+
+def _slot_wait_backoff_seconds(wait_cycles: int) -> int:
+    base = max(1, RETEST_REQUEUE_DELAY_SECONDS)
+    # Exponential backoff with cap to avoid hot-loop queue churn under saturation.
+    return max(1, min(base * (2 ** min(max(wait_cycles - 1, 0), 4)), 30))
+
+
 def _current_retest_capabilities() -> dict[str, bool]:
     """
     Snapshot proof-engine capabilities for standardized observability.
@@ -1294,14 +1330,17 @@ async def process_finding_retest_job(job_data: dict):
     print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
     now = datetime.utcnow()
     if not _try_acquire_retest_slot(r):
-        # Requeue with bounded retries to avoid global retest saturation loops.
-        next_attempt = attempt + 1
-        if next_attempt > RETEST_QUEUE_MAX_RETRIES:
+        # Wait with bounded backoff/time budget; do not consume retest attempt
+        # counters just because global worker slots are currently saturated.
+        wait_started_at, wait_cycles, waited_seconds = _slot_wait_state(job_data, now)
+        if waited_seconds >= RETEST_SLOT_WAIT_MAX_SECONDS:
             r.hset(retest_key, mapping={
                 "status": "failed",
                 "verification_id": verification_id,
                 "error": "retest_slot_exhausted",
                 "attempt": str(attempt),
+                "slot_wait_cycles": str(wait_cycles),
+                "slot_waited_seconds": str(waited_seconds),
                 "attempts_exhausted": "true",
             })
             r.expire(retest_key, 86400)
@@ -1321,11 +1360,11 @@ async def process_finding_retest_job(job_data: dict):
                             attempts_exhausted = TRUE,
                             retry_class = 'transient',
                             retryable = FALSE,
-                            error_message = 'Retest retries exhausted waiting for worker slot.',
+                            error_message = $3,
                             completed_at = NOW(),
                             updated_at = NOW()
                         WHERE id = $1
-                    """, uuid.UUID(verification_id), attempt)
+                    """, uuid.UUID(verification_id), attempt, f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.")
                     if finding_uuid is not None:
                         await conn.execute(
                             """
@@ -1343,7 +1382,8 @@ async def process_finding_retest_job(job_data: dict):
                 except Exception:
                     pass
             print(
-                f"[retest:{job_id[:8]}] Exhausted retest slot retries (max={RETEST_QUEUE_MAX_RETRIES})",
+                f"[retest:{job_id[:8]}] Exhausted retest slot wait budget "
+                f"({waited_seconds}s >= {RETEST_SLOT_WAIT_MAX_SECONDS}s)",
                 flush=True,
             )
             return
@@ -1354,20 +1394,26 @@ async def process_finding_retest_job(job_data: dict):
             finding_id=str(job_data["finding_id"]),
             submitted_at=str(job_data["submitted_at"]),
             trigger=trigger,
-            attempt=next_attempt,
+            attempt=attempt,
         )
         if requested_mode in {"ai", "deterministic"}:
             requeued_payload["mode"] = requested_mode
+        requeued_payload["slot_wait_started_at"] = wait_started_at.isoformat()
+        requeued_payload["slot_wait_cycles"] = wait_cycles
+        backoff_seconds = _slot_wait_backoff_seconds(wait_cycles)
         r.hset(retest_key, mapping={
             "status": "queued",
             "verification_id": verification_id,
             "requeued_at": now.isoformat(),
             "note": "waiting_for_retest_slot",
-            "attempt": str(next_attempt),
+            "attempt": str(attempt),
+            "slot_wait_cycles": str(wait_cycles),
+            "slot_waited_seconds": str(waited_seconds),
+            "next_backoff_seconds": str(backoff_seconds),
         })
         r.rpush(RETEST_QUEUE_NAME, json.dumps(requeued_payload))
         r.expire(retest_key, 86400)
-        await asyncio.sleep(RETEST_REQUEUE_DELAY_SECONDS)
+        await asyncio.sleep(backoff_seconds)
         return
 
     try:
