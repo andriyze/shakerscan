@@ -845,6 +845,57 @@ def classify_retest_outcome(
     )
 
 
+def _result_status_for_verdict(verdict: str | None) -> str:
+    """Map normalized verdicts to backwards-compatible result_status values."""
+    v = str(verdict or "").lower()
+    if v == "exploited":
+        return "still_vulnerable"
+    if v == "likely_fixed":
+        return "likely_fixed"
+    if v in {"false_positive", "inconclusive", "blocked_by_security", "out_of_scope_internal"}:
+        return "inconclusive"
+    return "error"
+
+
+def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[str, Any]) -> dict[str, Any]:
+    """
+    Merge AI verdict into deterministic retest result.
+
+    AI can upgrade or clarify inconclusive/error deterministic outcomes. When AI
+    provides a supported verdict, treat the verification as completed.
+    """
+    if not isinstance(ai_result, dict):
+        return result
+
+    ai_verdict = str(ai_result.get("verdict") or "").lower()
+    if not ai_verdict:
+        return result
+
+    current_verdict = str(result.get("verdict") or "").lower()
+
+    # Always trust explicit AI exploit confirmation.
+    if ai_verdict == "exploited":
+        result["status"] = "completed"
+        result["result_status"] = "still_vulnerable"
+        result["verdict"] = "exploited"
+        result["verdict_reason"] = ai_result.get("reasoning", "AI verification confirmed vulnerability")
+        result["confidence"] = ai_result.get("confidence")
+        result["verification_mode"] = "ai_driven"
+        return result
+
+    # Only replace deterministic outcomes when they were inconclusive or failed.
+    if current_verdict not in {"", "error", "inconclusive"}:
+        return result
+
+    result["status"] = "completed"
+    result["verification_mode"] = "ai_driven"
+    result["verdict"] = ai_verdict
+    result["verdict_reason"] = ai_result.get("reasoning", "")
+    result["confidence"] = ai_result.get("confidence")
+    result["result_status"] = _result_status_for_verdict(ai_verdict)
+    return result
+
+
 def _severity_allows_auto_retest(severity: str, min_severity: str) -> bool:
     min_rank = SEVERITY_ORDER.get(min_severity, SEVERITY_ORDER["high"])
     sev_rank = SEVERITY_ORDER.get(str(severity or "").lower(), 0)
@@ -1456,25 +1507,8 @@ async def process_finding_retest_job(job_data: dict):
                             target_url=target,
                         )
 
-                        # If AI found it exploited, override the result
-                        if ai_result and ai_result.get("verdict") == "exploited":
-                            result["verdict"] = "exploited"
-                            result["result_status"] = "still_vulnerable"
-                            result["verdict_reason"] = ai_result.get("reasoning", "AI verification confirmed vulnerability")
-                            result["confidence"] = ai_result.get("confidence")
-                            result["verification_mode"] = "ai_driven"
-                        elif ai_result:
-                            # Use AI verdict if more informative than deterministic
-                            result["verification_mode"] = "ai_driven"
-                            if (
-                                result.get("verdict") in {"inconclusive", "error", None}
-                                and ai_result.get("verdict") != "inconclusive"
-                            ):
-                                result["verdict"] = ai_result["verdict"]
-                                result["verdict_reason"] = ai_result.get("reasoning", "")
-                                result["confidence"] = ai_result.get("confidence")
-                                if ai_result["verdict"] in ("likely_fixed", "false_positive"):
-                                    result["result_status"] = ai_result["verdict"]
+                        if ai_result:
+                            result = _merge_ai_result_into_retest_result(result, ai_result)
                 except ImportError:
                     print(f"[retest:{job_id[:8]}] AI verifier module not available", flush=True)
                 except Exception as ai_err:
