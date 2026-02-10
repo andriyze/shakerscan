@@ -52,3 +52,28 @@ def test_normalize_min_severity_defaults_to_high():
     assert vp._normalize_min_severity(None) == "high"
     assert vp._normalize_min_severity("invalid") == "high"
     assert vp._normalize_min_severity("medium") == "medium"
+
+
+def test_verify_findings_can_return_summary():
+    findings = [
+        {"id": "high-generic", "type": "generic", "severity": "high"},
+        {"id": "low-generic", "type": "generic", "severity": "low"},
+    ]
+
+    updated, summary = asyncio.run(
+        vp.verify_high_severity_findings(
+            findings=findings,
+            verify_xss=False,
+            verify_sqli=False,
+            min_severity="medium",
+            include_summary=True,
+        )
+    )
+
+    assert len(updated) == 2
+    assert summary["min_severity"] == "medium"
+    assert summary["eligible_findings"] == 1
+    assert summary["attempted"] == 0
+    assert summary["verified"] == 0
+    assert summary["downgraded"] == 0
+    assert summary["skipped"] == 0

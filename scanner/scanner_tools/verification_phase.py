@@ -99,7 +99,8 @@ async def verify_high_severity_findings(
     verify_sqli: bool = True,
     max_verification_attempts: int = 3,
     min_severity: str = "high",
-) -> list[dict]:
+    include_summary: bool = False,
+) -> list[dict] | tuple[list[dict], dict]:
     """
     Attempt to verify findings at/above the configured severity before final report.
 
@@ -119,7 +120,8 @@ async def verify_high_severity_findings(
         min_severity: Lowest severity eligible for verification (critical/high/medium/low/info)
 
     Returns:
-        List of findings with verification status and adjusted severity/confidence
+        List of findings with verification status and adjusted severity/confidence.
+        If include_summary=True, returns (findings, summary_dict).
     """
     # Import verification tools (with graceful degradation)
     try:
@@ -138,6 +140,9 @@ async def verify_high_severity_findings(
     verified_findings = []
     normalized_min_severity = _normalize_min_severity(min_severity, default="high")
     min_rank = SEVERITY_ORDER[normalized_min_severity]
+    eligible_count = 0
+    attempted_count = 0
+    skipped_count = 0
 
     for finding in findings:
         severity = finding.get("severity", "info").lower()
@@ -148,8 +153,14 @@ async def verify_high_severity_findings(
             verified_findings.append(finding)
             continue
 
+        eligible_count += 1
+
         # Skip if already verified
         if finding.get("verified"):
+            if finding.get("verification_attempted"):
+                attempted_count += 1
+            if finding.get("verification_skipped"):
+                skipped_count += 1
             verified_findings.append(finding)
             continue
 
@@ -190,17 +201,32 @@ async def verify_high_severity_findings(
                     evidence.append("Verification failed or skipped - downgraded severity")
                 finding["evidence"] = evidence
 
+        if finding.get("verification_attempted"):
+            attempted_count += 1
+        if finding.get("verification_skipped"):
+            skipped_count += 1
         verified_findings.append(finding)
 
     # Report verification stats
     verified_count = sum(1 for f in verified_findings if f.get("verified"))
     downgraded_count = sum(1 for f in verified_findings if f.get("verification_attempted") and not f.get("verified"))
+    summary = {
+        "min_severity": normalized_min_severity,
+        "eligible_findings": eligible_count,
+        "attempted": attempted_count,
+        "verified": verified_count,
+        "downgraded": downgraded_count,
+        "skipped": skipped_count,
+    }
 
     if verified_count > 0 or downgraded_count > 0:
         print(
             f"[verification] Verified {verified_count} findings, downgraded {downgraded_count} (scope: {normalized_min_severity}+)",
             file=sys.stderr
         )
+
+    if include_summary:
+        return verified_findings, summary
 
     return verified_findings
 

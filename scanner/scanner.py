@@ -8678,6 +8678,16 @@ async def build_report(target: str,
             for f in pre_verification_findings
             if AI_CLASSIFICATION_SEVERITY_ORDER.get(str(f.get("severity") or "").lower(), 0) >= verify_min_rank
         )
+        verification_summary = {
+            "enabled": True,
+            "min_severity": verify_min_severity,
+            "eligible_findings": verifiable_count,
+            "attempted": 0,
+            "verified": 0,
+            "downgraded": 0,
+            "skipped": 0,
+            "error": None,
+        }
 
         if verifiable_count > 0:
             print(
@@ -8685,18 +8695,28 @@ async def build_report(target: str,
                 file=sys.stderr,
             )
             try:
-                verified_findings = await verify_high_severity_findings(
+                verification_result = await verify_high_severity_findings(
                     findings=pre_verification_findings,
                     auth_session=auth_session,
                     verify_xss=True,
                     verify_sqli=True,
                     max_verification_attempts=3,
                     min_severity=verify_min_severity,
+                    include_summary=True,
                 )
+                if isinstance(verification_result, tuple):
+                    verified_findings, phase_summary = verification_result
+                else:
+                    verified_findings, phase_summary = verification_result, {}
+                if isinstance(phase_summary, dict):
+                    verification_summary.update(phase_summary)
                 report["findings"] = verified_findings
             except Exception as e:
                 print(f"[verification] Warning: Verification phase failed: {e}", file=sys.stderr)
+                verification_summary["error"] = str(e)
                 # Continue with unverified findings
+
+        report["verification_phase"] = {"summary": verification_summary}
 
     if verified_findings_only:
         def _is_verified_exploited(finding: dict[str, Any]) -> bool:

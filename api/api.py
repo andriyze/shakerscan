@@ -127,6 +127,30 @@ def _decode_json_value(value: Any) -> Any:
     return value
 
 
+SENSITIVE_SCAN_OPTION_KEYS = {
+    "ai_api_key",
+    "auth_cookies",
+    "auth_header",
+    "auth_headers_json",
+    "auth_scenario_json",
+    "login_password",
+    "user2_cookies",
+    "user2_header",
+}
+
+
+def _sanitize_scan_options(value: Any) -> Any:
+    """Decode scan options and mask sensitive credentials before returning."""
+    options = _decode_json_value(value)
+    if not isinstance(options, dict):
+        return options
+    masked = dict(options)
+    for key in SENSITIVE_SCAN_OPTION_KEYS:
+        if key in masked and masked.get(key) not in (None, "", [], {}):
+            masked[key] = "***"
+    return masked
+
+
 def _mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -1627,8 +1651,15 @@ async def list_scans(
         rows = await conn.fetch(query, *params)
         total = await conn.fetchval(count_query, *count_params)
 
+    scans = []
+    for row in rows:
+        scan = dict(row)
+        if scan.get("options") is not None:
+            scan["options"] = _sanitize_scan_options(scan["options"])
+        scans.append(scan)
+
     return {
-        'scans': [dict(r) for r in rows],
+        'scans': scans,
         'total': total,
         'limit': limit,
         'offset': offset
@@ -1669,7 +1700,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     if result.get('result') is not None:
         result['result'] = _decode_json_value(result['result'])
     if result.get('options') is not None:
-        result['options'] = _decode_json_value(result['options'])
+        result['options'] = _sanitize_scan_options(result['options'])
     return result
 
 
