@@ -36,6 +36,9 @@ export default function AISettingsPanel() {
   const [autoRetestEnabledInput, setAutoRetestEnabledInput] = useState(true)
   const [autoRetestMinSeverityInput, setAutoRetestMinSeverityInput] = useState<Severity>('medium')
   const [autoRetestMaxPerScanInput, setAutoRetestMaxPerScanInput] = useState('25')
+  const [verificationMinSeverityInput, setVerificationMinSeverityInput] = useState<Severity>('medium')
+  const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
+  const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(true)
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
   const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
@@ -55,6 +58,9 @@ export default function AISettingsPanel() {
     setAutoRetestEnabledInput(Boolean(settings.auto_retest_on_scan_complete))
     setAutoRetestMinSeverityInput(settings.auto_retest_min_severity || 'medium')
     setAutoRetestMaxPerScanInput(String(settings.auto_retest_max_per_scan ?? 25))
+    setVerificationMinSeverityInput((settings as Record<string, any>).verification_min_severity || settings.auto_retest_min_severity || 'medium')
+    setAIEscalationMinSeverityInput((settings as Record<string, any>).ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
+    setProofRequiredForSmartInput((settings as Record<string, any>).proof_required_for_smart !== false)
     setScanAPIKeyInput('')
     setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
@@ -102,8 +108,11 @@ export default function AISettingsPanel() {
         auto_retest_on_scan_complete: autoRetestEnabledInput,
         auto_retest_min_severity: autoRetestMinSeverityInput,
         auto_retest_max_per_scan: Math.max(0, Number.parseInt(autoRetestMaxPerScanInput || '0', 10) || 0),
+        verification_min_severity: verificationMinSeverityInput,
+        ai_escalation_min_severity: aiEscalationMinSeverityInput,
+        proof_required_for_smart: proofRequiredForSmartInput,
         persist_to_env: persistAIToEnv,
-      }
+      } as AISettingsUpdate & Record<string, any>
 
       if (clearScanAPIKey) {
         payload.ai_api_key = ''
@@ -428,6 +437,46 @@ export default function AISettingsPanel() {
                 {verifyProbeMessage}
               </span>
             )}
+          </div>
+          <div className="pt-2 border-t border-gray-800 mt-2 space-y-2">
+            <h4 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Verification Policy</h4>
+            <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+              <input
+                type="checkbox"
+                checked={proofRequiredForSmartInput}
+                onChange={(e) => setProofRequiredForSmartInput(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              />
+              Proof required for smart scan reports (no exploit = no report)
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Verification Min Severity (scan-time + retest)</span>
+              <select
+                value={verificationMinSeverityInput}
+                onChange={(e) => setVerificationMinSeverityInput(e.target.value as Severity)}
+                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="critical">critical</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="info">info</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">AI Escalation Min Severity</span>
+              <select
+                value={aiEscalationMinSeverityInput}
+                onChange={(e) => setAIEscalationMinSeverityInput(e.target.value as Severity)}
+                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="critical">critical</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="info">info</option>
+              </select>
+            </label>
           </div>
         </div>
       </div>

@@ -34,6 +34,7 @@ from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
     SUPPORTED_RETEST_VERDICTS,
+    VerificationPolicy,
     build_replay_commands,
     build_retest_job_payload,
     extract_auth_context,
@@ -192,6 +193,21 @@ def _default_ai_settings() -> dict[str, Any]:
             os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25"),
             default=25,
         ),
+        # Unified verification policy fields (canonical names)
+        "verification_min_severity": _normalize_severity(
+            os.environ.get("VERIFICATION_MIN_SEVERITY")
+            or os.environ.get("AUTO_RETEST_MIN_SEVERITY", "medium"),
+            default="medium",
+        ),
+        "ai_escalation_min_severity": _normalize_severity(
+            os.environ.get("AI_ESCALATION_MIN_SEVERITY")
+            or os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"),
+            default="high",
+        ),
+        "proof_required_for_smart": _is_truthy(
+            os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
+            default=True,
+        ),
     }
 
 
@@ -258,6 +274,25 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings.get("ai_classify_min_severity"),
         default=settings.get("ai_verify_min_severity") or "high",
     )
+    # Unified policy fields: apply overrides and keep bidirectional sync
+    if "verification_min_severity" in overrides:
+        settings["verification_min_severity"] = _normalize_severity(
+            overrides.get("verification_min_severity"), default=settings["verification_min_severity"]
+        )
+        settings["auto_retest_min_severity"] = settings["verification_min_severity"]
+    else:
+        settings["verification_min_severity"] = settings["auto_retest_min_severity"]
+    if "ai_escalation_min_severity" in overrides:
+        settings["ai_escalation_min_severity"] = _normalize_severity(
+            overrides.get("ai_escalation_min_severity"), default=settings["ai_escalation_min_severity"]
+        )
+        settings["ai_verify_min_severity"] = settings["ai_escalation_min_severity"]
+    else:
+        settings["ai_escalation_min_severity"] = settings["ai_verify_min_severity"]
+    if "proof_required_for_smart" in overrides:
+        settings["proof_required_for_smart"] = _is_truthy(
+            overrides.get("proof_required_for_smart"), default=settings["proof_required_for_smart"]
+        )
     return settings
 
 
@@ -284,6 +319,10 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
             settings.get("auto_retest_max_per_scan"),
             default=0,
         ),
+        # Unified verification policy fields
+        "verification_min_severity": settings.get("verification_min_severity") or settings.get("auto_retest_min_severity") or "medium",
+        "ai_escalation_min_severity": settings.get("ai_escalation_min_severity") or settings.get("ai_verify_min_severity") or "high",
+        "proof_required_for_smart": bool(settings.get("proof_required_for_smart", True)),
     }
 
 
@@ -1070,7 +1109,7 @@ class ScanOptions(BaseModel):
     auth_scenario_json: Optional[str] = None  # JSON auth DSL with login flow/success condition/TOTP secret
     focus_rules_json: Optional[str] = None  # JSON array of scope focus rules
     avoid_rules_json: Optional[str] = None  # JSON array of scope avoid rules
-    verified_findings_only: bool = False
+    verified_findings_only: Optional[bool] = None
 
     # Smart scan tuning options
     no_early_stop: bool = False                    # Disable early stopping in smart scan
@@ -1225,6 +1264,10 @@ class AISettingsUpdate(BaseModel):
     auto_retest_on_scan_complete: Optional[bool] = None
     auto_retest_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     auto_retest_max_per_scan: Optional[int] = Field(default=None, ge=0, le=500)
+    # Unified verification policy fields
+    verification_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    ai_escalation_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    proof_required_for_smart: Optional[bool] = None
     persist_to_env: bool = False
 
 
@@ -1348,6 +1391,16 @@ async def update_ai_settings(request: AISettingsUpdate):
     if request.auto_retest_max_per_scan is not None:
         updates["auto_retest_max_per_scan"] = str(max(0, int(request.auto_retest_max_per_scan)))
 
+    # Unified verification policy fields (bidirectional sync with legacy names)
+    if request.verification_min_severity is not None:
+        updates["verification_min_severity"] = _normalize_severity(request.verification_min_severity, default="medium")
+        updates["auto_retest_min_severity"] = updates["verification_min_severity"]
+    if request.ai_escalation_min_severity is not None:
+        updates["ai_escalation_min_severity"] = _normalize_severity(request.ai_escalation_min_severity, default="high")
+        updates["ai_verify_min_severity"] = updates["ai_escalation_min_severity"]
+    if request.proof_required_for_smart is not None:
+        updates["proof_required_for_smart"] = "true" if request.proof_required_for_smart else "false"
+
     if updates:
         r.hset(AI_SETTINGS_KEY, mapping=updates)
     if deletes:
@@ -1374,6 +1427,9 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AUTO_RETEST_ON_SCAN_COMPLETE": "true" if effective.get("auto_retest_on_scan_complete") else "false",
             "AUTO_RETEST_MIN_SEVERITY": effective.get("auto_retest_min_severity") or "medium",
             "AUTO_RETEST_MAX_PER_SCAN": str(max(0, int(effective.get("auto_retest_max_per_scan") or 0))),
+            "VERIFICATION_MIN_SEVERITY": effective.get("verification_min_severity") or "medium",
+            "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
+            "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", True) else "false",
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
 

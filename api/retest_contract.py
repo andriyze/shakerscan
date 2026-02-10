@@ -9,12 +9,115 @@ payload semantics, type normalization, and retry classification consistent.
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
+
+# ---------------------------------------------------------------------------
+# Verification Policy: single source of truth for severity gates
+# ---------------------------------------------------------------------------
+
+SEVERITY_ORDER: dict[str, int] = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
+
+
+def _normalize_severity(value: str | None, default: str = "high") -> str:
+    severity = str(value or "").strip().lower()
+    return severity if severity in SEVERITY_ORDER else default
+
+
+@dataclass(frozen=True)
+class VerificationPolicy:
+    """Single source of truth for all verification severity gates.
+
+    Workers, scanner, and API should all derive thresholds from a single
+    ``VerificationPolicy`` instance rather than reading independent env vars.
+    """
+
+    verification_min_severity: str = "medium"
+    """Minimum finding severity for *any* verification (scan-time + retest)."""
+
+    ai_escalation_min_severity: str = "high"
+    """Minimum finding severity to escalate from deterministic to AI tier."""
+
+    auto_retest_enabled: bool = True
+    auto_retest_max_per_scan: int = 25
+    proof_required_for_smart: bool = True
+    """When True, smart scans default to verified-findings-only output."""
+
+    @classmethod
+    def from_env(cls, overrides: dict[str, Any] | None = None) -> "VerificationPolicy":
+        """Build policy from env vars with optional Redis/runtime overrides."""
+        ov = overrides or {}
+
+        verification_min = _normalize_severity(
+            ov.get("verification_min_severity")
+            or ov.get("auto_retest_min_severity")
+            or os.environ.get("VERIFICATION_MIN_SEVERITY")
+            or os.environ.get("AUTO_RETEST_MIN_SEVERITY"),
+            default="medium",
+        )
+        ai_min = _normalize_severity(
+            ov.get("ai_escalation_min_severity")
+            or ov.get("ai_verify_min_severity")
+            or os.environ.get("AI_ESCALATION_MIN_SEVERITY")
+            or os.environ.get("AI_VERIFY_MIN_SEVERITY"),
+            default="high",
+        )
+
+        def _truthy(val: Any, default: bool) -> bool:
+            if val is None:
+                return default
+            return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+        auto_enabled = _truthy(
+            ov.get("auto_retest_on_scan_complete")
+            if "auto_retest_on_scan_complete" in (ov or {})
+            else os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true"),
+            default=True,
+        )
+
+        max_per = 25
+        raw_max = ov.get("auto_retest_max_per_scan") if ov.get("auto_retest_max_per_scan") is not None else os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25")
+        try:
+            max_per = max(0, int(raw_max))
+        except (TypeError, ValueError):
+            pass
+
+        proof_req = _truthy(
+            ov.get("proof_required_for_smart")
+            if "proof_required_for_smart" in (ov or {})
+            else os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
+            default=True,
+        )
+
+        return cls(
+            verification_min_severity=verification_min,
+            ai_escalation_min_severity=ai_min,
+            auto_retest_enabled=auto_enabled,
+            auto_retest_max_per_scan=max_per,
+            proof_required_for_smart=proof_req,
+        )
+
+    def severity_allows_verification(self, severity: str) -> bool:
+        return SEVERITY_ORDER.get(severity.lower(), 0) >= SEVERITY_ORDER.get(
+            self.verification_min_severity, SEVERITY_ORDER["medium"]
+        )
+
+    def severity_allows_ai(self, severity: str) -> bool:
+        return SEVERITY_ORDER.get(severity.lower(), 0) >= SEVERITY_ORDER.get(
+            self.ai_escalation_min_severity, SEVERITY_ORDER["high"]
+        )
 
 SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "xss",
@@ -24,10 +127,17 @@ SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "open_redirect",
     "cors",
     "2fa_bypass",
+    "command_injection",
+    "ssti",
+    "xxe",
+    "jwt",
+    "idor",
+    "bola",
 )
 
 SUPPORTED_RETEST_VERDICTS: tuple[str, ...] = (
     "exploited",
+    "likely_vulnerable",
     "blocked_by_security",
     "out_of_scope_internal",
     "false_positive",
@@ -62,6 +172,30 @@ RETEST_TYPE_ALIASES: dict[str, str] = {
     "mfa-bypass": "2fa_bypass",
     "otp_bypass": "2fa_bypass",
     "otp-bypass": "2fa_bypass",
+    "command_injection": "command_injection",
+    "command-injection": "command_injection",
+    "os_command_injection": "command_injection",
+    "os-command-injection": "command_injection",
+    "rce": "command_injection",
+    "remote_code_execution": "command_injection",
+    "ssti": "ssti",
+    "server_side_template_injection": "ssti",
+    "server-side-template-injection": "ssti",
+    "template_injection": "ssti",
+    "template-injection": "ssti",
+    "xxe": "xxe",
+    "xml_external_entity": "xxe",
+    "xml-external-entity": "xxe",
+    "jwt": "jwt",
+    "jwt_weakness": "jwt",
+    "jwt-weakness": "jwt",
+    "jwt_vulnerability": "jwt",
+    "idor": "idor",
+    "insecure_direct_object_reference": "idor",
+    "insecure-direct-object-reference": "idor",
+    "bola": "bola",
+    "broken_object_level_authorization": "bola",
+    "broken-object-level-authorization": "bola",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
@@ -72,6 +206,12 @@ DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "open_redirect": "https://example.org/",
     "cors": "https://evil.example.org",
     "2fa_bypass": "000000",
+    "command_injection": "; id",
+    "ssti": "{{7*7}}",
+    "xxe": '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>',
+    "jwt": '{"alg":"none"}',
+    "idor": "",
+    "bola": "",
 }
 
 # Ladder names intentionally use stable identifiers so UI/reporting can
@@ -84,6 +224,12 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "open_redirect": ["query_redirect_param", "post_redirect_param", "location_header_check", "ai_reasoning"],
     "cors": ["origin_reflection_probe", "wildcard_credentials_probe", "ai_reasoning"],
     "2fa_bypass": ["otp_bruteforce_window", "ai_reasoning"],
+    "command_injection": ["oob_callback", "time_delay_proof", "output_injection", "ai_reasoning"],
+    "ssti": ["template_expression_proof", "error_based_detection", "ai_reasoning"],
+    "xxe": ["oob_xxe", "file_read_xxe", "ai_reasoning"],
+    "jwt": ["none_algorithm", "weak_secret_bruteforce", "signature_strip", "ai_reasoning"],
+    "idor": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
+    "bola": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
 }
 
 RETRY_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -160,6 +306,18 @@ def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
             finding_type = "cors"
         elif "2fa bypass" in title or "mfa bypass" in title or tool in {"2fa_bypass", "mfa_bypass"}:
             finding_type = "2fa_bypass"
+        elif "command injection" in title or "rce" in title or "remote code execution" in title or tool in {"commix"}:
+            finding_type = "command_injection"
+        elif "ssti" in title or "template injection" in title:
+            finding_type = "ssti"
+        elif "xxe" in title or "xml external entity" in title:
+            finding_type = "xxe"
+        elif "jwt" in title:
+            finding_type = "jwt"
+        elif "bola" in title or "broken object level" in title or tool in {"smart_bola", "bola"}:
+            finding_type = "bola"
+        elif "idor" in title or "insecure direct object" in title:
+            finding_type = "idor"
 
     target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
     original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url

@@ -23,6 +23,7 @@ import redis
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
+    VerificationPolicy,
     auth_context_to_headers,
     build_replay_commands,
     build_retest_job_payload,
@@ -81,11 +82,14 @@ RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:wa
 RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 
-AUTO_RETEST_ON_SCAN_COMPLETE = os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true").lower() in {
-    "1", "true", "yes", "on"
-}
-AUTO_RETEST_MIN_SEVERITY = os.environ.get("AUTO_RETEST_MIN_SEVERITY", "medium").lower()
-AUTO_RETEST_MAX_PER_SCAN = max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", "25")))
+# Verification policy: single source of truth for severity gates.
+# Legacy env vars (AUTO_RETEST_MIN_SEVERITY, AI_VERIFY_MIN_SEVERITY) are still
+# read as fallbacks inside VerificationPolicy.from_env().
+_DEFAULT_POLICY = VerificationPolicy.from_env()
+
+AUTO_RETEST_ON_SCAN_COMPLETE = _DEFAULT_POLICY.auto_retest_enabled
+AUTO_RETEST_MIN_SEVERITY = _DEFAULT_POLICY.verification_min_severity
+AUTO_RETEST_MAX_PER_SCAN = _DEFAULT_POLICY.auto_retest_max_per_scan
 AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
 
 # AI verification (opt-in, Tier 2 after deterministic provers)
@@ -95,20 +99,14 @@ AI_VERIFY_API_KEY = os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("A
 AI_VERIFY_MODEL = os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929")
 AI_VERIFY_FALLBACK_MODEL = os.environ.get("AI_VERIFY_FALLBACK_MODEL", "")
 AI_VERIFY_MAX_PER_SCAN = max(0, int(os.environ.get("AI_VERIFY_MAX_PER_SCAN", "10")))
-AI_VERIFY_MIN_SEVERITY = os.environ.get("AI_VERIFY_MIN_SEVERITY", "high").lower()
+AI_VERIFY_MIN_SEVERITY = _DEFAULT_POLICY.ai_escalation_min_severity
 AI_VERIFY_USE_BROWSER = os.environ.get("AI_VERIFY_USE_BROWSER", "true").lower() in {"1", "true", "yes", "on"}
 AI_SCAN_CLASSIFICATION_ENABLED = os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false").lower() in {
     "1", "true", "yes", "on"
 }
 AI_CLASSIFY_MIN_SEVERITY = os.environ.get("AI_CLASSIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY).lower()
 
-SEVERITY_ORDER = {
-    "critical": 5,
-    "high": 4,
-    "medium": 3,
-    "low": 2,
-    "info": 1,
-}
+from retest_contract import SEVERITY_ORDER
 
 # Database pool (initialized in main)
 db_pool = None
@@ -405,8 +403,10 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.extend(['--focus-rules-json', options['focus_rules_json']])
     if options.get('avoid_rules_json'):
         cmd.extend(['--avoid-rules-json', options['avoid_rules_json']])
-    if options.get('verified_findings_only'):
+    if options.get('verified_findings_only') is True:
         cmd.append('--verified-findings-only')
+    elif options.get('verified_findings_only') is False:
+        cmd.append('--no-verified-findings-only')
 
     # Log command (mask API key and sensitive auth data)
     sensitive_flags = ['--ai-api-key', '--auth-cookies', '--auth-header', '--auth-headers-json',
@@ -426,6 +426,10 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     scan_env["AI_SCAN_CLASSIFICATION_ENABLED"] = "true" if scan_ai_enabled else "false"
     scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
     scan_env["AI_VERIFY_MIN_SEVERITY"] = ai_verify_min_severity
+    # Pass unified policy env vars so scanner picks up consolidated thresholds
+    scan_env["VERIFICATION_MIN_SEVERITY"] = ai_verify_min_severity
+    _policy_for_env = VerificationPolicy.from_env(overrides=ai_runtime)
+    scan_env["PROOF_REQUIRED_FOR_SMART"] = "true" if _policy_for_env.proof_required_for_smart else "false"
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
@@ -1035,6 +1039,12 @@ RETRYABLE_AI_ERROR_PATTERNS: tuple[str, ...] = (
     "timed out",
     "temporarily unavailable",
     "rate limit",
+    "overloaded",
+    "server_error",
+    "internal server error",
+    "service unavailable",
+    "bad gateway",
+    "capacity",
     "429",
     "500",
     "502",
@@ -1042,10 +1052,33 @@ RETRYABLE_AI_ERROR_PATTERNS: tuple[str, ...] = (
     "504",
 )
 
+NON_RETRYABLE_AI_ERROR_PATTERNS: tuple[str, ...] = (
+    "401",
+    "403",
+    "invalid_api_key",
+    "invalid api key",
+    "unauthorized",
+    "model_not_found",
+    "model not found",
+    "content_policy",
+    "content policy",
+    "billing",
+    "quota exceeded",
+)
+
+
+def _is_non_retryable_ai_error(error_text: str | None) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    return any(pattern in text for pattern in NON_RETRYABLE_AI_ERROR_PATTERNS)
+
 
 def _is_retryable_ai_error(error_text: str | None) -> bool:
     text = str(error_text or "").strip().lower()
     if not text:
+        return False
+    if _is_non_retryable_ai_error(text):
         return False
     return any(pattern in text for pattern in RETRYABLE_AI_ERROR_PATTERNS)
 
@@ -1106,6 +1139,8 @@ def _register_ai_circuit_failure(r, error_text: str, now: datetime) -> tuple[boo
 def _clear_ai_circuit_state(r) -> None:
     try:
         r.delete(RETEST_AI_CIRCUIT_KEY)
+        # Signal that blocked retests should be re-queued on next watchdog cycle
+        r.set("retest:ai:circuit_recovered", "1", ex=120)
     except Exception:
         pass
 
@@ -1147,14 +1182,19 @@ async def run_finding_retest(verification: dict) -> dict:
     try:
         from scanner_tools.proof_of_exploit import (
             end_scan_session,
+            prove_bola,
+            prove_command_injection,
             prove_cors,
+            prove_jwt,
             prove_open_redirect,
             prove_path_traversal,
             prove_sqli,
             prove_ssrf,
             prove_ssrf_oob,
+            prove_ssti,
             prove_xss,
             prove_xss_headless,
+            prove_xxe,
             start_scan_session,
         )
     except ImportError as e:
@@ -1285,47 +1325,34 @@ async def run_finding_retest(verification: dict) -> dict:
     steps_tried: list[str] = []
     step_attempts: list[dict[str, Any]] = []
 
-    # Map ladder step names to prover calls.
-    # Steps intentionally vary inputs so ladder stages are not no-op retries.
-    def _call_prover(step_name: str):
-        step_meta: dict[str, Any] = {"step": step_name}
-        param = inputs.get("param", "")
+    # Map ladder step names to prover calls via shared verification engine.
+    from scanner_tools.verification_engine import dispatch_ladder_step
 
-        if finding_type == "xss":
-            payload = inputs.get("payload") or None
-            if step_name == "headless_dom_execution":
-                payload = payload or "<script>alert(1)</script>"
-                step_meta["payload"] = payload
-                return prove_xss_headless(test_url, param, payload), step_meta
-            if step_name == "reflection_context":
-                payload = "<script>alert(1)</script>"
-            elif step_name == "alternate_payloads":
-                payload = "<svg onload=alert(1)>"
-            step_meta["payload"] = payload or ""
-            return prove_xss(test_url, param, "", payload), step_meta
-        if finding_type == "sqli":
-            dbms_hint = inputs.get("evidence", {}).get("dbms")
-            if step_name == "boolean_diff":
-                dbms_hint = None
-            elif step_name == "timing_fallback":
-                dbms_hint = "generic"
-            step_meta["dbms_hint"] = dbms_hint or "auto"
-            return prove_sqli(test_url, param, "", dbms_hint), step_meta
-        if finding_type == "ssrf":
-            step_meta["strategy"] = step_name
-            if step_name == "oob_callback":
-                return prove_ssrf_oob(test_url, param, ""), step_meta
-            return prove_ssrf(test_url, param, ""), step_meta
-        if finding_type == "path_traversal":
-            step_meta["strategy"] = step_name
-            return prove_path_traversal(test_url, param, ""), step_meta
-        if finding_type == "open_redirect":
-            step_meta["strategy"] = step_name
-            return prove_open_redirect(test_url, param, ""), step_meta
-        if finding_type == "cors":
-            step_meta["strategy"] = step_name
-            return prove_cors(test_url), step_meta
-        return None, step_meta
+    _prover_map = {
+        "prove_xss": prove_xss,
+        "prove_xss_headless": prove_xss_headless,
+        "prove_sqli": prove_sqli,
+        "prove_ssrf": prove_ssrf,
+        "prove_ssrf_oob": prove_ssrf_oob,
+        "prove_path_traversal": prove_path_traversal,
+        "prove_open_redirect": prove_open_redirect,
+        "prove_cors": prove_cors,
+        "prove_command_injection": prove_command_injection,
+        "prove_ssti": prove_ssti,
+        "prove_xxe": prove_xxe,
+        "prove_jwt": prove_jwt,
+        "prove_bola": prove_bola,
+    }
+
+    def _call_prover(step_name: str):
+        param = inputs.get("param", "")
+        payload = inputs.get("payload") or None
+        evidence = inputs.get("evidence", {})
+        return dispatch_ladder_step(
+            finding_type, step_name, test_url, param, payload,
+            evidence=evidence,
+            **_prover_map,
+        )
 
     try:
         try:
@@ -1627,7 +1654,8 @@ async def process_finding_retest_job(job_data: dict):
                 or ai_runtime.get("ai_model_fallback")
                 or AI_VERIFY_FALLBACK_MODEL
             )
-            ai_verify_min_severity = str(ai_runtime.get("ai_verify_min_severity") or AI_VERIFY_MIN_SEVERITY).lower()
+            _retest_policy = VerificationPolicy.from_env(overrides=ai_runtime)
+            ai_verify_min_severity = _retest_policy.ai_escalation_min_severity
             ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
             # Tier 1: Deterministic proof (fast, free) — skip if forced AI
@@ -1780,8 +1808,29 @@ async def process_finding_retest_job(job_data: dict):
                                 f"[retest:{job_id[:8]}] AI circuit opened after {error_count} retryable errors",
                                 flush=True,
                             )
+                    elif ai_failure_error and not _is_retryable_ai_error(ai_failure_error):
+                        # Non-retryable AI error: don't trip circuit breaker
+                        pass
                     elif ai_result and not ai_result.get("error"):
                         _clear_ai_circuit_state(r)
+
+            # Deterministic fallback: if AI was unavailable and deterministic tier
+            # found partial evidence, promote from inconclusive → likely_vulnerable.
+            _current_verdict = str(result.get("verdict") or "").lower()
+            if _current_verdict == "inconclusive" and result.get("deterministic_exhausted"):
+                _proof = result.get("proof")
+                _has_partial_evidence = (
+                    (isinstance(_proof, dict) and not _proof.get("proven") and _proof.get("evidence_type"))
+                    or result.get("attempt_count", 0) > 0
+                )
+                if _has_partial_evidence:
+                    result["verdict"] = "likely_vulnerable"
+                    result["verdict_reason"] = (
+                        (result.get("verdict_reason") or "")
+                        + " [promoted from inconclusive: deterministic tier found partial evidence]"
+                    ).strip()
+                    result["result_status"] = "likely_vulnerable"
+                    print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
 
             completed_at = datetime.utcnow()
             verification_mode = result.get("verification_mode", "deterministic")
@@ -1921,11 +1970,10 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
     This is a best-effort policy hook and should never fail the scan job itself.
     """
     runtime_settings = _load_runtime_ai_settings()
-    auto_retest_enabled = bool(runtime_settings.get("auto_retest_on_scan_complete"))
-    auto_retest_max_per_scan = max(0, int(runtime_settings.get("auto_retest_max_per_scan") or 0))
-    auto_retest_min_severity = str(runtime_settings.get("auto_retest_min_severity") or AUTO_RETEST_MIN_SEVERITY).lower()
-    if auto_retest_min_severity not in SEVERITY_ORDER:
-        auto_retest_min_severity = AUTO_RETEST_MIN_SEVERITY
+    policy = VerificationPolicy.from_env(overrides=runtime_settings)
+    auto_retest_enabled = policy.auto_retest_enabled
+    auto_retest_max_per_scan = policy.auto_retest_max_per_scan
+    auto_retest_min_severity = policy.verification_min_severity
 
     if not auto_retest_enabled or auto_retest_max_per_scan <= 0:
         return {"queued": 0, "skipped": 0}
@@ -2249,6 +2297,60 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
             flush=True,
         )
     return {"requeued": requeued, "failed": failed}
+
+
+RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS = max(1, int(os.environ.get("RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS", "24")))
+RETEST_INCONCLUSIVE_MAX_REQUEUE = max(0, int(os.environ.get("RETEST_INCONCLUSIVE_MAX_REQUEUE", "25")))
+
+
+async def requeue_circuit_recovered_retests() -> dict[str, int]:
+    """Re-queue inconclusive retests that were blocked by AI circuit breaker.
+
+    Called from the watchdog loop when the circuit-recovered signal is set.
+    Also handles stale inconclusive findings older than the retry window.
+    """
+    r = get_redis()
+    recovered_signal = r.get("retest:ai:circuit_recovered")
+    if not recovered_signal:
+        return {"requeued": 0}
+
+    r.delete("retest:ai:circuit_recovered")
+    requeued = 0
+    try:
+        async with db_pool.acquire() as conn:
+            cutoff = datetime.utcnow() - timedelta(hours=RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS)
+            rows = await conn.fetch("""
+                SELECT fv.id, fv.finding_id, fv.retry_class, fv.attempt_count
+                FROM finding_verifications fv
+                WHERE fv.verdict = 'inconclusive'
+                  AND fv.retry_class IN ('transient', 'rate_limited')
+                  AND fv.retryable = TRUE
+                  AND fv.completed_at < $1
+                ORDER BY fv.completed_at ASC
+                LIMIT $2
+            """, cutoff, RETEST_INCONCLUSIVE_MAX_REQUEUE)
+
+            for row in rows:
+                verification_id = str(row["id"])
+                finding_id = str(row["finding_id"])
+                job_id = f"circuit-recovery-{uuid.uuid4().hex[:12]}"
+                now_iso = datetime.utcnow().isoformat()
+                payload = build_retest_job_payload(
+                    job_id=job_id,
+                    verification_id=verification_id,
+                    finding_id=finding_id,
+                    submitted_at=now_iso,
+                    trigger="circuit_recovery",
+                    attempt=int(row["attempt_count"] or 0) + 1,
+                )
+                r.rpush(RETEST_QUEUE_NAME, json.dumps(payload))
+                requeued += 1
+
+            if requeued:
+                print(f"[watchdog] circuit recovery: requeued {requeued} inconclusive retests", flush=True)
+    except Exception as err:
+        print(f"[watchdog] circuit recovery requeue error: {err}", flush=True)
+    return {"requeued": requeued}
 
 
 def save_result_file(result: dict, job_id: str) -> str:
@@ -2598,6 +2700,7 @@ async def async_main():
                 ):
                     try:
                         await reap_stale_retests()
+                        await requeue_circuit_recovered_retests()
                     except Exception as stale_err:
                         print(f"[watchdog] stale retest sweep error: {stale_err}", flush=True)
                     finally:

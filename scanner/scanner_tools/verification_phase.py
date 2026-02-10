@@ -124,18 +124,39 @@ async def verify_high_severity_findings(
         If include_summary=True, returns (findings, summary_dict).
     """
     # Import verification tools (with graceful degradation)
+    provers: dict[str, Any] = {}
     try:
-        from .proof_of_exploit import prove_xss_headless
-        has_xss_proof = True
+        from .proof_of_exploit import (
+            prove_xss, prove_xss_headless,
+            prove_sqli, prove_ssrf, prove_ssrf_oob,
+            prove_path_traversal, prove_open_redirect, prove_cors,
+            prove_command_injection, prove_ssti, prove_xxe,
+            prove_jwt, prove_bola,
+        )
+        provers.update({
+            "prove_xss": prove_xss,
+            "prove_xss_headless": prove_xss_headless,
+            "prove_sqli": prove_sqli,
+            "prove_ssrf": prove_ssrf,
+            "prove_ssrf_oob": prove_ssrf_oob,
+            "prove_path_traversal": prove_path_traversal,
+            "prove_open_redirect": prove_open_redirect,
+            "prove_cors": prove_cors,
+            "prove_command_injection": prove_command_injection,
+            "prove_ssti": prove_ssti,
+            "prove_xxe": prove_xxe,
+            "prove_jwt": prove_jwt,
+            "prove_bola": prove_bola,
+        })
     except ImportError:
-        has_xss_proof = False
-        prove_xss_headless = None
+        pass
 
-    try:
-        from .active_checks import statistical_timing_test
-        has_timing_test = True
-    except ImportError:
-        has_timing_test = False
+    from .verification_engine import (
+        verify_finding as _engine_verify,
+        normalize_finding_type,
+        get_ladder,
+        downgrade_finding,
+    )
 
     verified_findings = []
     normalized_min_severity = _normalize_min_severity(min_severity, default="high")
@@ -164,42 +185,68 @@ async def verify_high_severity_findings(
             verified_findings.append(finding)
             continue
 
-        # XSS verification
-        if "xss" in vuln_type and verify_xss and has_xss_proof:
-            finding = await _verify_xss_finding(
-                finding,
-                prove_xss_headless,
-                max_attempts=max_verification_attempts
-            )
+        # Determine finding type and attempt ladder via shared engine
+        finding_type = normalize_finding_type(vuln_type)
+        if not finding_type:
+            # Try to infer from title / tool
+            title = str(finding.get("title", "")).lower()
+            tool = str(finding.get("tool", "")).lower()
+            for probe, ft in [
+                ("xss", "xss"), ("cross-site scripting", "xss"),
+                ("sqli", "sqli"), ("sql injection", "sqli"), ("sql-injection", "sqli"),
+                ("ssrf", "ssrf"), ("server-side request forgery", "ssrf"),
+                ("path traversal", "path_traversal"), ("lfi", "path_traversal"),
+                ("open redirect", "open_redirect"),
+                ("cors", "cors"),
+                ("command injection", "command_injection"), ("rce", "command_injection"),
+                ("ssti", "ssti"), ("template injection", "ssti"),
+            ]:
+                if probe in title or probe in tool:
+                    finding_type = ft
+                    break
 
-        # SQLi verification (blind/time-based)
-        elif "sqli" in vuln_type and verify_sqli:
-            technique = finding.get("technique", "").lower()
-            if "time" in technique:
-                finding = await _verify_sqli_timing(
-                    finding,
-                    auth_session,
-                    max_samples=max_verification_attempts
-                )
-            else:
-                # Error-based/union/unknown techniques: attempt data extraction proof
-                finding = await _verify_sqli_extraction(
-                    finding,
-                    auth_session
+        ladder = get_ladder(finding_type) if finding_type else []
+
+        if finding_type and ladder and provers:
+            # Use shared verification engine with attempt ladder
+            url = str(finding.get("url") or finding.get("finding_url") or "")
+            param = str(finding.get("param") or finding.get("parameter") or "")
+            payload = str(finding.get("payload") or "")
+            evidence_dict = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+
+            try:
+                result = await _engine_verify(
+                    finding_type=finding_type,
+                    ladder=ladder,
+                    url=url,
+                    param=param,
+                    payload=payload or None,
+                    evidence=evidence_dict,
+                    skip_ai=True,
+                    provers=provers,
                 )
 
-            # If still unverified, downgrade to avoid unconfirmed high/critical SQLi
-            if not finding.get("verified") and finding.get("severity") in ("high", "critical"):
-                if finding.get("severity") == "critical":
-                    finding["severity"] = "high"
-                    finding["confidence"] = min(finding.get("confidence", 0.75), 0.75)
+                finding["verification_attempted"] = True
+                if result.proven:
+                    finding["verified"] = True
+                    finding["verification_verdict"] = "exploited"
+                    if result.confidence is not None:
+                        finding["confidence"] = result.confidence
+                    if result.proof:
+                        finding["poe"] = result.proof.to_dict() if hasattr(result.proof, "to_dict") else result.proof
                 else:
-                    finding["severity"] = "medium"
-                    finding["confidence"] = min(finding.get("confidence", 0.65), 0.65)
-                evidence = finding.get("evidence", [])
-                if isinstance(evidence, list):
-                    evidence.append("Verification failed or skipped - downgraded severity")
-                finding["evidence"] = evidence
+                    # Unverified: downgrade severity
+                    if finding.get("severity") in ("high", "critical"):
+                        finding = downgrade_finding(finding)
+            except Exception as eng_err:
+                print(f"[verification] Engine error for {finding_type}: {eng_err}", file=sys.stderr)
+                finding["verification_attempted"] = True
+                finding["verification_error"] = str(eng_err)
+                if finding.get("severity") in ("high", "critical"):
+                    finding = downgrade_finding(finding)
+        elif finding_type:
+            # Supported type but no provers available — mark as skipped
+            finding = _mark_verification_skipped(finding, f"No provers available for {finding_type}")
 
         if finding.get("verification_attempted"):
             attempted_count += 1

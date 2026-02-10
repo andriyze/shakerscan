@@ -2185,7 +2185,7 @@ async def build_report(target: str,
                        options_method_discovery: bool=False,
                        focus_rules_json: str | None=None,
                        avoid_rules_json: str | None=None,
-                       verified_findings_only: bool=False,
+                       verified_findings_only: bool | None=None,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -2218,9 +2218,16 @@ async def build_report(target: str,
     )
     pipeline_ai_enabled = bool(ai_validation and ai_api_key and scan_ai_classification_enabled)
     verify_min_severity = _normalize_ai_classification_min_severity(
-        os.environ.get("AI_VERIFY_MIN_SEVERITY"),
+        os.environ.get("VERIFICATION_MIN_SEVERITY") or os.environ.get("AI_VERIFY_MIN_SEVERITY"),
         default="high",
     )
+    # Smart scans default to proof-gated reporting ("no exploit, no report")
+    # unless the caller explicitly passed --no-verified-findings-only.
+    if verified_findings_only is None and smart_mode:
+        _proof_required = os.environ.get("PROOF_REQUIRED_FOR_SMART", "true").strip().lower()
+        verified_findings_only = _proof_required in {"1", "true", "yes", "on"}
+    elif verified_findings_only is None:
+        verified_findings_only = False
     scope_stats = {
         "focus_rule_count": len(focus_rules),
         "avoid_rule_count": len(avoid_rules),
@@ -8737,12 +8744,19 @@ async def build_report(target: str,
                 return True
             return False
 
-        pre_filter_count = len(report.get("findings", []))
-        report["findings"] = [
-            finding for finding in (report.get("findings") or [])
-            if isinstance(finding, dict) and _is_verified_exploited(finding)
-        ]
-        post_filter_count = len(report["findings"])
+        all_findings = report.get("findings") or []
+        pre_filter_count = len(all_findings)
+        verified = []
+        unverified = []
+        for f in all_findings:
+            if isinstance(f, dict) and _is_verified_exploited(f):
+                verified.append(f)
+            else:
+                unverified.append(f)
+        report["findings"] = verified
+        # Preserve unverified findings for audit/review (not graded, not in primary output)
+        report["unverified_findings"] = unverified
+        post_filter_count = len(verified)
         dropped_count = max(0, pre_filter_count - post_filter_count)
         report.setdefault("filters_applied", {})
         report["filters_applied"]["verified_findings_only"] = {
@@ -9632,7 +9646,10 @@ async def cli_main():
     ap.add_argument("--options-method-discovery", action="store_true", help="Use HTTP OPTIONS to enumerate allowed methods")
     ap.add_argument("--focus-rules-json", type=str, help="JSON array of focus rules to constrain endpoint scope")
     ap.add_argument("--avoid-rules-json", type=str, help="JSON array of avoid rules to exclude endpoint scope")
-    ap.add_argument("--verified-findings-only", action="store_true", help="Only keep findings with exploit verification evidence")
+    ap.add_argument("--verified-findings-only", dest="verified_findings_only", action="store_true", default=None,
+                    help="Only keep findings with exploit verification evidence (default for smart scans)")
+    ap.add_argument("--no-verified-findings-only", dest="verified_findings_only", action="store_false",
+                    help="Keep all findings regardless of verification status")
 
     # Category convenience flags (enable groups of checks)
     ap.add_argument("--vuln-auth", action="store_true", help="Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds)")
