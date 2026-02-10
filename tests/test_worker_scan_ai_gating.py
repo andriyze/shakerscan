@@ -110,3 +110,43 @@ def test_run_scan_enables_scan_ai_when_classification_enabled(monkeypatch):
     assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
     assert env["AI_CLASSIFY_MIN_SEVERITY"] == "low"
     assert env["AI_VERIFY_MIN_SEVERITY"] == "critical"
+
+
+def test_run_scan_null_classification_option_uses_runtime_setting(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        worker,
+        "_load_runtime_ai_settings",
+        lambda: {
+            "ai_url": "https://ai.example/v1/chat/completions",
+            "ai_api_key": "secret",
+            "ai_model": "model-a",
+            "ai_model_fallback": "model-b",
+            "ai_mask_host": "masked.example",
+            "ai_scan_classification_enabled": True,
+            "ai_classify_min_severity": "medium",
+            "ai_verify_min_severity": "medium",
+        },
+    )
+
+    # Simulates persisted scan options that include the key with null value.
+    options = {
+        "scan_type": "smart",
+        "ai_scan_classification_enabled": None,
+    }
+
+    result = asyncio.run(worker.run_scan("https://example.com", options))
+    cmd = captured["cmd"]
+    env = captured["env"]
+
+    assert result.get("ok") is True
+    assert "--ai" in cmd
+    assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
+    assert env["AI_CLASSIFY_MIN_SEVERITY"] == "medium"

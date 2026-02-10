@@ -353,11 +353,14 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     )
     ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
     runtime_policy = VerificationPolicy.from_env(overrides=ai_runtime)
-    if "ai_scan_classification_enabled" in options:
-        ai_scan_classify_enabled = _is_truthy(options.get("ai_scan_classification_enabled"), default=False)
-    elif "ai_classify_enabled" in options:
-        ai_scan_classify_enabled = _is_truthy(options.get("ai_classify_enabled"), default=False)
+    scan_classify_override = options.get("ai_scan_classification_enabled")
+    scan_classify_alias_override = options.get("ai_classify_enabled")
+    if scan_classify_override is not None:
+        ai_scan_classify_enabled = _is_truthy(scan_classify_override, default=False)
+    elif scan_classify_alias_override is not None:
+        ai_scan_classify_enabled = _is_truthy(scan_classify_alias_override, default=False)
     else:
+        # Treat null/omitted option values as "no override" so runtime settings apply.
         ai_scan_classify_enabled = bool(ai_runtime.get("ai_scan_classification_enabled"))
     ai_classify_min_severity = str(
         options.get("ai_classify_min_severity")

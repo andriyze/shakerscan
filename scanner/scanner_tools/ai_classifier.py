@@ -29,10 +29,10 @@ AI_RETRY_ATTEMPTS = 3
 AI_RETRY_BASE_DELAY = 1.0  # seconds
 AI_RETRY_MAX_DELAY = 8.0   # seconds
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-DEFAULT_MAX_FINDINGS_PER_BATCH = max(1, int(os.environ.get("AI_CLASSIFY_MAX_FINDINGS_PER_BATCH", "12")))
-DEFAULT_MAX_PROMPT_CHARS = max(4000, int(os.environ.get("AI_CLASSIFY_MAX_PROMPT_CHARS", "24000")))
+DEFAULT_MAX_FINDINGS_PER_BATCH = max(1, int(os.environ.get("AI_CLASSIFY_MAX_FINDINGS_PER_BATCH", "8")))
+DEFAULT_MAX_PROMPT_CHARS = max(4000, int(os.environ.get("AI_CLASSIFY_MAX_PROMPT_CHARS", "18000")))
 MAX_REASONING_RETRY_TOKENS = max(4000, int(os.environ.get("AI_REASONING_RETRY_MAX_TOKENS", "12000")))
-AI_CLASSIFY_CHAIN_BUDGET_SECONDS = max(0, int(os.environ.get("AI_CLASSIFY_CHAIN_BUDGET_SECONDS", "120")))
+AI_CLASSIFY_CHAIN_BUDGET_SECONDS = max(0, int(os.environ.get("AI_CLASSIFY_CHAIN_BUDGET_SECONDS", "180")))
 AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS", "300")))
 AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD = max(1, int(os.environ.get("AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD", "5")))
 AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS", "180")))
@@ -1220,8 +1220,12 @@ def build_classification_prompt(
     # Prepare findings with context hints
     findings_for_ai = []
     for f in findings:
+        finding_id = f.get("id")
         finding_data = {
-            "id": f.get("id"),
+            # Keep both keys for provider compatibility: schema asks for
+            # `finding_id`, while some providers echo input keys verbatim.
+            "finding_id": finding_id,
+            "id": finding_id,
             "title": f.get("title"),
             "severity": f.get("severity"),
             "tool": f.get("tool"),
@@ -1598,7 +1602,8 @@ def _parse_ai_classification_results(response: dict[str, Any]) -> dict[str, AICl
     for ai_finding in response.get("findings", []) or []:
         if not isinstance(ai_finding, dict):
             continue
-        finding_id = ai_finding.get("finding_id")
+        # Accept provider outputs that use either `finding_id` (schema) or `id` (echoed input key).
+        finding_id = ai_finding.get("finding_id") or ai_finding.get("id")
         if not finding_id:
             continue
 
@@ -1623,6 +1628,29 @@ def _parse_ai_classification_results(response: dict[str, Any]) -> dict[str, AICl
         )
 
     return parsed
+
+
+def _should_split_classification_chunk(error_text: str | None, chunk_size: int) -> bool:
+    """Return True when a failed chunk should be retried in smaller pieces."""
+    if chunk_size <= 1:
+        return False
+    text = str(error_text or "").lower()
+    if not text:
+        return False
+    retry_markers = (
+        "network error",
+        "connection",
+        "timeout",
+        "budget exceeded",
+        "invalid json",
+        "empty content",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    )
+    return any(marker in text for marker in retry_markers)
 
 
 async def classify_findings_batch(
@@ -1659,66 +1687,85 @@ async def classify_findings_batch(
 
     finding_chunks = _chunk_findings_for_classification(findings, scan_context, mask_host)
     for chunk_idx, chunk in enumerate(finding_chunks, start=1):
-        user_prompt = build_classification_prompt(chunk, scan_context, mask_host)
-        messages = [
-            {"role": "system", "content": SECURITY_ANALYST_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
+        # Retry transient provider failures by splitting large chunks into
+        # smaller sub-chunks before falling back to heuristics.
+        pending_sub_chunks: list[list[dict[str, Any]]] = [chunk]
+        while pending_sub_chunks:
+            sub_chunk = pending_sub_chunks.pop(0)
+            user_prompt = build_classification_prompt(sub_chunk, scan_context, mask_host)
+            messages = [
+                {"role": "system", "content": SECURITY_ANALYST_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
 
-        response, error, latency_ms = await call_ai_provider(
-            ai_url,
-            ai_api_key,
-            model,
-            messages,
-            timeout_seconds=60,
-            max_tokens=4000,
-            json_schema=CLASSIFICATION_JSON_SCHEMA,
-            fallback_models=fallback_models,
-        )
-        if latency_ms:
-            total_latency_ms += latency_ms
+            response, error, latency_ms = await call_ai_provider(
+                ai_url,
+                ai_api_key,
+                model,
+                messages,
+                timeout_seconds=60,
+                max_tokens=3000,
+                json_schema=CLASSIFICATION_JSON_SCHEMA,
+                fallback_models=fallback_models,
+            )
+            if latency_ms:
+                total_latency_ms += latency_ms
 
-        if error or not response:
-            chunk_errors.append(f"chunk {chunk_idx}/{len(finding_chunks)}: {error or 'empty response'}")
-            for finding in chunk:
+            if error or not response:
+                err_text = error or "empty response"
+                if _should_split_classification_chunk(err_text, len(sub_chunk)):
+                    mid = max(1, len(sub_chunk) // 2)
+                    left = sub_chunk[:mid]
+                    right = sub_chunk[mid:]
+                    chunk_errors.append(
+                        f"chunk {chunk_idx}/{len(finding_chunks)}: {err_text}; "
+                        f"retrying as {len(left)}+{len(right)}"
+                    )
+                    pending_sub_chunks = [left, right] + pending_sub_chunks
+                    continue
+
+                chunk_errors.append(f"chunk {chunk_idx}/{len(finding_chunks)}: {err_text}")
+                for finding in sub_chunk:
+                    finding_id = finding.get("id")
+                    if finding_id and finding_id not in results:
+                        fid = str(finding_id)
+                        results[fid] = fallback_classify_finding(finding)
+                        fallback_finding_ids.add(fid)
+                continue
+
+            chunk_results = _parse_ai_classification_results(response)
+            provider_meta = response.get("_provider_meta", {}) if isinstance(response, dict) else {}
+            used_model = provider_meta.get("model_used") if isinstance(provider_meta, dict) else None
+            if isinstance(used_model, str) and used_model and used_model not in used_models:
+                used_models.append(used_model)
+            if chunk_results:
+                provider_used = True
+                ai_chunks += 1
+
+            for finding in sub_chunk:
                 finding_id = finding.get("id")
-                if finding_id and finding_id not in results:
-                    fid = str(finding_id)
+                if not finding_id:
+                    continue
+                fid = str(finding_id)
+                if fid in chunk_results:
+                    results[fid] = chunk_results[fid]
+                    provider_finding_ids.add(fid)
+                else:
                     results[fid] = fallback_classify_finding(finding)
                     fallback_finding_ids.add(fid)
-            continue
+                    chunk_errors.append(
+                        f"chunk {chunk_idx}/{len(finding_chunks)}: missing AI verdict for finding {fid}"
+                    )
 
-        chunk_results = _parse_ai_classification_results(response)
-        provider_meta = response.get("_provider_meta", {}) if isinstance(response, dict) else {}
-        used_model = provider_meta.get("model_used") if isinstance(provider_meta, dict) else None
-        if isinstance(used_model, str) and used_model and used_model not in used_models:
-            used_models.append(used_model)
-        if chunk_results:
-            provider_used = True
-            ai_chunks += 1
+            corr = response.get("cross_finding_correlations", [])
+            if isinstance(corr, list):
+                for item in corr:
+                    if isinstance(item, str) and item and item not in cross_finding_correlations:
+                        cross_finding_correlations.append(item)
 
-        for finding in chunk:
-            finding_id = finding.get("id")
-            if not finding_id:
-                continue
-            fid = str(finding_id)
-            if fid in chunk_results:
-                results[fid] = chunk_results[fid]
-                provider_finding_ids.add(fid)
-            else:
-                results[fid] = fallback_classify_finding(finding)
-                fallback_finding_ids.add(fid)
-                chunk_errors.append(f"chunk {chunk_idx}/{len(finding_chunks)}: missing AI verdict for finding {fid}")
-
-        corr = response.get("cross_finding_correlations", [])
-        if isinstance(corr, list):
-            for item in corr:
-                if isinstance(item, str) and item and item not in cross_finding_correlations:
-                    cross_finding_correlations.append(item)
-
-        risk = response.get("overall_risk_assessment")
-        if isinstance(risk, str) and risk and not overall_risk_assessment:
-            overall_risk_assessment = risk
+            risk = response.get("overall_risk_assessment")
+            if isinstance(risk, str) and risk and not overall_risk_assessment:
+                overall_risk_assessment = risk
 
     # Safety net in case some records lacked IDs during chunk processing.
     for finding in findings:
