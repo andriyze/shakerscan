@@ -125,31 +125,33 @@ async def verify_high_severity_findings(
     """
     # Import verification tools (with graceful degradation)
     provers: dict[str, Any] = {}
+    legacy_prove_xss_headless = None
     try:
-        from .proof_of_exploit import (
-            prove_xss, prove_xss_headless,
-            prove_sqli, prove_ssrf, prove_ssrf_oob,
-            prove_path_traversal, prove_open_redirect, prove_cors,
-            prove_command_injection, prove_ssti, prove_xxe,
-            prove_jwt, prove_bola,
-        )
-        provers.update({
-            "prove_xss": prove_xss,
-            "prove_xss_headless": prove_xss_headless,
-            "prove_sqli": prove_sqli,
-            "prove_ssrf": prove_ssrf,
-            "prove_ssrf_oob": prove_ssrf_oob,
-            "prove_path_traversal": prove_path_traversal,
-            "prove_open_redirect": prove_open_redirect,
-            "prove_cors": prove_cors,
-            "prove_command_injection": prove_command_injection,
-            "prove_ssti": prove_ssti,
-            "prove_xxe": prove_xxe,
-            "prove_jwt": prove_jwt,
-            "prove_bola": prove_bola,
-        })
+        from . import proof_of_exploit as _proof_module
     except ImportError:
-        pass
+        _proof_module = None
+
+    if _proof_module is not None:
+        legacy_prove_xss_headless = getattr(_proof_module, "prove_xss_headless", None)
+        prover_names = (
+            "prove_xss",
+            "prove_xss_headless",
+            "prove_sqli",
+            "prove_ssrf",
+            "prove_ssrf_oob",
+            "prove_path_traversal",
+            "prove_open_redirect",
+            "prove_cors",
+            "prove_command_injection",
+            "prove_ssti",
+            "prove_xxe",
+            "prove_jwt",
+            "prove_bola",
+        )
+        for name in prover_names:
+            fn = getattr(_proof_module, name, None)
+            if callable(fn):
+                provers[name] = fn
 
     from .verification_engine import (
         verify_finding as _engine_verify,
@@ -207,7 +209,30 @@ async def verify_high_severity_findings(
 
         ladder = get_ladder(finding_type) if finding_type else []
 
-        if finding_type and ladder and provers:
+        if finding_type == "xss" and not verify_xss:
+            verified_findings.append(finding)
+            continue
+        if finding_type == "sqli" and not verify_sqli:
+            verified_findings.append(finding)
+            continue
+
+        if finding_type == "xss" and verify_xss:
+            xss_prover = provers.get("prove_xss_headless") or legacy_prove_xss_headless
+            if xss_prover is None:
+                finding = _mark_verification_skipped(finding, "No XSS prover available")
+            else:
+                try:
+                    finding = await _verify_xss_finding(
+                        finding,
+                        xss_prover,
+                        max_attempts=max_verification_attempts,
+                    )
+                except Exception as legacy_err:
+                    finding["verification_attempted"] = True
+                    finding["verification_error"] = str(legacy_err)
+                    if finding.get("severity") in ("high", "critical"):
+                        finding = downgrade_finding(finding)
+        elif finding_type and ladder and provers:
             # Use shared verification engine with attempt ladder
             url = str(finding.get("url") or finding.get("finding_url") or "")
             param = str(finding.get("param") or finding.get("parameter") or "")

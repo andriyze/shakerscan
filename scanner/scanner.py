@@ -9899,7 +9899,7 @@ async def cli_main():
                        threat_intel: bool = False,
                        focus_rules_json: str | None = None,
                        avoid_rules_json: str | None = None,
-                       verified_findings_only: bool = False):
+                       verified_findings_only: bool | None = None):
             if not target:
                 raise HTTPException(status_code=400, detail="target required")
 

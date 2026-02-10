@@ -28,6 +28,7 @@ interface FindingsFilters {
 
 const VERIFICATION_VERDICTS = [
   'exploited',
+  'likely_vulnerable',
   'blocked_by_security',
   'out_of_scope_internal',
   'false_positive',
@@ -110,7 +111,7 @@ function FindingsContent() {
         target_id: targetIdFilter || undefined,
         search: searchQuery || undefined,
         seen_within_days: lastSeenFilter || undefined,
-        verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
+        verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
         verification_mode: verificationModeFilter ? (verificationModeFilter as 'deterministic' | 'ai_driven') : undefined,
         verified_only: verifiedOnlyFilter || undefined,
         sort_by: sortBy,

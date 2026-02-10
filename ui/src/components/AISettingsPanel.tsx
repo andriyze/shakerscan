@@ -58,9 +58,9 @@ export default function AISettingsPanel() {
     setAutoRetestEnabledInput(Boolean(settings.auto_retest_on_scan_complete))
     setAutoRetestMinSeverityInput(settings.auto_retest_min_severity || 'medium')
     setAutoRetestMaxPerScanInput(String(settings.auto_retest_max_per_scan ?? 25))
-    setVerificationMinSeverityInput((settings as Record<string, any>).verification_min_severity || settings.auto_retest_min_severity || 'medium')
-    setAIEscalationMinSeverityInput((settings as Record<string, any>).ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
-    setProofRequiredForSmartInput((settings as Record<string, any>).proof_required_for_smart !== false)
+    setVerificationMinSeverityInput(settings.verification_min_severity || settings.auto_retest_min_severity || 'medium')
+    setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
+    setProofRequiredForSmartInput(settings.proof_required_for_smart !== false)
     setScanAPIKeyInput('')
     setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
@@ -112,7 +112,7 @@ export default function AISettingsPanel() {
         ai_escalation_min_severity: aiEscalationMinSeverityInput,
         proof_required_for_smart: proofRequiredForSmartInput,
         persist_to_env: persistAIToEnv,
-      } as AISettingsUpdate & Record<string, any>
+      }
 
       if (clearScanAPIKey) {
         payload.ai_api_key = ''

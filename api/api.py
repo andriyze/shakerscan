@@ -2259,7 +2259,7 @@ async def list_findings(
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
-    verification_verdict: Optional[str] = Query(None, regex="^(exploited|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
+    verification_verdict: Optional[str] = Query(None, regex="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
     verification_mode: Optional[str] = Query(None, regex="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
     search: Optional[str] = None,

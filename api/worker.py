@@ -163,6 +163,18 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "auto_retest_on_scan_complete": AUTO_RETEST_ON_SCAN_COMPLETE,
         "auto_retest_min_severity": os.environ.get("AUTO_RETEST_MIN_SEVERITY", AUTO_RETEST_MIN_SEVERITY),
         "auto_retest_max_per_scan": max(0, int(os.environ.get("AUTO_RETEST_MAX_PER_SCAN", str(AUTO_RETEST_MAX_PER_SCAN)))),
+        "verification_min_severity": os.environ.get(
+            "VERIFICATION_MIN_SEVERITY",
+            os.environ.get("AUTO_RETEST_MIN_SEVERITY", AUTO_RETEST_MIN_SEVERITY),
+        ),
+        "ai_escalation_min_severity": os.environ.get(
+            "AI_ESCALATION_MIN_SEVERITY",
+            os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
+        ),
+        "proof_required_for_smart": _is_truthy(
+            os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
+            default=True,
+        ),
     }
     try:
         r = get_redis()
@@ -181,8 +193,10 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_verify_model",
         "ai_verify_model_fallback",
         "ai_verify_min_severity",
+        "ai_escalation_min_severity",
         "ai_classify_min_severity",
         "auto_retest_min_severity",
+        "verification_min_severity",
     ):
         if key in overrides:
             settings[key] = overrides.get(key) or ""
@@ -199,26 +213,33 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
             overrides.get("ai_scan_classification_enabled"),
             default=AI_SCAN_CLASSIFICATION_ENABLED,
         )
+    if "proof_required_for_smart" in overrides:
+        settings["proof_required_for_smart"] = _is_truthy(
+            overrides.get("proof_required_for_smart"),
+            default=True,
+        )
     if "auto_retest_max_per_scan" in overrides:
         try:
             settings["auto_retest_max_per_scan"] = max(0, int(str(overrides.get("auto_retest_max_per_scan") or "0")))
         except (TypeError, ValueError):
             settings["auto_retest_max_per_scan"] = AUTO_RETEST_MAX_PER_SCAN
 
-    severity = str(settings.get("ai_verify_min_severity") or "high").lower()
-    if severity not in SEVERITY_ORDER:
-        severity = "high"
-    settings["ai_verify_min_severity"] = severity
+    # Canonicalize verification thresholds through shared policy.
+    policy = VerificationPolicy.from_env(overrides=settings)
+    settings["auto_retest_on_scan_complete"] = policy.auto_retest_enabled
+    settings["auto_retest_max_per_scan"] = policy.auto_retest_max_per_scan
+    settings["proof_required_for_smart"] = policy.proof_required_for_smart
+    settings["verification_min_severity"] = policy.verification_min_severity
+    settings["auto_retest_min_severity"] = policy.verification_min_severity
+    settings["ai_escalation_min_severity"] = policy.ai_escalation_min_severity
+    settings["ai_verify_min_severity"] = policy.ai_escalation_min_severity
+
     if "ai_classify_min_severity" not in overrides:
-        settings["ai_classify_min_severity"] = severity
-    classify_severity = str(settings.get("ai_classify_min_severity") or severity).lower()
+        settings["ai_classify_min_severity"] = settings["ai_verify_min_severity"]
+    classify_severity = str(settings.get("ai_classify_min_severity") or settings["ai_verify_min_severity"]).lower()
     if classify_severity not in SEVERITY_ORDER:
-        classify_severity = severity
+        classify_severity = settings["ai_verify_min_severity"]
     settings["ai_classify_min_severity"] = classify_severity
-    auto_retest_severity = str(settings.get("auto_retest_min_severity") or AUTO_RETEST_MIN_SEVERITY).lower()
-    if auto_retest_severity not in SEVERITY_ORDER:
-        auto_retest_severity = AUTO_RETEST_MIN_SEVERITY
-    settings["auto_retest_min_severity"] = auto_retest_severity
     return settings
 
 
@@ -331,6 +352,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         or ai_runtime.get("ai_model_fallback")
     )
     ai_mask_host = options.get('ai_mask_host') or ai_runtime.get("ai_mask_host") or 'example.com'
+    runtime_policy = VerificationPolicy.from_env(overrides=ai_runtime)
     if "ai_scan_classification_enabled" in options:
         ai_scan_classify_enabled = _is_truthy(options.get("ai_scan_classification_enabled"), default=False)
     elif "ai_classify_enabled" in options:
@@ -348,9 +370,16 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         ai_classify_min_severity,
         default=_normalize_severity(ai_runtime.get("ai_verify_min_severity"), default="high"),
     )
+    verification_min_severity = _normalize_severity(
+        options.get("verification_min_severity") or ai_runtime.get("verification_min_severity"),
+        default=runtime_policy.verification_min_severity,
+    )
     ai_verify_min_severity = _normalize_severity(
-        options.get("ai_verify_min_severity") or ai_runtime.get("ai_verify_min_severity"),
-        default="high",
+        options.get("ai_escalation_min_severity")
+        or options.get("ai_verify_min_severity")
+        or ai_runtime.get("ai_escalation_min_severity")
+        or ai_runtime.get("ai_verify_min_severity"),
+        default=runtime_policy.ai_escalation_min_severity,
     )
 
     # Scan-time AI should only run when scan classification is explicitly enabled.
@@ -427,8 +456,14 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
     scan_env["AI_VERIFY_MIN_SEVERITY"] = ai_verify_min_severity
     # Pass unified policy env vars so scanner picks up consolidated thresholds
-    scan_env["VERIFICATION_MIN_SEVERITY"] = ai_verify_min_severity
-    _policy_for_env = VerificationPolicy.from_env(overrides=ai_runtime)
+    scan_env["VERIFICATION_MIN_SEVERITY"] = verification_min_severity
+    scan_env["AI_ESCALATION_MIN_SEVERITY"] = ai_verify_min_severity
+    _policy_overrides = dict(ai_runtime)
+    _policy_overrides["verification_min_severity"] = verification_min_severity
+    _policy_overrides["ai_escalation_min_severity"] = ai_verify_min_severity
+    if "proof_required_for_smart" in options:
+        _policy_overrides["proof_required_for_smart"] = options.get("proof_required_for_smart")
+    _policy_for_env = VerificationPolicy.from_env(overrides=_policy_overrides)
     scan_env["PROOF_REQUIRED_FOR_SMART"] = "true" if _policy_for_env.proof_required_for_smart else "false"
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
@@ -928,7 +963,7 @@ def _result_status_for_verdict(verdict: str | None) -> str:
         return "still_vulnerable"
     if v == "likely_fixed":
         return "likely_fixed"
-    if v in {"false_positive", "inconclusive", "blocked_by_security", "out_of_scope_internal"}:
+    if v in {"likely_vulnerable", "false_positive", "inconclusive", "blocked_by_security", "out_of_scope_internal"}:
         return "inconclusive"
     return "error"
 
@@ -1819,9 +1854,13 @@ async def process_finding_retest_job(job_data: dict):
             _current_verdict = str(result.get("verdict") or "").lower()
             if _current_verdict == "inconclusive" and result.get("deterministic_exhausted"):
                 _proof = result.get("proof")
+                _step_attempts = []
+                _artifacts = result.get("artifacts")
+                if isinstance(_artifacts, dict) and isinstance(_artifacts.get("step_attempts"), list):
+                    _step_attempts = _artifacts.get("step_attempts") or []
                 _has_partial_evidence = (
                     (isinstance(_proof, dict) and not _proof.get("proven") and _proof.get("evidence_type"))
-                    or result.get("attempt_count", 0) > 0
+                    or len(_step_attempts) > 0
                 )
                 if _has_partial_evidence:
                     result["verdict"] = "likely_vulnerable"
@@ -1829,7 +1868,7 @@ async def process_finding_retest_job(job_data: dict):
                         (result.get("verdict_reason") or "")
                         + " [promoted from inconclusive: deterministic tier found partial evidence]"
                     ).strip()
-                    result["result_status"] = "likely_vulnerable"
+                    result["result_status"] = _result_status_for_verdict(result["verdict"])
                     print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
 
             completed_at = datetime.utcnow()

@@ -108,8 +108,8 @@ export interface RetestRecord {
   job_id?: string
   requested_by?: string
   status: 'queued' | 'running' | 'completed' | 'failed'
-  result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error'
-  verdict?: 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error' | 'likely_vulnerable'
+  verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
   verdict_reason?: string
   verification_mode?: 'deterministic' | 'ai_driven'
   finding_type: string
@@ -173,6 +173,9 @@ export interface AISettings {
   auto_retest_on_scan_complete: boolean
   auto_retest_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   auto_retest_max_per_scan: number
+  verification_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_escalation_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  proof_required_for_smart: boolean
 }
 
 export interface AISettingsUpdate {
@@ -192,6 +195,9 @@ export interface AISettingsUpdate {
   auto_retest_on_scan_complete?: boolean
   auto_retest_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   auto_retest_max_per_scan?: number
+  verification_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_escalation_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  proof_required_for_smart?: boolean
   persist_to_env?: boolean
 }
 
@@ -332,7 +338,7 @@ export async function getFindings(params?: {
   target_id?: string
   search?: string
   seen_within_days?: number
-  verification_verdict?: 'exploited' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
   verification_mode?: 'deterministic' | 'ai_driven'
   verified_only?: boolean
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
