@@ -37,6 +37,7 @@ export interface Scan {
   completed_at?: string
   duration_seconds?: number
   error_message?: string
+  options?: Record<string, unknown> | null
 }
 
 export interface Target {

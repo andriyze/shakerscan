@@ -445,6 +445,33 @@ def validate_exposed_file(
     path = evidence.get("path", "").lower()
 
     if not response_body:
+        # Some scanners intentionally avoid storing raw secret contents in evidence.
+        # Fall back to detector metadata when confidence is already high.
+        confidence_label = str(evidence.get("confidence", "")).strip().lower()
+        has_html = bool(evidence.get("has_html"))
+        markers = evidence.get("markers")
+        markers = markers if isinstance(markers, list) else []
+        sensitive_hints = {
+            ".env",
+            ".git/config",
+            ".git/head",
+            ".htpasswd",
+            "id_rsa",
+            ".aws/credentials",
+            "wp-config.php",
+        }
+        looks_sensitive = any(hint in path for hint in sensitive_hints)
+        marker_signals = {"credential_like", "dotenv_format", "secret_like", "key_like"}
+        has_sensitive_marker = any(str(m).strip().lower() in marker_signals for m in markers)
+
+        if confidence_label == "high" and not has_html and (looks_sensitive or has_sensitive_marker):
+            return ValidationResult(
+                verified=True,
+                confidence=0.85,
+                evidence="Validated from detector metadata (body redacted)",
+                reason="High-confidence exposed file with sensitive markers",
+            )
+
         return ValidationResult(
             verified=False,
             confidence=0.4,

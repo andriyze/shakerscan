@@ -2065,6 +2065,40 @@ def _get_validator_type(finding: dict) -> str:
     return "other"
 
 
+try:
+    from scanner_tools.report_gating import finding_has_verification_evidence
+except Exception:
+    def finding_has_verification_evidence(finding: dict[str, Any]) -> bool:
+        """Fallback report gating helper when modular import is unavailable."""
+        if not isinstance(finding, dict):
+            return False
+        if finding.get("verified") is True:
+            return True
+        validation = finding.get("validation")
+        if isinstance(validation, dict):
+            if validation.get("verified") is True:
+                return True
+            if validation.get("poe_proven") is True:
+                return True
+        verdict = str(
+            finding.get("verification_verdict")
+            or finding.get("last_verification_verdict")
+            or ""
+        ).strip().lower()
+        if verdict in {"exploited", "likely_vulnerable"}:
+            return True
+        result_status = str(finding.get("result_status") or "").strip().lower()
+        if result_status in {"still_vulnerable", "verified_vulnerable"}:
+            return True
+        poe = finding.get("poe")
+        if isinstance(poe, dict) and poe.get("proven") is True:
+            return True
+        poe_result = finding.get("poe_result")
+        if isinstance(poe_result, dict) and poe_result.get("proven") is True:
+            return True
+        return False
+
+
 # ---------- Scan orchestration ----------
 
 async def build_report(target: str,
@@ -8726,30 +8760,12 @@ async def build_report(target: str,
         report["verification_phase"] = {"summary": verification_summary}
 
     if verified_findings_only:
-        def _is_verified_exploited(finding: dict[str, Any]) -> bool:
-            if finding.get("verified") is True:
-                return True
-            verdict = str(
-                finding.get("verification_verdict")
-                or finding.get("last_verification_verdict")
-                or ""
-            ).strip().lower()
-            if verdict == "exploited":
-                return True
-            result_status = str(finding.get("result_status") or "").strip().lower()
-            if result_status in {"still_vulnerable", "verified_vulnerable"}:
-                return True
-            poe = finding.get("poe")
-            if isinstance(poe, dict) and poe.get("proven") is True:
-                return True
-            return False
-
         all_findings = report.get("findings") or []
         pre_filter_count = len(all_findings)
         verified = []
         unverified = []
         for f in all_findings:
-            if isinstance(f, dict) and _is_verified_exploited(f):
+            if isinstance(f, dict) and finding_has_verification_evidence(f):
                 verified.append(f)
             else:
                 unverified.append(f)

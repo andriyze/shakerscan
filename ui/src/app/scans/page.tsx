@@ -9,6 +9,33 @@ import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
 const LIVE_DURATION_REFRESH_MS = 5000
+const AUTH_OPTION_KEYS = [
+  'auth_header',
+  'auth_cookies',
+  'auth_headers_json',
+  'auth_scenario_json',
+  'login_username',
+  'login_password',
+  'user2_header',
+  'user2_cookies'
+]
+
+function hasConfiguredValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (typeof value === 'number') return true
+  if (typeof value === 'boolean') return value
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0
+  return false
+}
+
+function isAuthenticatedScan(scan: Scan): boolean {
+  const { options } = scan
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return false
+  const optionMap = options as Record<string, unknown>
+  return AUTH_OPTION_KEYS.some((key) => hasConfiguredValue(optionMap[key]))
+}
 
 interface ScansFilters {
   [key: string]: string | number | undefined
@@ -286,6 +313,7 @@ function ScansContent() {
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Target</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Findings</th>
@@ -312,6 +340,29 @@ function ScansContent() {
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm text-gray-400 capitalize">{scan.scan_type}</span>
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    {isAuthenticatedScan(scan) ? (
+                      <span
+                        className="inline-flex items-center justify-center text-green-400"
+                        title="Authenticated scan"
+                        aria-label="Authenticated scan"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c1.657 0 3-1.343 3-3V7a3 3 0 10-6 0v1c0 1.657 1.343 3 3 3zm0 0v2m-7 2h14a2 2 0 002-2v-1a2 2 0 00-2-2H5a2 2 0 00-2 2v1a2 2 0 002 2z" />
+                        </svg>
+                      </span>
+                    ) : (
+                      <span
+                        className="inline-flex items-center justify-center text-gray-500"
+                        title="No authentication configured"
+                        aria-label="No authentication configured"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 10-8 0m8 4H8m8 0a2 2 0 012 2v1a2 2 0 01-2 2H8a2 2 0 01-2-2v-1a2 2 0 012-2m8 0V9" />
+                        </svg>
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={scan.status} />
