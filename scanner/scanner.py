@@ -2255,10 +2255,10 @@ async def build_report(target: str,
         os.environ.get("VERIFICATION_MIN_SEVERITY") or os.environ.get("AI_VERIFY_MIN_SEVERITY"),
         default="high",
     )
-    # Smart scans default to proof-gated reporting ("no exploit, no report")
-    # unless the caller explicitly passed --no-verified-findings-only.
+    # Smart scans default to discovery-first reporting unless proof-gating is
+    # explicitly enabled via PROOF_REQUIRED_FOR_SMART / --verified-findings-only.
     if verified_findings_only is None and smart_mode:
-        _proof_required = os.environ.get("PROOF_REQUIRED_FOR_SMART", "true").strip().lower()
+        _proof_required = os.environ.get("PROOF_REQUIRED_FOR_SMART", "false").strip().lower()
         verified_findings_only = _proof_required in {"1", "true", "yes", "on"}
     elif verified_findings_only is None:
         verified_findings_only = False

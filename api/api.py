@@ -205,8 +205,8 @@ def _default_ai_settings() -> dict[str, Any]:
             default="high",
         ),
         "proof_required_for_smart": _is_truthy(
-            os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
-            default=True,
+            os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
+            default=False,
         ),
     }
 
@@ -322,7 +322,7 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         # Unified verification policy fields
         "verification_min_severity": settings.get("verification_min_severity") or settings.get("auto_retest_min_severity") or "medium",
         "ai_escalation_min_severity": settings.get("ai_escalation_min_severity") or settings.get("ai_verify_min_severity") or "high",
-        "proof_required_for_smart": bool(settings.get("proof_required_for_smart", True)),
+        "proof_required_for_smart": bool(settings.get("proof_required_for_smart", False)),
     }
 
 
@@ -1429,7 +1429,7 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AUTO_RETEST_MAX_PER_SCAN": str(max(0, int(effective.get("auto_retest_max_per_scan") or 0))),
             "VERIFICATION_MIN_SEVERITY": effective.get("verification_min_severity") or "medium",
             "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
-            "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", True) else "false",
+            "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", False) else "false",
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
 

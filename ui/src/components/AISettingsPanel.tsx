@@ -44,7 +44,7 @@ export default function AISettingsPanel() {
   const [autoRetestMaxPerScanInput, setAutoRetestMaxPerScanInput] = useState('25')
   const [verificationMinSeverityInput, setVerificationMinSeverityInput] = useState<Severity>('medium')
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
-  const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(true)
+  const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
   const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
@@ -66,7 +66,7 @@ export default function AISettingsPanel() {
     setAutoRetestMaxPerScanInput(String(settings.auto_retest_max_per_scan ?? 25))
     setVerificationMinSeverityInput(settings.verification_min_severity || settings.auto_retest_min_severity || 'medium')
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
-    setProofRequiredForSmartInput(settings.proof_required_for_smart !== false)
+    setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
     setScanAPIKeyInput('')
     setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
@@ -211,7 +211,7 @@ export default function AISettingsPanel() {
         <div>
           <h2 className="text-sm font-medium text-gray-200">AI & Verification Settings</h2>
           <p className="text-xs text-gray-500 mt-1">
-            Retest verification is authoritative. Scan-time AI classification is optional triage assistance.
+            Configure scan-time triage, authoritative retest verification, and smart-scan reporting behavior.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -233,7 +233,7 @@ export default function AISettingsPanel() {
       </div>
 
       {aiSettings && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
           <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
             Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'}
           </div>
@@ -244,15 +244,29 @@ export default function AISettingsPanel() {
             Scan classification:{' '}
             {aiSettings.ai_scan_classification_enabled ? `on (${aiSettings.ai_classify_min_severity}+)` : 'off'}
           </div>
+          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+            Smart proof filter: {aiSettings.proof_required_for_smart ? 'on' : 'off'}
+          </div>
         </div>
       )}
+
+      <div className="rounded border border-blue-500/30 bg-blue-500/10 px-3 py-2">
+        <p className="text-xs font-medium text-blue-200">Pipeline flow</p>
+        <p className="text-xs text-blue-100/90 mt-1">
+          Scanner tools run first. Optional scan-time AI helps with triage. Retests run deterministic proofs first, then
+          optional AI escalation for hard cases.
+        </p>
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <SectionCard
           title="Shared Provider"
           description="Default provider used for scan-time classification and as fallback for retest verification."
         >
-          <Field label="AI URL">
+          <Field
+            label="AI URL"
+            hint="OpenAI-compatible endpoint used for scan-time AI, and as fallback for retest AI if verify URL is empty."
+          >
             <input
               type="text"
               value={aiURLInput}
@@ -261,7 +275,7 @@ export default function AISettingsPanel() {
               placeholder="https://api.openai.com/v1/chat/completions"
             />
           </Field>
-          <Field label="AI Model">
+          <Field label="AI Model" hint="Primary model for scan-time AI calls.">
             <input
               type="text"
               value={aiModelInput}
@@ -270,7 +284,10 @@ export default function AISettingsPanel() {
               placeholder="gpt-4o-mini"
             />
           </Field>
-          <Field label="Fallback Models (comma-separated)">
+          <Field
+            label="Fallback Models (comma-separated)"
+            hint="Tried in order when the primary model fails or returns incompatible output."
+          >
             <input
               type="text"
               value={aiModelFallbackInput}
@@ -279,7 +296,10 @@ export default function AISettingsPanel() {
               placeholder="moonshotai/kimi-k2.5,openai/gpt-4o-mini"
             />
           </Field>
-          <Field label="Mask Host">
+          <Field
+            label="Mask Host"
+            hint="Host used to redact sensitive domains/URLs in prompts sent to AI providers."
+          >
             <input
               type="text"
               value={aiMaskHostInput}
@@ -288,7 +308,7 @@ export default function AISettingsPanel() {
               placeholder="example.com"
             />
           </Field>
-          <Field label="AI API Key">
+          <Field label="AI API Key" hint="Shared provider key used unless a dedicated retest key is configured.">
             <input
               type="password"
               value={scanAPIKeyInput}
@@ -297,15 +317,13 @@ export default function AISettingsPanel() {
               placeholder={aiSettings?.ai_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
             />
           </Field>
-          <label className="inline-flex items-center gap-2 text-xs text-gray-400">
-            <input
-              type="checkbox"
-              checked={clearScanAPIKey}
-              onChange={(e) => setClearScanAPIKey(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Clear shared provider API key
-          </label>
+          <ToggleRow
+            label="Clear shared provider API key"
+            description="Removes the currently stored shared key when you click Save."
+            hint="Only applies on save."
+            checked={clearScanAPIKey}
+            onChange={setClearScanAPIKey}
+          />
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => handleTestAISettings('scan')}
@@ -324,18 +342,19 @@ export default function AISettingsPanel() {
 
         <SectionCard
           title="Scan-Time Classification"
-          description="Optional AI triage during scan reporting. Does not replace retest verification."
+          description="Optional AI triage during report generation. This does not replace retest verification."
         >
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-            <input
-              type="checkbox"
-              checked={aiScanClassificationEnabledInput}
-              onChange={(e) => setAIScanClassificationEnabledInput(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Enable scan-time AI classification
-          </label>
-          <Field label="Scan Classification Min Severity">
+          <ToggleRow
+            label="Enable scan-time AI classification"
+            description="Uses AI during scan result processing to help classify findings."
+            hint="When off, scan findings rely only on scanner/tool logic."
+            checked={aiScanClassificationEnabledInput}
+            onChange={setAIScanClassificationEnabledInput}
+          />
+          <Field
+            label="Scan Classification Min Severity"
+            hint="Only findings at or above this severity are sent to scan-time AI classification."
+          >
             <select
               value={aiClassifyMinSeverityInput}
               onChange={(e) => setAIClassifyMinSeverityInput(e.target.value as Severity)}
@@ -356,18 +375,19 @@ export default function AISettingsPanel() {
 
         <SectionCard
           title="Retest Verification (Authoritative)"
-          description="Used for retest AI decisions and exploit validation workflow."
+          description="AI settings used for post-scan retest verification and exploit validation."
         >
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-            <input
-              type="checkbox"
-              checked={aiVerifyEnabledInput}
-              onChange={(e) => setAIVerifyEnabledInput(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Enable AI verification for retests
-          </label>
-          <Field label="AI Verify URL">
+          <ToggleRow
+            label="Enable AI verification for retests"
+            description="Allows AI escalation when deterministic retest cannot confidently conclude."
+            hint="Deterministic checks still run first."
+            checked={aiVerifyEnabledInput}
+            onChange={setAIVerifyEnabledInput}
+          />
+          <Field
+            label="AI Verify URL"
+            hint="Dedicated endpoint for retest AI. Leave empty to use shared AI URL."
+          >
             <input
               type="text"
               value={aiVerifyURLInput}
@@ -376,7 +396,7 @@ export default function AISettingsPanel() {
               placeholder="Leave empty to use shared AI URL"
             />
           </Field>
-          <Field label="AI Verify Model">
+          <Field label="AI Verify Model" hint="Primary model for retest AI verification.">
             <input
               type="text"
               value={aiVerifyModelInput}
@@ -385,7 +405,10 @@ export default function AISettingsPanel() {
               placeholder="moonshotai/kimi-k2.5"
             />
           </Field>
-          <Field label="Verify Fallback Models (comma-separated)">
+          <Field
+            label="Verify Fallback Models (comma-separated)"
+            hint="Fallback model list for retest AI verification."
+          >
             <input
               type="text"
               value={aiVerifyModelFallbackInput}
@@ -394,7 +417,10 @@ export default function AISettingsPanel() {
               placeholder="openai/gpt-4o-mini,anthropic/claude-3-5-sonnet"
             />
           </Field>
-          <Field label="Verification Min Severity">
+          <Field
+            label="Verification Min Severity"
+            hint="Only retest findings at or above this severity can be escalated to AI."
+          >
             <select
               value={aiVerifyMinSeverityInput}
               onChange={(e) => setAIVerifyMinSeverityInput(e.target.value as Severity)}
@@ -407,7 +433,7 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
-          <Field label="AI Verify API Key">
+          <Field label="AI Verify API Key" hint="Optional dedicated key for retest AI. Falls back to shared key.">
             <input
               type="password"
               value={verifyAPIKeyInput}
@@ -416,15 +442,13 @@ export default function AISettingsPanel() {
               placeholder={aiSettings?.ai_verify_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
             />
           </Field>
-          <label className="inline-flex items-center gap-2 text-xs text-gray-400">
-            <input
-              type="checkbox"
-              checked={clearVerifyAPIKey}
-              onChange={(e) => setClearVerifyAPIKey(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Clear retest AI API key
-          </label>
+          <ToggleRow
+            label="Clear retest AI API key"
+            description="Removes the stored retest key when you click Save."
+            hint="Only applies on save."
+            checked={clearVerifyAPIKey}
+            onChange={setClearVerifyAPIKey}
+          />
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => handleTestAISettings('verify')}
@@ -443,18 +467,19 @@ export default function AISettingsPanel() {
 
         <SectionCard
           title="Verification Policy"
-          description="Controls proof-gated reporting and how strict chain-visible findings are."
+          description="Controls proof-gating and escalation thresholds used by smart scan and retest workflows."
         >
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-            <input
-              type="checkbox"
-              checked={proofRequiredForSmartInput}
-              onChange={(e) => setProofRequiredForSmartInput(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Proof required for smart scan reports (no exploit = no report)
-          </label>
-          <Field label="Verification Min Severity (scan-time + retest)">
+          <ToggleRow
+            label="Proof required for smart scan reports"
+            description="When on, only findings with verification evidence are kept in primary smart-scan output."
+            hint="Can reduce visible findings and attack chains when proof collection fails."
+            checked={proofRequiredForSmartInput}
+            onChange={setProofRequiredForSmartInput}
+          />
+          <Field
+            label="Verification Min Severity (scan-time + retest)"
+            hint="Baseline minimum severity for verification workflows across scan-time checks and retests."
+          >
             <select
               value={verificationMinSeverityInput}
               onChange={(e) => setVerificationMinSeverityInput(e.target.value as Severity)}
@@ -467,7 +492,10 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
-          <Field label="AI Escalation Min Severity">
+          <Field
+            label="AI Escalation Min Severity"
+            hint="Minimum severity required before deterministic retest can escalate to AI."
+          >
             <select
               value={aiEscalationMinSeverityInput}
               onChange={(e) => setAIEscalationMinSeverityInput(e.target.value as Severity)}
@@ -481,25 +509,26 @@ export default function AISettingsPanel() {
             </select>
           </Field>
           <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1.5">
-            If proof-required is enabled, smart scans may show fewer findings and fewer attack chains unless exploit
-            evidence is collected.
+            If proof-required is enabled, smart scans can look quieter because unverified findings are filtered out of
+            the primary report.
           </p>
         </SectionCard>
 
         <SectionCard
           title="Auto Retest Policy"
-          description="Automatically queue retests after scan completion."
+          description="Queues retests automatically after scan completion."
         >
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-            <input
-              type="checkbox"
-              checked={autoRetestEnabledInput}
-              onChange={(e) => setAutoRetestEnabledInput(e.target.checked)}
-              className={CHECKBOX_CLASS}
-            />
-            Auto-queue retests after each scan
-          </label>
-          <Field label="Auto Retest Min Severity">
+          <ToggleRow
+            label="Auto-queue retests after each scan"
+            description="Creates retest jobs for eligible findings when a scan completes."
+            hint="Useful for continuous validation with less manual work."
+            checked={autoRetestEnabledInput}
+            onChange={setAutoRetestEnabledInput}
+          />
+          <Field
+            label="Auto Retest Min Severity"
+            hint="Only findings at or above this severity are auto-queued for retest."
+          >
             <select
               value={autoRetestMinSeverityInput}
               onChange={(e) => setAutoRetestMinSeverityInput(e.target.value as Severity)}
@@ -512,7 +541,10 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
-          <Field label="Auto Retest Max Findings Per Scan">
+          <Field
+            label="Auto Retest Max Findings Per Scan"
+            hint="Hard cap on number of findings auto-queued for retest from one scan."
+          >
             <input
               type="number"
               min={0}
@@ -526,15 +558,13 @@ export default function AISettingsPanel() {
       </div>
 
       <div className="pt-2 border-t border-gray-800">
-        <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-          <input
-            type="checkbox"
-            checked={persistAIToEnv}
-            onChange={(e) => setPersistAIToEnv(e.target.checked)}
-            className={CHECKBOX_CLASS}
-          />
-          Persist changes to local <code>.env</code>
-        </label>
+        <ToggleRow
+          label="Persist changes to local .env"
+          description="When on, saved settings survive container restarts. When off, changes are runtime-only."
+          hint="Use runtime-only for temporary experiments."
+          checked={persistAIToEnv}
+          onChange={setPersistAIToEnv}
+        />
       </div>
 
       {aiSettingsMessage && <p className="text-xs text-green-400">{aiSettingsMessage}</p>}
@@ -565,15 +595,64 @@ function SectionCard({
 
 function Field({
   label,
+  hint,
   children,
 }: {
   label: string
+  hint?: string
   children: React.ReactNode
 }) {
   return (
     <label className="block">
-      <span className="text-xs text-gray-400">{label}</span>
+      <span className="text-xs text-gray-400 inline-flex items-center gap-1">
+        {label}
+        {hint && <HelpHint text={hint} />}
+      </span>
       {children}
     </label>
+  )
+}
+
+function ToggleRow({
+  label,
+  description,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string
+  description: string
+  hint?: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+}) {
+  return (
+    <label className="flex items-start gap-2 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className={`${CHECKBOX_CLASS} mt-0.5`}
+      />
+      <span className="space-y-0.5">
+        <span className="text-xs text-gray-200 inline-flex items-center gap-1">
+          {label}
+          {hint && <HelpHint text={hint} />}
+        </span>
+        <span className="block text-[11px] text-gray-500">{description}</span>
+      </span>
+    </label>
+  )
+}
+
+function HelpHint({ text }: { text: string }) {
+  return (
+    <span
+      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-600 text-[10px] font-semibold text-gray-300 cursor-help"
+      title={text}
+      aria-label={text}
+    >
+      ?
+    </span>
   )
 }

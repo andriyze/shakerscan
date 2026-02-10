@@ -172,8 +172,8 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
             os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
         ),
         "proof_required_for_smart": _is_truthy(
-            os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
-            default=True,
+            os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
+            default=False,
         ),
     }
     try:

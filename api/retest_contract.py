@@ -52,7 +52,7 @@ class VerificationPolicy:
 
     auto_retest_enabled: bool = True
     auto_retest_max_per_scan: int = 25
-    proof_required_for_smart: bool = True
+    proof_required_for_smart: bool = False
     """When True, smart scans default to verified-findings-only output."""
 
     @classmethod
@@ -97,8 +97,8 @@ class VerificationPolicy:
         proof_req = _truthy(
             ov.get("proof_required_for_smart")
             if "proof_required_for_smart" in (ov or {})
-            else os.environ.get("PROOF_REQUIRED_FOR_SMART", "true"),
-            default=True,
+            else os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
+            default=False,
         )
 
         return cls(
