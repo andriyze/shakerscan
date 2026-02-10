@@ -661,6 +661,215 @@ export async function discoverSubdomains(rootDomain: string): Promise<{ status: 
   return res.json()
 }
 
+// Interactive Sessions
+export interface InteractiveSessionUserState {
+  is_authenticated: boolean
+  auth_method: string | null
+  cookies_count: number
+}
+
+export interface InteractiveDiscoveredEndpoint {
+  path: string
+  method: string
+  status: number | null
+}
+
+export interface InteractiveSessionState {
+  session_id: string
+  target_url: string
+  current_url: string | null
+  created_at: string
+  last_activity: string
+  users: Record<string, InteractiveSessionUserState>
+  discovered_endpoints_count: number
+  discovered_endpoints: InteractiveDiscoveredEndpoint[]
+  discovered_ids: Record<string, string[]>
+  network_log_count: number
+}
+
+export interface InteractiveSessionStartResponse {
+  success: boolean
+  session_id: string
+  target: string
+  current_url: string
+  message?: string
+}
+
+export interface InteractiveSessionSummary {
+  session_id: string
+  target_url: string
+  created_at: string
+  last_activity: string
+  is_expired: boolean
+}
+
+export interface InteractiveSessionsListResponse {
+  sessions: InteractiveSessionSummary[]
+  count: number
+}
+
+export interface InteractiveActionRequest {
+  action: string
+  user?: string
+  data?: Record<string, unknown>
+}
+
+export interface InteractiveEndpointTestRequest {
+  endpoint: string
+  method?: string
+  as_user?: string
+  body?: Record<string, unknown>
+  allow_out_of_scope?: boolean
+}
+
+export interface InteractiveEndpointTestResult {
+  success: boolean
+  endpoint: string
+  method: string
+  as_user?: string
+  status?: number
+  status_text?: string
+  headers?: Record<string, string>
+  body?: string
+  json?: Record<string, unknown> | null
+  accessible?: boolean
+  error?: string
+}
+
+export interface InteractiveSessionFindingCreateRequest {
+  title: string
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  description?: string
+  category?: string
+  cwe?: string
+  cvss_score?: number
+  url?: string
+  evidence?: string
+  request?: string
+  response?: string
+  remediation?: string
+  notes?: string
+}
+
+export interface InteractiveSessionFindingCreateResponse {
+  id: string
+  fingerprint: string
+  target_id: string
+  target: string
+  session_id: string
+  status: string
+  message: string
+}
+
+export interface InteractiveScreenshotResponse {
+  success: boolean
+  format: 'base64'
+  data: string
+  url: string
+  user: string
+  saved_path?: string
+}
+
+export async function startInteractiveSession(target: string): Promise<InteractiveSessionStartResponse> {
+  const res = await fetch(`${API_URL}/session/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to start interactive session'))
+  }
+  return res.json()
+}
+
+export async function listInteractiveSessions(): Promise<InteractiveSessionsListResponse> {
+  const res = await fetch(`${API_URL}/sessions`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to list interactive sessions'))
+  }
+  return res.json()
+}
+
+export async function getInteractiveSession(sessionId: string): Promise<InteractiveSessionState> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch interactive session'))
+  }
+  return res.json()
+}
+
+export async function runInteractiveAction(
+  sessionId: string,
+  request: InteractiveActionRequest
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Interactive action failed'))
+  }
+  return res.json()
+}
+
+export async function captureInteractiveScreenshot(
+  sessionId: string,
+  params?: { full_page?: boolean; user?: string }
+): Promise<InteractiveScreenshotResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.full_page !== undefined) searchParams.set('full_page', String(params.full_page))
+  if (params?.user) searchParams.set('user', params.user)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/screenshot${query ? `?${query}` : ''}`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to capture screenshot'))
+  }
+  return res.json()
+}
+
+export async function testInteractiveEndpoint(
+  sessionId: string,
+  request: InteractiveEndpointTestRequest
+): Promise<InteractiveEndpointTestResult> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/test-endpoint`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Endpoint test failed'))
+  }
+  return res.json()
+}
+
+export async function createInteractiveSessionFinding(
+  sessionId: string,
+  request: InteractiveSessionFindingCreateRequest
+): Promise<InteractiveSessionFindingCreateResponse> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/findings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to create finding from interactive session'))
+  }
+  return res.json()
+}
+
+export async function endInteractiveSession(sessionId: string): Promise<{ status: string; session_id: string; message: string }> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to end interactive session'))
+  }
+  return res.json()
+}
+
 // Utilities
 export function getSeverityColor(severity: string): string {
   switch (severity) {

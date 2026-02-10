@@ -49,6 +49,15 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    href: '/interactive',
+    label: 'Interactive',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5V4H2v16h5m10 0v-6a3 3 0 00-3-3H10a3 3 0 00-3 3v6m10 0H7m7-11a2 2 0 11-4 0 2 2 0 014 0z" />
+      </svg>
+    ),
+  },
 ]
 
 export default function Sidebar() {
