@@ -11,6 +11,12 @@ import {
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 
+const SEVERITY_OPTIONS: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
+const INPUT_CLASS =
+  'mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500'
+const CHECKBOX_CLASS =
+  'h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500'
+
 export default function AISettingsPanel() {
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [aiSettingsError, setAISettingsError] = useState<string | null>(null)
@@ -151,6 +157,7 @@ export default function AISettingsPanel() {
       setVerifyProbeMessage(null)
     }
     setTestingScope(scope)
+
     try {
       const result = await testAISettings({
         scope,
@@ -167,9 +174,10 @@ export default function AISettingsPanel() {
       const latency = result.probe?.latency_ms
       const detail = usedModel ? `model ${usedModel}` : 'provider responded'
       const latencyLabel = typeof latency === 'number' ? ` in ${latency}ms` : ''
-      const message = result.status === 'ok'
-        ? `Probe succeeded (${detail}${latencyLabel}).`
-        : `Probe failed: ${result.probe?.error || 'unknown error'}`
+      const message =
+        result.status === 'ok'
+          ? `Probe succeeded (${detail}${latencyLabel}).`
+          : `Probe failed: ${result.probe?.error || 'unknown error'}`
 
       if (scope === 'scan') {
         setScanProbeMessage(message)
@@ -189,111 +197,112 @@ export default function AISettingsPanel() {
     }
   }
 
+  if (loading && !aiSettings) {
+    return (
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 text-sm text-gray-400">
+        Loading AI settings...
+      </div>
+    )
+  }
+
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 space-y-4">
-      <div className="flex items-start justify-between gap-4">
+    <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-gray-400">AI Settings</h2>
+          <h2 className="text-sm font-medium text-gray-200">AI & Verification Settings</h2>
           <p className="text-xs text-gray-500 mt-1">
-            Retest AI verification is authoritative. Scan-time AI classification is optional pre-triage.
-            Changes apply to new jobs immediately.
+            Retest verification is authoritative. Scan-time AI classification is optional triage assistance.
           </p>
         </div>
-        <button
-          onClick={fetchAISettings}
-          disabled={loading || aiSaving}
-          className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-sm"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={fetchAISettings}
+            disabled={loading || aiSaving}
+            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-sm"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={handleSaveAISettings}
+            disabled={aiSaving || loading}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-sm"
+          >
+            {aiSaving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Shared Provider + Optional Scan Classification</h3>
-          <p className="text-xs text-gray-500">
-            Used as the shared provider defaults. Scan-time AI classification runs only when enabled below.
-          </p>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI URL</span>
+      {aiSettings && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+            Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'}
+          </div>
+          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+            Retest key: {aiSettings.ai_verify_api_key_configured ? 'configured' : 'not set'}
+          </div>
+          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+            Scan classification:{' '}
+            {aiSettings.ai_scan_classification_enabled ? `on (${aiSettings.ai_classify_min_severity}+)` : 'off'}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <SectionCard
+          title="Shared Provider"
+          description="Default provider used for scan-time classification and as fallback for retest verification."
+        >
+          <Field label="AI URL">
             <input
               type="text"
               value={aiURLInput}
               onChange={(e) => setAIURLInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder="https://api.openai.com/v1/chat/completions"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI Model</span>
+          </Field>
+          <Field label="AI Model">
             <input
               type="text"
               value={aiModelInput}
               onChange={(e) => setAIModelInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder="gpt-4o-mini"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">Fallback Models (comma-separated)</span>
+          </Field>
+          <Field label="Fallback Models (comma-separated)">
             <input
               type="text"
               value={aiModelFallbackInput}
               onChange={(e) => setAIModelFallbackInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder="moonshotai/kimi-k2.5,openai/gpt-4o-mini"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">Mask Host</span>
+          </Field>
+          <Field label="Mask Host">
             <input
               type="text"
               value={aiMaskHostInput}
               onChange={(e) => setAIMaskHostInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder="example.com"
             />
-          </label>
-          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-            <input
-              type="checkbox"
-              checked={aiScanClassificationEnabledInput}
-              onChange={(e) => setAIScanClassificationEnabledInput(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
-            />
-            Enable scan-time AI classification
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">Scan Classification Min Severity</span>
-            <select
-              value={aiClassifyMinSeverityInput}
-              onChange={(e) => setAIClassifyMinSeverityInput(e.target.value as Severity)}
-              disabled={!aiScanClassificationEnabledInput}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
-            >
-              <option value="critical">critical</option>
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
-              <option value="info">info</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI API Key</span>
+          </Field>
+          <Field label="AI API Key">
             <input
               type="password"
               value={scanAPIKeyInput}
               onChange={(e) => setScanAPIKeyInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder={aiSettings?.ai_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
             />
-          </label>
+          </Field>
           <label className="inline-flex items-center gap-2 text-xs text-gray-400">
             <input
               type="checkbox"
               checked={clearScanAPIKey}
               onChange={(e) => setClearScanAPIKey(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              className={CHECKBOX_CLASS}
             />
             Clear shared provider API key
           </label>
@@ -303,7 +312,7 @@ export default function AISettingsPanel() {
               disabled={loading || aiSaving || testingScope !== null}
               className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
             >
-              {testingScope === 'scan' ? 'Testing shared provider...' : 'Test Shared Provider'}
+              {testingScope === 'scan' ? 'Testing provider...' : 'Test Shared Provider'}
             </button>
             {scanProbeMessage && (
               <span className={`text-xs ${scanProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
@@ -311,119 +320,111 @@ export default function AISettingsPanel() {
               </span>
             )}
           </div>
-        </div>
+        </SectionCard>
 
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Retest AI Verification (Authoritative)</h3>
+        <SectionCard
+          title="Scan-Time Classification"
+          description="Optional AI triage during scan reporting. Does not replace retest verification."
+        >
+          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={aiScanClassificationEnabledInput}
+              onChange={(e) => setAIScanClassificationEnabledInput(e.target.checked)}
+              className={CHECKBOX_CLASS}
+            />
+            Enable scan-time AI classification
+          </label>
+          <Field label="Scan Classification Min Severity">
+            <select
+              value={aiClassifyMinSeverityInput}
+              onChange={(e) => setAIClassifyMinSeverityInput(e.target.value as Severity)}
+              disabled={!aiScanClassificationEnabledInput}
+              className={`${INPUT_CLASS} disabled:opacity-50`}
+            >
+              {SEVERITY_OPTIONS.map((sev) => (
+                <option key={sev} value={sev}>
+                  {sev}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-gray-500">
+            Recommendation: keep this at <code>medium</code> or higher for lower noise.
+          </p>
+        </SectionCard>
+
+        <SectionCard
+          title="Retest Verification (Authoritative)"
+          description="Used for retest AI decisions and exploit validation workflow."
+        >
           <label className="inline-flex items-center gap-2 text-xs text-gray-300">
             <input
               type="checkbox"
               checked={aiVerifyEnabledInput}
               onChange={(e) => setAIVerifyEnabledInput(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              className={CHECKBOX_CLASS}
             />
             Enable AI verification for retests
           </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI Verify URL</span>
+          <Field label="AI Verify URL">
             <input
               type="text"
               value={aiVerifyURLInput}
               onChange={(e) => setAIVerifyURLInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              placeholder="Leave empty to fall back to shared AI URL"
+              className={INPUT_CLASS}
+              placeholder="Leave empty to use shared AI URL"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI Verify Model</span>
+          </Field>
+          <Field label="AI Verify Model">
             <input
               type="text"
               value={aiVerifyModelInput}
               onChange={(e) => setAIVerifyModelInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              placeholder="claude-sonnet-4-5-20250929"
+              className={INPUT_CLASS}
+              placeholder="moonshotai/kimi-k2.5"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">Verify Fallback Models (comma-separated)</span>
+          </Field>
+          <Field label="Verify Fallback Models (comma-separated)">
             <input
               type="text"
               value={aiVerifyModelFallbackInput}
               onChange={(e) => setAIVerifyModelFallbackInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder="openai/gpt-4o-mini,anthropic/claude-3-5-sonnet"
             />
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">Verification Min Severity</span>
+          </Field>
+          <Field label="Verification Min Severity">
             <select
               value={aiVerifyMinSeverityInput}
               onChange={(e) => setAIVerifyMinSeverityInput(e.target.value as Severity)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
             >
-              <option value="critical">critical</option>
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
-              <option value="info">info</option>
+              {SEVERITY_OPTIONS.map((sev) => (
+                <option key={sev} value={sev}>
+                  {sev}
+                </option>
+              ))}
             </select>
-          </label>
-          <label className="block">
-            <span className="text-xs text-gray-400">AI Verify API Key</span>
+          </Field>
+          <Field label="AI Verify API Key">
             <input
               type="password"
               value={verifyAPIKeyInput}
               onChange={(e) => setVerifyAPIKeyInput(e.target.value)}
-              className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              className={INPUT_CLASS}
               placeholder={aiSettings?.ai_verify_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
             />
-          </label>
+          </Field>
           <label className="inline-flex items-center gap-2 text-xs text-gray-400">
             <input
               type="checkbox"
               checked={clearVerifyAPIKey}
               onChange={(e) => setClearVerifyAPIKey(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+              className={CHECKBOX_CLASS}
             />
             Clear retest AI API key
           </label>
-          <div className="pt-2 border-t border-gray-800 mt-2 space-y-2">
-            <h4 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Auto Retest Policy</h4>
-            <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={autoRetestEnabledInput}
-                onChange={(e) => setAutoRetestEnabledInput(e.target.checked)}
-                className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
-              />
-              Auto-queue retests after each scan
-            </label>
-            <label className="block">
-              <span className="text-xs text-gray-400">Auto Retest Min Severity</span>
-              <select
-                value={autoRetestMinSeverityInput}
-                onChange={(e) => setAutoRetestMinSeverityInput(e.target.value as Severity)}
-                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="critical">critical</option>
-                <option value="high">high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-                <option value="info">info</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-xs text-gray-400">Auto Retest Max Findings Per Scan</span>
-              <input
-                type="number"
-                min={0}
-                max={500}
-                value={autoRetestMaxPerScanInput}
-                onChange={(e) => setAutoRetestMaxPerScanInput(e.target.value)}
-                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              />
-            </label>
-          </div>
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => handleTestAISettings('verify')}
@@ -438,77 +439,141 @@ export default function AISettingsPanel() {
               </span>
             )}
           </div>
-          <div className="pt-2 border-t border-gray-800 mt-2 space-y-2">
-            <h4 className="text-xs font-medium text-gray-300 uppercase tracking-wide">Verification Policy</h4>
-            <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-              <input
-                type="checkbox"
-                checked={proofRequiredForSmartInput}
-                onChange={(e) => setProofRequiredForSmartInput(e.target.checked)}
-                className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
-              />
-              Proof required for smart scan reports (no exploit = no report)
-            </label>
-            <label className="block">
-              <span className="text-xs text-gray-400">Verification Min Severity (scan-time + retest)</span>
-              <select
-                value={verificationMinSeverityInput}
-                onChange={(e) => setVerificationMinSeverityInput(e.target.value as Severity)}
-                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="critical">critical</option>
-                <option value="high">high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-                <option value="info">info</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-xs text-gray-400">AI Escalation Min Severity</span>
-              <select
-                value={aiEscalationMinSeverityInput}
-                onChange={(e) => setAIEscalationMinSeverityInput(e.target.value as Severity)}
-                className="mt-1 w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="critical">critical</option>
-                <option value="high">high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-                <option value="info">info</option>
-              </select>
-            </label>
-          </div>
-        </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Verification Policy"
+          description="Controls proof-gated reporting and how strict chain-visible findings are."
+        >
+          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={proofRequiredForSmartInput}
+              onChange={(e) => setProofRequiredForSmartInput(e.target.checked)}
+              className={CHECKBOX_CLASS}
+            />
+            Proof required for smart scan reports (no exploit = no report)
+          </label>
+          <Field label="Verification Min Severity (scan-time + retest)">
+            <select
+              value={verificationMinSeverityInput}
+              onChange={(e) => setVerificationMinSeverityInput(e.target.value as Severity)}
+              className={INPUT_CLASS}
+            >
+              {SEVERITY_OPTIONS.map((sev) => (
+                <option key={sev} value={sev}>
+                  {sev}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="AI Escalation Min Severity">
+            <select
+              value={aiEscalationMinSeverityInput}
+              onChange={(e) => setAIEscalationMinSeverityInput(e.target.value as Severity)}
+              className={INPUT_CLASS}
+            >
+              {SEVERITY_OPTIONS.map((sev) => (
+                <option key={sev} value={sev}>
+                  {sev}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1.5">
+            If proof-required is enabled, smart scans may show fewer findings and fewer attack chains unless exploit
+            evidence is collected.
+          </p>
+        </SectionCard>
+
+        <SectionCard
+          title="Auto Retest Policy"
+          description="Automatically queue retests after scan completion."
+        >
+          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={autoRetestEnabledInput}
+              onChange={(e) => setAutoRetestEnabledInput(e.target.checked)}
+              className={CHECKBOX_CLASS}
+            />
+            Auto-queue retests after each scan
+          </label>
+          <Field label="Auto Retest Min Severity">
+            <select
+              value={autoRetestMinSeverityInput}
+              onChange={(e) => setAutoRetestMinSeverityInput(e.target.value as Severity)}
+              className={INPUT_CLASS}
+            >
+              {SEVERITY_OPTIONS.map((sev) => (
+                <option key={sev} value={sev}>
+                  {sev}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Auto Retest Max Findings Per Scan">
+            <input
+              type="number"
+              min={0}
+              max={500}
+              value={autoRetestMaxPerScanInput}
+              onChange={(e) => setAutoRetestMaxPerScanInput(e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </SectionCard>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="pt-2 border-t border-gray-800">
         <label className="inline-flex items-center gap-2 text-xs text-gray-300">
           <input
             type="checkbox"
             checked={persistAIToEnv}
             onChange={(e) => setPersistAIToEnv(e.target.checked)}
-            className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500"
+            className={CHECKBOX_CLASS}
           />
           Persist changes to local <code>.env</code>
         </label>
-        <button
-          onClick={handleSaveAISettings}
-          disabled={aiSaving || loading}
-          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-sm"
-        >
-          {aiSaving ? 'Saving...' : 'Save AI Settings'}
-        </button>
       </div>
 
-      {aiSettings && (
-        <p className="text-xs text-gray-500">
-          Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'} · Retest key:{' '}
-          {aiSettings.ai_verify_api_key_configured ? 'configured' : 'not set'} · Scan classification:{' '}
-          {aiSettings.ai_scan_classification_enabled ? `enabled (${aiSettings.ai_classify_min_severity}+)` : 'disabled'}
-        </p>
-      )}
       {aiSettingsMessage && <p className="text-xs text-green-400">{aiSettingsMessage}</p>}
       {aiSettingsError && <p className="text-xs text-red-400">{aiSettingsError}</p>}
     </div>
+  )
+}
+
+function SectionCard({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2">
+      <div>
+        <h3 className="text-xs font-medium text-gray-200 uppercase tracking-wide">{title}</h3>
+        <p className="text-xs text-gray-500 mt-1">{description}</p>
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs text-gray-400">{label}</span>
+      {children}
+    </label>
   )
 }
