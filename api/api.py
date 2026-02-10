@@ -3837,7 +3837,7 @@ class SessionStartRequest(BaseModel):
 
 
 class SessionActionRequest(BaseModel):
-    action: str  # navigate, click, fill, register, login, submit, wait, extract
+    action: str  # navigate, click, fill, set_auth, register, login, submit, wait, extract
     user: Optional[str] = "default"
     data: Optional[dict] = None
 
@@ -4002,6 +4002,7 @@ async def session_action(session_id: str, request: SessionActionRequest):
     - navigate: Go to URL (data: {"url": "/path"})
     - click: Click element (data: {"selector": "button#submit"})
     - fill: Fill input (data: {"selector": "input#email", "value": "test@example.com"})
+    - set_auth: Set auth context (data: {"token":"..."} or {"auth_header":"Bearer ..."} or {"cookies":{"session":"..."}})
     - register: Register user (data: {"email": "...", "password": "..."})
     - login: Login user (data: {"email": "...", "password": "..."})
     - submit: Submit form (data: {"selector": "form"})

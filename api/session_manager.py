@@ -396,6 +396,7 @@ class InteractiveSession:
         - navigate: Go to URL
         - click: Click element by selector
         - fill: Fill input field
+        - set_auth: Set user auth header/cookies directly
         - register: Register new user account
         - login: Login with credentials
         - submit: Submit current form
@@ -456,6 +457,9 @@ class InteractiveSession:
                     await page.fill(selector, value, timeout=10000)
                     result["selector"] = selector
 
+                elif action_type == "set_auth":
+                    result = await self._handle_set_auth(page, user, data)
+
                 elif action_type == "register":
                     result = await self._handle_register(page, user, data)
 
@@ -505,6 +509,142 @@ class InteractiveSession:
             except Exception as e:
                 return {"success": False, "error": f"Action failed: {str(e)}", "action": action_type}
 
+    async def _wait_after_form_submit(self, page: Page, start_url: str, timeout_ms: int = 6000) -> None:
+        """Wait briefly for post-submit navigation/state changes without hanging on long-polling apps."""
+        try:
+            await page.wait_for_function(
+                "previous => window.location.href !== previous",
+                arg=start_url,
+                timeout=timeout_ms
+            )
+            return
+        except Exception:
+            pass
+
+        for state in ("domcontentloaded", "load"):
+            try:
+                await page.wait_for_load_state(state, timeout=2000)
+                return
+            except Exception:
+                continue
+
+        try:
+            await page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+    async def _click_first_available(self, page: Page, selectors: list[str], timeout_ms: int = 3000) -> tuple[bool, str | None]:
+        """Click the first selector that resolves and is clickable."""
+        for selector in selectors:
+            try:
+                el = await page.query_selector(selector)
+                if not el:
+                    continue
+                await el.click(timeout=timeout_ms)
+                return True, selector
+            except Exception:
+                continue
+        return False, None
+
+    def _parse_cookie_string(self, raw: str) -> dict[str, str]:
+        """Parse 'a=b; c=d' cookie string into a dict."""
+        cookies: dict[str, str] = {}
+        for part in (raw or "").split(";"):
+            piece = part.strip()
+            if not piece or "=" not in piece:
+                continue
+            name, value = piece.split("=", 1)
+            name = name.strip()
+            if not name:
+                continue
+            cookies[name] = value.strip()
+        return cookies
+
+    async def _handle_set_auth(self, page: Page, user: str, data: dict) -> dict[str, Any]:
+        """Set user auth context directly using token/header/cookies."""
+        auth_header = (data.get("auth_header") or "").strip()
+        token = (data.get("token") or "").strip()
+        cookies_input = data.get("cookies")
+        cookie_string = data.get("cookie_string")
+
+        headers: dict[str, str] = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+            if auth_header.lower().startswith("bearer "):
+                token = token or auth_header[7:].strip()
+        elif token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        cookie_dict: dict[str, str] = {}
+        if isinstance(cookies_input, dict):
+            cookie_dict.update({str(k): str(v) for k, v in cookies_input.items() if str(k).strip()})
+        elif isinstance(cookies_input, str):
+            cookie_dict.update(self._parse_cookie_string(cookies_input))
+
+        if isinstance(cookie_string, str) and cookie_string.strip():
+            cookie_dict.update(self._parse_cookie_string(cookie_string))
+
+        if not headers and not cookie_dict:
+            return {
+                "success": False,
+                "error": "No auth data provided. Supply token/auth_header and/or cookies.",
+                "action": "set_auth"
+            }
+
+        if cookie_dict:
+            parsed = urlparse(page.url or self.target_url)
+            domain = parsed.hostname or urlparse(self.target_url).hostname
+            if domain:
+                secure = parsed.scheme == "https"
+                cookies_for_browser = []
+                for name, value in cookie_dict.items():
+                    cookies_for_browser.append({
+                        "name": name,
+                        "value": value,
+                        "domain": domain,
+                        "path": "/",
+                        "secure": secure
+                    })
+                try:
+                    context = self._contexts.get(user)
+                    if context:
+                        await context.add_cookies(cookies_for_browser)
+                except Exception:
+                    # Keep state even if browser cookie injection fails
+                    pass
+
+        existing = self.state.users.get(user, UserSession(name=user))
+        merged_headers = dict(existing.headers or {})
+        merged_headers.update(headers)
+        merged_cookies = dict(existing.cookies or {})
+        merged_cookies.update(cookie_dict)
+
+        auth_method = None
+        if "Authorization" in merged_headers:
+            auth_method = "jwt"
+        elif merged_cookies:
+            auth_method = "cookie"
+
+        is_authenticated = bool("Authorization" in merged_headers or merged_cookies)
+        self.state.users[user] = UserSession(
+            name=user,
+            cookies=merged_cookies,
+            headers=merged_headers,
+            is_authenticated=is_authenticated,
+            auth_method=auth_method,
+            token=token or existing.token
+        )
+
+        return {
+            "success": True,
+            "action": "set_auth",
+            "user": user,
+            "is_authenticated": is_authenticated,
+            "auth_method": auth_method,
+            "cookies_count": len(merged_cookies),
+            "has_authorization_header": "Authorization" in merged_headers
+        }
+
     async def _handle_register(self, page: Page, user: str, data: dict) -> dict[str, Any]:
         """Handle user registration action."""
         email = data.get("email")
@@ -532,42 +672,87 @@ class InteractiveSession:
             'input[type="submit"]',
             'button:has-text("Register")',
             'button:has-text("Sign up")',
+            'button:has-text("Sign Up")',
             'button:has-text("Create")',
         ]
 
         try:
             # Try to find and fill email
+            email_filled = False
             for selector in email_selectors:
                 try:
                     el = await page.query_selector(selector)
                     if el:
-                        await el.fill(email)
+                        await el.fill(email, timeout=5000)
+                        email_filled = True
                         break
                 except Exception:
                     continue
 
             # Fill password and confirm password
+            password_filled = False
             password_inputs = await page.query_selector_all('input[type="password"]')
             for inp in password_inputs:
-                await inp.fill(password)
+                try:
+                    await inp.fill(password, timeout=5000)
+                    password_filled = True
+                except Exception:
+                    continue
+
+            # Fallback if password type inputs aren't found
+            if not password_filled:
+                for selector in password_selectors:
+                    try:
+                        el = await page.query_selector(selector)
+                        if el:
+                            await el.fill(password, timeout=5000)
+                            password_filled = True
+                            break
+                    except Exception:
+                        continue
+
+            if not email_filled or not password_filled:
+                return {
+                    "success": False,
+                    "error": "Registration form fields not found or not fillable on current page",
+                    "action": "register",
+                    "url": page.url
+                }
 
             # Fill extra fields
             for name, value in extra_fields.items():
                 try:
-                    await page.fill(f'input[name="{name}"]', value)
+                    await page.fill(f'input[name="{name}"]', str(value), timeout=3000)
+                except Exception:
+                    try:
+                        await page.fill(f'input[id="{name}"]', str(value), timeout=3000)
+                    except Exception:
+                        pass
+
+            # Submit form
+            start_url = page.url
+            submitted, submit_selector = await self._click_first_available(page, submit_selectors, timeout_ms=3000)
+
+            if not submitted:
+                try:
+                    # Fallback: try any form submit control
+                    btn = await page.query_selector('form button, form input[type="submit"], button[type="submit"], input[type="submit"]')
+                    if btn:
+                        await btn.click(timeout=3000)
+                        submitted = True
+                        submit_selector = "form button/input[type=submit]"
                 except Exception:
                     pass
 
-            # Submit form
-            for selector in submit_selectors:
-                try:
-                    btn = await page.query_selector(selector)
-                    if btn:
-                        await btn.click()
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                        break
-                except Exception:
-                    continue
+            if not submitted:
+                return {
+                    "success": False,
+                    "error": "No clickable submit button found for registration form",
+                    "action": "register",
+                    "url": page.url
+                }
+
+            await self._wait_after_form_submit(page, start_url)
 
             # Update user session
             self.state.users[user] = UserSession(
@@ -580,7 +765,8 @@ class InteractiveSession:
                 "action": "register",
                 "user": user,
                 "email": email,
-                "url": page.url
+                "url": page.url,
+                "submit_selector": submit_selector
             }
 
         except Exception as e:
@@ -612,50 +798,96 @@ class InteractiveSession:
             'input[type="submit"]',
             'button:has-text("Login")',
             'button:has-text("Sign in")',
+            'button:has-text("Sign In")',
             'button:has-text("Log in")',
+            'button:has-text("Log In")',
         ]
 
         try:
             # Fill email
+            email_filled = False
             for selector in email_selectors:
                 try:
                     el = await page.query_selector(selector)
                     if el:
-                        await el.fill(email)
+                        await el.fill(email, timeout=5000)
+                        email_filled = True
                         break
                 except Exception:
                     continue
 
             # Fill password
+            password_filled = False
             for selector in password_selectors:
                 try:
                     el = await page.query_selector(selector)
                     if el:
-                        await el.fill(password)
+                        await el.fill(password, timeout=5000)
+                        password_filled = True
                         break
                 except Exception:
                     continue
 
+            if not email_filled or not password_filled:
+                return {
+                    "success": False,
+                    "error": "Login form fields not found or not fillable on current page",
+                    "action": "login",
+                    "url": page.url
+                }
+
             # Submit
-            for selector in submit_selectors:
+            start_url = page.url
+            submitted, submit_selector = await self._click_first_available(page, submit_selectors, timeout_ms=3000)
+
+            if not submitted:
                 try:
-                    btn = await page.query_selector(selector)
+                    btn = await page.query_selector('form button, form input[type="submit"], button[type="submit"], input[type="submit"]')
                     if btn:
-                        await btn.click()
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                        break
+                        await btn.click(timeout=3000)
+                        submitted = True
+                        submit_selector = "form button/input[type=submit]"
                 except Exception:
-                    continue
+                    pass
+
+            if not submitted:
+                return {
+                    "success": False,
+                    "error": "No clickable submit button found for login form",
+                    "action": "login",
+                    "url": page.url
+                }
+
+            await self._wait_after_form_submit(page, start_url)
 
             # Capture cookies and detect auth
             context = self._contexts[user]
             cookies = await context.cookies()
             cookie_dict = {c["name"]: c["value"] for c in cookies}
 
-            # Look for auth tokens in localStorage
+            # Look for auth tokens in localStorage/sessionStorage
             token = None
             try:
-                token = await page.evaluate("() => localStorage.getItem('token') || localStorage.getItem('access_token') || localStorage.getItem('jwt')")
+                token = await page.evaluate("""
+                    () => {
+                        const stores = [window.localStorage, window.sessionStorage];
+                        const explicitKeys = ["token", "access_token", "jwt", "auth_token", "id_token"];
+                        for (const store of stores) {
+                            for (const key of explicitKeys) {
+                                const val = store.getItem(key);
+                                if (val) return val;
+                            }
+                            for (let i = 0; i < store.length; i++) {
+                                const key = store.key(i) || "";
+                                if (/(token|jwt|auth)/i.test(key)) {
+                                    const val = store.getItem(key);
+                                    if (val) return val;
+                                }
+                            }
+                        }
+                        return null;
+                    }
+                """)
             except Exception:
                 pass
 
@@ -663,27 +895,44 @@ class InteractiveSession:
             auth_method = None
             if token:
                 auth_method = "jwt"
-            elif any(name.lower() in ["session", "sessionid", "sid", "auth"] for name in cookie_dict.keys()):
+            elif any(
+                any(marker in name.lower() for marker in ["session", "sid", "auth", "token", "jwt"])
+                for name in cookie_dict.keys()
+            ):
                 auth_method = "cookie"
 
+            is_authenticated = bool(token or auth_method == "cookie")
             self.state.users[user] = UserSession(
                 name=user,
                 cookies=cookie_dict,
                 headers={"Authorization": f"Bearer {token}"} if token else {},
-                is_authenticated=bool(token or auth_method == "cookie"),
+                is_authenticated=is_authenticated,
                 auth_method=auth_method,
                 token=token
             )
+
+            if not is_authenticated:
+                return {
+                    "success": False,
+                    "error": "Login form submitted but no authentication token/cookie was detected",
+                    "action": "login",
+                    "user": user,
+                    "email": email,
+                    "url": page.url,
+                    "cookies_count": len(cookie_dict),
+                    "submit_selector": submit_selector
+                }
 
             return {
                 "success": True,
                 "action": "login",
                 "user": user,
                 "email": email,
-                "is_authenticated": self.state.users[user].is_authenticated,
+                "is_authenticated": is_authenticated,
                 "auth_method": auth_method,
                 "url": page.url,
-                "cookies_count": len(cookie_dict)
+                "cookies_count": len(cookie_dict),
+                "submit_selector": submit_selector
             }
 
         except Exception as e:
