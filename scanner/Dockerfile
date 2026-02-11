@@ -8,34 +8,14 @@ FROM golang:latest AS go-builder
 RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.1 \
  && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.8.1 \
  && go install github.com/projectdiscovery/katana/cmd/katana@v1.4.0 \
+ && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.12.0 \
+ && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.6.2 \
  && go install github.com/hahwul/dalfox/v2@v2.12.0 \
  && go install github.com/ffuf/ffuf/v2@latest \
  && go install github.com/tomnomnom/meg@latest \
  && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@latest
 
-# --- Stage 2: Download pre-built subfinder binary ---
-FROM alpine:latest AS subfinder-downloader
-RUN apk add --no-cache curl unzip
-WORKDIR /tmp
-RUN curl -L "https://github.com/projectdiscovery/subfinder/releases/download/v2.12.0/subfinder_2.12.0_linux_amd64.zip" -o subfinder.zip && \
-    unzip subfinder.zip && \
-    chmod +x subfinder
-
-# --- Stage 3: Download pre-built nuclei binary ---
-FROM alpine:latest AS nuclei-downloader
-RUN apk add --no-cache curl tar unzip
-WORKDIR /tmp
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
-        NUCLEI_ARCH="arm64"; \
-    else \
-        NUCLEI_ARCH="amd64"; \
-    fi && \
-    curl -L "https://github.com/projectdiscovery/nuclei/releases/download/v3.6.2/nuclei_3.6.2_linux_${NUCLEI_ARCH}.zip" -o nuclei.zip && \
-    unzip nuclei.zip && \
-    chmod +x nuclei
-
-# --- Stage 4: Runtime with Playwright (Chromium) ---
+# --- Stage 2: Runtime with Playwright (Chromium) ---
 FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 # System deps for network tooling and additional scanners
@@ -63,14 +43,12 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 COPY --from=go-builder /go/bin/tlsx /opt/tools/tlsx
 COPY --from=go-builder /go/bin/httpx /opt/tools/httpx
 COPY --from=go-builder /go/bin/katana /opt/tools/katana
+COPY --from=go-builder /go/bin/subfinder /opt/tools/subfinder
+COPY --from=go-builder /go/bin/nuclei /opt/tools/nuclei
 COPY --from=go-builder /go/bin/dalfox /opt/tools/dalfox
 COPY --from=go-builder /go/bin/ffuf /opt/tools/ffuf
 COPY --from=go-builder /go/bin/meg /opt/tools/meg
 COPY --from=go-builder /go/bin/gungnir /opt/tools/gungnir
-
-# Copy prebuilt binaries
-COPY --from=subfinder-downloader /tmp/subfinder /opt/tools/subfinder
-COPY --from=nuclei-downloader /tmp/nuclei /opt/tools/nuclei
 
 # Make all tools executable
 RUN chmod +x /opt/tools/*
