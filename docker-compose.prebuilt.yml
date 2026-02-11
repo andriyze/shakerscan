@@ -1,0 +1,19 @@
+# Shaker Scan prebuilt image overrides.
+# Loaded by scanner.sh when running in prebuilt mode (default for start/restart).
+
+services:
+  api:
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.2.0}
+    build: null
+
+  worker:
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.2.0}
+    build: null
+
+  gungnir-worker:
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.2.0}
+    build: null
+
+  ui:
+    image: ${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}:${SCANNER_IMAGE_TAG:-0.2.0}
+    build: null

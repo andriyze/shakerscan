@@ -20,8 +20,12 @@ ASSUME_YES=0
 FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
+COMPOSE_FILE_ARGS=()
 PLATFORM=""
 PLATFORM_VERSION=""
+USE_PREBUILT=1
+PREBUILT_COMPOSE_FILE="docker-compose.prebuilt.yml"
+IMAGE_TAG_OVERRIDE=""
 
 command_exists() {
     command -v "$1" > /dev/null 2>&1
@@ -57,13 +61,43 @@ resolve_compose_command() {
     return 1
 }
 
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+update_compose_file_args() {
+    COMPOSE_FILE_ARGS=(-f docker-compose.yml)
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        COMPOSE_FILE_ARGS+=(-f "$PREBUILT_COMPOSE_FILE")
+    fi
+}
+
 compose() {
     if ! resolve_compose_command; then
         echo -e "${RED}Error: Docker Compose is not installed${NC}"
         return 1
     fi
 
-    "${DOCKER_COMPOSE_CMD[@]}" "$@"
+    "${DOCKER_COMPOSE_CMD[@]}" "${COMPOSE_FILE_ARGS[@]}" "$@"
+}
+
+compose_up() {
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        compose up --no-build "$@"
+    else
+        compose up "$@"
+    fi
+}
+
+compose_run() {
+    compose run "$@"
 }
 
 run_with_sudo() {
@@ -417,12 +451,77 @@ get_build_version() {
     fi
 }
 
+get_release_version() {
+    if [ -f "$SCRIPT_DIR/VERSION" ]; then
+        local version
+        version="$(head -n 1 "$SCRIPT_DIR/VERSION" | tr -d '[:space:]')"
+        if [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+
+    echo "dev"
+}
+
 set_build_env() {
-    local version
-    version=$(get_build_version)
-    export SCANNER_VERSION="$version"
-    export GIT_COMMIT="$version"
-    export NEXT_PUBLIC_APP_VERSION="$version"
+    local local_commit
+    local release_version
+    local image_tag
+    local_commit=$(get_build_version)
+    release_version=$(get_release_version)
+    image_tag="${SCANNER_IMAGE_TAG:-$release_version}"
+
+    export SCANNER_RELEASE_VERSION="$release_version"
+    export BUILD_GIT_COMMIT="$local_commit"
+
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        export SCANNER_VERSION="$image_tag"
+        export GIT_COMMIT="${SCANNER_IMAGE_COMMIT:-image:${image_tag}}"
+        export NEXT_PUBLIC_APP_VERSION="$image_tag"
+    else
+        export SCANNER_VERSION="$local_commit"
+        export GIT_COMMIT="$local_commit"
+        export NEXT_PUBLIC_APP_VERSION="$local_commit"
+    fi
+}
+
+configure_runtime_mode() {
+    local command="$1"
+
+    if [ -n "${SCANNER_USE_PREBUILT:-}" ]; then
+        if is_truthy "${SCANNER_USE_PREBUILT}"; then
+            USE_PREBUILT=1
+        else
+            USE_PREBUILT=0
+        fi
+    fi
+
+    if is_truthy "${SCANNER_LOCAL_BUILD:-0}"; then
+        USE_PREBUILT=0
+    fi
+
+    if [ -n "$IMAGE_TAG_OVERRIDE" ]; then
+        export SCANNER_IMAGE_TAG="$IMAGE_TAG_OVERRIDE"
+    fi
+
+    export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
+    export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
+    export SCANNER_RELEASE_VERSION="$(get_release_version)"
+    export SCANNER_IMAGE_TAG="${SCANNER_IMAGE_TAG:-$SCANNER_RELEASE_VERSION}"
+
+    case "$command" in
+        build|rebuild)
+            USE_PREBUILT=0
+            ;;
+    esac
+
+    if [ "$USE_PREBUILT" -eq 1 ] && [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
+        echo -e "${YELLOW}Prebuilt override file missing ($PREBUILT_COMPOSE_FILE). Falling back to local build mode.${NC}"
+        USE_PREBUILT=0
+    fi
+
+    update_compose_file_args
 }
 
 print_banner() {
@@ -461,10 +560,15 @@ print_help() {
     echo "  -w, --workers N    Number of workers (default: $WORKERS)"
     echo "  -f, --follow       Follow logs"
     echo "  -y, --yes          Auto-confirm dependency installation"
+    echo "  --local            Force local Docker build instead of prebuilt images"
+    echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
+    echo "  --image-tag TAG    Override Docker image tag (default: VERSION file)"
     echo ""
     echo "Examples:"
-    echo "  ./scanner.sh start                    # Start with 5 workers (default)"
+    echo "  ./scanner.sh start                    # Start with prebuilt images"
+    echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
+    echo "  ./scanner.sh start --image-tag 0.2.0  # Use a specific published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
     echo "  ./scanner.sh install-deps             # Install dependencies"
@@ -478,7 +582,14 @@ print_help() {
 start_services() {
     set_build_env
     echo -e "${GREEN}Starting Shaker Scan with $WORKERS workers...${NC}"
-    compose up -d --scale worker=$WORKERS
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        echo "Mode: prebuilt images"
+        echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
+        echo "  ui:      ${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
+    else
+        echo "Mode: local build"
+    fi
+    compose_up -d --scale worker=$WORKERS
     echo ""
     echo -e "${GREEN}Services started!${NC}"
     echo "  UI:  http://localhost:3000"
@@ -677,7 +788,7 @@ reset_database() {
         echo "Stopping services..."
         compose down -v
         echo "Starting fresh..."
-        compose up -d --scale worker=$WORKERS
+        compose_up -d --scale worker=$WORKERS
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"
@@ -699,7 +810,7 @@ scale_workers() {
     fi
 
     echo -e "${GREEN}Scaling to $COUNT workers...${NC}"
-    compose up -d --scale worker=$COUNT --no-recreate worker
+    compose_up -d --scale worker=$COUNT --no-recreate worker
     echo ""
 
     # Show current worker count
@@ -709,7 +820,7 @@ scale_workers() {
 
 open_shell() {
     echo "Opening shell in scanner container..."
-    compose run --rm worker /bin/bash
+    compose_run --rm worker /bin/bash
 }
 
 gungnir_cmd() {
@@ -718,7 +829,11 @@ gungnir_cmd() {
     case $SUBCMD in
         start)
             echo -e "${GREEN}Starting Gungnir CT monitor...${NC}"
-            compose --profile gungnir up -d gungnir-worker
+            if [ "$USE_PREBUILT" -eq 1 ]; then
+                compose --profile gungnir up --no-build -d gungnir-worker
+            else
+                compose --profile gungnir up -d gungnir-worker
+            fi
             echo -e "${GREEN}Gungnir started. Monitoring CT logs for all targets.${NC}"
             echo ""
             echo "Use './scanner.sh gungnir status' to check status"
@@ -775,6 +890,10 @@ shift || true
 while [[ $# -gt 0 ]]; do
     case $1 in
         -w|--workers)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: $1 requires a value${NC}"
+                exit 1
+            fi
             WORKERS="$2"
             shift 2
             ;;
@@ -786,12 +905,30 @@ while [[ $# -gt 0 ]]; do
             ASSUME_YES=1
             shift
             ;;
+        --local|--local-build)
+            USE_PREBUILT=0
+            shift
+            ;;
+        --prebuilt)
+            USE_PREBUILT=1
+            shift
+            ;;
+        --image-tag)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --image-tag requires a value${NC}"
+                exit 1
+            fi
+            IMAGE_TAG_OVERRIDE="$2"
+            shift 2
+            ;;
         *)
             ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
