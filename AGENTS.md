@@ -23,6 +23,17 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
+## Current UI (Implemented)
+
+- **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
+- **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
+- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export and compliance section when complete. Preserves list filter context on back navigation.
+- **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning). Warning for active testing types.
+- **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
+- **Findings (`/findings`)**: filter by severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
+
 ## Your Role
 
 When users ask about security scanning, you should:
@@ -87,11 +98,29 @@ curl -X POST http://localhost:8080/scans \
 # Get scan by ID
 curl http://localhost:8080/scans/{scan_id}
 
-# List recent scans
+# List recent scans (filter by status, domain)
 curl "http://localhost:8080/scans?limit=10"
+curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
+
+# Get recent scan logs (default 200 lines, max 1000)
+curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+
+# Cancel a running or pending scan
+curl -X POST http://localhost:8080/scans/{scan_id}/cancel
+```
+
+### Batch Scans
+
+```bash
+curl -X POST http://localhost:8080/scans/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targets": ["https://a.example.com", "https://b.example.com"],
+    "options": {"scan_type": "quick"}
+  }'
 ```
 
 ### Findings
@@ -104,10 +133,55 @@ curl "http://localhost:8080/findings?status=active"
 curl "http://localhost:8080/findings?severity=critical"
 curl "http://localhost:8080/findings?severity=high"
 
-# Update finding status
+# Filter by recency (last 30 days)
+curl "http://localhost:8080/findings?seen_within_days=30"
+
+# Combined filters with sorting
+curl "http://localhost:8080/findings?severity=high&status=active&sort_by=cvss&sort_order=desc&limit=50"
+
+# Update finding status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
-  -d '{"status": "resolved"}'
+  -d '{"status": "resolved", "notes": "Fixed in v2.1 deploy"}'
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
+
+# Bulk cleanup (execute after reviewing dry-run count)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "status": "resolved", "root_domain": "example.com", "dry_run": false}'
+
+# Bulk update finding statuses
+curl -X POST http://localhost:8080/findings/bulk \
+  -H "Content-Type: application/json" \
+  -d '{"finding_ids": ["id1", "id2"], "status": "false_positive", "notes": "Verified non-issue"}'
+
+# Queue retest for one finding (tiered: deterministic then optional AI escalation)
+curl -X POST http://localhost:8080/findings/{id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by": "api"}'
+
+# Force AI-only retest for one finding
+curl -X POST "http://localhost:8080/findings/{id}/retest?mode=ai" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by": "api"}'
+
+# Bulk retest by IDs or filters (supports mode: ai|deterministic)
+curl -X POST http://localhost:8080/findings/retest \
+  -H "Content-Type: application/json" \
+  -d '{"severity": "high", "status": "active", "limit": 25, "mode": "deterministic"}'
+
+# List retest history for one finding
+curl "http://localhost:8080/retests/finding/{id}?limit=20"
+
+# Get one retest record with proof/artifacts/AI metadata
+curl "http://localhost:8080/retests/{retest_id}"
 
 # Create manual finding (from manual testing)
 curl -X POST http://localhost:8080/findings/manual \
@@ -138,10 +212,92 @@ Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI security session)
 
+**Findings Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
+| `severity` | Filter by severity (critical, high, medium, low, info) |
+| `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
+| `root_domain` | Filter by root domain |
+| `target_id` | Filter by target ID |
+| `scan_id` | Filter by scan ID |
+| `verification_verdict` | Filter by latest verification verdict (`exploited`, `likely_fixed`, etc.) |
+| `verification_mode` | Filter findings with verification runs in mode `deterministic` or `ai_driven` |
+| `verified_only` | If true, only return findings with `last_verification_verdict = exploited` |
+| `search` | Search by title or URL |
+| `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
+| `sort_order` | asc or desc (default: desc) |
+| `limit` | Results per page (default: 100, max: 500) |
+| `offset` | Pagination offset |
+
+Retest history records (`/retests/*`) include: `verification_mode`, `ai_plan`, `ai_reasoning`, `proof`, `artifacts`, and replay commands.
+
+**Cleanup Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `older_than_days` | Required. Delete findings last seen more than N days ago |
+| `status` | Optional. Only delete findings with this status |
+| `root_domain` | Optional. Only delete findings for this domain |
+| `dry_run` | If true, returns count without deleting (default: true) |
+
+### Target Management
+
+```bash
+# List targets (flat)
+curl http://localhost:8080/targets
+
+# List targets grouped by root domain (hierarchical view)
+curl "http://localhost:8080/targets/grouped?sort_by=active_findings_count&sort_order=desc"
+
+# List root domains (for filter dropdowns)
+curl http://localhost:8080/domains
+
+# Add a target
+curl -X POST http://localhost:8080/targets \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "name": "Production"}'
+
+# Get target details with recent scans
+curl http://localhost:8080/targets/{target_id}
+
+# Update target
+curl -X PATCH http://localhost:8080/targets/{target_id} \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Staging", "scan_options": {"scan_type": "standard"}}'
+
+# Deactivate target (soft delete)
+curl -X DELETE http://localhost:8080/targets/{target_id}
+
+# Start scan for a specific target
+curl -X POST http://localhost:8080/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"scan_type": "quick"}}'
+```
+
+**Grouped Targets Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `search` | Search by URL or domain |
+| `discovery_source` | Filter: manual, subfinder, gungnir-monitor, import |
+| `grade` | Filter by grade: A, B, C, D, F |
+| `has_findings` | Filter: true (with findings) or false (no findings) |
+| `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
+| `sort_order` | asc or desc |
+
 ### Subdomain Discovery
 
 ```bash
+# Start subdomain discovery
 curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
+
+# List discovery runs
+curl http://localhost:8080/discovery
+
+# Get discovery run details
+curl http://localhost:8080/discovery/{discovery_id}
 ```
 
 ### Dashboard & Status
@@ -152,6 +308,9 @@ curl http://localhost:8080/dashboard
 
 # Queue status
 curl http://localhost:8080/queue/stats
+
+# Emergency clear all pending jobs
+curl -X DELETE http://localhost:8080/queue/clear
 ```
 
 ### Worker Management
@@ -175,6 +334,88 @@ curl -X POST http://localhost:8080/workers \
 
 Worker limits: 1-20 workers. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
 
+### AI Settings
+
+Configure scan AI and AI retest verification at runtime (stored in Redis), with optional local `.env` persistence:
+
+```bash
+# Get effective AI settings (API keys are masked)
+curl http://localhost:8080/settings/ai
+
+# Update runtime settings only (takes effect for new jobs immediately)
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ai_url": "https://api.openai.com/v1/chat/completions",
+    "ai_api_key": "sk-...",
+    "ai_model": "gpt-4o-mini",
+    "ai_model_fallback": "moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet",
+    "ai_verify_enabled": true,
+    "ai_verify_url": "https://api.openai.com/v1/chat/completions",
+    "ai_verify_api_key": "sk-...",
+    "ai_verify_model": "gpt-4o-mini",
+    "ai_verify_model_fallback": "openai/gpt-4o-mini,anthropic/claude-3-5-sonnet",
+    "ai_verify_min_severity": "high",
+    "persist_to_env": false
+  }'
+
+# Clear keys and persist to local .env (if API has LOCAL_ENV_FILE access)
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ai_url": "",
+    "ai_api_key": "",
+    "ai_model_fallback": "",
+    "ai_verify_url": "",
+    "ai_verify_api_key": "",
+    "ai_verify_model_fallback": "",
+    "persist_to_env": true
+  }'
+
+# Probe active settings for scan AI
+curl -X POST http://localhost:8080/settings/ai/test \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"scan"}'
+
+# Probe retest AI with temporary override values (without persisting)
+curl -X POST http://localhost:8080/settings/ai/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scope":"verify",
+    "ai_model":"gpt-4o-mini",
+    "ai_fallback_model":"moonshotai/kimi-k2.5"
+  }'
+```
+
+Notes:
+- Runtime settings apply to **new scans/retests** without restarting services.
+- `persist_to_env: true` writes values to `LOCAL_ENV_FILE` (default `/workspace/.env` in Docker).
+
+### Schedules (Recurring Scans)
+
+```bash
+# List schedules
+curl http://localhost:8080/schedules
+
+# Create daily schedule
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "frequency": "daily",
+    "time_of_day": "02:00",
+    "scan_type": "standard"
+  }'
+
+# Update/toggle schedule
+curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+
+# Delete schedule
+curl -X DELETE http://localhost:8080/schedules/{schedule_id}
+```
+
 ### Certificate Transparency Monitoring (Gungnir)
 
 Monitor CT logs in real-time to discover new certificates issued for your domains:
@@ -186,8 +427,9 @@ Monitor CT logs in real-time to discover new certificates issued for your domain
 # Check Gungnir status
 curl http://localhost:8080/gungnir/status
 
-# View discovered subdomains for a domain
-curl "http://localhost:8080/gungnir/discoveries?domain=example.com"
+# Start/stop via API (alternative to CLI)
+curl -X POST http://localhost:8080/gungnir/start
+curl -X POST http://localhost:8080/gungnir/stop
 ```
 
 Gungnir watches Certificate Transparency logs and automatically discovers new subdomains when certificates are issued. Useful for:
@@ -292,6 +534,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_password` | Password for form-based login |
 | `login_url` | Login page URL (auto-detected if not provided) |
 | `login_extra_fields` | Extra form fields as JSON (e.g., '{"remember": "true"}') |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `user2_cookies` | Second user cookies for BOLA/IDOR comparison testing |
 | `user2_header` | Second user auth header for BOLA/IDOR comparison testing |
 
@@ -459,6 +702,9 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
 | `custom_endpoints` | Array of endpoints with params to test (see format above) |
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings that have exploit verification evidence |
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
 | `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
@@ -468,10 +714,12 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 **Performance/Safety Limits:**
 | Option | Description | Default |
 |--------|-------------|---------|
-| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 30 |
+| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 80 |
 | `dom_xss_max_files` | Max JS files for DOM XSS analysis | 20 |
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |
+
+Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS`.
 
 ### Smart Scan Tuning
 
@@ -690,7 +938,7 @@ curl -s "http://localhost:8080/scans/{scan_id}/result" | jq '{
 }'
 
 # Get existing findings to validate
-curl -s "http://localhost:8080/findings?target_url=https://example.com&status=active"
+curl -s "http://localhost:8080/findings?root_domain=example.com&status=active"
 ```
 
 ### Session API
@@ -706,6 +954,9 @@ curl http://localhost:8080/session/{session_id}
 
 # Take a screenshot
 curl -X POST "http://localhost:8080/session/{session_id}/screenshot"
+
+# Get raw screenshot PNG
+curl -s "http://localhost:8080/session/{session_id}/screenshot.png" -o screenshot.png
 
 # Execute browser action
 curl -X POST "http://localhost:8080/session/{session_id}/action" \
@@ -744,13 +995,16 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 # End session
 curl -X DELETE "http://localhost:8080/session/{session_id}"
+
+# List active sessions
+curl http://localhost:8080/sessions
 ```
 
 ### Session Actions
 
 | Action | Description | Data Fields |
 |--------|-------------|-------------|
-| `navigate` | Go to URL | `url` |
+| `navigate` | Go to URL | `url`, `allow_out_of_scope` (optional) |
 | `click` | Click element | `selector` |
 | `fill` | Fill input field | `selector`, `value` |
 | `register` | Register new account | `email`, `password` |
@@ -758,6 +1012,8 @@ curl -X DELETE "http://localhost:8080/session/{session_id}"
 | `submit` | Submit form | `selector` (optional) |
 | `wait` | Wait for element/time | `selector`, `timeout` |
 | `extract` | Extract data from page | `selector`, `attribute` |
+
+Same-origin is enforced by default for navigation and endpoint tests (SSRF protection). Only use `allow_out_of_scope: true` when user explicitly requests cross-origin testing.
 
 ### BOLA Testing Workflow
 
@@ -797,27 +1053,16 @@ Users can also use the CLI directly:
 ./scanner.sh scan-full https://example.com  # Full assessment
 ./scanner.sh scan-smart https://example.com # Smart adaptive scan
 
-# Authenticated scans
-./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
-
-# Focused active checks
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"   # SQLi-only
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123" # XSS-only
-
-# Dual-auth BOLA testing
-./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1_token" --user2-header "Bearer user2_token"
-
-# Thorough mode (no early stop, more params)
-./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
-
 # Management
 ./scanner.sh status                          # Check status
 ./scanner.sh scale 5                         # Scale to 5 workers
 ./scanner.sh logs -f                         # Follow logs
 ./scanner.sh rebuild                         # Full rebuild (code changes)
 ./scanner.sh restart                         # Restart services
+./scanner.sh gungnir status                  # CT monitor status
 ```
+
+For authenticated scans, focused XSS/SQLi-only checks, and advanced smart tuning (`no_early_stop`, `thorough_params`, `custom_endpoints`, etc.), use the REST API `POST /scans` options.
 
 ## Files Structure
 

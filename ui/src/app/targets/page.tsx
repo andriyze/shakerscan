@@ -445,6 +445,17 @@ function TargetsContent() {
                         {domain.root_target.last_grade}
                       </span>
                     )}
+                    {/* Schedule Button */}
+                    <Link
+                      href={`/schedules?create=true&target_id=${domain.root_target!.id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                      title="Create schedule"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </Link>
                     {/* Scan Menu */}
                     <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-[100]' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
                       <button
@@ -622,6 +633,16 @@ function TargetsContent() {
                         </span>
                       )}
 
+                      {/* Schedule Button for Subdomain */}
+                      <Link
+                        href={`/schedules?create=true&target_id=${subdomain.id}`}
+                        className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                        title="Create schedule"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </Link>
                       {/* Scan Menu for Subdomain */}
                       <div className={`relative ${openScanMenu === subdomain.id ? 'z-[100]' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>
                         <button

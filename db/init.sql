@@ -123,12 +123,71 @@ CREATE TABLE findings (
     -- Notes
     notes TEXT,
 
+    -- Verification summary (latest retest state)
+    last_verification_status TEXT,  -- queued, running, still_vulnerable, likely_fixed, inconclusive, error
+    last_verification_verdict TEXT,  -- exploited, blocked_by_security, out_of_scope_internal, false_positive, likely_fixed, inconclusive, error
+    last_verification_confidence NUMERIC(3,2),
+    last_verified_at TIMESTAMPTZ,
+    verification_count INTEGER DEFAULT 0,
+
     -- Source tracking
     source TEXT DEFAULT 'scan',  -- scan, manual, ai_session
     session_id TEXT,  -- For AI session findings
 
     -- Timestamps
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- FINDING VERIFICATIONS - Retest attempts and proof history
+-- ============================================================
+CREATE TABLE finding_verifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+
+    -- Job metadata
+    job_id TEXT,
+    requested_by TEXT DEFAULT 'api',
+    status TEXT NOT NULL DEFAULT 'queued',  -- queued, running, completed, failed
+    result_status TEXT,  -- still_vulnerable, likely_fixed, inconclusive, error
+    verdict TEXT,  -- exploited, blocked_by_security, out_of_scope_internal, false_positive, likely_fixed, inconclusive, error
+    verdict_reason TEXT,
+
+    -- Retest inputs
+    finding_type TEXT NOT NULL,  -- xss, sqli, ssrf, path_traversal, open_redirect, cors
+    target_url TEXT NOT NULL,
+    original_url TEXT,
+    param TEXT,
+    payload TEXT,
+    method TEXT,
+    request_body TEXT,
+    replay_commands JSONB,
+
+    -- Auth context (forwarded from original scan for authenticated retests)
+    auth_context JSONB,
+
+    -- Retest outputs
+    proof JSONB,
+    artifacts JSONB,
+    confidence NUMERIC(3,2),
+    attempt_count INTEGER DEFAULT 0,
+    attempts_exhausted BOOLEAN DEFAULT FALSE,
+    retry_class TEXT,
+    retryable BOOLEAN DEFAULT FALSE,
+    message TEXT,
+    error_message TEXT,
+
+    -- AI verification (opt-in)
+    verification_mode TEXT DEFAULT 'deterministic',  -- deterministic, ai_driven
+    ai_plan JSONB,         -- LLM's exploitation plan (audit trail)
+    ai_reasoning TEXT,     -- LLM's reasoning about exploitability
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -214,6 +273,16 @@ CREATE INDEX idx_findings_fingerprint ON findings(fingerprint);
 CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
 CREATE INDEX idx_findings_source ON findings(source);
 CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL;
+CREATE INDEX idx_findings_last_verification_verdict ON findings(last_verification_verdict);
+
+-- Finding verifications
+CREATE INDEX idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC);
+CREATE INDEX idx_finding_verifications_status ON finding_verifications(status);
+CREATE INDEX idx_finding_verifications_result_status ON finding_verifications(result_status);
+CREATE INDEX idx_finding_verifications_verdict ON finding_verifications(verdict);
+CREATE INDEX idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX idx_finding_verifications_retry_class ON finding_verifications(retry_class) WHERE retry_class IS NOT NULL;
 
 -- Discovery
 CREATE INDEX idx_discovery_root_domain ON discovery_runs(root_domain);

@@ -33,9 +33,11 @@ export interface Scan {
   grade?: string
   findings_count: number
   created_at: string
+  started_at?: string | null
   completed_at?: string
   duration_seconds?: number
   error_message?: string
+  options?: Record<string, unknown> | null
 }
 
 export interface Target {
@@ -86,13 +88,50 @@ export interface Finding {
   ai_confidence?: number
   ai_rationale?: string
   ai_recommendations?: string[] | Record<string, unknown> | null
+  ai_classification_source?: 'provider' | 'heuristic_fallback' | 'heuristic_only' | string
   notes?: string
   first_seen_at: string
   last_seen_at: string
   resolved_at?: string
   resurfaced_count?: number
+  last_verification_status?: string
+  last_verification_verdict?: string
+  last_verification_confidence?: number
+  last_verified_at?: string
+  verification_count?: number
   created_at?: string
   updated_at?: string
+}
+
+export interface RetestRecord {
+  id: string
+  finding_id: string
+  job_id?: string
+  requested_by?: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  result_status?: 'still_vulnerable' | 'likely_fixed' | 'inconclusive' | 'error' | 'likely_vulnerable'
+  verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  verdict_reason?: string
+  verification_mode?: 'deterministic' | 'ai_driven'
+  finding_type: string
+  target_url: string
+  original_url?: string
+  param?: string
+  payload?: string
+  method?: string
+  request_body?: string
+  replay_commands?: string[] | null
+  proof?: Record<string, unknown> | null
+  artifacts?: Record<string, unknown> | null
+  auth_context?: Record<string, unknown> | null
+  ai_plan?: Record<string, unknown> | null
+  ai_reasoning?: string | null
+  confidence?: number | null
+  message?: string
+  error_message?: string
+  created_at?: string
+  started_at?: string | null
+  completed_at?: string | null
 }
 
 export interface QueueStats {
@@ -114,6 +153,56 @@ export interface WorkerStats {
   workers: WorkerInfo[]
   max_allowed: number
   error?: string
+}
+
+export interface AISettings {
+  ai_url: string
+  ai_model: string
+  ai_model_fallback: string
+  ai_mask_host: string
+  ai_scan_classification_enabled: boolean
+  ai_classify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_api_key_configured: boolean
+  ai_api_key_masked?: string
+  ai_verify_enabled: boolean
+  ai_verify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_on_scan_complete: boolean
+  auto_retest_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_max_per_scan: number
+  verification_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_escalation_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  proof_required_for_smart: boolean
+}
+
+export interface AISettingsUpdate {
+  ai_url?: string
+  ai_api_key?: string
+  ai_model?: string
+  ai_model_fallback?: string
+  ai_mask_host?: string
+  ai_scan_classification_enabled?: boolean
+  ai_classify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_verify_enabled?: boolean
+  ai_verify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_on_scan_complete?: boolean
+  auto_retest_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  auto_retest_max_per_scan?: number
+  verification_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  ai_escalation_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  proof_required_for_smart?: boolean
+  persist_to_env?: boolean
+}
+
+export interface AIProbeResponse {
+  status: 'ok' | 'failed'
+  scope: 'scan' | 'verify'
+  probe: {
+    ok: boolean
+    error?: string | null
+    latency_ms?: number | null
+    provider_meta?: Record<string, unknown>
+    response?: Record<string, unknown> | null
+  }
 }
 
 // Dashboard
@@ -240,6 +329,10 @@ export async function getFindings(params?: {
   scan_id?: string
   target_id?: string
   search?: string
+  seen_within_days?: number
+  verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
+  verification_mode?: 'deterministic' | 'ai_driven'
+  verified_only?: boolean
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
 }): Promise<{ findings: Finding[]; total: number; limit: number; offset: number }> {
@@ -252,6 +345,10 @@ export async function getFindings(params?: {
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.search) searchParams.set('search', params.search)
+  if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
+  if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
+  if (params?.verification_mode) searchParams.set('verification_mode', params.verification_mode)
+  if (params?.verified_only) searchParams.set('verified_only', 'true')
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
@@ -273,6 +370,51 @@ export async function getFinding(id: string): Promise<Finding> {
   return res.json()
 }
 
+export async function retestFinding(
+  id: string,
+  params: {
+    finding_type?: string
+    target?: string
+    original_url?: string
+    param?: string
+    payload?: string
+    method?: string
+    request_body?: string
+    requested_by?: string
+  } = {},
+  mode?: 'ai' | 'deterministic'
+): Promise<{
+  retest_id: string
+  job_id: string
+  status: string
+  mode?: string
+  finding_id: string
+  finding_type: string
+  target_url: string
+  replay_commands?: string[]
+}> {
+  const query = mode ? `?mode=${mode}` : ''
+  const res = await fetch(`${API_URL}/findings/${id}/retest${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to queue retest'))
+  }
+  return res.json()
+}
+
+export async function getFindingRetests(id: string, limit: number = 20): Promise<{
+  finding_id: string
+  retests: RetestRecord[]
+  count: number
+}> {
+  const res = await fetch(`${API_URL}/retests/finding/${id}?limit=${limit}`)
+  if (!res.ok) throw new Error('Failed to fetch retest history')
+  return res.json()
+}
+
 export async function updateFinding(id: string, status: string, notes?: string, scanId?: string) {
   const url = scanId
     ? `${API_URL}/findings/${id}?scan_id=${scanId}`
@@ -283,6 +425,29 @@ export async function updateFinding(id: string, status: string, notes?: string, 
     body: JSON.stringify({ status, notes })
   })
   if (!res.ok) throw new Error('Failed to update finding')
+  return res.json()
+}
+
+export async function deleteFinding(id: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/findings/${id}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok) throw new Error('Failed to delete finding')
+  return res.json()
+}
+
+export async function cleanupFindings(params: {
+  older_than_days: number
+  status?: string
+  root_domain?: string
+  dry_run: boolean
+}): Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
+  const res = await fetch(`${API_URL}/findings/cleanup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) throw new Error('Failed to cleanup findings')
   return res.json()
 }
 
@@ -297,6 +462,49 @@ export async function getQueueStats(): Promise<QueueStats> {
 export async function getHealth() {
   const res = await fetch(`${API_URL}/health`)
   if (!res.ok) throw new Error('API not healthy')
+  return res.json()
+}
+
+export async function getAISettings(): Promise<AISettings> {
+  const res = await fetch(`${API_URL}/settings/ai`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI settings'))
+  }
+  return res.json()
+}
+
+export async function updateAISettings(data: AISettingsUpdate): Promise<{
+  status: string
+  persisted_to_env: boolean
+  persist_message?: string
+  settings: AISettings
+}> {
+  const res = await fetch(`${API_URL}/settings/ai`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update AI settings'))
+  }
+  return res.json()
+}
+
+export async function testAISettings(data: {
+  scope: 'scan' | 'verify'
+  ai_url?: string
+  ai_api_key?: string
+  ai_model?: string
+  ai_fallback_model?: string
+}): Promise<AIProbeResponse> {
+  const res = await fetch(`${API_URL}/settings/ai/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to test AI settings'))
+  }
   return res.json()
 }
 
@@ -354,6 +562,86 @@ export async function stopGungnir(): Promise<{ status: string; message: string }
   return res.json()
 }
 
+// Schedules
+export interface Schedule {
+  id: string
+  target_id: string
+  target_url: string
+  target_name?: string
+  name?: string
+  frequency: 'daily' | 'weekly'
+  day_of_week?: number
+  time_of_day: string
+  timezone: string
+  jitter_minutes: number
+  scan_type: string
+  scan_options?: Record<string, unknown>
+  is_active: boolean
+  last_run_at?: string
+  next_run_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduleCreate {
+  target_id: string
+  name?: string
+  frequency: string
+  day_of_week?: number
+  time_of_day: string
+  timezone?: string
+  scan_type: string
+  scan_options?: Record<string, unknown>
+  jitter_minutes?: number
+}
+
+export async function getSchedules(params?: {
+  target_id?: string
+  is_active?: boolean
+}): Promise<{ schedules: Schedule[]; total: number }> {
+  const searchParams = new URLSearchParams()
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.is_active !== undefined) searchParams.set('is_active', String(params.is_active))
+
+  const res = await fetch(`${API_URL}/schedules?${searchParams}`)
+  if (!res.ok) throw new Error('Failed to fetch schedules')
+  return res.json()
+}
+
+export async function createSchedule(data: ScheduleCreate): Promise<{ id: string; target_url: string; next_run_at: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to create schedule'))
+  }
+  return res.json()
+}
+
+export async function updateSchedule(id: string, data: Partial<Schedule>): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update schedule'))
+  }
+  return res.json()
+}
+
+export async function deleteSchedule(id: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/schedules/${id}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to delete schedule'))
+  }
+  return res.json()
+}
+
 // Discovery
 export async function discoverSubdomains(rootDomain: string): Promise<{ status: string; message: string }> {
   const res = await fetch(`${API_URL}/discovery?root_domain=${encodeURIComponent(rootDomain)}`, {
@@ -361,6 +649,215 @@ export async function discoverSubdomains(rootDomain: string): Promise<{ status: 
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to start subdomain discovery'))
+  }
+  return res.json()
+}
+
+// Interactive Sessions
+export interface InteractiveSessionUserState {
+  is_authenticated: boolean
+  auth_method: string | null
+  cookies_count: number
+}
+
+export interface InteractiveDiscoveredEndpoint {
+  path: string
+  method: string
+  status: number | null
+}
+
+export interface InteractiveSessionState {
+  session_id: string
+  target_url: string
+  current_url: string | null
+  created_at: string
+  last_activity: string
+  users: Record<string, InteractiveSessionUserState>
+  discovered_endpoints_count: number
+  discovered_endpoints: InteractiveDiscoveredEndpoint[]
+  discovered_ids: Record<string, string[]>
+  network_log_count: number
+}
+
+export interface InteractiveSessionStartResponse {
+  success: boolean
+  session_id: string
+  target: string
+  current_url: string
+  message?: string
+}
+
+export interface InteractiveSessionSummary {
+  session_id: string
+  target_url: string
+  created_at: string
+  last_activity: string
+  is_expired: boolean
+}
+
+export interface InteractiveSessionsListResponse {
+  sessions: InteractiveSessionSummary[]
+  count: number
+}
+
+export interface InteractiveActionRequest {
+  action: string
+  user?: string
+  data?: Record<string, unknown>
+}
+
+export interface InteractiveEndpointTestRequest {
+  endpoint: string
+  method?: string
+  as_user?: string
+  body?: Record<string, unknown>
+  allow_out_of_scope?: boolean
+}
+
+export interface InteractiveEndpointTestResult {
+  success: boolean
+  endpoint: string
+  method: string
+  as_user?: string
+  status?: number
+  status_text?: string
+  headers?: Record<string, string>
+  body?: string
+  json?: Record<string, unknown> | null
+  accessible?: boolean
+  error?: string
+}
+
+export interface InteractiveSessionFindingCreateRequest {
+  title: string
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  description?: string
+  category?: string
+  cwe?: string
+  cvss_score?: number
+  url?: string
+  evidence?: string
+  request?: string
+  response?: string
+  remediation?: string
+  notes?: string
+}
+
+export interface InteractiveSessionFindingCreateResponse {
+  id: string
+  fingerprint: string
+  target_id: string
+  target: string
+  session_id: string
+  status: string
+  message: string
+}
+
+export interface InteractiveScreenshotResponse {
+  success: boolean
+  format: 'base64'
+  data: string
+  url: string
+  user: string
+  saved_path?: string
+}
+
+export async function startInteractiveSession(target: string): Promise<InteractiveSessionStartResponse> {
+  const res = await fetch(`${API_URL}/session/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to start interactive session'))
+  }
+  return res.json()
+}
+
+export async function listInteractiveSessions(): Promise<InteractiveSessionsListResponse> {
+  const res = await fetch(`${API_URL}/sessions`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to list interactive sessions'))
+  }
+  return res.json()
+}
+
+export async function getInteractiveSession(sessionId: string): Promise<InteractiveSessionState> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch interactive session'))
+  }
+  return res.json()
+}
+
+export async function runInteractiveAction(
+  sessionId: string,
+  request: InteractiveActionRequest
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Interactive action failed'))
+  }
+  return res.json()
+}
+
+export async function captureInteractiveScreenshot(
+  sessionId: string,
+  params?: { full_page?: boolean; user?: string }
+): Promise<InteractiveScreenshotResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.full_page !== undefined) searchParams.set('full_page', String(params.full_page))
+  if (params?.user) searchParams.set('user', params.user)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/screenshot${query ? `?${query}` : ''}`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to capture screenshot'))
+  }
+  return res.json()
+}
+
+export async function testInteractiveEndpoint(
+  sessionId: string,
+  request: InteractiveEndpointTestRequest
+): Promise<InteractiveEndpointTestResult> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/test-endpoint`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Endpoint test failed'))
+  }
+  return res.json()
+}
+
+export async function createInteractiveSessionFinding(
+  sessionId: string,
+  request: InteractiveSessionFindingCreateRequest
+): Promise<InteractiveSessionFindingCreateResponse> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}/findings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to create finding from interactive session'))
+  }
+  return res.json()
+}
+
+export async function endInteractiveSession(sessionId: string): Promise<{ status: string; session_id: string; message: string }> {
+  const res = await fetch(`${API_URL}/session/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to end interactive session'))
   }
   return res.json()
 }

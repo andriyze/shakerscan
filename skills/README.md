@@ -21,6 +21,10 @@ This directory contains skills files for integrating Shaker Scan with Claude Cod
    - "List all critical findings"
    - "Run a full security assessment on my-app.com"
 
+Available skills in this folder:
+- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules)
+- `ai-security-session/` - interactive `/session` Playwright workflows (BOLA/IDOR/manual testing)
+
 ## API Endpoints
 
 The scanner exposes these endpoints at `http://localhost:8080`:
@@ -28,16 +32,52 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/scans` | POST | Submit a new scan |
-| `/scans` | GET | List all scans |
-| `/scans/{id}` | GET | Get scan details |
+| `/scans/batch` | POST | Submit scans for multiple targets |
+| `/scans` | GET | List all scans (filter by status, domain, search) |
+| `/scans/{id}` | GET | Get scan details with findings |
 | `/scans/{id}/result` | GET | Get full scan result JSON |
-| `/scans/{id}/cancel` | POST | Cancel a running scan |
-| `/findings` | GET | List findings |
-| `/findings/{id}` | PATCH | Update finding status |
-| `/targets` | GET/POST | Manage targets |
+| `/scans/{id}/logs` | GET | Get live scan logs tail (limit param, default 200, max 1000) |
+| `/scans/{id}/cancel` | POST | Cancel a running or pending scan |
+| `/findings` | GET | List findings (filter by severity, status, seen_within_days, domain, search, verification filters) |
+| `/findings/{id}` | GET | Get finding details |
+| `/findings/{id}` | PATCH | Update finding status and notes |
+| `/findings/{id}` | DELETE | Delete a finding |
+| `/findings/{id}/retest` | POST | Queue retest for one finding (`mode=ai` or `mode=deterministic` optional) |
+| `/findings/retest` | POST | Queue bulk retests by IDs or filters |
+| `/findings/cleanup` | POST | Bulk delete old findings (dry_run support) |
+| `/findings/bulk` | POST | Bulk update finding statuses |
+| `/findings/manual` | POST | Create manual finding |
+| `/retests/finding/{id}` | GET | List retest history for a finding |
+| `/retests/{id}` | GET | Get one retest record with proof/artifacts/AI metadata |
+| `/targets` | GET/POST | List/create targets |
+| `/targets/grouped` | GET | Hierarchical targets view (root + subdomains, with filtering/sorting) |
+| `/targets/{id}` | GET | Get target details with recent scans |
+| `/targets/{id}` | PATCH | Update target (name, is_active, scan_options) |
+| `/targets/{id}` | DELETE | Deactivate target (soft delete) |
+| `/targets/{id}/scan` | POST | Start a scan for a specific target |
+| `/domains` | GET | List unique root domains |
 | `/discovery` | POST | Start subdomain discovery |
+| `/discovery` | GET | List discovery runs |
+| `/discovery/{id}` | GET | Get discovery run details |
+| `/schedules` | GET/POST | Manage recurring scans |
+| `/schedules/{id}` | GET | Get schedule details |
+| `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
+| `/workers` | GET/POST | View/scale worker count (1-20) |
+| `/settings/ai` | GET/PUT | View/update runtime AI settings (optional `.env` persistence) |
+| `/gungnir/status` | GET | CT monitor status |
+| `/gungnir/start` | POST | Start CT monitor |
+| `/gungnir/stop` | POST | Stop CT monitor |
+| `/session/start` | POST | Start interactive browser session |
+| `/session/{id}` | GET/DELETE | Read/end interactive session |
+| `/session/{id}/action` | POST | Execute browser action |
+| `/session/{id}/test-endpoint` | POST | Run BOLA/IDOR endpoint test |
+| `/session/{id}/screenshot` | POST | Capture screenshot (base64 JSON) |
+| `/session/{id}/screenshot.png` | GET | Capture screenshot (PNG bytes) |
+| `/session/{id}/findings` | POST | Save finding from session |
+| `/sessions` | GET | List active sessions |
 | `/dashboard` | GET | Get dashboard metrics |
 | `/queue/stats` | GET | Get queue status |
+| `/queue/clear` | DELETE | Emergency clear all pending jobs |
 | `/health` | GET | Health check |
 
 ## Scan Types
@@ -69,14 +109,41 @@ curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
 
-# List findings
-curl "http://localhost:8080/findings?severity=critical&status=active"
+# List findings (with recency filter)
+curl "http://localhost:8080/findings?severity=critical&status=active&seen_within_days=30"
+
+# Filter to verified and AI-driven findings
+curl "http://localhost:8080/findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true"
+
+# Queue retest (tiered)
+curl -X POST http://localhost:8080/findings/{finding_id}/retest \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+
+# Force AI-only retest
+curl -X POST "http://localhost:8080/findings/{finding_id}/retest?mode=ai" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_by":"api"}'
+
+# Delete a finding
+curl -X DELETE http://localhost:8080/findings/{finding_id}
+
+# Bulk cleanup old findings (dry-run first)
+curl -X POST http://localhost:8080/findings/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"older_than_days": 90, "dry_run": true}'
 
 # Subdomain discovery
 curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
 
 # Cancel a scan
 curl -X POST http://localhost:8080/scans/{scan_id}/cancel
+
+# AI runtime settings (keys masked on read)
+curl http://localhost:8080/settings/ai
+curl -X PUT http://localhost:8080/settings/ai \
+  -H "Content-Type: application/json" \
+  -d '{"ai_verify_enabled": true, "ai_verify_min_severity": "high", "persist_to_env": false}'
 
 # Authenticated scan (Bearer token)
 curl -X POST http://localhost:8080/scans \
@@ -132,6 +199,7 @@ curl -X POST http://localhost:8080/scans \
 | `login_username` | Form login username |
 | `login_password` | Form login password |
 | `login_url` | Login page URL (auto-detected) |
+| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
 | `user2_header` | Second user auth for BOLA testing |
 | `user2_cookies` | Second user cookies for BOLA testing |
 
@@ -141,11 +209,33 @@ curl -X POST http://localhost:8080/scans \
 |--------|-------------|
 | `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains always appear in `result.attack_chains.chains`. |
 
-## Focused Active Checks (CLI)
+## Scope/Output Options
 
-Use `--sqli` or `--xss` to run only those active checks (implies `--active`):
+| Option | Description |
+|--------|-------------|
+| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
+| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
+| `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
+
+## Focused Active Checks (API)
+
+Use `xss` or `sqli` in scan options:
 
 ```bash
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123"
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://api.example.com","options":{"scan_type":"smart","sqli":true}}'
+
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target":"https://example.com","options":{"scan_type":"smart","xss":true}}'
 ```
+
+## CLI Notes
+
+Current `scanner.sh` scan wrappers are:
+- `scan` (quick)
+- `scan-full`
+- `scan-smart`
+
+For `standard`/`deep`/`aggressive` and advanced auth/tuning options, use the API or web UI.

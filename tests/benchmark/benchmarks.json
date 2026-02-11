@@ -1,4 +1,9 @@
 {
+  "global_assertions": {
+    "min_high_precision": 0.9,
+    "min_critical_precision": 0.95,
+    "max_unverified_high_ratio": 0.1
+  },
   "benchmarks": [
     {
       "name": "juice-shop",
@@ -6,10 +11,12 @@
       "assertions": {
         "min_total_findings": 10,
         "min_high_or_critical": 2,
+        "min_high_precision": 0.9,
         "min_quality_score": 60,
         "min_endpoint_coverage": 0.05,
         "min_har_api_requests": 5,
         "min_har_unique_endpoints": 10,
+        "max_unverified_high_ratio": 0.1,
         "require_methods_used": [
           "browser_api_capture"
         ],
@@ -27,8 +34,10 @@
       "assertions": {
         "min_total_findings": 5,
         "min_high_or_critical": 1,
+        "min_high_precision": 0.9,
         "min_quality_score": 50,
-        "min_endpoint_coverage": 0.05
+        "min_endpoint_coverage": 0.05,
+        "max_unverified_high_ratio": 0.1
       }
     }
   ]

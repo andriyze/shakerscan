@@ -341,8 +341,9 @@ async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, An
 
     Detection Strategy:
     1. Fetch 3 random non-existent paths
-    2. If all return HTTP 200 with nearly identical content -> SPA detected
-    3. If any returns 404 or different content -> not a catch-all SPA
+    2. Require all 3 responses to be HTTP 200 with identical content
+    3. Require HTML shell-like content AND SPA framework indicators
+    4. If any requirement fails, do not classify as SPA catch-all
 
     Args:
         base_url: Base URL to test (e.g., "https://example.com")
@@ -356,7 +357,9 @@ async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, An
                 "all_paths_200": bool,
                 "content_identical": bool,
                 "content_type": str,
-                "sample_title": str
+                "sample_title": str,
+                "html_shell": bool,
+                "has_spa_indicators": bool
             }
         }
     """
@@ -367,7 +370,9 @@ async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, An
             "all_paths_200": False,
             "content_identical": False,
             "content_type": "",
-            "sample_title": ""
+            "sample_title": "",
+            "html_shell": False,
+            "has_spa_indicators": False,
         }
     }
 
@@ -425,6 +430,18 @@ async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, An
     if title_match:
         result["evidence"]["sample_title"] = title_match.group(1).strip()[:100]
 
+    # Require HTML shell-like content. Uniform JSON or text responses are ambiguous
+    # (e.g., gateway/WAF/login-wall defaults) and should not disable scan phases.
+    sample = first_body[:4000].lower()
+    content_type = (responses[0]["content_type"] or "").lower()
+    html_indicators = ("<!doctype", "<html", "<head", "<body", "<script", "<title")
+    html_indicator_count = sum(1 for token in html_indicators if token in sample)
+    is_html_shell = ("html" in content_type) or html_indicator_count >= 2
+    result["evidence"]["html_shell"] = is_html_shell
+
+    if not is_html_shell:
+        return result
+
     # Detect SPA frameworks in the response
     spa_indicators = [
         'id="root"',  # React
@@ -436,10 +453,11 @@ async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, An
         'window.__INITIAL_STATE__',
     ]
 
-    has_spa_indicators = any(ind in first_body for ind in spa_indicators)
+    has_spa_indicators = any(ind.lower() in sample for ind in spa_indicators)
+    result["evidence"]["has_spa_indicators"] = has_spa_indicators
 
-    # All paths return 200 with identical HTML content
-    result["is_spa_catch_all"] = True
+    # Only high-confidence detections should suppress discovery/testing phases.
+    result["is_spa_catch_all"] = has_spa_indicators
     result["confidence"] = "high" if has_spa_indicators else "medium"
 
     return result

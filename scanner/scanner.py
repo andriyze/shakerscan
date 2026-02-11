@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import base64
 import faulthandler
+import fnmatch
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -149,7 +152,7 @@ def _merge_port_scan_results(primary: dict[str, Any] | None, secondary: dict[str
 # These modules extract common functionality for better maintainability
 # Support both package import (from scanner.scanner) and script import (python3 scanner.py)
 try:
-    from .constants import NUCLEI_PROMOTE_TEMPLATES
+    from .constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
     from .grading import grade
     from .findings import (
         normalize_finding,
@@ -177,7 +180,7 @@ try:
     )
 except ImportError:
     try:
-        from scanner.constants import NUCLEI_PROMOTE_TEMPLATES
+        from scanner.constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
         from scanner.grading import grade
         from scanner.findings import (
             normalize_finding,
@@ -204,7 +207,7 @@ except ImportError:
             HONEYPOT_TEST_DOMAINS,
         )
     except ImportError:
-        from constants import NUCLEI_PROMOTE_TEMPLATES
+        from constants import NUCLEI_PROMOTE_TEMPLATES, SMART_SCAN_BUDGETS
         from grading import grade
         from findings import (
             normalize_finding,
@@ -571,6 +574,240 @@ def normalize_manual_endpoints(base_url: str, manual_endpoints: list[dict[str, A
                 normalized_ep["content_type"] = "application/json"
         normalized.append(normalized_ep)
     return normalized
+
+
+SCOPE_RULE_TYPES = {"path", "subdomain", "domain", "method", "header", "parameter"}
+
+
+def parse_scope_rules_json(raw: str | None, label: str) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        print(f"[scope] Invalid {label} rules JSON, ignoring: {e}", file=sys.stderr)
+        return []
+    if not isinstance(parsed, list):
+        print(f"[scope] {label} rules must be a JSON array, ignoring.", file=sys.stderr)
+        return []
+
+    rules: list[dict[str, str]] = []
+    seen = set()
+    for idx, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            continue
+        rule_type = str(item.get("type") or "").strip().lower()
+        url_path = str(item.get("url_path") or item.get("value") or "").strip()
+        if rule_type not in SCOPE_RULE_TYPES or not url_path:
+            continue
+        key = (rule_type, url_path.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        rules.append({
+            "type": rule_type,
+            "url_path": url_path,
+            "description": str(item.get("description") or f"{label}_{idx}").strip(),
+        })
+    return rules
+
+
+def _endpoint_param_names(endpoint: dict[str, Any]) -> list[str]:
+    names: set[str] = set()
+    for key in ("params", "body_params"):
+        values = endpoint.get(key) or []
+        if isinstance(values, list):
+            for value in values:
+                if value:
+                    names.add(str(value))
+    for key in ("param_defaults", "body_param_defaults"):
+        values = endpoint.get(key) or {}
+        if isinstance(values, dict):
+            for value in values.keys():
+                if value:
+                    names.add(str(value))
+    return sorted(names)
+
+
+def _rule_matches(
+    rule: dict[str, str],
+    *,
+    url: str,
+    method: str | None = None,
+    param_names: list[str] | None = None,
+    header_names: list[str] | None = None,
+) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or "/"
+    except Exception:
+        host = ""
+        path = "/"
+    rule_type = rule.get("type")
+    value = str(rule.get("url_path") or "").strip()
+    value_l = value.lower()
+
+    if rule_type == "path":
+        if fnmatch.fnmatch(path, value) or fnmatch.fnmatch(path, value_l):
+            return True
+        return value in path
+    if rule_type == "subdomain":
+        if not host:
+            return False
+        if fnmatch.fnmatch(host, f"{value_l}.*"):
+            return True
+        return host.startswith(f"{value_l}.")
+    if rule_type == "domain":
+        if not host:
+            return False
+        return host == value_l or host.endswith(f".{value_l}")
+    if rule_type == "method":
+        return bool(method and method.upper() == value.upper())
+    if rule_type == "parameter":
+        return any(str(p).lower() == value_l for p in (param_names or []))
+    if rule_type == "header":
+        return any(str(h).lower() == value_l for h in (header_names or []))
+    return False
+
+
+def apply_scope_rules_to_manual_endpoints(
+    endpoints: list[dict[str, Any]],
+    focus_rules: list[dict[str, str]],
+    avoid_rules: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    if not endpoints:
+        return [], {"kept": 0, "dropped": 0}
+
+    scoped: list[dict[str, Any]] = []
+    dropped = 0
+    for endpoint in endpoints:
+        url = str(endpoint.get("url") or "")
+        method = str(endpoint.get("method") or "GET")
+        param_names = _endpoint_param_names(endpoint)
+
+        if any(_rule_matches(rule, url=url, method=method, param_names=param_names) for rule in avoid_rules):
+            dropped += 1
+            continue
+
+        if focus_rules and not any(
+            _rule_matches(rule, url=url, method=method, param_names=param_names)
+            for rule in focus_rules
+        ):
+            dropped += 1
+            continue
+        scoped.append(endpoint)
+
+    return scoped, {"kept": len(scoped), "dropped": dropped}
+
+
+def apply_scope_rules_to_urls(
+    urls: list[str],
+    focus_rules: list[dict[str, str]],
+    avoid_rules: list[dict[str, str]],
+) -> tuple[list[str], dict[str, int]]:
+    if not urls:
+        return [], {"kept": 0, "dropped": 0}
+
+    focus_url_rules = [r for r in focus_rules if r.get("type") in {"path", "subdomain", "domain"}]
+    avoid_url_rules = [r for r in avoid_rules if r.get("type") in {"path", "subdomain", "domain"}]
+
+    scoped: list[str] = []
+    dropped = 0
+    for url in urls:
+        if any(_rule_matches(rule, url=url) for rule in avoid_url_rules):
+            dropped += 1
+            continue
+
+        if focus_url_rules and not any(_rule_matches(rule, url=url) for rule in focus_url_rules):
+            dropped += 1
+            continue
+        scoped.append(url)
+    return scoped, {"kept": len(scoped), "dropped": dropped}
+
+
+def _generate_totp(secret: str, digits: int = 6, interval_seconds: int = 30) -> str:
+    cleaned = re.sub(r"\s+", "", str(secret or "").upper())
+    if not cleaned:
+        raise ValueError("empty TOTP secret")
+    pad_len = (-len(cleaned)) % 8
+    key = base64.b32decode(cleaned + ("=" * pad_len), casefold=True)
+    counter = int(time.time() // interval_seconds)
+    msg = counter.to_bytes(8, "big")
+    digest = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = (
+        ((digest[offset] & 0x7F) << 24)
+        | ((digest[offset + 1] & 0xFF) << 16)
+        | ((digest[offset + 2] & 0xFF) << 8)
+        | (digest[offset + 3] & 0xFF)
+    )
+    return f"{code_int % (10 ** digits):0{digits}d}"
+
+
+def parse_auth_scenario_json(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        print(f"[auth_scenario] Invalid JSON, ignoring: {e}", file=sys.stderr)
+        return None
+    if not isinstance(parsed, dict):
+        print("[auth_scenario] Expected JSON object, ignoring.", file=sys.stderr)
+        return None
+
+    scenario: dict[str, Any] = {}
+    for key in ("login_type", "login_url", "auth_header", "auth_cookies"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            scenario[key] = value.strip()
+
+    credentials = parsed.get("credentials")
+    if isinstance(credentials, dict):
+        normalized_credentials: dict[str, str] = {}
+        for key in ("username", "password", "totp_secret"):
+            value = credentials.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized_credentials[key] = value.strip()
+        if normalized_credentials:
+            scenario["credentials"] = normalized_credentials
+
+    success_condition = parsed.get("success_condition")
+    if isinstance(success_condition, dict):
+        cond_type = str(success_condition.get("type") or "").strip().lower()
+        cond_value = str(success_condition.get("value") or "").strip()
+        if cond_type and cond_value:
+            scenario["success_condition"] = {"type": cond_type, "value": cond_value}
+
+    login_flow = parsed.get("login_flow")
+    if isinstance(login_flow, list):
+        flow_steps = [str(step).strip() for step in login_flow if str(step).strip()]
+        if flow_steps:
+            scenario["login_flow"] = flow_steps[:20]
+
+    extra_fields = parsed.get("extra_fields")
+    if isinstance(extra_fields, dict):
+        normalized_extra_fields: dict[str, str] = {}
+        for key, value in extra_fields.items():
+            k = str(key).strip()
+            if not k:
+                continue
+            normalized_extra_fields[k] = str(value)
+        if normalized_extra_fields:
+            scenario["extra_fields"] = normalized_extra_fields
+
+    return scenario or None
+
+
+def _apply_auth_placeholders(value: str | None, *, totp_code: str | None = None) -> str | None:
+    """Render lightweight auth placeholders used by auth_scenario_json."""
+    if value is None:
+        return None
+    rendered = str(value)
+    if totp_code:
+        rendered = rendered.replace("{{TOTP}}", totp_code).replace("${TOTP}", totp_code)
+    return rendered
 
 # ---------- DNS ----------
 
@@ -1828,6 +2065,40 @@ def _get_validator_type(finding: dict) -> str:
     return "other"
 
 
+try:
+    from scanner_tools.report_gating import finding_has_verification_evidence
+except Exception:
+    def finding_has_verification_evidence(finding: dict[str, Any]) -> bool:
+        """Fallback report gating helper when modular import is unavailable."""
+        if not isinstance(finding, dict):
+            return False
+        if finding.get("verified") is True:
+            return True
+        validation = finding.get("validation")
+        if isinstance(validation, dict):
+            if validation.get("verified") is True:
+                return True
+            if validation.get("poe_proven") is True:
+                return True
+        verdict = str(
+            finding.get("verification_verdict")
+            or finding.get("last_verification_verdict")
+            or ""
+        ).strip().lower()
+        if verdict in {"exploited", "likely_vulnerable"}:
+            return True
+        result_status = str(finding.get("result_status") or "").strip().lower()
+        if result_status in {"still_vulnerable", "verified_vulnerable"}:
+            return True
+        poe = finding.get("poe")
+        if isinstance(poe, dict) and poe.get("proven") is True:
+            return True
+        poe_result = finding.get("poe_result")
+        if isinstance(poe_result, dict) and poe_result.get("proven") is True:
+            return True
+        return False
+
+
 # ---------- Scan orchestration ----------
 
 async def build_report(target: str,
@@ -1905,6 +2176,7 @@ async def build_report(target: str,
                        auth_cookies: str | None=None,
                        auth_header: str | None=None,
                        auth_headers_json: str | None=None,
+                       auth_scenario_json: str | None=None,
                        # New: Form-Based Login
                        login_url: str | None=None,
                        login_username: str | None=None,
@@ -1945,6 +2217,9 @@ async def build_report(target: str,
                        grpc_discovery: bool=False,
                        json_link_following: bool=False,
                        options_method_discovery: bool=False,
+                       focus_rules_json: str | None=None,
+                       avoid_rules_json: str | None=None,
+                       verified_findings_only: bool | None=None,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -1952,10 +2227,10 @@ async def build_report(target: str,
                        thorough_params: bool=False,
                        oob_callback_url: str | None=None,
                        # Safety/performance limits
-                       smart_bola_max_endpoints: int=80,
-                       dom_xss_max_files: int=20,
-                       sqli_extract_max: int=3,
-                       oob_max_findings: int=3,
+                       smart_bola_max_endpoints: int=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+                       dom_xss_max_files: int=SMART_SCAN_BUDGETS.dom_xss_max_files,
+                       sqli_extract_max: int=SMART_SCAN_BUDGETS.sqli_extract_max,
+                       oob_max_findings: int=SMART_SCAN_BUDGETS.oob_max_findings,
                        # Active enforcement metadata
                        active_enforced: bool=False) -> dict[str, Any]:
 
@@ -1967,6 +2242,70 @@ async def build_report(target: str,
     base_url = f"{scheme}://{host}"
     if port and port not in [80, 443]:
         base_url = f"{scheme}://{host}:{port}"
+
+    focus_rules = parse_scope_rules_json(focus_rules_json, "focus")
+    avoid_rules = parse_scope_rules_json(avoid_rules_json, "avoid")
+    # Runtime AI controls are injected by worker env and should drive scan behavior.
+    scan_ai_classification_enabled = _is_truthy_env(
+        os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
+        default=ai_validation,
+    )
+    pipeline_ai_enabled = bool(ai_validation and ai_api_key and scan_ai_classification_enabled)
+    verify_min_severity = _normalize_ai_classification_min_severity(
+        os.environ.get("VERIFICATION_MIN_SEVERITY") or os.environ.get("AI_VERIFY_MIN_SEVERITY"),
+        default="high",
+    )
+    # Smart scans default to discovery-first reporting unless proof-gating is
+    # explicitly enabled via PROOF_REQUIRED_FOR_SMART / --verified-findings-only.
+    if verified_findings_only is None and smart_mode:
+        _proof_required = os.environ.get("PROOF_REQUIRED_FOR_SMART", "false").strip().lower()
+        verified_findings_only = _proof_required in {"1", "true", "yes", "on"}
+    elif verified_findings_only is None:
+        verified_findings_only = False
+    scope_stats = {
+        "focus_rule_count": len(focus_rules),
+        "avoid_rule_count": len(avoid_rules),
+        "manual_endpoints_dropped": 0,
+        "discovered_urls_dropped": 0,
+    }
+    auth_scenario = parse_auth_scenario_json(auth_scenario_json)
+    auth_scenario_info: dict[str, Any] | None = None
+    auth_scenario_totp: str | None = None
+    if auth_scenario:
+        credentials = auth_scenario.get("credentials") if isinstance(auth_scenario.get("credentials"), dict) else {}
+        totp_secret = str((credentials or {}).get("totp_secret") or "").strip()
+        if totp_secret:
+            try:
+                auth_scenario_totp = _generate_totp(totp_secret)
+            except Exception as e:
+                print(f"[auth_scenario] Failed to generate TOTP code: {e}", file=sys.stderr)
+
+        # Scenario config acts as fallback defaults; explicit scan options win.
+        if not login_url and auth_scenario.get("login_url"):
+            login_url = _apply_auth_placeholders(str(auth_scenario.get("login_url")), totp_code=auth_scenario_totp)
+        if not auth_header and auth_scenario.get("auth_header"):
+            auth_header = _apply_auth_placeholders(str(auth_scenario.get("auth_header")), totp_code=auth_scenario_totp)
+        if not auth_cookies and auth_scenario.get("auth_cookies"):
+            auth_cookies = _apply_auth_placeholders(str(auth_scenario.get("auth_cookies")), totp_code=auth_scenario_totp)
+        if not login_username and (credentials or {}).get("username"):
+            login_username = _apply_auth_placeholders(str((credentials or {}).get("username")), totp_code=auth_scenario_totp)
+        if not login_password and (credentials or {}).get("password"):
+            login_password = _apply_auth_placeholders(str((credentials or {}).get("password")), totp_code=auth_scenario_totp)
+
+        auth_scenario_info = {
+            "configured": True,
+            "login_type": auth_scenario.get("login_type"),
+            "has_login_flow": bool(auth_scenario.get("login_flow")),
+            "has_success_condition": bool(auth_scenario.get("success_condition")),
+            "has_totp_secret": bool(totp_secret),
+            "extra_fields_count": len(auth_scenario.get("extra_fields") or {}),
+        }
+        print("[auth_scenario] Loaded scenario config", file=sys.stderr)
+    if focus_rules or avoid_rules:
+        print(
+            f"[scope] Loaded rules: focus={len(focus_rules)} avoid={len(avoid_rules)}",
+            file=sys.stderr,
+        )
 
     # Initialize coverage tracker for smart scans
     coverage_tracker = CoverageTracker() if smart_mode else None
@@ -2002,6 +2341,17 @@ async def build_report(target: str,
         print(f"[scanner] Entry seed URLs derived from target: {seed_entry_urls[:3]}...", file=sys.stderr)
 
     manual_endpoints_norm = normalize_manual_endpoints(base_url, manual_endpoints)
+    if manual_endpoints_norm and (focus_rules or avoid_rules):
+        manual_endpoints_norm, manual_scope = apply_scope_rules_to_manual_endpoints(
+            manual_endpoints_norm,
+            focus_rules=focus_rules,
+            avoid_rules=avoid_rules,
+        )
+        scope_stats["manual_endpoints_dropped"] = manual_scope["dropped"]
+        print(
+            f"[scope] Manual endpoints kept={manual_scope['kept']} dropped={manual_scope['dropped']}",
+            file=sys.stderr,
+        )
     if manual_endpoints_norm:
         print(f"[DEBUG] Normalized {len(manual_endpoints_norm)} manual endpoints:", file=sys.stderr)
         for i, ep in enumerate(manual_endpoints_norm[:5]):
@@ -2056,6 +2406,10 @@ async def build_report(target: str,
                     "smart_mode": smart_mode,
                     "no_early_stop": no_early_stop,
                     "thorough_params": thorough_params,
+                    "verified_findings_only": verified_findings_only,
+                    "focus_rules": len(focus_rules),
+                    "avoid_rules": len(avoid_rules),
+                    "auth_scenario": bool(auth_scenario),
                 },
                 "timestamp_utc": now_utc_iso(),
                 "dns": {
@@ -2164,7 +2518,9 @@ async def build_report(target: str,
                 "options": {
                     "public_only": public_only,
                     "active_checks_requested": active_checks,
-                    "ai_validation_enabled": ai_validation,
+                    "ai_validation_enabled": pipeline_ai_enabled,
+                    "ai_scan_classification_enabled": scan_ai_classification_enabled,
+                    "ai_verify_min_severity": verify_min_severity,
                 },
                 "checks_skipped": checks_skipped,
                 "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
@@ -2228,13 +2584,37 @@ async def build_report(target: str,
 
     # Form-based login authentication (takes priority over cookie/header auth)
     login_result_info = None
-    extra_fields = None
+    extra_fields: dict[str, Any] | None = {}
+
     if login_extra_fields:
         try:
-            extra_fields = json.loads(login_extra_fields)
+            parsed_extra = json.loads(login_extra_fields)
+            if isinstance(parsed_extra, dict):
+                extra_fields.update(parsed_extra)
+            else:
+                print("Warning: --login-extra-fields must be a JSON object, ignoring", file=sys.stderr)
         except json.JSONDecodeError:
             print("Warning: Invalid JSON in --login-extra-fields, ignoring", file=sys.stderr)
-            extra_fields = None
+
+    scenario_extra_fields = auth_scenario.get("extra_fields") if isinstance(auth_scenario, dict) else None
+    if isinstance(scenario_extra_fields, dict):
+        for key, value in scenario_extra_fields.items():
+            field_name = str(key).strip()
+            if not field_name:
+                continue
+            if field_name not in extra_fields:
+                extra_fields[field_name] = _apply_auth_placeholders(
+                    str(value),
+                    totp_code=auth_scenario_totp,
+                )
+
+    if extra_fields:
+        if auth_scenario_totp:
+            for key, value in list(extra_fields.items()):
+                if isinstance(value, str):
+                    extra_fields[key] = _apply_auth_placeholders(value, totp_code=auth_scenario_totp)
+    else:
+        extra_fields = None
 
     if login_username and login_password:
         try:
@@ -2409,10 +2789,11 @@ async def build_report(target: str,
         # Perform form login for user2
         try:
             login_result_user2 = await form_login(
-                login_url,
-                user2_login_username,
-                user2_login_password,
-                extra_fields=login_extra
+                base_url=base_url,
+                username=user2_login_username,
+                password=user2_login_password,
+                login_url=login_url,
+                extra_fields=extra_fields,
             )
             if login_result_user2.success and login_result_user2.session:
                 user2_session = login_result_user2.session
@@ -3265,6 +3646,18 @@ async def build_report(target: str,
                 smart_discovery_data["api_endpoints"] = list(set(api_list + json_links))
                 smart_discovery_data["all_urls"] = list(set(all_list + json_links))
 
+    if crawl_urls and (focus_rules or avoid_rules):
+        crawl_urls, discovered_scope = apply_scope_rules_to_urls(
+            crawl_urls,
+            focus_rules=focus_rules,
+            avoid_rules=avoid_rules,
+        )
+        scope_stats["discovered_urls_dropped"] = discovered_scope["dropped"]
+        print(
+            f"[scope] Discovered URLs kept={discovered_scope['kept']} dropped={discovered_scope['dropped']}",
+            file=sys.stderr,
+        )
+
     options_method_results = None
     if options_method_discovery and not public_only:
         options_limit = discovery_config.get("options_method_limit", 150)
@@ -3505,7 +3898,8 @@ async def build_report(target: str,
     nuclei_signals = extract_signals_from_nuclei(nuclei_results) if smart_mode else {}
 
     # Adaptive smart discovery refinement using nuclei signals (post-nuclei)
-    if smart_mode and smart_discovery_data and nuclei_signals:
+    # Skip when SPA catch-all detected — recursive fuzzing on SPA sites produces false paths
+    if smart_mode and smart_discovery_data and nuclei_signals and not smart_discovery_data.get("spa_catch_all"):
         try:
             signals_used = smart_discovery_data.get("signals_used")
             if not signals_used:
@@ -4239,6 +4633,7 @@ async def build_report(target: str,
         "katana_sample": crawl_urls[:100],
         "browser_api_endpoints": browser_api_endpoints[:50],  # API endpoints captured via Playwright
         "websocket_endpoints": all_ws_endpoints[:20],  # WebSocket endpoints discovered
+        "scope": scope_stats,
         "tech_stack_guess": all_techs,
         "tech_fingerprint": tech_fingerprint,
         "tech": tech_discovery_result,  # New structured tech discovery with evidence
@@ -4364,6 +4759,13 @@ async def build_report(target: str,
             "or ensure OpenAPI spec is available at standard paths."
         )
 
+    if smart_discovery_data and smart_discovery_data.get("spa_catch_all"):
+        discovery_summary["spa_catch_all"] = True
+        discovery_summary["warnings"].append(
+            "SPA catch-all routing detected. Directory fuzzing and POST inference were skipped "
+            "to avoid false positives. Only real URLs from crawl/JS parsing are included."
+        )
+
     discovery["summary"] = discovery_summary
     emit_progress("discovery_complete", 40, "discovery summary ready")
 
@@ -4380,6 +4782,10 @@ async def build_report(target: str,
             "no_early_stop": no_early_stop,
             "thorough_params": thorough_params,
             "include_partial_attack_chains": include_partial_attack_chains,
+            "verified_findings_only": verified_findings_only,
+            "focus_rules": len(focus_rules),
+            "avoid_rules": len(avoid_rules),
+            "auth_scenario": bool(auth_scenario),
         },
         "timestamp_utc": now_utc_iso(),
         "dns": {
@@ -4441,8 +4847,12 @@ async def build_report(target: str,
     }
 
     # Add authenticated scanning config if enabled
-    if auth_config:
-        report["authenticated_scan"] = auth_config
+    if auth_config or auth_scenario_info:
+        report["authenticated_scan"] = auth_config or {"enabled": False}
+        if auth_scenario_info:
+            report["authenticated_scan"]["scenario"] = auth_scenario_info
+            if isinstance(auth_scenario, dict) and auth_scenario.get("success_condition"):
+                report["authenticated_scan"]["scenario"]["success_condition"] = auth_scenario.get("success_condition")
         # Add session validation stats if session was created
         if auth_session:
             report["authenticated_scan"]["session_stats"] = auth_session.get_stats()
@@ -6622,6 +7032,10 @@ async def build_report(target: str,
                 # Infer POST endpoints from discovered URLs (katana crawl results)
                 # This converts API paths like /api/auth/login, /workshop/api/shop/apply_coupon
                 # into POST endpoint candidates with inferred body parameters
+                # Skip when SPA catch-all detected — discovered URLs are phantom paths
+                _skip_post_inference = smart_discovery_data and smart_discovery_data.get("spa_catch_all")
+                if _skip_post_inference:
+                    print("[scanner] POST inference: skipped (SPA catch-all detected)", file=sys.stderr)
                 try:
                     # Patterns that suggest POST/mutation operations
                     POST_INDICATORS = [
@@ -6668,10 +7082,11 @@ async def build_report(target: str,
 
                     # Collect all discovered URLs from crawl
                     all_discovered_urls = []
-                    if crawl_urls:
-                        all_discovered_urls.extend(crawl_urls)
-                    if smart_discovery_data:
-                        all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
+                    if not _skip_post_inference:
+                        if crawl_urls:
+                            all_discovered_urls.extend(crawl_urls)
+                        if smart_discovery_data:
+                            all_discovered_urls.extend(smart_discovery_data.get("api_endpoints", []))
 
                     print(f"[scanner] POST inference: {len(all_discovered_urls)} URLs to analyze (crawl_urls={len(crawl_urls) if crawl_urls else 0})", file=sys.stderr)
 
@@ -8209,7 +8624,7 @@ async def build_report(target: str,
             enable_heuristics=True,
             enable_poe=True,
             poe_safe_mode=True,
-            enable_ai=ai_validation and bool(ai_api_key),
+            enable_ai=pipeline_ai_enabled,
             ai_url=ai_url or os.environ.get("AI_URL", ""),
             ai_api_key=ai_api_key or os.environ.get("AI_API_KEY", ""),
             ai_model=ai_model,
@@ -8289,28 +8704,86 @@ async def build_report(target: str,
     report["coverage"] = coverage
 
     # =========================================================================
-    # VERIFICATION PHASE: Verify high-severity findings before grading
+    # VERIFICATION PHASE: Verify findings at/above configured severity before grading
     # =========================================================================
     # Run verification BEFORE grading so downgraded severities are reflected
     # in the final grade. Only run in smart mode to avoid slowing down standard scans.
     if smart_mode:
         pre_verification_findings = report.get("findings", [])
-        high_sev_count = sum(1 for f in pre_verification_findings if f.get("severity") in ("high", "critical"))
+        verify_min_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(
+            verify_min_severity,
+            AI_CLASSIFICATION_SEVERITY_ORDER["high"],
+        )
+        verifiable_count = sum(
+            1
+            for f in pre_verification_findings
+            if AI_CLASSIFICATION_SEVERITY_ORDER.get(str(f.get("severity") or "").lower(), 0) >= verify_min_rank
+        )
+        verification_summary = {
+            "enabled": True,
+            "min_severity": verify_min_severity,
+            "eligible_findings": verifiable_count,
+            "attempted": 0,
+            "verified": 0,
+            "downgraded": 0,
+            "skipped": 0,
+            "error": None,
+        }
 
-        if high_sev_count > 0:
-            print(f"[verification] Verifying {high_sev_count} high-severity findings...", file=sys.stderr)
+        if verifiable_count > 0:
+            print(
+                f"[verification] Verifying {verifiable_count} findings (min severity: {verify_min_severity})...",
+                file=sys.stderr,
+            )
             try:
-                verified_findings = await verify_high_severity_findings(
+                verification_result = await verify_high_severity_findings(
                     findings=pre_verification_findings,
                     auth_session=auth_session,
                     verify_xss=True,
                     verify_sqli=True,
                     max_verification_attempts=3,
+                    min_severity=verify_min_severity,
+                    include_summary=True,
                 )
+                if isinstance(verification_result, tuple):
+                    verified_findings, phase_summary = verification_result
+                else:
+                    verified_findings, phase_summary = verification_result, {}
+                if isinstance(phase_summary, dict):
+                    verification_summary.update(phase_summary)
                 report["findings"] = verified_findings
             except Exception as e:
                 print(f"[verification] Warning: Verification phase failed: {e}", file=sys.stderr)
+                verification_summary["error"] = str(e)
                 # Continue with unverified findings
+
+        report["verification_phase"] = {"summary": verification_summary}
+
+    if verified_findings_only:
+        all_findings = report.get("findings") or []
+        pre_filter_count = len(all_findings)
+        verified = []
+        unverified = []
+        for f in all_findings:
+            if isinstance(f, dict) and finding_has_verification_evidence(f):
+                verified.append(f)
+            else:
+                unverified.append(f)
+        report["findings"] = verified
+        # Preserve unverified findings for audit/review (not graded, not in primary output)
+        report["unverified_findings"] = unverified
+        post_filter_count = len(verified)
+        dropped_count = max(0, pre_filter_count - post_filter_count)
+        report.setdefault("filters_applied", {})
+        report["filters_applied"]["verified_findings_only"] = {
+            "enabled": True,
+            "kept": post_filter_count,
+            "dropped": dropped_count,
+        }
+        print(
+            f"[filters] verified_findings_only enabled: kept={post_filter_count} dropped={dropped_count}",
+            file=sys.stderr,
+        )
 
     # Attack chain analysis (optional)
     def _empty_attack_chains(error_message: str | None = None) -> dict[str, Any]:
@@ -8352,6 +8825,7 @@ async def build_report(target: str,
     # Calculate grade
     emit_progress("finalizing", 97, "grading report")
     grade_result = grade(report)
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # If required modules failed, mark grade as unreliable
     if not coverage["grade_reliable"]:
@@ -8376,6 +8850,7 @@ async def build_report(target: str,
             )
         except Exception as e:
             report["compliance"] = {"error": str(e)}
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add scan metadata (per SCANNER_REFERENCE.md spec)
     # Use the scan_session_id we created at the start for consistency
@@ -8408,8 +8883,14 @@ async def build_report(target: str,
         "options": {
             "public_only": public_only,
             "active_checks_requested": active_checks,
-            "ai_validation_enabled": ai_validation,
+            "ai_validation_enabled": pipeline_ai_enabled,
+            "ai_scan_classification_enabled": scan_ai_classification_enabled,
+            "ai_verify_min_severity": verify_min_severity,
             "include_partial_attack_chains": include_partial_attack_chains,
+            "verified_findings_only": verified_findings_only,
+            "focus_rules": len(focus_rules),
+            "avoid_rules": len(avoid_rules),
+            "auth_scenario": bool(auth_scenario),
         },
         "checks_skipped": checks_skipped,
         "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
@@ -8503,13 +8984,14 @@ async def build_report(target: str,
         "severity_distribution": severity_counts,
         "confidence_distribution": confidence_distribution,
         "ai_validation": {
-            "enabled": ai_validation,
+            "enabled": pipeline_ai_enabled,
             "verdicts": ai_verdicts,
         },
         "tools_with_findings": sorted(list(tools_with_findings)),
         "coverage_status": coverage["status"],
         "reliability_notes": [],
     }
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add reliability notes
     if coverage["status"] != "complete":
@@ -8578,6 +9060,7 @@ async def build_report(target: str,
             "sample": _sample_findings(verification_skipped),
         },
     }
+    await asyncio.sleep(0)  # yield to heartbeat
 
     coverage_gaps: list[str] = []
     if coverage.get("issues"):
@@ -8618,6 +9101,7 @@ async def build_report(target: str,
                     finding.get("body"),
                     finding.get("content_type"),
                 )
+    await asyncio.sleep(0)  # yield to heartbeat
 
     # Add smart coverage metrics without overwriting completeness coverage
     # report["coverage"] contains grade_reliable, issues, status from assess_scan_completeness
@@ -8645,8 +9129,40 @@ async def build_report(target: str,
 # ---------- AI review ----------
 # Note: Config findings emitters and AI helpers moved to reporting.py module
 
+AI_CLASSIFICATION_SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
 
-async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: str | None, ai_api_key: str | None, exploit_level: str = "safe", public_only: bool = False, mask_host: str = "example.com") -> dict[str, Any]:
+
+def _is_truthy_env(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_ai_classification_min_severity(value: str | None, default: str = "high") -> str:
+    severity = str(value or "").strip().lower()
+    if severity not in AI_CLASSIFICATION_SEVERITY_ORDER:
+        severity = str(default or "").strip().lower()
+    if severity not in AI_CLASSIFICATION_SEVERITY_ORDER:
+        severity = "high"
+    return severity
+
+
+async def ai_review_findings(
+    report: dict[str, Any],
+    model: str | None,
+    ai_url: str | None,
+    ai_api_key: str | None,
+    exploit_level: str = "safe",
+    public_only: bool = False,
+    mask_host: str = "example.com",
+    ai_fallback_model: str | None = None,
+) -> dict[str, Any]:
     """Attach AI analysis per finding and aggregate logs.
 
     Uses external AI provider if configured for enhanced classification,
@@ -8660,6 +9176,31 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
     base_url = report.get("http", {}).get("final_url") or (f"https://{host}" if host else "https://example.com")
     http_status = report.get("http", {}).get("status")
     findings = report.get("findings", [])
+    ai_scan_classification_enabled = _is_truthy_env(
+        os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
+        default=False,
+    )
+    ai_min_severity = _normalize_ai_classification_min_severity(
+        os.environ.get("AI_CLASSIFY_MIN_SEVERITY"),
+        default=os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"),
+    )
+    min_rank = AI_CLASSIFICATION_SEVERITY_ORDER[ai_min_severity]
+    ai_eligible_findings: list[dict[str, Any]] = []
+    ai_skipped_due_to_severity_ids: set[str] = set()
+    ai_skipped_due_to_disabled_ids: set[str] = set()
+    for finding in findings:
+        finding_id = finding.get("id")
+        if not ai_scan_classification_enabled:
+            if isinstance(finding_id, str) and finding_id:
+                ai_skipped_due_to_disabled_ids.add(finding_id)
+            continue
+        finding_severity = str(finding.get("severity") or "").lower()
+        finding_rank = AI_CLASSIFICATION_SEVERITY_ORDER.get(finding_severity, 0)
+        if finding_rank >= min_rank:
+            ai_eligible_findings.append(finding)
+            continue
+        if isinstance(finding_id, str) and finding_id:
+            ai_skipped_due_to_severity_ids.add(finding_id)
 
     ai_logs: list[dict[str, Any]] = []
     tp = fp = unc = 0
@@ -8683,19 +9224,40 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
     provider_error = None
     provider_latency_ms = None
     ai_meta: dict[str, Any] | None = None
+    provider_models_used: list[str] = []
+    provider_partial = False
+    provider_finding_ids: set[str] = set()
+    fallback_finding_ids: set[str] = set()
+    classification_source_counts = {
+        "provider": 0,
+        "heuristic_fallback": 0,
+        "heuristic_only": 0,
+        "disabled": 0,
+    }
 
-    if ai_url and ai_api_key and model and findings:
+    if ai_scan_classification_enabled and ai_url and ai_api_key and model and ai_eligible_findings:
         provider_attempted = True
         try:
             # Use the new classify_findings_batch function that actually parses AI responses
             ai_results, error, latency, ai_meta = await classify_findings_batch(
-                findings, scan_context, ai_url, ai_api_key, model, mask_host
+                ai_eligible_findings,
+                scan_context,
+                ai_url,
+                ai_api_key,
+                model,
+                mask_host,
+                fallback_models=ai_fallback_model,
             )
             provider_latency_ms = latency
+            provider_used = bool(ai_meta.get("provider_used")) if isinstance(ai_meta, dict) else False
+            if isinstance(ai_meta, dict):
+                provider_models_used = [m for m in (ai_meta.get("used_models") or []) if isinstance(m, str)]
+                provider_partial = bool(ai_meta.get("chunks_fallback", 0))
+                provider_finding_ids = {str(fid) for fid in (ai_meta.get("provider_finding_ids") or []) if isinstance(fid, str)}
+                fallback_finding_ids = {str(fid) for fid in (ai_meta.get("fallback_finding_ids") or []) if isinstance(fid, str)}
             if error:
                 provider_error = error
-            else:
-                provider_used = True
+            if provider_used:
                 provider_status = 200
                 if ai_meta:
                     report["ai_correlations"] = {
@@ -8749,6 +9311,19 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
 
         # Get AI result if available
         ai_result = ai_results.get(finding_id) if ai_results else None
+        classification_source = "heuristic_only"
+        if not ai_scan_classification_enabled:
+            classification_source = "disabled"
+        elif isinstance(finding_id, str) and finding_id in provider_finding_ids:
+            classification_source = "provider"
+        elif isinstance(finding_id, str) and finding_id in fallback_finding_ids:
+            classification_source = "heuristic_fallback"
+        elif isinstance(finding_id, str) and finding_id in ai_skipped_due_to_severity_ids:
+            classification_source = "heuristic_only"
+        elif ai_result and hasattr(ai_result, "classification_source"):
+            classification_source = str(getattr(ai_result, "classification_source") or "heuristic_fallback")
+        elif provider_attempted:
+            classification_source = "heuristic_fallback"
 
         # Calculate hybrid confidence (combines heuristics + AI)
         if ai_result and hasattr(ai_result, 'verdict'):
@@ -8809,11 +9384,17 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
         if ai_result and hasattr(ai_result, 'verification_steps') and ai_result.verification_steps:
             ai_rec["ai_verification_steps"] = ai_result.verification_steps
 
-        # Annotate finding
-        f["ai_verdict"] = final_verdict
-        f["ai_confidence"] = round(final_conf, 2)
-        f["ai_confidence_percent"] = int(round(final_conf * 100))
-        f["ai_recommendations"] = ai_rec
+        # Annotate finding only when scan-time AI classification is enabled.
+        if ai_scan_classification_enabled:
+            f["ai_verdict"] = final_verdict
+            f["ai_confidence"] = round(final_conf, 2)
+            f["ai_confidence_percent"] = int(round(final_conf * 100))
+            f["ai_classification_source"] = classification_source
+            f["ai_recommendations"] = ai_rec
+        if classification_source in classification_source_counts:
+            classification_source_counts[classification_source] += 1
+        else:
+            classification_source_counts["heuristic_only"] += 1
 
         # Per-finding log entry
         log_entry: dict[str, Any] = {
@@ -8827,12 +9408,16 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
             "rationale": final_rationale,
             "commands": commands,
             "plan": plan,
+            "classification_source": classification_source,
         }
 
         # Include AI verdict for comparison if available
-        if ai_result and hasattr(ai_result, 'verdict'):
+        if ai_result and hasattr(ai_result, 'verdict') and classification_source == "provider":
             log_entry["ai_verdict_raw"] = ai_result.verdict
             log_entry["ai_confidence_raw"] = round(ai_result.confidence, 2) if hasattr(ai_result, 'confidence') else None
+        elif ai_result and hasattr(ai_result, 'verdict'):
+            log_entry["fallback_verdict_raw"] = ai_result.verdict
+            log_entry["fallback_confidence_raw"] = round(ai_result.confidence, 2) if hasattr(ai_result, 'confidence') else None
 
         ai_logs.append(log_entry)
 
@@ -8844,7 +9429,13 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
             # Get real host from report to unmask in final output
             real_host = report.get("input", {}).get("normalized_host")
             exec_result, exec_error, exec_latency = await generate_executive_summary_ai(
-                report, ai_url, ai_api_key, model, mask_host, real_host=real_host
+                report,
+                ai_url,
+                ai_api_key,
+                model,
+                mask_host,
+                real_host=real_host,
+                fallback_models=ai_fallback_model,
             )
             if exec_error:
                 exec_summary_error = exec_error
@@ -8867,12 +9458,21 @@ async def ai_review_findings(report: dict[str, Any], model: str | None, ai_url: 
         "counts": {"true_positive": tp, "false_positive": fp, "unclear": unc},
         "avg_confidence": round((sum(confs) / len(confs)) if confs else 0.0, 2),
         "model": model or os.environ.get("AI_MODEL"),
+        "model_fallback": ai_fallback_model or os.environ.get("AI_FALLBACK_MODEL"),
         "provider_url": ai_url or os.environ.get("AI_URL"),
         "used_provider": provider_used,
         "provider_status": provider_status,
         "provider_attempted": provider_attempted,
         "provider_error": provider_error,
         "provider_latency_ms": provider_latency_ms,
+        "provider_models_used": provider_models_used,
+        "provider_partial": provider_partial,
+        "classification_source_counts": classification_source_counts,
+        "classification_enabled": ai_scan_classification_enabled,
+        "classification_min_severity": ai_min_severity,
+        "classification_eligible_findings": len(ai_eligible_findings),
+        "classification_skipped_disabled": len(ai_skipped_due_to_disabled_ids),
+        "classification_skipped_by_min_severity": len(ai_skipped_due_to_severity_ids),
         "masking": {"enabled": True, "replacement_host": mask_host},
         "executive_summary": executive_summary,
         "executive_summary_error": exec_summary_error,
@@ -8917,6 +9517,7 @@ async def cli_main():
     # AI-enabled review
     ap.add_argument("--ai", action="store_true", help="Enable AI-assisted verification of findings (non-invasive)")
     ap.add_argument("--model", help="AI model identifier (provider specific)")
+    ap.add_argument("--ai-fallback-model", dest="ai_fallback_model", help="Comma-separated fallback AI model IDs")
     ap.add_argument("--ai-url", dest="ai_url", help="AI provider URL (HTTP endpoint)")
     ap.add_argument("--ai-api-key", dest="ai_api_key", help="AI provider API key")
     ap.add_argument("--ai-mask-host", dest="ai_mask_host", default="example.com", help="Replacement host sent to AI instead of the real target (default: example.com)")
@@ -9004,6 +9605,7 @@ async def cli_main():
     ap.add_argument("--auth-cookies", type=str, help="Session cookies for authenticated scanning (e.g., 'session=abc; token=xyz')")
     ap.add_argument("--auth-header", type=str, help="Authorization header for authenticated scanning (e.g., 'Bearer token123')")
     ap.add_argument("--auth-headers-json", type=str, help="Custom auth headers as JSON (e.g., '{\"X-API-Key\": \"abc\"}')")
+    ap.add_argument("--auth-scenario-json", type=str, help="Auth scenario DSL JSON (login flow, credentials, success condition)")
 
     # New: Form-Based Login
     ap.add_argument("--login-url", type=str, help="Login page URL for form-based authentication (auto-detected if not provided)")
@@ -9058,6 +9660,12 @@ async def cli_main():
     ap.add_argument("--grpc-discovery", action="store_true", help="Enable gRPC reflection discovery (requires grpcurl)")
     ap.add_argument("--json-link-following", action="store_true", help="Follow JSON/HATEOAS links to expand API endpoints")
     ap.add_argument("--options-method-discovery", action="store_true", help="Use HTTP OPTIONS to enumerate allowed methods")
+    ap.add_argument("--focus-rules-json", type=str, help="JSON array of focus rules to constrain endpoint scope")
+    ap.add_argument("--avoid-rules-json", type=str, help="JSON array of avoid rules to exclude endpoint scope")
+    ap.add_argument("--verified-findings-only", dest="verified_findings_only", action="store_true", default=None,
+                    help="Only keep findings with exploit verification evidence (default for smart scans)")
+    ap.add_argument("--no-verified-findings-only", dest="verified_findings_only", action="store_false",
+                    help="Keep all findings regardless of verification status")
 
     # Category convenience flags (enable groups of checks)
     ap.add_argument("--vuln-auth", action="store_true", help="Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds)")
@@ -9086,10 +9694,34 @@ async def cli_main():
     ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
     ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
     # Safety/performance limits
-    ap.add_argument("--smart-bola-max-endpoints", type=int, default=80, dest="smart_bola_max_endpoints", help="Max endpoints for smart BOLA testing (default: 80)")
-    ap.add_argument("--dom-xss-max-files", type=int, default=20, dest="dom_xss_max_files", help="Max JS files for DOM XSS analysis (default: 20)")
-    ap.add_argument("--sqli-extract-max", type=int, default=3, dest="sqli_extract_max", help="Max SQLi findings to attempt data extraction (default: 3)")
-    ap.add_argument("--oob-max-findings", type=int, default=None, dest="oob_max_findings", help="Max SQLi findings to test with OOB payloads (default: 3)")
+    ap.add_argument(
+        "--smart-bola-max-endpoints",
+        type=int,
+        default=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+        dest="smart_bola_max_endpoints",
+        help=f"Max endpoints for smart BOLA testing (default: {SMART_SCAN_BUDGETS.smart_bola_max_endpoints})",
+    )
+    ap.add_argument(
+        "--dom-xss-max-files",
+        type=int,
+        default=SMART_SCAN_BUDGETS.dom_xss_max_files,
+        dest="dom_xss_max_files",
+        help=f"Max JS files for DOM XSS analysis (default: {SMART_SCAN_BUDGETS.dom_xss_max_files})",
+    )
+    ap.add_argument(
+        "--sqli-extract-max",
+        type=int,
+        default=SMART_SCAN_BUDGETS.sqli_extract_max,
+        dest="sqli_extract_max",
+        help=f"Max SQLi findings to attempt data extraction (default: {SMART_SCAN_BUDGETS.sqli_extract_max})",
+    )
+    ap.add_argument(
+        "--oob-max-findings",
+        type=int,
+        default=None,
+        dest="oob_max_findings",
+        help=f"Max SQLi findings to test with OOB payloads (default: {SMART_SCAN_BUDGETS.oob_max_findings})",
+    )
     # Deprecated alias for backward compatibility (hidden from help)
     ap.add_argument("--oob-max-payloads", type=int, default=None, dest="oob_max_payloads_deprecated", help=argparse.SUPPRESS)
 
@@ -9102,7 +9734,7 @@ async def cli_main():
 
     # Apply default if neither was set
     if args.oob_max_findings is None:
-        args.oob_max_findings = 3
+        args.oob_max_findings = SMART_SCAN_BUDGETS.oob_max_findings
 
     # Auto-enable AI when environment variables are set
     if not args.ai_url:
@@ -9198,6 +9830,7 @@ async def cli_main():
                        exploit_level: str = "safe",
                        ai: bool = False,
                        model: str | None = None,
+                       ai_fallback_model: str | None = Query(default=None, alias="ai-fallback-model"),
                        ai_url: str | None = Query(default=None, alias="ai-url"),
                        ai_api_key: str | None = Query(default=None, alias="ai-api-key"),
                        ai_mask_host: str | None = Query(default="example.com", alias="ai-mask-host"),
@@ -9254,6 +9887,7 @@ async def cli_main():
                        auth_cookies: str | None = None,
                        auth_header: str | None = None,
                        auth_headers_json: str | None = None,
+                       auth_scenario_json: str | None = None,
                        login_url: str | None = None,
                        login_username: str | None = None,
                        login_password: str | None = None,
@@ -9278,7 +9912,10 @@ async def cli_main():
                        vuln_web: bool = False,
                        exposure_client: bool = False,
                        exposure_infra: bool = False,
-                       threat_intel: bool = False):
+                       threat_intel: bool = False,
+                       focus_rules_json: str | None = None,
+                       avoid_rules_json: str | None = None,
+                       verified_findings_only: bool | None = None):
             if not target:
                 raise HTTPException(status_code=400, detail="target required")
 
@@ -9484,6 +10121,7 @@ async def cli_main():
                 auth_cookies=auth_cookies,
                 auth_header=auth_header,
                 auth_headers_json=auth_headers_json,
+                auth_scenario_json=auth_scenario_json,
                 login_url=login_url,
                 login_username=login_username,
                 login_password=login_password,
@@ -9507,10 +10145,22 @@ async def cli_main():
                 ai_api_key=ai_api_key,
                 ai_model=model or "gpt-4o-mini",
                 include_partial_attack_chains=include_partial_attack_chains,
+                focus_rules_json=focus_rules_json,
+                avoid_rules_json=avoid_rules_json,
+                verified_findings_only=verified_findings_only,
             )
             if ai:
                 try:
-                    rep["ai_logs"] = await ai_review_findings(rep, model, ai_url, ai_api_key, exploit_level=exploit_level, public_only=public, mask_host=ai_mask_host or "example.com")
+                    rep["ai_logs"] = await ai_review_findings(
+                        rep,
+                        model,
+                        ai_url,
+                        ai_api_key,
+                        exploit_level=exploit_level,
+                        public_only=public,
+                        mask_host=ai_mask_host or "example.com",
+                        ai_fallback_model=ai_fallback_model,
+                    )
                     # Recompute grade now that AI has set ai_verdict on findings
                     rep["result"] = grade(rep)
                 except Exception as e:
@@ -9977,6 +10627,7 @@ async def cli_main():
         auth_cookies=args.auth_cookies,
         auth_header=args.auth_header,
         auth_headers_json=args.auth_headers_json,
+        auth_scenario_json=args.auth_scenario_json,
         login_url=args.login_url,
         login_username=args.login_username,
         login_password=args.login_password,
@@ -10009,6 +10660,9 @@ async def cli_main():
         grpc_discovery=args.grpc_discovery,
         json_link_following=args.json_link_following,
         options_method_discovery=args.options_method_discovery,
+        focus_rules_json=args.focus_rules_json,
+        avoid_rules_json=args.avoid_rules_json,
+        verified_findings_only=args.verified_findings_only,
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
         # Smart scan tuning
@@ -10016,17 +10670,26 @@ async def cli_main():
         thorough_params=getattr(args, 'thorough_params', False),
         oob_callback_url=getattr(args, 'oob_callback_url', None),
         # Safety/performance limits
-        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', 30),
-        dom_xss_max_files=getattr(args, 'dom_xss_max_files', 20),
-        sqli_extract_max=getattr(args, 'sqli_extract_max', 3),
-        oob_max_findings=getattr(args, 'oob_max_findings', 3),
+        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', SMART_SCAN_BUDGETS.smart_bola_max_endpoints),
+        dom_xss_max_files=getattr(args, 'dom_xss_max_files', SMART_SCAN_BUDGETS.dom_xss_max_files),
+        sqli_extract_max=getattr(args, 'sqli_extract_max', SMART_SCAN_BUDGETS.sqli_extract_max),
+        oob_max_findings=getattr(args, 'oob_max_findings', SMART_SCAN_BUDGETS.oob_max_findings),
         # Active enforcement metadata
         active_enforced=getattr(args, 'active_enforced', False),
     )
     # Optional AI review attachment (batch classification + executive summary)
     if args.ai:
         try:
-            ai = await ai_review_findings(report, args.model, args.ai_url, args.ai_api_key, exploit_level=args.exploit_level, public_only=args.public, mask_host=args.ai_mask_host)
+            ai = await ai_review_findings(
+                report,
+                args.model,
+                args.ai_url,
+                args.ai_api_key,
+                exploit_level=args.exploit_level,
+                public_only=args.public,
+                mask_host=args.ai_mask_host,
+                ai_fallback_model=getattr(args, "ai_fallback_model", None),
+            )
             report["ai_logs"] = ai
             # Surface AI errors in result.notes for visibility
             ai_summary = ai.get("summary", {})

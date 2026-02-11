@@ -10,6 +10,39 @@ from dataclasses import dataclass
 
 
 # =============================================================================
+# SMART SCAN BUDGETS
+# =============================================================================
+
+@dataclass(frozen=True)
+class SmartScanBudgetConfig:
+    """Typed defaults for smart scan safety/performance budget limits."""
+
+    smart_bola_max_endpoints: int = 80
+    dom_xss_max_files: int = 20
+    sqli_extract_max: int = 3
+    oob_max_findings: int = 3
+
+    def as_dict(self) -> dict[str, int]:
+        """Return budget defaults as a serializable mapping."""
+        return {
+            "smart_bola_max_endpoints": self.smart_bola_max_endpoints,
+            "dom_xss_max_files": self.dom_xss_max_files,
+            "sqli_extract_max": self.sqli_extract_max,
+            "oob_max_findings": self.oob_max_findings,
+        }
+
+
+SMART_SCAN_BUDGETS = SmartScanBudgetConfig()
+
+SMART_SCAN_BUDGET_DESCRIPTIONS: dict[str, str] = {
+    "smart_bola_max_endpoints": "Max endpoints for smart BOLA testing",
+    "dom_xss_max_files": "Max JS files for DOM XSS analysis",
+    "sqli_extract_max": "Max SQLi findings for data extraction attempts",
+    "oob_max_findings": "Max findings for OOB SQLi verification",
+}
+
+
+# =============================================================================
 # ENDPOINT PATTERNS
 # =============================================================================
 

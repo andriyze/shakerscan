@@ -7,10 +7,13 @@ Supports OpenAI-compatible APIs (OpenAI, OpenRouter, Claude-via-gateway, etc.).
 import asyncio
 import json
 import logging
+import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import aiohttp
@@ -26,6 +29,47 @@ AI_RETRY_ATTEMPTS = 3
 AI_RETRY_BASE_DELAY = 1.0  # seconds
 AI_RETRY_MAX_DELAY = 8.0   # seconds
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+DEFAULT_MAX_FINDINGS_PER_BATCH = max(1, int(os.environ.get("AI_CLASSIFY_MAX_FINDINGS_PER_BATCH", "8")))
+DEFAULT_MAX_PROMPT_CHARS = max(4000, int(os.environ.get("AI_CLASSIFY_MAX_PROMPT_CHARS", "18000")))
+MAX_REASONING_RETRY_TOKENS = max(4000, int(os.environ.get("AI_REASONING_RETRY_MAX_TOKENS", "12000")))
+AI_CLASSIFY_CHAIN_BUDGET_SECONDS = max(0, int(os.environ.get("AI_CLASSIFY_CHAIN_BUDGET_SECONDS", "180")))
+AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS", "300")))
+AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD = max(1, int(os.environ.get("AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD", "5")))
+AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS = max(30, int(os.environ.get("AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS", "180")))
+
+RESPONSE_FORMAT_UNSUPPORTED_PATTERNS = (
+    "response_format",
+    "json_schema",
+    "json_object",
+    "unsupported",
+    "not support",
+    "invalid_request_error",
+)
+
+RETRYABLE_PROVIDER_ERROR_PATTERNS = (
+    "network error",
+    "connection",
+    "connection closed",
+    "connection reset",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "budget exceeded",
+)
+
+_AI_CLASSIFY_CIRCUIT_STATE: dict[str, Any] = {
+    "error_count": 0,
+    "window_started_monotonic": None,
+    "open_until_monotonic": None,
+    "last_error": None,
+}
+_AI_CLASSIFY_CIRCUIT_LOCK = threading.Lock()
 
 # Models that support strict structured outputs (json_schema mode)
 STRUCTURED_OUTPUT_MODELS = frozenset([
@@ -171,6 +215,7 @@ class AIClassificationResult:
     remediation: list[str] = field(default_factory=list)
     attack_narrative: str | None = None
     severity_adjustment: str | None = None  # "upgrade", "downgrade", None
+    classification_source: str = "provider"  # provider | heuristic_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +501,346 @@ def _repair_truncated_json(content: str) -> str | None:
 # AI Provider Communication
 # ---------------------------------------------------------------------------
 
+
+def _clone_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [{"role": str(msg.get("role", "user")), "content": str(msg.get("content", ""))} for msg in messages]
+
+
+def _append_strict_json_instruction(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Append a strict JSON reminder without mutating caller-provided messages."""
+    cloned = _clone_messages(messages)
+    strict_hint = "IMPORTANT: Respond with ONLY valid JSON. No markdown, no explanations."
+    if cloned and cloned[-1].get("role") == "user":
+        content = cloned[-1].get("content", "")
+        if strict_hint not in content:
+            cloned[-1]["content"] = f"{content}\n\n{strict_hint}"
+    else:
+        cloned.append({"role": "user", "content": strict_hint})
+    return cloned
+
+
+def _parse_model_chain(model: str, fallback_models: str | list[str] | None = None) -> list[str]:
+    """Parse primary model + optional fallbacks from strings/lists."""
+    chain: list[str] = []
+
+    def _extend(raw: str | None) -> None:
+        if not raw:
+            return
+        for part in str(raw).split(","):
+            candidate = part.strip()
+            if candidate and candidate not in chain:
+                chain.append(candidate)
+
+    _extend(model)
+    if isinstance(fallback_models, str):
+        _extend(fallback_models)
+    elif isinstance(fallback_models, list):
+        for item in fallback_models:
+            _extend(str(item))
+
+    return chain
+
+
+def _provider_kind_from_url(ai_url: str) -> str:
+    """Infer request format from URL path."""
+    try:
+        parsed = urlparse(ai_url)
+        path = (parsed.path or "").rstrip("/").lower()
+    except Exception:
+        path = ai_url.lower()
+    if path.endswith("/v1/messages"):
+        return "anthropic_messages"
+    return "chat_completions"
+
+
+def _supports_structured_outputs(model: str) -> bool:
+    model_base = model.split("/")[-1].lower()
+    return any(m in model_base for m in STRUCTURED_OUTPUT_MODELS)
+
+
+def _build_response_format_candidates(
+    model: str,
+    json_schema: dict[str, Any] | None,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    modes: list[tuple[str, dict[str, Any] | None]] = []
+    if json_schema and _supports_structured_outputs(model):
+        modes.append(("json_schema", {"type": "json_schema", "json_schema": json_schema}))
+    modes.append(("json_object", {"type": "json_object"}))
+    modes.append(("none", None))
+    return modes
+
+
+def _build_request_headers(ai_api_key: str, provider_kind: str) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Title": "scanner-ai-review",
+    }
+    if provider_kind == "anthropic_messages":
+        headers["x-api-key"] = ai_api_key
+        headers["anthropic-version"] = "2023-06-01"
+    else:
+        headers["Authorization"] = f"Bearer {ai_api_key}"
+    return headers
+
+
+def _build_request_body(
+    provider_kind: str,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    response_format: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if provider_kind == "anthropic_messages":
+        system_parts: list[str] = []
+        anthropic_messages: list[dict[str, str]] = []
+        for msg in messages:
+            role = str(msg.get("role", "user"))
+            content = str(msg.get("content", ""))
+            if role == "system":
+                if content:
+                    system_parts.append(content)
+                continue
+            if role not in {"user", "assistant"}:
+                role = "user"
+            anthropic_messages.append({"role": role, "content": content})
+        if not anthropic_messages:
+            anthropic_messages = [{"role": "user", "content": "Respond with JSON."}]
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+        return body
+
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if response_format:
+        body["response_format"] = response_format
+    return body
+
+
+def _extract_text_chunks(value: Any) -> list[str]:
+    chunks: list[str] = []
+    if value is None:
+        return chunks
+    if isinstance(value, str):
+        if value.strip():
+            chunks.append(value)
+        return chunks
+    if isinstance(value, list):
+        for item in value:
+            chunks.extend(_extract_text_chunks(item))
+        return chunks
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "output_text", "reasoning_content", "reasoning"):
+            if key in value:
+                chunks.extend(_extract_text_chunks(value.get(key)))
+        # Some providers nest text parts under output/message blocks.
+        if not chunks:
+            for nested in value.values():
+                if isinstance(nested, (str, list, dict)):
+                    chunks.extend(_extract_text_chunks(nested))
+        return chunks
+    return chunks
+
+
+def _strip_markdown_fences(content: str) -> str:
+    text = content.strip()
+    if text.startswith("```"):
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if match:
+            return match.group(1).strip()
+    return text
+
+
+def _extract_json_payload(content: str) -> Any | None:
+    """Parse JSON payload from raw text, fenced blocks, or embedded snippets."""
+    if not content:
+        return None
+    stripped = _strip_markdown_fences(content)
+    if not stripped:
+        return None
+
+    decoder = json.JSONDecoder()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        repaired = _repair_truncated_json(stripped)
+        if repaired:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    for idx, ch in enumerate(stripped):
+        if ch not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(stripped[idx:])
+            return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _extract_direct_parsed_json(response_data: dict[str, Any]) -> Any | None:
+    """Extract already-parsed JSON from provider-specific fields if present."""
+    choices = response_data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(message, dict):
+            parsed = message.get("parsed")
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _extract_content_and_reasoning(response_data: dict[str, Any]) -> tuple[str, str]:
+    content_chunks: list[str] = []
+    reasoning_chunks: list[str] = []
+
+    choices = response_data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(message, dict):
+            content_chunks.extend(_extract_text_chunks(message.get("content")))
+            reasoning_chunks.extend(_extract_text_chunks(message.get("reasoning_content")))
+            reasoning_chunks.extend(_extract_text_chunks(message.get("reasoning")))
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            if isinstance(delta, dict):
+                content_chunks.extend(_extract_text_chunks(delta.get("content")))
+
+    content_chunks.extend(_extract_text_chunks(response_data.get("content")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("output_text")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("completion")))
+    content_chunks.extend(_extract_text_chunks(response_data.get("output")))
+    reasoning_chunks.extend(_extract_text_chunks(response_data.get("reasoning")))
+
+    content = "\n".join(chunk for chunk in content_chunks if chunk).strip()
+    reasoning = "\n".join(chunk for chunk in reasoning_chunks if chunk).strip()
+    return content, reasoning
+
+
+def _error_mentions_response_format(error_text: str) -> bool:
+    text = (error_text or "").lower()
+    return any(pat in text for pat in RESPONSE_FORMAT_UNSUPPORTED_PATTERNS)
+
+
+def _is_retryable_provider_error(error_text: str | None) -> bool:
+    text = str(error_text or "").strip().lower()
+    if not text:
+        return False
+    return any(pattern in text for pattern in RETRYABLE_PROVIDER_ERROR_PATTERNS)
+
+
+def _should_open_provider_circuit(error_count: int) -> bool:
+    return int(error_count) >= AI_CLASSIFY_CIRCUIT_ERROR_THRESHOLD
+
+
+def _is_provider_circuit_open(open_until_monotonic: float | None, now_monotonic: float) -> bool:
+    return bool(open_until_monotonic and open_until_monotonic > now_monotonic)
+
+
+def _refresh_provider_circuit_locked(now_monotonic: float) -> None:
+    open_until = _AI_CLASSIFY_CIRCUIT_STATE.get("open_until_monotonic")
+    if isinstance(open_until, (int, float)) and open_until <= now_monotonic:
+        _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = None
+
+    window_started = _AI_CLASSIFY_CIRCUIT_STATE.get("window_started_monotonic")
+    if not isinstance(window_started, (int, float)):
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = now_monotonic
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+        return
+
+    if now_monotonic - float(window_started) > AI_CLASSIFY_CIRCUIT_WINDOW_SECONDS:
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = now_monotonic
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+
+
+def _get_provider_circuit_state(now_monotonic: float | None = None) -> dict[str, Any]:
+    now_value = now_monotonic if isinstance(now_monotonic, (int, float)) else time.monotonic()
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _refresh_provider_circuit_locked(now_value)
+        open_until = _AI_CLASSIFY_CIRCUIT_STATE.get("open_until_monotonic")
+        is_open = _is_provider_circuit_open(
+            float(open_until) if isinstance(open_until, (int, float)) else None,
+            now_value,
+        )
+        remaining = 0
+        if is_open and isinstance(open_until, (int, float)):
+            remaining = max(0, int(open_until - now_value))
+        return {
+            "error_count": max(0, int(_AI_CLASSIFY_CIRCUIT_STATE.get("error_count") or 0)),
+            "is_open": is_open,
+            "open_until_monotonic": open_until if isinstance(open_until, (int, float)) else None,
+            "cooldown_remaining_seconds": remaining,
+            "last_error": _AI_CLASSIFY_CIRCUIT_STATE.get("last_error"),
+        }
+
+
+def _register_provider_circuit_failure(error_text: str, now_monotonic: float | None = None) -> tuple[bool, int]:
+    if not _is_retryable_provider_error(error_text):
+        return False, 0
+    now_value = now_monotonic if isinstance(now_monotonic, (int, float)) else time.monotonic()
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _refresh_provider_circuit_locked(now_value)
+        error_count = max(0, int(_AI_CLASSIFY_CIRCUIT_STATE.get("error_count") or 0)) + 1
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = error_count
+        _AI_CLASSIFY_CIRCUIT_STATE["last_error"] = str(error_text)[:400]
+        if _should_open_provider_circuit(error_count):
+            _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = now_value + AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS
+            return True, error_count
+        return False, error_count
+
+
+def _clear_provider_circuit_state() -> None:
+    with _AI_CLASSIFY_CIRCUIT_LOCK:
+        _AI_CLASSIFY_CIRCUIT_STATE["error_count"] = 0
+        _AI_CLASSIFY_CIRCUIT_STATE["window_started_monotonic"] = time.monotonic()
+        _AI_CLASSIFY_CIRCUIT_STATE["open_until_monotonic"] = None
+        _AI_CLASSIFY_CIRCUIT_STATE["last_error"] = None
+
+
+def _remaining_budget_seconds(deadline_monotonic: float | None) -> float | None:
+    if deadline_monotonic is None:
+        return None
+    return max(0.0, float(deadline_monotonic) - time.monotonic())
+
+
+def _is_budget_exhausted(deadline_monotonic: float | None) -> bool:
+    remaining = _remaining_budget_seconds(deadline_monotonic)
+    return bool(remaining is not None and remaining <= 0.0)
+
+
+async def _sleep_with_budget(delay_seconds: float, deadline_monotonic: float | None) -> bool:
+    sleep_for = max(0.0, float(delay_seconds))
+    if sleep_for <= 0.0:
+        return True
+
+    remaining = _remaining_budget_seconds(deadline_monotonic)
+    if remaining is not None:
+        if remaining <= 0.0:
+            return False
+        sleep_for = min(sleep_for, remaining)
+        if sleep_for <= 0.0:
+            return False
+
+    await asyncio.sleep(sleep_for)
+    return True
+
+
 async def call_ai_provider(
     ai_url: str,
     ai_api_key: str,
@@ -464,17 +849,23 @@ async def call_ai_provider(
     timeout_seconds: int = 45,
     max_tokens: int = 4000,
     temperature: float = 0.3,
-    json_schema: dict[str, Any] | None = None
+    json_schema: dict[str, Any] | None = None,
+    fallback_models: str | list[str] | None = None,
+    overall_budget_seconds: int | None = None,
+    use_circuit_breaker: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     """
-    Call OpenAI-compatible AI provider and parse JSON response.
+    Call AI provider and parse JSON response with model/mode fallback.
 
     Includes automatic retry with exponential backoff for transient errors
-    AND JSON parse failures.
+    and JSON parse failures.
 
     Args:
         json_schema: Optional strict JSON schema for structured outputs.
-                    Only used for models in STRUCTURED_OUTPUT_MODELS.
+                    Only used for compatible chat-completions models.
+        fallback_models: Optional comma-separated string or list of fallback model IDs.
+        overall_budget_seconds: Optional hard cap for the entire model/mode fallback chain.
+        use_circuit_breaker: When true, fail fast while transient provider failures are cooling down.
 
     Returns:
         Tuple of (parsed_response, error_message, latency_ms)
@@ -483,161 +874,290 @@ async def call_ai_provider(
         logger.error("AI validation failed: aiohttp not installed")
         return None, "aiohttp not installed", None
 
-    headers = {
-        "Authorization": f"Bearer {ai_api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Title": "scanner-ai-review"
-    }
+    if not ai_url or not ai_api_key:
+        return None, "AI provider URL/API key not configured", None
 
-    # Check if model supports structured outputs
-    model_base = model.split("/")[-1]  # Handle openrouter format like "openai/gpt-4o"
-    supports_structured = any(m in model_base for m in STRUCTURED_OUTPUT_MODELS)
+    model_chain = _parse_model_chain(model, fallback_models)
+    if not model_chain:
+        return None, "AI model not configured", None
 
-    body: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
+    effective_budget_seconds = (
+        AI_CLASSIFY_CHAIN_BUDGET_SECONDS
+        if overall_budget_seconds is None
+        else max(0, int(overall_budget_seconds))
+    )
+    budget_deadline_monotonic = (
+        time.monotonic() + effective_budget_seconds
+        if effective_budget_seconds > 0
+        else None
+    )
 
-    # Use strict structured outputs for supported models, otherwise json_object mode
-    if supports_structured and json_schema:
-        body["response_format"] = {"type": "json_schema", "json_schema": json_schema}
-        logger.debug(f"Using strict structured outputs for model {model}")
-    else:
-        # Fallback to basic JSON mode
-        body["response_format"] = {"type": "json_object"}
+    if use_circuit_breaker:
+        circuit_state = _get_provider_circuit_state()
+        if circuit_state.get("is_open"):
+            cooldown = int(circuit_state.get("cooldown_remaining_seconds") or 0)
+            error = (
+                f"AI provider circuit open ({cooldown}s remaining) "
+                "after repeated transient failures"
+            )
+            logger.warning(error)
+            return None, error, 0
 
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    provider_kind = _provider_kind_from_url(ai_url)
+    headers = _build_request_headers(ai_api_key, provider_kind)
     total_start = time.time()
-    last_error: str | None = None
-    last_latency: int | None = None
-    json_parse_retry = False  # Track if we're retrying due to JSON parse failure
+    cumulative_latency_ms = 0
+    attempt_errors: list[str] = []
+    budget_error: str | None = None
 
-    for attempt in range(AI_RETRY_ATTEMPTS):
-        start = time.time()
+    for model_name in model_chain:
+        if _is_budget_exhausted(budget_deadline_monotonic):
+            budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+            break
 
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.post(ai_url, json=body, headers=headers) as resp:
-                    latency_ms = int((time.time() - start) * 1000)
+        if provider_kind == "anthropic_messages":
+            mode_candidates = [("none", None)]
+        else:
+            mode_candidates = _build_response_format_candidates(model_name, json_schema)
 
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        # Truncate long error responses
-                        error_text = error_text[:500] if len(error_text) > 500 else error_text
+        for mode_name, response_format in mode_candidates:
+            if _is_budget_exhausted(budget_deadline_monotonic):
+                budget_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                break
 
-                        # Check if this is a retryable error
-                        if resp.status in RETRYABLE_STATUS_CODES and attempt < AI_RETRY_ATTEMPTS - 1:
-                            delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
-                            logger.warning(
-                                f"AI provider returned HTTP {resp.status}, retrying in {delay:.1f}s "
-                                f"(attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
-                            )
-                            last_error = f"HTTP {resp.status}: {error_text}"
-                            last_latency = latency_ms
-                            await asyncio.sleep(delay)
-                            continue
+            mode_error: str | None = None
+            strict_retry = False
 
-                        logger.warning(f"AI provider returned HTTP {resp.status}: {error_text[:100]}")
-                        return None, f"HTTP {resp.status}: {error_text}", latency_ms
+            for attempt in range(AI_RETRY_ATTEMPTS):
+                if _is_budget_exhausted(budget_deadline_monotonic):
+                    mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                    budget_error = mode_error
+                    break
 
-                    response_data = await resp.json()
+                start = time.time()
+                messages_for_attempt = _clone_messages(messages)
+                max_tokens_for_attempt = max_tokens
+                if strict_retry:
+                    messages_for_attempt = _append_strict_json_instruction(messages_for_attempt)
+                    max_tokens_for_attempt = min(
+                        MAX_REASONING_RETRY_TOKENS,
+                        max(max_tokens_for_attempt + 1000, max_tokens_for_attempt * 2),
+                    )
 
-                    # Parse OpenAI-compatible response structure
-                    choices = response_data.get("choices", [])
-                    if not choices:
-                        return None, "No choices in response", latency_ms
+                body = _build_request_body(
+                    provider_kind=provider_kind,
+                    model=model_name,
+                    messages=messages_for_attempt,
+                    max_tokens=max_tokens_for_attempt,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
 
-                    content = choices[0].get("message", {}).get("content", "")
+                try:
+                    remaining_budget = _remaining_budget_seconds(budget_deadline_monotonic)
+                    if remaining_budget is not None and remaining_budget <= 0.0:
+                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                        budget_error = mode_error
+                        break
 
-                    if not content:
-                        return None, "Empty content in response", latency_ms
+                    request_timeout_seconds = float(timeout_seconds)
+                    if remaining_budget is not None:
+                        request_timeout_seconds = max(1.0, min(request_timeout_seconds, remaining_budget))
 
-                    # Parse JSON from content
-                    try:
-                        # Handle potential markdown code blocks
-                        if content.strip().startswith("```"):
-                            # Extract JSON from code block
-                            match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
-                            if match:
-                                content = match.group(1)
+                    timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+                    async with aiohttp.ClientSession(timeout=timeout) as sess:
+                        async with sess.post(ai_url, json=body, headers=headers) as resp:
+                            latency_ms = int((time.time() - start) * 1000)
+                            cumulative_latency_ms += latency_ms
 
-                        parsed = json.loads(content.strip())
-                        return parsed, None, latency_ms
-                    except json.JSONDecodeError as e:
-                        # Try to repair truncated JSON
-                        repaired = _repair_truncated_json(content.strip())
-                        if repaired:
+                            if resp.status != 200:
+                                error_text = (await resp.text())[:500]
+                                mode_error = f"HTTP {resp.status}: {error_text}"
+
+                                if resp.status in RETRYABLE_STATUS_CODES and attempt < AI_RETRY_ATTEMPTS - 1:
+                                    delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
+                                    logger.warning(
+                                        f"AI provider HTTP {resp.status}, retrying in {delay:.1f}s "
+                                        f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
+                                    )
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
+                                    continue
+
+                                # Auth errors are definitive; no point rotating models.
+                                if resp.status in {401, 403}:
+                                    return None, mode_error, cumulative_latency_ms
+
+                                # If response_format is rejected, try less strict mode.
+                                if response_format and resp.status in {400, 422} and _error_mentions_response_format(error_text):
+                                    logger.debug(
+                                        "AI provider rejected response_format; downgrading mode "
+                                        f"(model={model_name}, mode={mode_name})"
+                                    )
+                                break
+
                             try:
-                                parsed = json.loads(repaired)
-                                logger.info("Successfully repaired truncated JSON response")
-                                return parsed, None, latency_ms
-                            except json.JSONDecodeError:
-                                pass
+                                response_data = await resp.json(content_type=None)
+                            except Exception:
+                                raw_text = (await resp.text())[:500]
+                                mode_error = f"Invalid JSON response envelope: {raw_text}"
+                                if attempt < AI_RETRY_ATTEMPTS - 1:
+                                    delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
+                                    continue
+                                break
 
-                        # Retry on JSON parse failure (once)
-                        if attempt < AI_RETRY_ATTEMPTS - 1 and not json_parse_retry:
-                            json_parse_retry = True
-                            delay = AI_RETRY_BASE_DELAY
-                            logger.warning(
-                                f"JSON parse failed, retrying with explicit instruction "
-                                f"(attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
-                            )
-                            # Add explicit JSON instruction to last message
-                            if messages and messages[-1].get("role") == "user":
-                                messages[-1]["content"] += "\n\nIMPORTANT: Respond with ONLY valid JSON. No markdown, no explanations."
-                            last_error = f"Invalid JSON: {e}"
-                            last_latency = latency_ms
-                            await asyncio.sleep(delay)
-                            continue
+                            parsed = _extract_direct_parsed_json(response_data)
+                            content_text, reasoning_text = _extract_content_and_reasoning(response_data)
+                            if parsed is None and content_text:
+                                parsed = _extract_json_payload(content_text)
 
-                        return None, f"Invalid JSON in response: {e}", latency_ms
+                            if parsed is None:
+                                mode_error = "Empty content in response" if not content_text else "Invalid JSON in response"
+                                if attempt < AI_RETRY_ATTEMPTS - 1 and not strict_retry:
+                                    strict_retry = True
+                                    delay = AI_RETRY_BASE_DELAY
+                                    logger.warning(
+                                        "AI response parse failed, retrying with stricter JSON prompt "
+                                        f"(model={model_name}, mode={mode_name})"
+                                    )
+                                    if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                                        mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                                        budget_error = mode_error
+                                        break
+                                    continue
+                                break
 
-        except TimeoutError:
-            latency_ms = int((time.time() - start) * 1000)
-            last_error = f"AI provider timeout after {timeout_seconds}s"
-            last_latency = latency_ms
+                            if not isinstance(parsed, dict):
+                                mode_error = "AI response JSON is not an object"
+                                break
 
-            if attempt < AI_RETRY_ATTEMPTS - 1:
-                delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
-                logger.warning(
-                    f"AI provider timeout, retrying in {delay:.1f}s "
-                    f"(attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
-                )
-                await asyncio.sleep(delay)
-                continue
+                            parsed["_provider_meta"] = {
+                                "model_used": model_name,
+                                "mode_used": mode_name,
+                                "provider_kind": provider_kind,
+                                "latency_ms": latency_ms,
+                                "reasoning_present": bool(reasoning_text),
+                            }
+                            if use_circuit_breaker:
+                                _clear_provider_circuit_state()
+                            return parsed, None, cumulative_latency_ms
 
-            logger.warning(f"AI provider timeout after {timeout_seconds}s (all retries exhausted)")
-            return None, last_error, latency_ms
+                except (TimeoutError, asyncio.TimeoutError):
+                    latency_ms = int((time.time() - start) * 1000)
+                    cumulative_latency_ms += latency_ms
+                    mode_error = f"AI provider timeout after {timeout_seconds}s"
+                    if attempt < AI_RETRY_ATTEMPTS - 1:
+                        delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
+                        logger.warning(
+                            f"AI provider timeout, retrying in {delay:.1f}s "
+                            f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
+                        )
+                        if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                            mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                            budget_error = mode_error
+                            break
+                        continue
+                    break
 
-        except aiohttp.ClientError as e:
-            latency_ms = int((time.time() - start) * 1000)
-            last_error = f"Network error: {type(e).__name__}: {str(e)[:100]}"
-            last_latency = latency_ms
+                except aiohttp.ClientError as e:
+                    latency_ms = int((time.time() - start) * 1000)
+                    cumulative_latency_ms += latency_ms
+                    mode_error = f"Network error: {type(e).__name__}: {str(e)[:100]}"
+                    if attempt < AI_RETRY_ATTEMPTS - 1:
+                        delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
+                        logger.warning(
+                            f"AI provider network error ({type(e).__name__}), retrying in {delay:.1f}s "
+                            f"(model={model_name}, mode={mode_name}, attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
+                        )
+                        if not await _sleep_with_budget(delay, budget_deadline_monotonic):
+                            mode_error = f"AI provider budget exceeded {effective_budget_seconds}s"
+                            budget_error = mode_error
+                            break
+                        continue
+                    break
 
-            if attempt < AI_RETRY_ATTEMPTS - 1:
-                delay = min(AI_RETRY_BASE_DELAY * (2 ** attempt), AI_RETRY_MAX_DELAY)
-                logger.warning(
-                    f"AI provider network error ({type(e).__name__}), retrying in {delay:.1f}s "
-                    f"(attempt {attempt + 1}/{AI_RETRY_ATTEMPTS})"
-                )
-                await asyncio.sleep(delay)
-                continue
+                except Exception as e:
+                    latency_ms = int((time.time() - start) * 1000)
+                    cumulative_latency_ms += latency_ms
+                    mode_error = f"Unexpected error: {type(e).__name__}: {str(e)[:120]}"
+                    break
 
-            logger.warning(f"AI provider network error: {type(e).__name__}")
-            return None, last_error, latency_ms
+            if mode_error:
+                attempt_errors.append(f"{model_name} [{mode_name}]: {mode_error}")
+            if budget_error:
+                break
+        if budget_error:
+            break
 
-        except Exception as e:
-            latency_ms = int((time.time() - start) * 1000)
-            logger.error(f"AI provider unexpected error: {type(e).__name__}: {str(e)[:100]}")
-            return None, f"Unexpected error: {type(e).__name__}: {str(e)[:100]}", latency_ms
-
-    # All retries exhausted (shouldn't reach here normally)
     total_latency = int((time.time() - total_start) * 1000)
-    logger.warning(f"AI provider call failed after {AI_RETRY_ATTEMPTS} attempts")
-    return None, last_error or "All retries exhausted", last_latency or total_latency
+    unique_errors: list[str] = []
+    for err in attempt_errors:
+        if err not in unique_errors:
+            unique_errors.append(err)
+    if budget_error and budget_error not in unique_errors:
+        unique_errors.append(budget_error)
+    if unique_errors:
+        compact_error = "; ".join(unique_errors[:3])
+        if len(unique_errors) > 3:
+            compact_error += f"; +{len(unique_errors) - 3} more"
+    else:
+        compact_error = "All retries exhausted"
+
+    if use_circuit_breaker:
+        circuit_opened, error_count = _register_provider_circuit_failure(compact_error)
+        if circuit_opened:
+            logger.warning(
+                "AI provider circuit opened for %ss after %s transient errors",
+                AI_CLASSIFY_CIRCUIT_COOLDOWN_SECONDS,
+                error_count,
+            )
+
+    logger.warning(f"AI provider call failed after model/mode fallback chain: {compact_error}")
+    return None, compact_error, cumulative_latency_ms or total_latency
+
+
+async def probe_ai_provider(
+    ai_url: str,
+    ai_api_key: str,
+    model: str,
+    fallback_models: str | list[str] | None = None,
+    timeout_seconds: int = 25,
+) -> dict[str, Any]:
+    """Run a lightweight provider probe used by settings API/UI."""
+    messages = [
+        {"role": "system", "content": "Respond only with valid JSON object."},
+        {"role": "user", "content": 'Return {"ok": true, "probe": "shakerscan"} as JSON.'},
+    ]
+    response, error, latency_ms = await call_ai_provider(
+        ai_url=ai_url,
+        ai_api_key=ai_api_key,
+        model=model,
+        messages=messages,
+        timeout_seconds=timeout_seconds,
+        max_tokens=300,
+        temperature=0.0,
+        fallback_models=fallback_models,
+        overall_budget_seconds=max(10, timeout_seconds),
+        use_circuit_breaker=False,
+    )
+    provider_meta = {}
+    parsed_response: dict[str, Any] | None = None
+    if isinstance(response, dict):
+        provider_meta = response.pop("_provider_meta", {}) if isinstance(response.get("_provider_meta"), dict) else {}
+        parsed_response = response
+    return {
+        "ok": error is None and isinstance(parsed_response, dict),
+        "error": error,
+        "latency_ms": latency_ms,
+        "provider_meta": provider_meta,
+        "response": parsed_response,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -700,8 +1220,12 @@ def build_classification_prompt(
     # Prepare findings with context hints
     findings_for_ai = []
     for f in findings:
+        finding_id = f.get("id")
         finding_data = {
-            "id": f.get("id"),
+            # Keep both keys for provider compatibility: schema asks for
+            # `finding_id`, while some providers echo input keys verbatim.
+            "finding_id": finding_id,
+            "id": finding_id,
             "title": f.get("title"),
             "severity": f.get("severity"),
             "tool": f.get("tool"),
@@ -990,7 +1514,8 @@ def fallback_classify_finding(finding: dict[str, Any]) -> AIClassificationResult
         verification_steps=verification_steps,
         remediation=[],
         attack_narrative=None,
-        severity_adjustment=None
+        severity_adjustment=None,
+        classification_source="heuristic_fallback",
     )
 
 
@@ -1034,57 +1559,51 @@ def _generate_fallback_verification_steps(finding: dict[str, Any]) -> list[str]:
 # Batch Classification
 # ---------------------------------------------------------------------------
 
-async def classify_findings_batch(
+
+def _chunk_findings_for_classification(
     findings: list[dict[str, Any]],
     scan_context: dict[str, Any],
-    ai_url: str,
-    ai_api_key: str,
-    model: str,
-    mask_host: str = "example.com"
-) -> tuple[dict[str, AIClassificationResult], str | None, int | None, dict[str, Any] | None]:
-    """
-    Classify multiple findings in a single AI call.
-
-    Falls back to heuristic-based classification if AI fails.
-
-    Returns:
-        Tuple of (results_dict, error_message, latency_ms, meta)
-        results_dict maps finding_id -> AIClassificationResult
-    """
+    mask_host: str,
+    max_findings_per_batch: int = DEFAULT_MAX_FINDINGS_PER_BATCH,
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
+) -> list[list[dict[str, Any]]]:
+    """Split findings into prompt-safe chunks for providers with tighter limits."""
     if not findings:
-        return {}, None, None, None
+        return []
 
-    # Build prompt
-    user_prompt = build_classification_prompt(findings, scan_context, mask_host)
+    chunks: list[list[dict[str, Any]]] = []
+    start = 0
+    total = len(findings)
+    max_findings = max(1, max_findings_per_batch)
+    max_chars = max(4000, max_prompt_chars)
 
-    messages = [
-        {"role": "system", "content": SECURITY_ANALYST_SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt}
-    ]
+    while start < total:
+        end = min(total, start + max_findings)
+        chosen_end = end
 
-    response, error, latency_ms = await call_ai_provider(
-        ai_url, ai_api_key, model, messages,
-        timeout_seconds=60,  # Allow more time for batch
-        max_tokens=4000,
-        json_schema=CLASSIFICATION_JSON_SCHEMA  # Use strict structured outputs
-    )
+        while chosen_end > start:
+            candidate = findings[start:chosen_end]
+            prompt = build_classification_prompt(candidate, scan_context, mask_host)
+            if len(prompt) <= max_chars or chosen_end == start + 1:
+                break
+            chosen_end -= 1
 
-    # If AI fails completely, use fallback classification
-    if error or not response:
-        logger.warning(f"AI classification failed, using fallback heuristics: {error}")
-        fallback_results: dict[str, AIClassificationResult] = {}
-        for finding in findings:
-            finding_id = finding.get("id")
-            if finding_id:
-                fallback_results[finding_id] = fallback_classify_finding(finding)
-        # Return fallback results with the original error for transparency
-        return fallback_results, f"AI unavailable, used heuristics: {error}", latency_ms, None
+        if chosen_end <= start:
+            chosen_end = min(total, start + 1)
 
-    # Parse response into per-finding results
-    results: dict[str, AIClassificationResult] = {}
+        chunks.append(findings[start:chosen_end])
+        start = chosen_end
 
-    for ai_finding in response.get("findings", []):
-        finding_id = ai_finding.get("finding_id")
+    return chunks
+
+
+def _parse_ai_classification_results(response: dict[str, Any]) -> dict[str, AIClassificationResult]:
+    parsed: dict[str, AIClassificationResult] = {}
+    for ai_finding in response.get("findings", []) or []:
+        if not isinstance(ai_finding, dict):
+            continue
+        # Accept provider outputs that use either `finding_id` (schema) or `id` (echoed input key).
+        finding_id = ai_finding.get("finding_id") or ai_finding.get("id")
         if not finding_id:
             continue
 
@@ -1097,21 +1616,200 @@ async def classify_findings_batch(
             confidence = 0.5
         confidence = max(0.0, min(1.0, float(confidence)))
 
-        results[finding_id] = AIClassificationResult(
+        parsed[str(finding_id)] = AIClassificationResult(
             verdict=verdict,
             confidence=confidence,
             rationale=ai_finding.get("rationale", ""),
             verification_steps=ai_finding.get("verification_steps", []),
             remediation=ai_finding.get("remediation", []),
             attack_narrative=ai_finding.get("attack_narrative"),
-            severity_adjustment=ai_finding.get("severity_adjustment")
+            severity_adjustment=ai_finding.get("severity_adjustment"),
+            classification_source="provider",
         )
 
+    return parsed
+
+
+def _should_split_classification_chunk(error_text: str | None, chunk_size: int) -> bool:
+    """Return True when a failed chunk should be retried in smaller pieces."""
+    if chunk_size <= 1:
+        return False
+    text = str(error_text or "").lower()
+    if not text:
+        return False
+    retry_markers = (
+        "network error",
+        "connection",
+        "timeout",
+        "budget exceeded",
+        "invalid json",
+        "empty content",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+async def classify_findings_batch(
+    findings: list[dict[str, Any]],
+    scan_context: dict[str, Any],
+    ai_url: str,
+    ai_api_key: str,
+    model: str,
+    mask_host: str = "example.com",
+    fallback_models: str | list[str] | None = None,
+) -> tuple[dict[str, AIClassificationResult], str | None, int | None, dict[str, Any] | None]:
+    """
+    Classify findings in one or more AI calls with chunking/fallback.
+
+    Falls back to heuristic-based classification when AI fails for any chunk.
+
+    Returns:
+        Tuple of (results_dict, error_message, latency_ms, meta)
+        results_dict maps finding_id -> AIClassificationResult
+    """
+    if not findings:
+        return {}, None, None, None
+
+    results: dict[str, AIClassificationResult] = {}
+    chunk_errors: list[str] = []
+    used_models: list[str] = []
+    provider_used = False
+    ai_chunks = 0
+    total_latency_ms = 0
+    cross_finding_correlations: list[str] = []
+    overall_risk_assessment: str | None = None
+    provider_finding_ids: set[str] = set()
+    fallback_finding_ids: set[str] = set()
+
+    finding_chunks = _chunk_findings_for_classification(findings, scan_context, mask_host)
+    for chunk_idx, chunk in enumerate(finding_chunks, start=1):
+        # Retry transient provider failures by splitting large chunks into
+        # smaller sub-chunks before falling back to heuristics.
+        pending_sub_chunks: list[list[dict[str, Any]]] = [chunk]
+        while pending_sub_chunks:
+            sub_chunk = pending_sub_chunks.pop(0)
+            user_prompt = build_classification_prompt(sub_chunk, scan_context, mask_host)
+            messages = [
+                {"role": "system", "content": SECURITY_ANALYST_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            response, error, latency_ms = await call_ai_provider(
+                ai_url,
+                ai_api_key,
+                model,
+                messages,
+                timeout_seconds=60,
+                max_tokens=3000,
+                json_schema=CLASSIFICATION_JSON_SCHEMA,
+                fallback_models=fallback_models,
+            )
+            if latency_ms:
+                total_latency_ms += latency_ms
+
+            if error or not response:
+                err_text = error or "empty response"
+                if _should_split_classification_chunk(err_text, len(sub_chunk)):
+                    mid = max(1, len(sub_chunk) // 2)
+                    left = sub_chunk[:mid]
+                    right = sub_chunk[mid:]
+                    chunk_errors.append(
+                        f"chunk {chunk_idx}/{len(finding_chunks)}: {err_text}; "
+                        f"retrying as {len(left)}+{len(right)}"
+                    )
+                    pending_sub_chunks = [left, right] + pending_sub_chunks
+                    continue
+
+                chunk_errors.append(f"chunk {chunk_idx}/{len(finding_chunks)}: {err_text}")
+                for finding in sub_chunk:
+                    finding_id = finding.get("id")
+                    if finding_id and finding_id not in results:
+                        fid = str(finding_id)
+                        results[fid] = fallback_classify_finding(finding)
+                        fallback_finding_ids.add(fid)
+                continue
+
+            chunk_results = _parse_ai_classification_results(response)
+            provider_meta = response.get("_provider_meta", {}) if isinstance(response, dict) else {}
+            used_model = provider_meta.get("model_used") if isinstance(provider_meta, dict) else None
+            if isinstance(used_model, str) and used_model and used_model not in used_models:
+                used_models.append(used_model)
+            if chunk_results:
+                provider_used = True
+                ai_chunks += 1
+
+            for finding in sub_chunk:
+                finding_id = finding.get("id")
+                if not finding_id:
+                    continue
+                fid = str(finding_id)
+                if fid in chunk_results:
+                    results[fid] = chunk_results[fid]
+                    provider_finding_ids.add(fid)
+                else:
+                    results[fid] = fallback_classify_finding(finding)
+                    fallback_finding_ids.add(fid)
+                    chunk_errors.append(
+                        f"chunk {chunk_idx}/{len(finding_chunks)}: missing AI verdict for finding {fid}"
+                    )
+
+            corr = response.get("cross_finding_correlations", [])
+            if isinstance(corr, list):
+                for item in corr:
+                    if isinstance(item, str) and item and item not in cross_finding_correlations:
+                        cross_finding_correlations.append(item)
+
+            risk = response.get("overall_risk_assessment")
+            if isinstance(risk, str) and risk and not overall_risk_assessment:
+                overall_risk_assessment = risk
+
+    # Safety net in case some records lacked IDs during chunk processing.
+    for finding in findings:
+        finding_id = finding.get("id")
+        if finding_id and str(finding_id) not in results:
+            fid = str(finding_id)
+            results[fid] = fallback_classify_finding(finding)
+            fallback_finding_ids.add(fid)
+
+    latency_out = total_latency_ms or None
+    if not provider_used:
+        err = chunk_errors[0] if chunk_errors else "AI classification unavailable"
+        return results, f"AI unavailable, used heuristics: {err}", latency_out, {
+            "provider_used": False,
+            "used_models": used_models,
+            "chunks_total": len(finding_chunks),
+            "chunks_with_ai": 0,
+            "chunks_fallback": len(finding_chunks),
+            "provider_finding_ids": [],
+            "fallback_finding_ids": sorted(fallback_finding_ids),
+            "errors": chunk_errors[:5],
+            "cross_finding_correlations": cross_finding_correlations,
+            "overall_risk_assessment": overall_risk_assessment,
+        }
+
+    partial_error: str | None = None
+    if chunk_errors:
+        partial_error = f"AI partially unavailable: {'; '.join(chunk_errors[:3])}"
+        if len(chunk_errors) > 3:
+            partial_error += f"; +{len(chunk_errors) - 3} more"
+
     meta = {
-        "cross_finding_correlations": response.get("cross_finding_correlations", []),
-        "overall_risk_assessment": response.get("overall_risk_assessment"),
+        "provider_used": True,
+        "used_models": used_models,
+        "chunks_total": len(finding_chunks),
+        "chunks_with_ai": ai_chunks,
+        "chunks_fallback": len(finding_chunks) - ai_chunks,
+        "provider_finding_ids": sorted(provider_finding_ids),
+        "fallback_finding_ids": sorted(fallback_finding_ids),
+        "errors": chunk_errors[:5],
+        "cross_finding_correlations": cross_finding_correlations,
+        "overall_risk_assessment": overall_risk_assessment,
     }
-    return results, None, latency_ms, meta
+    return results, partial_error, latency_out, meta
 
 
 # ---------------------------------------------------------------------------
@@ -1137,7 +1835,8 @@ async def generate_executive_summary(
     ai_api_key: str,
     model: str,
     mask_host: str = "example.com",
-    real_host: str | None = None
+    real_host: str | None = None,
+    fallback_models: str | list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, int | None]:
     """
     Generate an AI-powered executive summary for non-technical stakeholders.
@@ -1164,12 +1863,17 @@ async def generate_executive_summary(
         ai_url, ai_api_key, model, messages,
         timeout_seconds=45,  # Increased timeout for larger responses
         max_tokens=3000,  # Increased from 2000 to handle longer summaries
-        json_schema=EXECUTIVE_SUMMARY_JSON_SCHEMA  # Use strict structured outputs
+        json_schema=EXECUTIVE_SUMMARY_JSON_SCHEMA,  # Use strict structured outputs
+        fallback_models=fallback_models,
     )
 
     if error:
         logger.warning(f"AI executive summary generation failed: {error}")
         return None, error, latency_ms
+
+    # Remove internal provider metadata before persisting report output.
+    if response:
+        response.pop("_provider_meta", None)
 
     # Unmask domain in the response if real_host is provided
     if response and real_host and mask_host != real_host:
