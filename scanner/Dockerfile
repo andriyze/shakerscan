@@ -2,19 +2,19 @@
 # Multi-stage build for comprehensive security scanning
 
 # --- Stage 1: Build Go tools ---
-# Pin Go to avoid upstream breakages from `golang:latest` (e.g. sonic on newer Go runtimes).
-FROM golang:1.23 AS go-builder
+# Pin Go to a stable major/minor (not latest) while meeting tool requirements (tlsx needs >=1.24).
+FROM golang:1.24 AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner)
-RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.1 \
+RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 \
  && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.8.1 \
  && go install github.com/projectdiscovery/katana/cmd/katana@v1.4.0 \
  && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.12.0 \
- && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.6.2 \
+ && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.7.0 \
  && go install github.com/hahwul/dalfox/v2@v2.12.0 \
- && go install github.com/ffuf/ffuf/v2@latest \
- && go install github.com/tomnomnom/meg@latest \
- && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@latest
+ && go install github.com/ffuf/ffuf/v2@v2.1.0 \
+ && go install github.com/tomnomnom/meg@v0.3.0 \
+ && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
 FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
