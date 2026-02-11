@@ -165,12 +165,7 @@ export interface AISettings {
   ai_api_key_configured: boolean
   ai_api_key_masked?: string
   ai_verify_enabled: boolean
-  ai_verify_url: string
-  ai_verify_model: string
-  ai_verify_model_fallback: string
   ai_verify_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
-  ai_verify_api_key_configured: boolean
-  ai_verify_api_key_masked?: string
   auto_retest_on_scan_complete: boolean
   auto_retest_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   auto_retest_max_per_scan: number
@@ -188,10 +183,6 @@ export interface AISettingsUpdate {
   ai_scan_classification_enabled?: boolean
   ai_classify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_verify_enabled?: boolean
-  ai_verify_url?: string
-  ai_verify_api_key?: string
-  ai_verify_model?: string
-  ai_verify_model_fallback?: string
   ai_verify_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   auto_retest_on_scan_complete?: boolean
   auto_retest_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'

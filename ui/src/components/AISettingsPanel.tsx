@@ -24,9 +24,7 @@ export default function AISettingsPanel() {
   const [aiSaving, setAISaving] = useState(false)
   const [loading, setLoading] = useState(true)
   const [scanAPIKeyInput, setScanAPIKeyInput] = useState('')
-  const [verifyAPIKeyInput, setVerifyAPIKeyInput] = useState('')
   const [clearScanAPIKey, setClearScanAPIKey] = useState(false)
-  const [clearVerifyAPIKey, setClearVerifyAPIKey] = useState(false)
   const [persistAIToEnv, setPersistAIToEnv] = useState(false)
   const [aiURLInput, setAIURLInput] = useState('')
   const [aiModelInput, setAIModelInput] = useState('')
@@ -35,9 +33,6 @@ export default function AISettingsPanel() {
   const [aiScanClassificationEnabledInput, setAIScanClassificationEnabledInput] = useState(false)
   const [aiClassifyMinSeverityInput, setAIClassifyMinSeverityInput] = useState<Severity>('high')
   const [aiVerifyEnabledInput, setAIVerifyEnabledInput] = useState(false)
-  const [aiVerifyURLInput, setAIVerifyURLInput] = useState('')
-  const [aiVerifyModelInput, setAIVerifyModelInput] = useState('')
-  const [aiVerifyModelFallbackInput, setAIVerifyModelFallbackInput] = useState('')
   const [aiVerifyMinSeverityInput, setAIVerifyMinSeverityInput] = useState<Severity>('high')
   const [autoRetestEnabledInput, setAutoRetestEnabledInput] = useState(true)
   const [autoRetestMinSeverityInput, setAutoRetestMinSeverityInput] = useState<Severity>('medium')
@@ -58,9 +53,6 @@ export default function AISettingsPanel() {
     setAIScanClassificationEnabledInput(Boolean(settings.ai_scan_classification_enabled))
     setAIClassifyMinSeverityInput(settings.ai_classify_min_severity || settings.ai_verify_min_severity || 'high')
     setAIVerifyEnabledInput(Boolean(settings.ai_verify_enabled))
-    setAIVerifyURLInput(settings.ai_verify_url || '')
-    setAIVerifyModelInput(settings.ai_verify_model || '')
-    setAIVerifyModelFallbackInput(settings.ai_verify_model_fallback || '')
     setAIVerifyMinSeverityInput(settings.ai_verify_min_severity || 'high')
     setAutoRetestEnabledInput(Boolean(settings.auto_retest_on_scan_complete))
     setAutoRetestMinSeverityInput(settings.auto_retest_min_severity || 'medium')
@@ -69,9 +61,7 @@ export default function AISettingsPanel() {
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
     setScanAPIKeyInput('')
-    setVerifyAPIKeyInput('')
     setClearScanAPIKey(false)
-    setClearVerifyAPIKey(false)
     setScanProbeMessage(null)
     setVerifyProbeMessage(null)
   }
@@ -108,9 +98,6 @@ export default function AISettingsPanel() {
         ai_scan_classification_enabled: aiScanClassificationEnabledInput,
         ai_classify_min_severity: aiClassifyMinSeverityInput,
         ai_verify_enabled: aiVerifyEnabledInput,
-        ai_verify_url: aiVerifyURLInput,
-        ai_verify_model: aiVerifyModelInput,
-        ai_verify_model_fallback: aiVerifyModelFallbackInput,
         ai_verify_min_severity: aiVerifyMinSeverityInput,
         auto_retest_on_scan_complete: autoRetestEnabledInput,
         auto_retest_min_severity: autoRetestMinSeverityInput,
@@ -125,12 +112,6 @@ export default function AISettingsPanel() {
         payload.ai_api_key = ''
       } else if (scanAPIKeyInput.trim()) {
         payload.ai_api_key = scanAPIKeyInput.trim()
-      }
-
-      if (clearVerifyAPIKey) {
-        payload.ai_verify_api_key = ''
-      } else if (verifyAPIKeyInput.trim()) {
-        payload.ai_verify_api_key = verifyAPIKeyInput.trim()
       }
 
       const result = await updateAISettings(payload)
@@ -162,13 +143,10 @@ export default function AISettingsPanel() {
     try {
       const result = await testAISettings({
         scope,
-        ai_url: scope === 'scan' ? aiURLInput || undefined : aiVerifyURLInput || undefined,
-        ai_api_key: scope === 'scan' ? scanAPIKeyInput.trim() || undefined : verifyAPIKeyInput.trim() || undefined,
-        ai_model: scope === 'scan' ? aiModelInput || undefined : aiVerifyModelInput || undefined,
-        ai_fallback_model:
-          scope === 'scan'
-            ? aiModelFallbackInput || undefined
-            : aiVerifyModelFallbackInput || undefined,
+        ai_url: aiURLInput || undefined,
+        ai_api_key: scanAPIKeyInput.trim() || undefined,
+        ai_model: aiModelInput || undefined,
+        ai_fallback_model: aiModelFallbackInput || undefined,
       })
 
       const usedModel = String(result.probe?.provider_meta?.model_used || '').trim()
@@ -246,7 +224,7 @@ export default function AISettingsPanel() {
             Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'}
           </div>
           <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
-            Retest key: {aiSettings.ai_verify_api_key_configured ? 'configured' : 'not set'}
+            AI retest: {aiSettings.ai_verify_enabled ? 'enabled' : 'disabled'}
           </div>
           <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
             Scan classification:{' '}
@@ -475,39 +453,9 @@ export default function AISettingsPanel() {
             checked={aiVerifyEnabledInput}
             onChange={setAIVerifyEnabledInput}
           />
-          <Field
-            label="AI Verify URL"
-            hint="Dedicated endpoint for retest AI. Leave empty to use shared AI URL."
-          >
-            <input
-              type="text"
-              value={aiVerifyURLInput}
-              onChange={(e) => setAIVerifyURLInput(e.target.value)}
-              className={INPUT_CLASS}
-              placeholder="Leave empty to use shared AI URL"
-            />
-          </Field>
-          <Field label="AI Verify Model" hint="Primary model for retest AI verification.">
-            <input
-              type="text"
-              value={aiVerifyModelInput}
-              onChange={(e) => setAIVerifyModelInput(e.target.value)}
-              className={INPUT_CLASS}
-              placeholder="moonshotai/kimi-k2.5"
-            />
-          </Field>
-          <Field
-            label="Verify Fallback Models (comma-separated)"
-            hint="Fallback model list for retest AI verification."
-          >
-            <input
-              type="text"
-              value={aiVerifyModelFallbackInput}
-              onChange={(e) => setAIVerifyModelFallbackInput(e.target.value)}
-              className={INPUT_CLASS}
-              placeholder="openai/gpt-4o-mini,anthropic/claude-3-5-sonnet"
-            />
-          </Field>
+          <p className="text-xs text-gray-500">
+            Retest AI uses the shared provider settings from <span className="text-gray-300">Shared Provider</span>.
+          </p>
           <Field
             label="Verification Min Severity"
             hint="Only retest findings at or above this severity can be escalated to AI."
@@ -524,22 +472,6 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
-          <Field label="AI Verify API Key" hint="Optional dedicated key for retest AI. Falls back to shared key.">
-            <input
-              type="password"
-              value={verifyAPIKeyInput}
-              onChange={(e) => setVerifyAPIKeyInput(e.target.value)}
-              className={INPUT_CLASS}
-              placeholder={aiSettings?.ai_verify_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
-            />
-          </Field>
-          <ToggleRow
-            label="Clear retest AI API key"
-            description="Removes the stored retest key when you click Save."
-            hint="Only applies on save."
-            checked={clearVerifyAPIKey}
-            onChange={setClearVerifyAPIKey}
-          />
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={() => handleTestAISettings('verify')}

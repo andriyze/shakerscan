@@ -94,10 +94,10 @@ AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
 
 # AI verification (opt-in, Tier 2 after deterministic provers)
 AI_VERIFY_ENABLED = os.environ.get("AI_VERIFY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-AI_VERIFY_URL = os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", "")
-AI_VERIFY_API_KEY = os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", "")
-AI_VERIFY_MODEL = os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929")
-AI_VERIFY_FALLBACK_MODEL = os.environ.get("AI_VERIFY_FALLBACK_MODEL", "")
+AI_VERIFY_URL = os.environ.get("AI_URL", "")
+AI_VERIFY_API_KEY = os.environ.get("AI_API_KEY", "")
+AI_VERIFY_MODEL = os.environ.get("AI_MODEL", "claude-sonnet-4-5-20250929")
+AI_VERIFY_FALLBACK_MODEL = os.environ.get("AI_FALLBACK_MODEL", "")
 AI_VERIFY_MAX_PER_SCAN = max(0, int(os.environ.get("AI_VERIFY_MAX_PER_SCAN", "10")))
 AI_VERIFY_MIN_SEVERITY = _DEFAULT_POLICY.ai_escalation_min_severity
 AI_VERIFY_USE_BROWSER = os.environ.get("AI_VERIFY_USE_BROWSER", "true").lower() in {"1", "true", "yes", "on"}
@@ -143,17 +143,22 @@ def _decode_redis_hash(raw: Any) -> dict[str, str]:
 
 
 def _load_runtime_ai_settings() -> dict[str, Any]:
+    shared_ai_url = os.environ.get("AI_URL", "")
+    shared_ai_key = os.environ.get("AI_API_KEY", "")
+    shared_ai_model = os.environ.get("AI_MODEL", "")
+    shared_ai_fallback = os.environ.get("AI_FALLBACK_MODEL", "")
+
     settings: dict[str, Any] = {
-        "ai_url": os.environ.get("AI_URL", ""),
-        "ai_api_key": os.environ.get("AI_API_KEY", ""),
-        "ai_model": os.environ.get("AI_MODEL", ""),
-        "ai_model_fallback": os.environ.get("AI_FALLBACK_MODEL", ""),
+        "ai_url": shared_ai_url,
+        "ai_api_key": shared_ai_key,
+        "ai_model": shared_ai_model,
+        "ai_model_fallback": shared_ai_fallback,
         "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
         "ai_verify_enabled": AI_VERIFY_ENABLED,
-        "ai_verify_url": os.environ.get("AI_VERIFY_URL", "") or os.environ.get("AI_URL", ""),
-        "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", "") or os.environ.get("AI_API_KEY", ""),
-        "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", AI_VERIFY_MODEL),
-        "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", AI_VERIFY_FALLBACK_MODEL),
+        "ai_verify_url": shared_ai_url,
+        "ai_verify_api_key": shared_ai_key,
+        "ai_verify_model": shared_ai_model,
+        "ai_verify_model_fallback": shared_ai_fallback,
         "ai_verify_min_severity": os.environ.get("AI_VERIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY),
         "ai_scan_classification_enabled": _is_truthy(
             os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false"),
@@ -188,10 +193,6 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         "ai_model",
         "ai_model_fallback",
         "ai_mask_host",
-        "ai_verify_url",
-        "ai_verify_api_key",
-        "ai_verify_model",
-        "ai_verify_model_fallback",
         "ai_verify_min_severity",
         "ai_escalation_min_severity",
         "ai_classify_min_severity",
@@ -216,7 +217,7 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     if "proof_required_for_smart" in overrides:
         settings["proof_required_for_smart"] = _is_truthy(
             overrides.get("proof_required_for_smart"),
-            default=True,
+            default=False,
         )
     if "auto_retest_max_per_scan" in overrides:
         try:

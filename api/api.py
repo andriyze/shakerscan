@@ -23,7 +23,7 @@ import redis
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from constants import SMART_SCAN_BUDGETS
@@ -161,11 +161,16 @@ def _mask_secret(value: str) -> str:
 
 
 def _default_ai_settings() -> dict[str, Any]:
+    shared_ai_url = os.environ.get("AI_URL", "").strip()
+    shared_ai_key = os.environ.get("AI_API_KEY", "").strip()
+    shared_ai_model = os.environ.get("AI_MODEL", "").strip()
+    shared_ai_fallback = os.environ.get("AI_FALLBACK_MODEL", "").strip()
+
     return {
-        "ai_url": os.environ.get("AI_URL", ""),
-        "ai_api_key": os.environ.get("AI_API_KEY", ""),
-        "ai_model": os.environ.get("AI_MODEL", ""),
-        "ai_model_fallback": os.environ.get("AI_FALLBACK_MODEL", ""),
+        "ai_url": shared_ai_url,
+        "ai_api_key": shared_ai_key,
+        "ai_model": shared_ai_model,
+        "ai_model_fallback": shared_ai_fallback,
         "ai_mask_host": os.environ.get("AI_MASK_HOST", "example.com"),
         "ai_scan_classification_enabled": _is_truthy(
             os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED", "false"),
@@ -176,10 +181,6 @@ def _default_ai_settings() -> dict[str, Any]:
             default=_normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
         ),
         "ai_verify_enabled": _is_truthy(os.environ.get("AI_VERIFY_ENABLED", "false"), default=False),
-        "ai_verify_url": os.environ.get("AI_VERIFY_URL", ""),
-        "ai_verify_api_key": os.environ.get("AI_VERIFY_API_KEY", ""),
-        "ai_verify_model": os.environ.get("AI_VERIFY_MODEL", "claude-sonnet-4-5-20250929"),
-        "ai_verify_model_fallback": os.environ.get("AI_VERIFY_FALLBACK_MODEL", ""),
         "ai_verify_min_severity": _normalize_severity(os.environ.get("AI_VERIFY_MIN_SEVERITY", "high"), default="high"),
         "auto_retest_on_scan_complete": _is_truthy(
             os.environ.get("AUTO_RETEST_ON_SCAN_COMPLETE", "true"),
@@ -241,18 +242,11 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         )
     if "ai_verify_enabled" in overrides:
         settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=settings["ai_verify_enabled"])
-    if "ai_verify_url" in overrides:
-        settings["ai_verify_url"] = str(overrides.get("ai_verify_url") or "")
-    if "ai_verify_api_key" in overrides:
-        settings["ai_verify_api_key"] = str(overrides.get("ai_verify_api_key") or "")
-    if "ai_verify_model" in overrides:
-        settings["ai_verify_model"] = str(overrides.get("ai_verify_model") or "")
-    if "ai_verify_model_fallback" in overrides:
-        settings["ai_verify_model_fallback"] = str(overrides.get("ai_verify_model_fallback") or "")
     if "ai_verify_min_severity" in overrides:
         settings["ai_verify_min_severity"] = _normalize_severity(
             overrides.get("ai_verify_min_severity"), default=settings["ai_verify_min_severity"]
         )
+
     if "ai_classify_min_severity" not in overrides:
         settings["ai_classify_min_severity"] = settings["ai_verify_min_severity"]
     if "auto_retest_on_scan_complete" in overrides:
@@ -297,6 +291,7 @@ def _load_effective_ai_settings() -> dict[str, Any]:
 
 
 def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
+    shared_key = str(settings.get("ai_api_key") or "")
     return {
         "ai_url": settings.get("ai_url") or "",
         "ai_model": settings.get("ai_model") or "",
@@ -304,15 +299,10 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "ai_mask_host": settings.get("ai_mask_host") or "",
         "ai_scan_classification_enabled": bool(settings.get("ai_scan_classification_enabled")),
         "ai_classify_min_severity": settings.get("ai_classify_min_severity") or settings.get("ai_verify_min_severity") or "high",
-        "ai_api_key_configured": bool(settings.get("ai_api_key")),
-        "ai_api_key_masked": _mask_secret(str(settings.get("ai_api_key") or "")),
+        "ai_api_key_configured": bool(shared_key),
+        "ai_api_key_masked": _mask_secret(shared_key),
         "ai_verify_enabled": bool(settings.get("ai_verify_enabled")),
-        "ai_verify_url": settings.get("ai_verify_url") or "",
-        "ai_verify_model": settings.get("ai_verify_model") or "",
-        "ai_verify_model_fallback": settings.get("ai_verify_model_fallback") or "",
         "ai_verify_min_severity": settings.get("ai_verify_min_severity") or "high",
-        "ai_verify_api_key_configured": bool(settings.get("ai_verify_api_key")),
-        "ai_verify_api_key_masked": _mask_secret(str(settings.get("ai_verify_api_key") or "")),
         "auto_retest_on_scan_complete": bool(settings.get("auto_retest_on_scan_complete")),
         "auto_retest_min_severity": settings.get("auto_retest_min_severity") or "medium",
         "auto_retest_max_per_scan": _normalize_non_negative_int(
@@ -1248,6 +1238,8 @@ class ScheduleUpdate(BaseModel):
 
 
 class AISettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     ai_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
@@ -1256,10 +1248,6 @@ class AISettingsUpdate(BaseModel):
     ai_scan_classification_enabled: Optional[bool] = None
     ai_classify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     ai_verify_enabled: Optional[bool] = None
-    ai_verify_url: Optional[str] = None
-    ai_verify_api_key: Optional[str] = None
-    ai_verify_model: Optional[str] = None
-    ai_verify_model_fallback: Optional[str] = None
     ai_verify_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     auto_retest_on_scan_complete: Optional[bool] = None
     auto_retest_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
@@ -1346,10 +1334,6 @@ async def update_ai_settings(request: AISettingsUpdate):
         "ai_model",
         "ai_model_fallback",
         "ai_mask_host",
-        "ai_verify_url",
-        "ai_verify_api_key",
-        "ai_verify_model",
-        "ai_verify_model_fallback",
     )
 
     updates: dict[str, str] = {}
@@ -1364,6 +1348,14 @@ async def update_ai_settings(request: AISettingsUpdate):
             deletes.append(field)
         else:
             updates[field] = normalized
+
+    # Always remove legacy per-verify provider keys from runtime settings.
+    deletes.extend([
+        "ai_verify_url",
+        "ai_verify_api_key",
+        "ai_verify_model",
+        "ai_verify_model_fallback",
+    ])
 
     if request.ai_verify_enabled is not None:
         updates["ai_verify_enabled"] = "true" if request.ai_verify_enabled else "false"
@@ -1419,10 +1411,11 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AI_SCAN_CLASSIFICATION_ENABLED": "true" if effective.get("ai_scan_classification_enabled") else "false",
             "AI_CLASSIFY_MIN_SEVERITY": effective.get("ai_classify_min_severity") or effective.get("ai_verify_min_severity") or "high",
             "AI_VERIFY_ENABLED": "true" if effective.get("ai_verify_enabled") else "false",
-            "AI_VERIFY_URL": effective.get("ai_verify_url") or None,
-            "AI_VERIFY_API_KEY": effective.get("ai_verify_api_key") or None,
-            "AI_VERIFY_MODEL": effective.get("ai_verify_model") or None,
-            "AI_VERIFY_FALLBACK_MODEL": effective.get("ai_verify_model_fallback") or None,
+            # Single provider model: keep legacy verify-provider env vars cleared.
+            "AI_VERIFY_URL": None,
+            "AI_VERIFY_API_KEY": None,
+            "AI_VERIFY_MODEL": None,
+            "AI_VERIFY_FALLBACK_MODEL": None,
             "AI_VERIFY_MIN_SEVERITY": effective.get("ai_verify_min_severity") or "high",
             "AUTO_RETEST_ON_SCAN_COMPLETE": "true" if effective.get("auto_retest_on_scan_complete") else "false",
             "AUTO_RETEST_MIN_SEVERITY": effective.get("auto_retest_min_severity") or "medium",
@@ -1448,16 +1441,12 @@ async def test_ai_settings(request: AISettingsProbeRequest):
     scope = request.scope
 
     if scope == "verify":
-        ai_url = (request.ai_url or effective.get("ai_verify_url") or effective.get("ai_url") or "").strip()
-        ai_api_key = (request.ai_api_key or effective.get("ai_verify_api_key") or effective.get("ai_api_key") or "").strip()
-        ai_model = (request.ai_model or effective.get("ai_verify_model") or effective.get("ai_model") or "").strip()
+        ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
+        ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
+        ai_model = (request.ai_model or effective.get("ai_model") or "").strip()
         fallback_models = request.ai_fallback_model
         if fallback_models is None:
-            fallback_models = (
-                effective.get("ai_verify_model_fallback")
-                or effective.get("ai_model_fallback")
-                or ""
-            )
+            fallback_models = effective.get("ai_model_fallback") or ""
     else:
         ai_url = (request.ai_url or effective.get("ai_url") or "").strip()
         ai_api_key = (request.ai_api_key or effective.get("ai_api_key") or "").strip()
