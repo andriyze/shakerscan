@@ -45,6 +45,7 @@ export default function AISettingsPanel() {
   const [verificationMinSeverityInput, setVerificationMinSeverityInput] = useState<Severity>('medium')
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
   const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
+  const [settingsMode, setSettingsMode] = useState<'basic' | 'advanced'>('basic')
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
   const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
@@ -197,6 +198,13 @@ export default function AISettingsPanel() {
     }
   }
 
+  const setUnifiedVerificationSeverity = (severity: Severity) => {
+    setAIVerifyMinSeverityInput(severity)
+    setVerificationMinSeverityInput(severity)
+    setAIEscalationMinSeverityInput(severity)
+    setAutoRetestMinSeverityInput(severity)
+  }
+
   if (loading && !aiSettings) {
     return (
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 text-sm text-gray-400">
@@ -250,6 +258,27 @@ export default function AISettingsPanel() {
         </div>
       )}
 
+      <div className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-gray-800 p-1">
+        <button
+          onClick={() => setSettingsMode('basic')}
+          className={`px-2.5 py-1 text-xs rounded ${
+            settingsMode === 'basic' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
+          }`}
+          aria-pressed={settingsMode === 'basic'}
+        >
+          Basic
+        </button>
+        <button
+          onClick={() => setSettingsMode('advanced')}
+          className={`px-2.5 py-1 text-xs rounded ${
+            settingsMode === 'advanced' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
+          }`}
+          aria-pressed={settingsMode === 'advanced'}
+        >
+          Advanced
+        </button>
+      </div>
+
       <div className="rounded border border-blue-500/30 bg-blue-500/10 px-3 py-2">
         <p className="text-xs font-medium text-blue-200">Pipeline flow</p>
         <p className="text-xs text-blue-100/90 mt-1">
@@ -258,7 +287,69 @@ export default function AISettingsPanel() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      {settingsMode === 'basic' ? (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <SectionCard
+            title="Quick Setup"
+            description="Recommended defaults for most teams: configure one key, enable retest AI, set severity threshold."
+          >
+            <Field
+              label="AI API Key"
+              hint="Primary key used for AI provider access. Advanced mode supports separate retest key/provider."
+            >
+              <input
+                type="password"
+                value={scanAPIKeyInput}
+                onChange={(e) => setScanAPIKeyInput(e.target.value)}
+                className={INPUT_CLASS}
+                placeholder={aiSettings?.ai_api_key_configured ? 'Configured (enter to replace)' : 'sk-...'}
+              />
+            </Field>
+            <ToggleRow
+              label="Enable AI verification for retests"
+              description="Uses AI only when deterministic retest cannot confidently conclude."
+              hint="Deterministic proof checks still run first."
+              checked={aiVerifyEnabledInput}
+              onChange={setAIVerifyEnabledInput}
+            />
+            <Field
+              label="Minimum Severity for AI Verification"
+              hint="Findings below this severity are not escalated to AI retest."
+            >
+              <select
+                value={aiVerifyMinSeverityInput}
+                onChange={(e) => setUnifiedVerificationSeverity(e.target.value as Severity)}
+                className={INPUT_CLASS}
+              >
+                {SEVERITY_OPTIONS.map((sev) => (
+                  <option key={sev} value={sev}>
+                    {sev}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <p className="text-xs text-gray-500">
+              Need provider/model overrides, proof-gated smart mode, scan-time AI classification, or auto-retest tuning?
+              Switch to <span className="text-gray-300">Advanced</span>.
+            </p>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={() => handleTestAISettings('verify')}
+                disabled={loading || aiSaving || testingScope !== null}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+              >
+                {testingScope === 'verify' ? 'Testing retest AI...' : 'Test AI Verification'}
+              </button>
+              {verifyProbeMessage && (
+                <span className={`text-xs ${verifyProbeMessage.startsWith('Probe succeeded') ? 'text-green-400' : 'text-red-400'}`}>
+                  {verifyProbeMessage}
+                </span>
+              )}
+            </div>
+          </SectionCard>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <SectionCard
           title="Shared Provider"
           description="Default provider used for scan-time classification and as fallback for retest verification."
@@ -555,7 +646,8 @@ export default function AISettingsPanel() {
             />
           </Field>
         </SectionCard>
-      </div>
+        </div>
+      )}
 
       <div className="pt-2 border-t border-gray-800">
         <ToggleRow
