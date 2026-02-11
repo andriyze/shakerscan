@@ -137,6 +137,7 @@ See `CLAUDE.md` for full API reference and integration details.
 ### Prerequisites
 
 - Docker and Docker Compose
+- curl and jq (the CLI can auto-install missing prerequisites)
 - 8GB+ RAM recommended
 - Linux, macOS, or Windows with WSL2
 
@@ -149,6 +150,9 @@ cd shakerscan
 
 # Start the scanner (builds images on first run)
 ./scanner.sh start
+
+# Optional: install/repair prerequisites first
+./scanner.sh install-deps
 
 # Or with more workers
 ./scanner.sh start -w 5
@@ -190,6 +194,7 @@ Commands:
   scan <target>      Quick scan a target
   scan-full <target> Full assessment scan
   scan-smart <target> Smart adaptive scan
+  install-deps       Install missing prerequisites
   gungnir <cmd>      CT monitor: start, stop, status, logs
   build              Build Docker images
   rebuild [opts]     Rebuild images (cached by default, supports --no-cache, scanner, ui)
@@ -199,16 +204,20 @@ Commands:
 Options:
   -w, --workers N    Number of workers (default: 5)
   -f, --follow       Follow logs in real-time
+  -y, --yes          Auto-confirm dependency installation prompts
 
 Examples:
   ./scanner.sh start                           # Start with 5 workers
   ./scanner.sh start -w 10                     # Start with 10 workers
   ./scanner.sh scan https://example.com        # Quick scan
+  ./scanner.sh install-deps                    # Install prerequisites
   ./scanner.sh scan-full https://example.com   # Full assessment (active)
   ./scanner.sh scan-smart https://example.com  # Smart adaptive scan (active)
   ./scanner.sh gungnir status                  # Check CT monitor status
   ./scanner.sh logs worker -f                  # Follow worker logs
 ```
+
+When required tools are missing, `scanner.sh` now offers to install them automatically on Ubuntu 24.04 and macOS.
 
 Note: the CLI currently wraps `quick`, `full`, and `smart` scans. Use the API or UI for `standard`, `deep`, `aggressive`, and advanced auth/tuning options.
 

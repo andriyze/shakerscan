@@ -16,6 +16,393 @@ NC='\033[0m' # No Color
 
 # Default workers
 WORKERS=${WORKERS:-5}
+ASSUME_YES=0
+FOLLOW=""
+ARGS=()
+DOCKER_COMPOSE_CMD=()
+PLATFORM=""
+PLATFORM_VERSION=""
+
+command_exists() {
+    command -v "$1" > /dev/null 2>&1
+}
+
+has_docker_compose_v2() {
+    command_exists docker && docker compose version > /dev/null 2>&1
+}
+
+has_docker_compose_v1() {
+    command_exists docker-compose
+}
+
+has_docker_compose() {
+    has_docker_compose_v2 || has_docker_compose_v1
+}
+
+resolve_compose_command() {
+    if [ ${#DOCKER_COMPOSE_CMD[@]} -gt 0 ]; then
+        return 0
+    fi
+
+    if has_docker_compose_v2; then
+        DOCKER_COMPOSE_CMD=(docker compose)
+        return 0
+    fi
+
+    if has_docker_compose_v1; then
+        DOCKER_COMPOSE_CMD=(docker-compose)
+        return 0
+    fi
+
+    return 1
+}
+
+compose() {
+    if ! resolve_compose_command; then
+        echo -e "${RED}Error: Docker Compose is not installed${NC}"
+        return 1
+    fi
+
+    "${DOCKER_COMPOSE_CMD[@]}" "$@"
+}
+
+run_with_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+        return $?
+    fi
+
+    if command_exists sudo; then
+        sudo "$@"
+        return $?
+    fi
+
+    echo -e "${RED}Error: sudo is required to install dependencies${NC}"
+    return 1
+}
+
+detect_platform() {
+    PLATFORM="unsupported"
+    PLATFORM_VERSION=""
+
+    case "$(uname -s)" in
+        Darwin)
+            PLATFORM="macos"
+            PLATFORM_VERSION="$(sw_vers -productVersion 2>/dev/null || echo "")"
+            ;;
+        Linux)
+            if [ -f /etc/os-release ]; then
+                # shellcheck disable=SC1091
+                source /etc/os-release
+                if [ "$ID" = "ubuntu" ]; then
+                    PLATFORM="ubuntu"
+                    PLATFORM_VERSION="${VERSION_ID:-}"
+                else
+                    PLATFORM="linux-other"
+                    PLATFORM_VERSION="${ID:-linux}"
+                fi
+            else
+                PLATFORM="linux-other"
+                PLATFORM_VERSION="unknown"
+            fi
+            ;;
+    esac
+}
+
+apt_has_package() {
+    apt-cache show "$1" > /dev/null 2>&1
+}
+
+ensure_homebrew_in_path() {
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+}
+
+install_homebrew_if_missing() {
+    if command_exists brew; then
+        ensure_homebrew_in_path
+        return 0
+    fi
+
+    echo -e "${YELLOW}Homebrew not found. Installing Homebrew...${NC}"
+    local curl_bin=""
+    if [ -x /usr/bin/curl ]; then
+        curl_bin="/usr/bin/curl"
+    elif command_exists curl; then
+        curl_bin="$(command -v curl)"
+    else
+        echo -e "${RED}Error: curl is required to install Homebrew on macOS${NC}"
+        return 1
+    fi
+
+    NONINTERACTIVE=1 /bin/bash -c "$("$curl_bin" -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    ensure_homebrew_in_path
+
+    if ! command_exists brew; then
+        echo -e "${RED}Error: Homebrew installation failed${NC}"
+        return 1
+    fi
+}
+
+install_dependencies_ubuntu() {
+    local packages=()
+    local compose_pkg=""
+    local added_to_docker_group=0
+    local needs_apt_update=0
+
+    if [ "$PLATFORM_VERSION" != "24.04" ]; then
+        echo -e "${YELLOW}Note: Ubuntu $PLATFORM_VERSION detected. Installer is optimized for Ubuntu 24.04.${NC}"
+    fi
+
+    if ! command_exists docker; then
+        packages+=("docker.io")
+        needs_apt_update=1
+    fi
+
+    if ! command_exists curl; then
+        packages+=("curl")
+        needs_apt_update=1
+    fi
+
+    if ! command_exists jq; then
+        packages+=("jq")
+        needs_apt_update=1
+    fi
+
+    if ! has_docker_compose; then
+        needs_apt_update=1
+    fi
+
+    if [ "$needs_apt_update" -eq 1 ]; then
+        run_with_sudo apt-get update
+    fi
+
+    if ! has_docker_compose; then
+        if apt_has_package docker-compose-v2; then
+            compose_pkg="docker-compose-v2"
+        elif apt_has_package docker-compose-plugin; then
+            compose_pkg="docker-compose-plugin"
+        elif apt_has_package docker-compose; then
+            compose_pkg="docker-compose"
+        fi
+
+        if [ -n "$compose_pkg" ]; then
+            packages+=("$compose_pkg")
+        else
+            echo -e "${RED}Error: Could not find a Docker Compose package in apt repositories${NC}"
+            return 1
+        fi
+    fi
+
+    if [ ${#packages[@]} -eq 0 ]; then
+        echo -e "${GREEN}All required dependencies are already installed${NC}"
+    else
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo apt-get install -y "${packages[@]}"
+    fi
+
+    if command_exists docker && command_exists systemctl; then
+        run_with_sudo systemctl enable docker > /dev/null 2>&1 || true
+        run_with_sudo systemctl start docker > /dev/null 2>&1 || true
+    fi
+
+    if command_exists docker && command_exists getent && getent group docker > /dev/null 2>&1; then
+        if [ "$(id -u)" -ne 0 ] && ! id -nG "$USER" | grep -qw docker; then
+            run_with_sudo usermod -aG docker "$USER" || true
+            added_to_docker_group=1
+        fi
+    fi
+
+    if [ "$added_to_docker_group" -eq 1 ]; then
+        echo -e "${YELLOW}You were added to the docker group. Log out/in (or run 'newgrp docker') for permission changes.${NC}"
+    fi
+}
+
+install_dependencies_macos() {
+    install_homebrew_if_missing
+
+    if ! command_exists docker; then
+        echo -e "${GREEN}Installing Docker Desktop...${NC}"
+        if brew info --cask docker > /dev/null 2>&1; then
+            brew install --cask docker
+        else
+            brew install --cask docker-desktop
+        fi
+    fi
+
+    if ! has_docker_compose; then
+        echo -e "${GREEN}Installing Docker Compose...${NC}"
+        # Fallback for environments that do not provide the v2 plugin.
+        brew install docker-compose
+    fi
+
+    if ! command_exists jq; then
+        echo -e "${GREEN}Installing jq...${NC}"
+        brew install jq
+    fi
+
+    if ! command_exists curl; then
+        echo -e "${GREEN}Installing curl...${NC}"
+        brew install curl
+    fi
+
+    if command_exists docker && ! docker info > /dev/null 2>&1; then
+        echo -e "${YELLOW}Docker daemon is not running. Launching Docker Desktop...${NC}"
+        open -a Docker > /dev/null 2>&1 || true
+    fi
+}
+
+install_dependencies() {
+    detect_platform
+    echo -e "${BLUE}Installing missing scanner dependencies...${NC}"
+
+    case "$PLATFORM" in
+        ubuntu)
+            install_dependencies_ubuntu
+            ;;
+        macos)
+            install_dependencies_macos
+            ;;
+        *)
+            echo -e "${RED}Automatic install is supported on Ubuntu 24.04 and macOS.${NC}"
+            echo "Install manually: Docker + Docker Compose + curl + jq"
+            return 1
+            ;;
+    esac
+
+    # Reset compose command cache in case compose became available after install.
+    DOCKER_COMPOSE_CMD=()
+}
+
+command_needs_docker_runtime() {
+    case "$1" in
+        start|stop|restart|status|scale|logs|scan|scan-full|scan-smart|gungnir|build|rebuild|reset|shell)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+command_needs_curl() {
+    local cmd="$1"
+    local subcmd="$2"
+
+    case "$cmd" in
+        status|scan|scan-full|scan-smart)
+            return 0
+            ;;
+        gungnir)
+            [ "${subcmd:-status}" = "status" ]
+            return $?
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+command_needs_jq() {
+    command_needs_curl "$1" "$2"
+}
+
+collect_missing_dependencies() {
+    local cmd="$1"
+    local subcmd="$2"
+    local missing=()
+
+    if command_needs_docker_runtime "$cmd"; then
+        command_exists docker || missing+=("docker")
+        has_docker_compose || missing+=("docker-compose")
+    fi
+
+    if command_needs_curl "$cmd" "$subcmd"; then
+        command_exists curl || missing+=("curl")
+    fi
+
+    if command_needs_jq "$cmd" "$subcmd"; then
+        command_exists jq || missing+=("jq")
+    fi
+
+    echo "${missing[*]}"
+}
+
+confirm_install_missing() {
+    if [ "$ASSUME_YES" -eq 1 ] || [ "${SCANNER_AUTO_INSTALL_DEPS:-0}" = "1" ]; then
+        return 0
+    fi
+
+    if [ ! -t 0 ]; then
+        return 1
+    fi
+
+    read -r -p "Install missing dependencies now? (y/N): " CONFIRM_INSTALL
+    case "$CONFIRM_INSTALL" in
+        y|Y|yes|YES)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ensure_command_dependencies() {
+    local cmd="$1"
+    local subcmd="$2"
+    local missing
+
+    missing="$(collect_missing_dependencies "$cmd" "$subcmd")"
+    if [ -n "$missing" ]; then
+        echo -e "${YELLOW}Missing dependencies: $missing${NC}"
+
+        if ! confirm_install_missing; then
+            echo "Run './scanner.sh install-deps' to install prerequisites."
+            return 1
+        fi
+
+        install_dependencies
+        missing="$(collect_missing_dependencies "$cmd" "$subcmd")"
+        if [ -n "$missing" ]; then
+            echo -e "${RED}Error: Missing dependencies after install: $missing${NC}"
+            return 1
+        fi
+    fi
+
+    if command_needs_docker_runtime "$cmd"; then
+        if ! docker info > /dev/null 2>&1; then
+            detect_platform
+            if [ "$PLATFORM" = "ubuntu" ] && command_exists systemctl; then
+                echo -e "${YELLOW}Docker daemon is not running. Attempting to start Docker...${NC}"
+                run_with_sudo systemctl start docker > /dev/null 2>&1 || true
+            elif [ "$PLATFORM" = "macos" ]; then
+                echo -e "${YELLOW}Docker daemon is not running. Launching Docker Desktop...${NC}"
+                open -a Docker > /dev/null 2>&1 || true
+            fi
+        fi
+
+        if ! docker info > /dev/null 2>&1; then
+            echo -e "${RED}Error: Docker daemon is not running${NC}"
+            if [ "$PLATFORM" = "macos" ]; then
+                echo "Open Docker Desktop and wait until it is ready."
+            elif [ "$PLATFORM" = "ubuntu" ]; then
+                echo "Try: sudo systemctl start docker"
+            fi
+            return 1
+        fi
+
+        if ! resolve_compose_command; then
+            echo -e "${RED}Error: Docker Compose is not available${NC}"
+            return 1
+        fi
+    fi
+
+    return 0
+}
 
 get_build_version() {
     if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
@@ -60,24 +447,27 @@ print_help() {
     echo "  scan <target>      Quick scan a target"
     echo "  scan-full <target> Full assessment scan"
     echo "  scan-smart <target> Smart adaptive scan"
+    echo "  install-deps       Install missing prerequisites"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
-echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
-echo "                       scanner     Rebuild scanner/worker only"
-echo "                       ui          Rebuild UI only"
+    echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
+    echo "                       scanner     Rebuild scanner/worker only"
+    echo "                       ui          Rebuild UI only"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
     echo "Options:"
     echo "  -w, --workers N    Number of workers (default: $WORKERS)"
     echo "  -f, --follow       Follow logs"
+    echo "  -y, --yes          Auto-confirm dependency installation"
     echo ""
     echo "Examples:"
     echo "  ./scanner.sh start                    # Start with 5 workers (default)"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
+    echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
     echo "Access:"
@@ -85,21 +475,10 @@ echo "                       ui          Rebuild UI only"
     echo "  API: http://localhost:8080"
 }
 
-check_docker() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Error: Docker is not installed${NC}"
-        exit 1
-    fi
-    if ! docker info &> /dev/null; then
-        echo -e "${RED}Error: Docker daemon is not running${NC}"
-        exit 1
-    fi
-}
-
 start_services() {
     set_build_env
     echo -e "${GREEN}Starting Shaker Scan with $WORKERS workers...${NC}"
-    docker compose up -d --scale worker=$WORKERS
+    compose up -d --scale worker=$WORKERS
     echo ""
     echo -e "${GREEN}Services started!${NC}"
     echo "  UI:  http://localhost:3000"
@@ -111,7 +490,7 @@ start_services() {
 
 stop_services() {
     echo -e "${YELLOW}Stopping Shaker Scan...${NC}"
-    docker compose down
+    compose down
     echo -e "${GREEN}Services stopped${NC}"
 }
 
@@ -122,7 +501,7 @@ restart_services() {
 
 show_status() {
     echo -e "${BLUE}Service Status:${NC}"
-    docker compose ps
+    compose ps
     echo ""
 
     # Check API health
@@ -152,15 +531,15 @@ show_logs() {
 
     if [ -z "$SERVICE" ]; then
         if [ "$FOLLOW" = "-f" ]; then
-            docker compose logs -f
+            compose logs -f
         else
-            docker compose logs --tail=100
+            compose logs --tail=100
         fi
     else
         if [ "$FOLLOW" = "-f" ]; then
-            docker compose logs -f $SERVICE
+            compose logs -f $SERVICE
         else
-            docker compose logs --tail=100 $SERVICE
+            compose logs --tail=100 $SERVICE
         fi
     fi
 }
@@ -234,7 +613,7 @@ smart_scan() {
 build_images() {
     set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
-    docker compose build
+    compose build
     echo -e "${GREEN}Build complete${NC}"
 }
 
@@ -281,9 +660,9 @@ rebuild_images() {
     fi
 
     if [ -n "$SERVICES" ]; then
-        docker compose build $NO_CACHE $SERVICES
+        compose build $NO_CACHE $SERVICES
     else
-        docker compose build $NO_CACHE
+        compose build $NO_CACHE
     fi
 
     echo -e "${GREEN}Rebuild complete${NC}"
@@ -296,9 +675,9 @@ reset_database() {
     read -p "Are you sure? (yes/no): " CONFIRM
     if [ "$CONFIRM" = "yes" ]; then
         echo "Stopping services..."
-        docker compose down -v
+        compose down -v
         echo "Starting fresh..."
-        docker compose up -d --scale worker=$WORKERS
+        compose up -d --scale worker=$WORKERS
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"
@@ -320,17 +699,17 @@ scale_workers() {
     fi
 
     echo -e "${GREEN}Scaling to $COUNT workers...${NC}"
-    docker compose up -d --scale worker=$COUNT --no-recreate worker
+    compose up -d --scale worker=$COUNT --no-recreate worker
     echo ""
 
     # Show current worker count
-    RUNNING=$(docker compose ps worker --format json 2>/dev/null | grep -c '"State":"running"' || echo "?")
+    RUNNING=$(compose ps worker 2>/dev/null | awk 'NR>1 && $0 ~ /Up|running/ {count++} END {print count+0}' || echo "?")
     echo -e "${GREEN}Workers scaled: $RUNNING running${NC}"
 }
 
 open_shell() {
     echo "Opening shell in scanner container..."
-    docker compose run --rm worker /bin/bash
+    compose run --rm worker /bin/bash
 }
 
 gungnir_cmd() {
@@ -339,7 +718,7 @@ gungnir_cmd() {
     case $SUBCMD in
         start)
             echo -e "${GREEN}Starting Gungnir CT monitor...${NC}"
-            docker compose --profile gungnir up -d gungnir-worker
+            compose --profile gungnir up -d gungnir-worker
             echo -e "${GREEN}Gungnir started. Monitoring CT logs for all targets.${NC}"
             echo ""
             echo "Use './scanner.sh gungnir status' to check status"
@@ -347,9 +726,9 @@ gungnir_cmd() {
             ;;
         stop)
             echo -e "${YELLOW}Stopping Gungnir CT monitor...${NC}"
-            docker compose stop gungnir-worker
+            compose stop gungnir-worker
             # Update Redis status
-            docker compose exec -T redis redis-cli HSET gungnir:status running false > /dev/null 2>&1 || true
+            compose exec -T redis redis-cli HSET gungnir:status running false > /dev/null 2>&1 || true
             echo -e "${GREEN}Gungnir stopped${NC}"
             ;;
         status)
@@ -374,7 +753,7 @@ gungnir_cmd() {
             fi
             ;;
         logs)
-            docker compose logs --tail=100 gungnir-worker ${FOLLOW:-}
+            compose logs --tail=100 gungnir-worker ${FOLLOW:-}
             ;;
         *)
             echo "Usage: ./scanner.sh gungnir {start|stop|status|logs}"
@@ -403,6 +782,10 @@ while [[ $# -gt 0 ]]; do
             FOLLOW="-f"
             shift
             ;;
+        -y|--yes)
+            ASSUME_YES=1
+            shift
+            ;;
         *)
             ARGS+=("$1")
             shift
@@ -410,8 +793,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Execute command
-check_docker
+# Dependency preflight for command execution
+case $COMMAND in
+    help|--help|-h|install-deps)
+        ;;
+    *)
+        if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
+            exit 1
+        fi
+        ;;
+esac
 
 case $COMMAND in
     start)
@@ -441,6 +832,9 @@ case $COMMAND in
         ;;
     scan-smart)
         smart_scan "${ARGS[0]}"
+        ;;
+    install-deps)
+        install_dependencies
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"
