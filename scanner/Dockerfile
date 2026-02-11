@@ -2,7 +2,8 @@
 # Multi-stage build for comprehensive security scanning
 
 # --- Stage 1: Build Go tools ---
-FROM golang:latest AS go-builder
+# Pin Go to avoid upstream breakages from `golang:latest` (e.g. sonic on newer Go runtimes).
+FROM golang:1.23 AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner)
 RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.1 \
