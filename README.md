@@ -4,6 +4,7 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 ## Contents
 
+- [60-Second Quick Start](#60-second-quick-start)
 - [Features](#features)
 - [Claude Code Integration](#claude-code-integration)
 - [Quick Start](#quick-start)
@@ -23,6 +24,59 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 **[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
 
 **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs for next-gen smart scanning.
+
+## 60-Second Quick Start
+
+If you want to get running fast:
+
+```bash
+git clone https://github.com/andriyze/shakerscan.git
+cd shakerscan
+./scanner.sh start
+```
+
+That starts the full stack (API, workers, UI). By default it pulls prebuilt Docker images.
+
+- Web UI: http://localhost:3000
+- API: http://localhost:8080
+
+If your machine is missing prerequisites:
+
+```bash
+./scanner.sh install-deps
+./scanner.sh start
+```
+
+If you want to build locally instead of using prebuilt images:
+
+```bash
+./scanner.sh start --local
+```
+
+### Use from Terminal
+
+```bash
+./scanner.sh scan https://example.com
+./scanner.sh status
+./scanner.sh logs worker -f
+./scanner.sh stop
+```
+
+### Use with AI Agents (Claude, Codex, OpenCode)
+
+Open this repo in your preferred AI coding agent and ask in plain language:
+
+```bash
+# from the repo root (use whichever tool you have installed)
+claude
+codex
+opencode
+```
+
+- "Start Shaker Scan"
+- "Run a quick scan on https://example.com"
+- "Show active high and critical findings"
+- "Scale workers to 10"
 
 ## Features
 
@@ -148,11 +202,14 @@ See `CLAUDE.md` for full API reference and integration details.
 git clone https://github.com/andriyze/shakerscan.git
 cd shakerscan
 
-# Start the scanner (builds images on first run)
+# Start the scanner (uses prebuilt images by default)
 ./scanner.sh start
 
 # Optional: install/repair prerequisites first
 ./scanner.sh install-deps
+
+# Optional: force local image build
+./scanner.sh start --local
 
 # Or with more workers
 ./scanner.sh start -w 5
@@ -205,10 +262,15 @@ Options:
   -w, --workers N    Number of workers (default: 5)
   -f, --follow       Follow logs in real-time
   -y, --yes          Auto-confirm dependency installation prompts
+  --local            Force local Docker build instead of prebuilt images
+  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)
+  --image-tag TAG    Override Docker image tag (default: VERSION file)
 
 Examples:
-  ./scanner.sh start                           # Start with 5 workers
+  ./scanner.sh start                           # Start with prebuilt images
+  ./scanner.sh start --local                   # Build locally and start
   ./scanner.sh start -w 10                     # Start with 10 workers
+  ./scanner.sh start --image-tag 0.3.1         # Start with a specific published tag
   ./scanner.sh scan https://example.com        # Quick scan
   ./scanner.sh install-deps                    # Install prerequisites
   ./scanner.sh scan-full https://example.com   # Full assessment (active)
