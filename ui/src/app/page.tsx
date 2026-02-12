@@ -338,11 +338,6 @@ export default function Dashboard() {
             Total subdomains discovered: <span className="text-gray-400">{gungnir.subdomains_found}</span>
           </p>
         ) : null}
-        {!gungnir?.running && (
-          <p className="text-xs text-gray-500 mt-2">
-            To enable CT monitoring, run <code className="text-gray-400">./scanner.sh gungnir start</code>
-          </p>
-        )}
         {gungnirError && (
           <p className="text-xs text-red-400 mt-2">{gungnirError}</p>
         )}
