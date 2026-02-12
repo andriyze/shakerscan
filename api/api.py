@@ -3241,53 +3241,57 @@ def docker_socket_request(method: str, path: str, body: dict = None) -> tuple[in
         response += chunk
     s.close()
 
-    # Parse HTTP response
-    response_str = response.decode('utf-8', errors='ignore')
+    # Parse HTTP response (bytes-safe for chunked payloads).
     status_code = 0
     response_body = {}
 
-    if '\r\n' in response_str:
-        status_line = response_str.split('\r\n')[0]
-        parts = status_line.split(' ')
-        if len(parts) >= 2:
+    header_bytes, sep, body_bytes = response.partition(b"\r\n\r\n")
+    header_text = header_bytes.decode("iso-8859-1", errors="ignore")
+
+    if header_text:
+        status_line = header_text.split("\r\n", 1)[0]
+        parts = status_line.split(" ")
+        if len(parts) >= 2 and parts[1].isdigit():
             status_code = int(parts[1])
 
-    if '\r\n\r\n' in response_str:
-        headers, body_part = response_str.split('\r\n\r\n', 1)
-        # Handle chunked transfer encoding
-        if 'Transfer-Encoding: chunked' in headers:
-            # Parse chunked encoding: format is "size\r\ndata\r\nsize\r\ndata\r\n...0\r\n\r\n"
-            # Assemble all chunks into complete body
-            assembled = []
-            remaining = body_part
+    if sep:
+        header_lines = header_text.lower().split("\r\n")
+        is_chunked = any(
+            line.startswith("transfer-encoding:") and "chunked" in line
+            for line in header_lines
+        )
+
+        if is_chunked:
+            # Parse chunked encoding from raw bytes:
+            # size\r\ndata\r\nsize\r\ndata\r\n...0\r\n\r\n
+            assembled = bytearray()
+            remaining = body_bytes
             while remaining:
-                # Find chunk size line
-                if '\r\n' not in remaining:
+                line_end = remaining.find(b"\r\n")
+                if line_end == -1:
                     break
-                size_line, remaining = remaining.split('\r\n', 1)
+                size_line = remaining[:line_end].decode("ascii", errors="ignore")
+                remaining = remaining[line_end + 2:]
+                size_str = size_line.split(";", 1)[0].strip()
+                if not size_str:
+                    break
                 try:
-                    size_str = size_line.split(';', 1)[0].strip()
-                    if not size_str:
-                        break
                     chunk_size = int(size_str, 16)
                 except ValueError:
                     break
                 if chunk_size == 0:
                     break
-                # Extract chunk data
                 if len(remaining) < chunk_size:
                     break
-                chunk_data = remaining[:chunk_size]
-                assembled.append(chunk_data)
-                # Skip past chunk data and trailing \r\n
+                assembled.extend(remaining[:chunk_size])
                 remaining = remaining[chunk_size:]
-                if remaining.startswith('\r\n'):
+                if remaining.startswith(b"\r\n"):
                     remaining = remaining[2:]
-            body_part = ''.join(assembled)
+            body_bytes = bytes(assembled)
 
-        if body_part.strip():
+        if body_bytes.strip():
             try:
-                response_body = json_module.loads(body_part)
+                response_body = json_module.loads(body_bytes.decode("utf-8", errors="ignore"))
             except json_module.JSONDecodeError:
                 response_body = {}
 
@@ -3299,24 +3303,47 @@ def get_compose_context(containers: list) -> tuple[Optional[str], Optional[str],
     if not containers or not isinstance(containers, list):
         return None, None, None
 
-    preferred_services = ("worker", "api")
-    for service in preferred_services:
-        for c in containers:
-            labels = c.get("Labels", {}) or {}
-            if labels.get("com.docker.compose.service") == service:
-                project = labels.get("com.docker.compose.project")
-                image = c.get("Image")
-                networks = (c.get("NetworkSettings") or {}).get("Networks", {})
-                network = next(iter(networks.keys()), None) if networks else None
-                return project, network, image
-
-    for c in containers:
+    def extract_context(c: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
         labels = c.get("Labels", {}) or {}
         project = labels.get("com.docker.compose.project")
-        if project:
-            image = c.get("Image")
-            networks = (c.get("NetworkSettings") or {}).get("Networks", {})
-            network = next(iter(networks.keys()), None) if networks else None
+        image = c.get("Image")
+        networks = (c.get("NetworkSettings") or {}).get("Networks", {})
+        network = next(iter(networks.keys()), None) if networks else None
+        if project and image and network:
+            return project, network, image
+        return None, None, None
+
+    def find_by_service(service: str, running_only: bool) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        for c in containers:
+            labels = c.get("Labels", {}) or {}
+            if labels.get("com.docker.compose.service") != service:
+                continue
+            if running_only and c.get("State") != "running":
+                continue
+            project, network, image = extract_context(c)
+            if project and network and image:
+                return project, network, image
+        return None, None, None
+
+    preferred_services = ("worker", "api")
+    for service in preferred_services:
+        project, network, image = find_by_service(service, running_only=True)
+        if project and network and image:
+            return project, network, image
+        project, network, image = find_by_service(service, running_only=False)
+        if project and network and image:
+            return project, network, image
+
+    for c in containers:
+        if c.get("State") != "running":
+            continue
+        project, network, image = extract_context(c)
+        if project and network and image:
+            return project, network, image
+
+    for c in containers:
+        project, network, image = extract_context(c)
+        if project and network and image:
             return project, network, image
 
     return None, None, None
@@ -3627,26 +3654,8 @@ async def gungnir_start():
     r = get_redis()
 
     try:
-        # Find gungnir container via socket API
-        filters = urllib.parse.quote('{"name":["gungnir"]}')
-        status_code, containers = docker_socket_request(
-            "GET",
-            f"/containers/json?all=true&filters={filters}"
-        )
-
-        if status_code != 200:
-            raise HTTPException(500, f"Failed to query containers: status {status_code}")
-
-        # Find the gungnir-worker container
-        gungnir = None
-        for c in containers if isinstance(containers, list) else []:
-            names = c.get('Names', [])
-            name = names[0].lstrip('/') if names else ''
-            if 'gungnir' in name.lower():
-                gungnir = c
-                break
-
-        if not gungnir:
+        def ensure_gungnir_container() -> dict:
+            """Find or create a gungnir container from current compose context."""
             status_code, all_containers = docker_socket_request("GET", "/containers/json?all=true")
             if status_code != 200:
                 raise HTTPException(500, f"Failed to query containers: status {status_code}")
@@ -3658,10 +3667,9 @@ async def gungnir_start():
                     detail="Gungnir container not found and auto-create failed. Start the stack with ./scanner.sh start first."
                 )
 
-            # Look for gungnir-worker image specifically, fall back to worker image
+            # Look for gungnir-worker image specifically, fall back to worker image.
             gungnir_image = None
             if project:
-                # Check if gungnir-worker image exists
                 img_status, images = docker_socket_request("GET", "/images/json")
                 if img_status == 200 and isinstance(images, list):
                     gungnir_image_name = f"{project}-gungnir-worker"
@@ -3674,9 +3682,7 @@ async def gungnir_start():
                         if gungnir_image:
                             break
 
-            # Use gungnir-worker image if found, otherwise fall back to worker image
             image = gungnir_image or image
-
             name = f"{project}-gungnir-worker-1" if project else "gungnir-worker"
             labels = {}
             if project:
@@ -3711,7 +3717,29 @@ async def gungnir_start():
             if not container_id:
                 raise HTTPException(500, "Failed to resolve Gungnir container ID after creation.")
 
-            gungnir = {"Id": container_id, "State": "created"}
+            return {"Id": container_id, "State": "created"}
+
+        # Find gungnir container via socket API
+        filters = urllib.parse.quote('{"name":["gungnir"]}')
+        status_code, containers = docker_socket_request(
+            "GET",
+            f"/containers/json?all=true&filters={filters}"
+        )
+
+        if status_code != 200:
+            raise HTTPException(500, f"Failed to query containers: status {status_code}")
+
+        # Find the gungnir-worker container
+        gungnir = None
+        for c in containers if isinstance(containers, list) else []:
+            names = c.get('Names', [])
+            name = names[0].lstrip('/') if names else ''
+            if 'gungnir' in name.lower():
+                gungnir = c
+                break
+
+        if not gungnir:
+            gungnir = ensure_gungnir_container()
 
         if gungnir.get('State') == 'running':
             return {
@@ -3721,7 +3749,7 @@ async def gungnir_start():
 
         # Start the container
         container_id = gungnir.get('Id')
-        start_status, _ = docker_socket_request("POST", f"/containers/{container_id}/start")
+        start_status, start_data = docker_socket_request("POST", f"/containers/{container_id}/start")
 
         if start_status in [204, 304]:  # 204 = started, 304 = already started
             # Update Redis status
@@ -3730,8 +3758,24 @@ async def gungnir_start():
                 "status": "started",
                 "message": "Gungnir CT monitor started successfully"
             }
-        else:
-            raise HTTPException(500, f"Failed to start Gungnir: Docker returned status {start_status}")
+
+        # Self-heal stale containers (e.g., old network ID no longer exists).
+        if start_status == 404 and container_id:
+            docker_socket_request("DELETE", f"/containers/{container_id}?force=true")
+            gungnir = ensure_gungnir_container()
+            container_id = gungnir.get('Id')
+            start_status, start_data = docker_socket_request("POST", f"/containers/{container_id}/start")
+            if start_status in [204, 304]:
+                r.hset("gungnir:status", "running", "true")
+                return {
+                    "status": "started",
+                    "message": "Gungnir CT monitor started successfully"
+                }
+
+        docker_message = ""
+        if isinstance(start_data, dict) and start_data.get("message"):
+            docker_message = f" ({start_data.get('message')})"
+        raise HTTPException(500, f"Failed to start Gungnir: Docker returned status {start_status}{docker_message}")
 
     except FileNotFoundError:
         raise HTTPException(
