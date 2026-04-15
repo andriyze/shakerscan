@@ -2,32 +2,7 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
-## Contents
-
-- [60-Second Quick Start](#60-second-quick-start)
-- [Features](#features)
-- [Claude Code Integration](#claude-code-integration)
-- [Quick Start](#quick-start)
-- [CLI Reference](#cli-reference)
-- [Scan Types](#scan-types)
-- [Interactive Security Sessions](#interactive-security-sessions)
-- [API Reference](#api-reference)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Integrated Tools](#integrated-tools)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
-**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
-
-**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - User guide for AI-assisted manual penetration testing.
-
-**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs for next-gen smart scanning.
-
-## 60-Second Quick Start
-
-If you want to get running fast:
+## Quick Start
 
 ```bash
 git clone https://github.com/andriyze/shakerscan.git
@@ -37,8 +12,8 @@ cd shakerscan
 
 That starts the full stack (API, workers, UI). By default it pulls prebuilt Docker images.
 
-- Web UI: http://localhost:3000
-- API: http://localhost:8080
+- **Web UI**: http://localhost:3000
+- **API**: http://localhost:8080
 
 If your machine is missing prerequisites:
 
@@ -47,36 +22,53 @@ If your machine is missing prerequisites:
 ./scanner.sh start
 ```
 
-If you want to build locally instead of using prebuilt images:
+To build locally instead of using prebuilt images:
 
 ```bash
 ./scanner.sh start --local
 ```
 
-### Use from Terminal
+### Run a Scan
 
 ```bash
-./scanner.sh scan https://example.com
-./scanner.sh status
-./scanner.sh logs worker -f
-./scanner.sh stop
+./scanner.sh scan https://example.com        # Quick scan
+./scanner.sh scan-full https://example.com   # Full assessment (active testing)
+./scanner.sh scan-smart https://example.com  # Adaptive smart scan
+./scanner.sh status                          # Check status
+./scanner.sh logs worker -f                  # Follow worker logs
+./scanner.sh stop                            # Stop all services
 ```
 
 ### Use with AI Agents (Claude, Codex, OpenCode)
 
 Open this repo in your preferred AI coding agent and ask in plain language:
 
-```bash
-# from the repo root (use whichever tool you have installed)
-claude
-codex
-opencode
+```
+"Start Shaker Scan"
+"Run a quick scan on https://example.com"
+"Show active high and critical findings"
+"Scale workers to 10"
 ```
 
-- "Start Shaker Scan"
-- "Run a quick scan on https://example.com"
-- "Show active high and critical findings"
-- "Scale workers to 10"
+## Contents
+
+- [Features](#features)
+- [Scan Types](#scan-types)
+- [CLI Reference](#cli-reference)
+- [API Quick Reference](#api-quick-reference)
+- [Claude Code Integration](#claude-code-integration)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Integrated Tools](#integrated-tools)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
+**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
+
+**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - AI-assisted manual penetration testing.
+
+**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
 
 ## Features
 
@@ -85,60 +77,129 @@ opencode
   - TLS/SSL certificate validation and cipher analysis
   - HTTP security headers evaluation
   - Content discovery and technology fingerprinting
-  - Headless browser crawl (Playwright) with API capture (auth-aware)
+  - Headless browser crawl (Playwright) with API capture
   - Subdomain enumeration (Gungnir, Subfinder, crt.sh)
-  - JavaScript dependency scanning (Retire.js methodology)
-  - Secret detection in client-side code
+  - JavaScript dependency scanning and secret detection
 
 - **Active Vulnerability Testing** (opt-in)
-  - XSS detection (dalfox)
-  - SQL injection testing (sqlmap)
+  - XSS detection (dalfox), SQL injection testing (sqlmap)
   - Nuclei templates (5000+ vulnerability checks)
-  - Auth-aware Nuclei/Dalfox scanning across discovered endpoints
-  - API security testing
+  - Auth-aware scanning across discovered endpoints
   - CSRF, IDOR, path traversal detection
 
 - **AI-Assisted Verification** (optional)
   - Confidence scoring and false-positive reduction
-  - Cross-finding correlation signals (attack-chain hints)
+  - Cross-finding correlation and attack-chain analysis
 
 - **Modern Web Interface**
-  - Real-time dashboard with metrics
-  - Scan management and history
-  - Finding tracking with status management
-  - Target organization
-  - Dark theme optimized for security work
+  - Real-time dashboard with metrics and scan management
+  - Finding tracking with status management and PDF export
+  - Target organization, scheduling, and worker scaling
 
 - **Production-Ready Architecture**
-  - PostgreSQL for persistent storage
-  - Redis-based job queue
-  - Horizontal scaling (multiple workers)
-  - Full API access
+  - PostgreSQL persistent storage, Redis job queue
+  - Horizontal scaling (1-20 workers)
 
 - **Interactive AI Security Sessions**
   - Real-time browser-based testing with Playwright
-  - Multi-user BOLA/IDOR testing
-  - Visual screenshots for context
-  - Finding persistence to database
-  - Collaborative human-AI security testing
+  - Multi-user BOLA/IDOR testing with finding persistence
 
-## Web UI Overview
+## Scan Types
 
-- **Dashboard (`/`)**: real-time metrics, queue health, worker scaling (1-20), Gungnir CT monitor toggle
-- **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan with any scan type
-- **Scan Report (`/scans/{id}`)**: live logs while running, progress bar, PDF export, compliance section, partial-results for failed scans
-- **Targets (`/targets`)**: hierarchical root/subdomains, filter by source/grade/findings, scan-one/scan-all, subdomain discovery
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans with target pre-population
-- **Findings (`/findings`)**: filter by severity/status/last-seen/domain, sort by CVSS/date, bulk cleanup with dry-run preview, delete individual findings
-- **Finding Detail (`/findings/{id}`)**: triage status buttons, delete, analyst notes, evidence with copy buttons, AI analysis, remediation steps, raw HTTP
-- **New Scan (`/scan/new`)**: scan type picker with advanced toggles (Active Testing, Nuclei, Discovery, DNS, JS Deps, JS Secrets)
+| Type | Duration | What It Does |
+|------|----------|--------------|
+| **Quick** | 1-2 min | DNS, TLS, headers, basic tech detection |
+| **Standard** | 5-10 min | + Nuclei (safe), cookies, CORS, JS deps |
+| **Deep** | 30-60 min | + Full Nuclei, top-1000 port scan, JS secrets |
+| **Full** | 1-2 hrs | + Active XSS/SQLi, all security tests |
+| **Aggressive** | 2-5 hrs | + Bruteforce, fuzzing, full port scan |
+| **Smart** | Variable | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
+
+> **Note**: `full`, `aggressive`, and `smart` include active testing. Only run these against targets you have permission to test.
+
+**Smart scan** highlights: staged Nuclei waves with early stopping, DBMS fingerprinting, context-aware XSS, DOM XSS analysis, authenticated Playwright crawl, adaptive rate limiting, attack chain correlation, and coverage tracking. See [Smart Scan Policy](docs/SMART_SCAN_POLICY.md) for details.
+
+## CLI Reference
+
+```
+./scanner.sh [command] [options]
+
+Commands:
+  start              Start all services (API, workers, UI)
+  stop               Stop all services
+  restart            Restart all services
+  status             Show service status and queue metrics
+  scale <N>          Scale to N workers (1-20)
+  logs [service]     View logs (api, worker, ui, postgres, redis)
+  scan <target>      Quick scan a target
+  scan-full <target> Full assessment scan
+  scan-smart <target> Smart adaptive scan
+  install-deps       Install missing prerequisites
+  gungnir <cmd>      CT monitor: start, stop, status, logs
+  build              Build Docker images
+  rebuild [opts]     Rebuild images (supports --no-cache, scanner, ui)
+  reset              Reset database (WARNING: deletes all data)
+  shell              Open shell in scanner container
+
+Options:
+  -w, --workers N    Number of workers (default: 5)
+  -f, --follow       Follow logs in real-time
+  -y, --yes          Auto-confirm dependency installation prompts
+  --local            Force local Docker build instead of prebuilt images
+  --prebuilt         Force prebuilt Docker Hub images (default)
+  --image-tag TAG    Override Docker image tag (default: VERSION file)
+```
+
+### Authenticated Scan Examples
+
+```bash
+./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
+./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
+./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"
+./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1" --user2-header "Bearer user2"
+./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
+```
+
+## API Quick Reference
+
+Base URL: `http://localhost:8080`
+
+```bash
+# Submit a scan
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
+
+# List scans
+curl "http://localhost:8080/scans?status=completed&limit=10"
+
+# Get scan details
+curl http://localhost:8080/scans/{scan_id}
+
+# List findings
+curl "http://localhost:8080/findings?severity=critical&status=active"
+
+# Update finding status
+curl -X PATCH http://localhost:8080/findings/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"status": "resolved", "notes": "Fixed in v2.1"}'
+
+# Dashboard metrics
+curl http://localhost:8080/dashboard
+
+# Scale workers
+curl -X POST http://localhost:8080/workers \
+  -H "Content-Type: application/json" \
+  -d '{"count": 5}'
+```
+
+Full API documentation including authenticated scanning, custom endpoints, interactive sessions, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md).
 
 ## Claude Code Integration
 
-This project is designed to work seamlessly with Claude Code. Just clone and open:
+This project works seamlessly with Claude Code. Just clone, open, and ask:
 
 ```bash
-git clone https://github.com/andriyze/shakerscan
 cd shakerscan
 claude    # Claude reads CLAUDE.md and understands the project
 ```
@@ -157,580 +218,18 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/subdomains <domain>` | Discover subdomains |
 | `/workers` | Manage scanner workers |
 
-### Natural Language
-
-Just ask Claude:
-- "Scan example.com for vulnerabilities"
-- "Show me critical findings"
-- "Start the scanner"
-- "Find subdomains for example.com"
-
-### Project Structure
-
-```
-.claude/
-├── commands/              # Slash commands
-│   ├── scan.md
-│   ├── scan-full.md
-│   ├── scan-smart.md
-│   ├── ai-security-session.md  # Interactive testing
-│   ├── save-finding.md         # Persist discoveries
-│   ├── findings.md
-│   ├── status.md
-│   ├── subdomains.md
-│   └── workers.md
-├── hooks/
-│   └── session-start.sh   # Auto-detects scanner status
-└── settings.json
-```
-
-See `CLAUDE.md` for full API reference and integration details.
-
-## Quick Start
-
-### Prerequisites
-
-- Docker and Docker Compose
-- curl and jq (the CLI can auto-install missing prerequisites)
-- 8GB+ RAM recommended
-- Linux, macOS, or Windows with WSL2
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/andriyze/shakerscan.git
-cd shakerscan
-
-# Start the scanner (uses prebuilt images by default)
-./scanner.sh start
-
-# Optional: install/repair prerequisites first
-./scanner.sh install-deps
-
-# Optional: force local image build
-./scanner.sh start --local
-
-# Or with more workers
-./scanner.sh start -w 5
-```
-
-### Access
-
-- **Web UI**: http://localhost:3000
-- **API**: http://localhost:8080
-- **API Docs**: http://localhost:8080/docs
-
-### Your First Scan
-
-```bash
-# Via CLI
-./scanner.sh scan https://example.com
-
-# Via Web UI
-# Navigate to http://localhost:3000 and click "New Scan"
-
-# Via API
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com"}'
-```
-
-## CLI Reference
-
-```bash
-./scanner.sh [command] [options]
-
-Commands:
-  start              Start all services (API, workers, UI)
-  stop               Stop all services
-  restart            Restart all services
-  status             Show service status and queue metrics
-  scale <N>          Scale to N workers (1-20)
-  logs [service]     View logs (api, worker, ui, postgres, redis)
-  scan <target>      Quick scan a target
-  scan-full <target> Full assessment scan
-  scan-smart <target> Smart adaptive scan
-  install-deps       Install missing prerequisites
-  gungnir <cmd>      CT monitor: start, stop, status, logs
-  build              Build Docker images
-  rebuild [opts]     Rebuild images (cached by default, supports --no-cache, scanner, ui)
-  reset              Reset database (WARNING: deletes all data)
-  shell              Open shell in scanner container
-
-Options:
-  -w, --workers N    Number of workers (default: 5)
-  -f, --follow       Follow logs in real-time
-  -y, --yes          Auto-confirm dependency installation prompts
-  --local            Force local Docker build instead of prebuilt images
-  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)
-  --image-tag TAG    Override Docker image tag (default: VERSION file)
-
-Examples:
-  ./scanner.sh start                           # Start with prebuilt images
-  ./scanner.sh start --local                   # Build locally and start
-  ./scanner.sh start -w 10                     # Start with 10 workers
-  ./scanner.sh start --image-tag 0.3.1         # Start with a specific published tag
-  ./scanner.sh scan https://example.com        # Quick scan
-  ./scanner.sh install-deps                    # Install prerequisites
-  ./scanner.sh scan-full https://example.com   # Full assessment (active)
-  ./scanner.sh scan-smart https://example.com  # Smart adaptive scan (active)
-  ./scanner.sh gungnir status                  # Check CT monitor status
-  ./scanner.sh logs worker -f                  # Follow worker logs
-```
-
-When required tools are missing, `scanner.sh` now offers to install them automatically on Ubuntu 24.04 and macOS.
-
-Note: the CLI currently wraps `quick`, `full`, and `smart` scans. Use the API or UI for `standard`, `deep`, `aggressive`, and advanced auth/tuning options.
-
-## Scan Types
-
-| Type | Description | Duration | Use Case |
-|------|-------------|----------|----------|
-| **Quick** | DNS, TLS, headers, basic tech detection | 1-2 min | Quick health check |
-| **Standard** | + Nuclei (safe), cookies, CORS, JS deps (no port scan by default) | 5-10 min | Regular assessment |
-| **Deep** | + Full Nuclei, top-ports scan (1000), JS secrets | 30-60 min | Thorough passive analysis |
-| **Full** | + Active XSS/SQLi, all security tests | 1-2 hrs | Comprehensive audit |
-| **Aggressive** | + Bruteforce, fuzzing, full port scan | 2-5 hrs | Maximum coverage |
-| **Smart** | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS | Variable | Intelligent targeted testing |
-
-Notes:
-- Port scanning: standard skips Nmap by default; smart runs a light top-33 scan for service hints and gRPC discovery; deep/full/aggressive run port scanning (full uses top-ports, aggressive uses full range).
-- Deep discovery (ffuf-based) is opt-in via `--deep-discovery` (enabled automatically in aggressive).
-- Advanced probes (SSRF/command injection) run only for full/aggressive with non-safe exploit level and parameterized endpoints.
-
-### Smart Scan Features
-
-The `smart` scan type uses adaptive techniques for more efficient and accurate testing:
-
-- **Staged Nuclei scanning**: 4 waves based on tech detection + signals, with early stopping on high-confidence findings
-- **Verification phase**: Browser-based XSS proofs and statistical timing analysis for SQLi confirmation
-- **Attack chain analysis**: Correlates findings into exploitable attack paths (XSS→ATO, SQLi→data exfil, SSRF→cloud breach)
-- **DBMS fingerprinting**: Detects SQLite, MySQL, PostgreSQL, MSSQL, Oracle and uses database-specific payloads
-- **Context-aware XSS**: Detects reflection context (in_script, in_attribute, in_html) and tests GET query params plus POST/PUT/PATCH body params (JSON/form)
-- **DOM XSS analysis**: Static source-to-sink flow detection in JavaScript bundles
-- **POST body injection**: Tests JSON/form POST parameters for SQLi (not just GET query params)
-- **Adaptive rate limiting**: Backs off on 429/503, speeds up on success
-- **Recursive discovery**: Adapts crawl depth based on findings
-- **Light port scan**: Top-33 scan for service hints and gRPC discovery
-- **Post-nuclei refinement**: Uses nuclei signals to adapt discovery after initial scan
-- **Authenticated Playwright crawl**: Multi-page headless crawl with API capture
-- **JSON/HATEOAS link following**: Follows `_links`/`href` fields in API responses to expand endpoints
-- **OPTIONS method discovery**: Enumerates allowed verbs to uncover POST/PUT/PATCH targets
-- **Auth-aware tool routing**: Nuclei/Dalfox use discovered endpoints + auth headers when provided
-- **Automated API login**: Tries JSON login endpoints when credentials are provided
-- **gRPC reflection**: Enumerates gRPC services/methods when grpcurl is available
-- **Synthetic endpoint gating**: Only generates synthetic API endpoints when API hints exist (or `--thorough-params` is set)
-- **Coverage tracking**: Monitors endpoint/parameter/template coverage metrics
-
-> **Note**: `full`, `aggressive`, and `smart` scans include active testing (XSS/SQLi probes). Only run these against targets you have permission to test.
-
-Tip: use `xss` or `sqli` in API scan options for focused active checks.
-
-## Interactive Security Sessions
-
-For manual penetration testing and complex vulnerability verification, use interactive AI security sessions. Unlike automated scans, these provide real-time browser-based testing with human guidance.
-
-### Recommended Workflow
-
-**Best practice**: Run a smart scan first, then use interactive session to validate findings and explore areas scanners miss.
-
-```bash
-# 1. Run automated scan first
-/scan-smart https://example.com
-# Wait for completion, then...
-
-# 2. Start interactive session (auto-bootstraps from scan data)
-/ai-security-session https://example.com
-```
-
-The session will automatically:
-- Fetch discovered API endpoints from the scan
-- Load existing findings for validation
-- Use tech stack info for tailored testing
-
-### Testing Scenarios
-
-| Category | Use Cases |
-|----------|-----------|
-| **Access Control** | BOLA/IDOR, privilege escalation, tenant isolation |
-| **Authentication** | Session fixation, JWT flaws, token invalidation |
-| **Business Logic** | Price manipulation, coupon abuse, workflow bypass |
-| **API Security** | Mass assignment, GraphQL abuse, rate limiting |
-| **Client-Side** | Stored XSS, DOM XSS, open redirect |
-
-### Saving Findings
-
-Findings discovered during interactive sessions can be persisted to the database:
-
-```bash
-# Save from active session (target auto-populated)
-curl -X POST "http://localhost:8080/session/{session_id}/findings" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "BOLA on Basket API",
-    "severity": "critical",
-    "category": "BOLA",
-    "cwe": "CWE-639",
-    "description": "User2 can access User1 basket items"
-  }'
-
-# Or use the skill
-/save-finding {session_id}
-```
-
-Findings are tagged with `source: "ai_session"` and linked to the session for tracking.
-
-### When to Use
-
-- **Validating findings** from automated scans
-- **Chaining vulnerabilities** into attack paths
-- Testing complex business logic requiring judgment
-- Verifying BOLA with real user authentication contexts
-- Demonstrating vulnerabilities to stakeholders
-
-See `CLAUDE.md` for full session API reference.
-
-## API Reference
-
-### Submit a Scan
-
-```bash
-POST /scans
-{
-  "target": "https://example.com",
-  "options": {
-    "scan_type": "standard"  # quick, standard, deep, full, aggressive, smart
-  }
-}
-
-# Examples:
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
-
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
-```
-
-### Authenticated Scanning
-
-Scan protected endpoints with authentication:
-
-```bash
-# Bearer token (JWT, API keys)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://api.example.com", "options": {
-    "scan_type": "smart",
-    "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-  }}'
-
-# Session cookies
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {
-    "scan_type": "smart",
-    "auth_cookies": "session=abc123; csrf_token=xyz"
-  }}'
-
-# Form-based login (auto-authenticates)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {
-    "scan_type": "smart",
-    "login_username": "user@test.com",
-    "login_password": "password123"
-  }}'
-
-# Custom headers (API keys, tenant IDs)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://api.example.com", "options": {
-    "scan_type": "smart",
-    "auth_headers_json": "{\"X-API-Key\": \"key123\", \"X-Tenant\": \"acme\"}"
-  }}'
-
-# Multi-user BOLA/IDOR testing
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://api.example.com", "options": {
-    "scan_type": "smart",
-    "auth_header": "Bearer user1_token",
-    "user2_header": "Bearer user2_token"
-  }}'
-```
-
-**Authentication Options:**
-
-| Option | Description |
-|--------|-------------|
-| `auth_header` | Authorization header (Bearer token, Basic auth, API key) |
-| `auth_cookies` | Session cookies |
-| `auth_headers_json` | Custom headers as JSON object |
-| `login_username` | Username for form-based login |
-| `login_password` | Password for form-based login |
-| `login_url` | Login page URL (auto-detected if not provided) |
-| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
-| `auto_auth` | Attempt API login on JSON endpoints using provided credentials |
-| `user2_header` | Second user auth for BOLA/IDOR testing |
-| `user2_cookies` | Second user cookies for BOLA/IDOR testing |
-
-Auth is propagated to discovery (Playwright crawl, JSON link following), Nuclei, Dalfox, SQLmap, and custom checks when provided. Long-running scans will attempt re-authentication if the session expires.
-
-**Discovery Options:**
-
-| Option | Description |
-|--------|-------------|
-| `json_link_following` | Follow JSON/HATEOAS links to expand API endpoints |
-| `options_method_discovery` | Use HTTP OPTIONS to enumerate allowed methods |
-| `grpc_discovery` | Use gRPC reflection to list services/methods (requires grpcurl) |
-| `custom_endpoints` | Manual endpoint list with params for testing (see format below). **Include params or endpoints won't be tested for SQLi/XSS** |
-| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
-| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
-| `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
-
-**Active Check Filters:**
-
-| Option | Description |
-|--------|-------------|
-| `xss` | Run only XSS active checks |
-| `sqli` | Run only SQLi active checks |
-
-**Reporting Options:**
-
-| Option | Description |
-|--------|-------------|
-| `include_partial_attack_chains` | Include partial attack chains in the human-readable report (analyst mode). Full chains are always in `result.attack_chains.chains`; partial chains are in `result.attack_chains.partial_chains`. |
-
-**Manual Endpoints (API-only targets):**
-
-Provide endpoints directly when no HTML/OpenAPI is available:
-
-```bash
-# API example
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "custom_endpoints": [
-        "POST /api/login json:{\"email\":\"user@test.com\",\"password\":\"pass\"}",
-        "GET /api/products id=1"
-      ]
-    }
-  }'
-
-# Supported endpoint formats
-GET /api/search query:q=test
-POST /api/login json:{"email":"user@test.com","password":"pass"}
-POST /api/coupon/validate form:coupon_code=TEST
-GET /api/items id=1,category=tools
-```
-
-Supported formats per line:
-- `METHOD /path` (no params)
-- `METHOD /path param1,param2` (param names only)
-- `METHOD /path key=value` or `query:key=value` (query defaults)
-- `METHOD /path form:key=value` (form body defaults)
-- `METHOD /path json:{...}` (JSON body template, supports nested keys)
-
-### List Scans
-
-```bash
-GET /scans?status=completed&limit=50
-```
-
-### Get Scan Details
-
-```bash
-GET /scans/{scan_id}
-```
-
-### Findings
-
-```bash
-# List with filters
-GET /findings?severity=critical&status=active&seen_within_days=30&sort_by=cvss
-GET /findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true
-
-# Update status and notes
-PATCH /findings/{finding_id}
-{"status": "resolved", "notes": "Fixed in v2.0"}
-
-# Delete a finding
-DELETE /findings/{finding_id}
-
-# Bulk cleanup old findings (dry-run first, then execute)
-POST /findings/cleanup
-{"older_than_days": 90, "status": "resolved", "dry_run": true}
-
-# Bulk update statuses
-POST /findings/bulk
-{"finding_ids": ["id1", "id2"], "status": "false_positive"}
-
-# Queue retest for one finding (tiered)
-POST /findings/{finding_id}/retest
-{"requested_by": "api"}
-
-# Force AI-only retest for one finding
-POST /findings/{finding_id}/retest?mode=ai
-{"requested_by": "api"}
-
-# Bulk retest by IDs or filters
-POST /findings/retest
-{"severity":"high","status":"active","limit":25,"mode":"deterministic"}
-
-# Retest history/details
-GET /retests/finding/{finding_id}?limit=20
-GET /retests/{retest_id}
-```
-
-Findings filters also support:
-- `verification_verdict`: `exploited`, `blocked_by_security`, `out_of_scope_internal`, `false_positive`, `likely_fixed`, `inconclusive`, `error`
-- `verification_mode`: `deterministic` or `ai_driven`
-- `verified_only=true`: only findings with latest verdict `exploited`
-
-Retest records (`/retests/*`) include `verification_mode`, `ai_plan`, `ai_reasoning`, `proof`, `artifacts`, and replay commands.
-
-### Targets
-
-```bash
-GET /targets
-GET /targets/grouped          # Hierarchical view with filtering/sorting
-GET /targets/{target_id}
-POST /targets                 # {"url": "https://example.com", "name": "Prod"}
-PATCH /targets/{target_id}    # Update name, scan_options, is_active
-DELETE /targets/{target_id}   # Soft delete
-POST /targets/{target_id}/scan  # Start scan for target
-GET /domains                  # List root domains
-```
-
-### Dashboard & Queue
-
-```bash
-GET /dashboard
-GET /queue/stats
-DELETE /queue/clear            # Emergency clear pending jobs
-```
-
-### Batch Scans
-
-```bash
-POST /scans/batch
-{
-  "targets": ["https://a.example.com", "https://b.example.com"],
-  "options": {"scan_type": "quick"}
-}
-```
-
-### Scan Logs & Control
-
-```bash
-GET /scans/{scan_id}/logs?limit=200    # Default 200, max 1000
-POST /scans/{scan_id}/cancel           # Cancel running/pending scan
-```
-
-### Schedules
-
-```bash
-GET /schedules
-POST /schedules
-PATCH /schedules/{schedule_id}
-DELETE /schedules/{schedule_id}
-```
-
-### Worker Management
-
-```bash
-GET /workers
-POST /workers
-{
-  "count": 8
-}
-```
-
-### AI Settings
-
-```bash
-# Get effective AI settings (keys masked)
-GET /settings/ai
-
-# Update runtime AI settings (applies to new jobs immediately)
-PUT /settings/ai
-{
-  "ai_url": "https://api.openai.com/v1/chat/completions",
-  "ai_api_key": "sk-...",
-  "ai_model": "gpt-4o-mini",
-  "ai_model_fallback": "moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet",
-  "ai_verify_enabled": true,
-  "ai_verify_url": "https://api.openai.com/v1/chat/completions",
-  "ai_verify_api_key": "sk-...",
-  "ai_verify_model": "gpt-4o-mini",
-  "ai_verify_model_fallback": "openai/gpt-4o-mini,anthropic/claude-3-5-sonnet",
-  "ai_verify_min_severity": "high",
-  "persist_to_env": false
-}
-
-# Clear keys and persist to local .env
-PUT /settings/ai
-{
-  "ai_url": "",
-  "ai_api_key": "",
-  "ai_model_fallback": "",
-  "ai_verify_url": "",
-  "ai_verify_api_key": "",
-  "ai_verify_model_fallback": "",
-  "persist_to_env": true
-}
-
-# Probe provider/model settings for scan AI (uses current settings by default)
-POST /settings/ai/test
-{
-  "scope": "scan"
-}
-
-# Probe retest AI with explicit overrides (without saving)
-POST /settings/ai/test
-{
-  "scope": "verify",
-  "ai_url": "https://api.openai.com/v1/chat/completions",
-  "ai_model": "gpt-4o-mini",
-  "ai_fallback_model": "moonshotai/kimi-k2.5"
-}
-```
-
-Notes:
-- Runtime settings are stored in Redis and picked up by workers for **new** scans/retests.
-- `persist_to_env: true` writes to `LOCAL_ENV_FILE` (default `/workspace/.env` in Docker).
-
-### Gungnir CT Monitor
-
-```bash
-GET /gungnir/status
-POST /gungnir/start
-POST /gungnir/stop
-```
-
-### Interactive Sessions
-
-```bash
-POST /session/start
-GET /session/{session_id}
-POST /session/{session_id}/action
-POST /session/{session_id}/test-endpoint
-POST /session/{session_id}/screenshot
-GET /session/{session_id}/screenshot.png
-GET /sessions
-DELETE /session/{session_id}
-POST /session/{session_id}/findings
-```
+## Web UI Overview
+
+- **Dashboard (`/`)**: real-time metrics, queue health, worker scaling, Gungnir CT monitor toggle
+- **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan
+- **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section
+- **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
+- **Findings (`/findings`)**: filter by severity/status/date/domain, bulk cleanup, CVSS sorting
+- **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
+- **New Scan (`/scan/new`)**: scan type picker with advanced toggles
 
 ## Configuration
-
-### Environment Variables
 
 Create a `.env` file to customize settings:
 
@@ -740,44 +239,26 @@ AI_URL=https://api.openai.com/v1/chat/completions
 AI_API_KEY=sk-...
 AI_MODEL=gpt-4o
 AI_FALLBACK_MODEL=moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet
-AI_MASK_HOST=example.com
 
 # AI Retest Verification (optional, runtime override via /settings/ai)
 AI_VERIFY_ENABLED=false
 AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
 AI_VERIFY_API_KEY=sk-...
 AI_VERIFY_MODEL=gpt-4o-mini
-AI_VERIFY_FALLBACK_MODEL=moonshotai/kimi-k2.5,openai/gpt-4o-mini
-AI_VERIFY_MIN_SEVERITY=high
-
-# Optional path used when /settings/ai persist_to_env=true
-# LOCAL_ENV_FILE=/workspace/.env
-
-# Database (defaults work out of the box)
-# DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
-# REDIS_URL=redis://redis:6379
 ```
-
-When AI is enabled, reports include `ai_correlations` (cross-finding correlations and overall risk assessment) and `ai_logs` summaries.
 
 ### Scaling Workers
 
 ```bash
-# Start with specific worker count
-./scanner.sh start -w 10
-
-# Scale running workers
-docker compose up -d --scale worker=20
+./scanner.sh start -w 10                       # Start with 10 workers
+docker compose up -d --scale worker=20         # Scale running workers
 ```
-
-### Resource Recommendations
 
 | Scan Type | RAM/Worker | Workers for 32GB |
 |-----------|------------|------------------|
 | Quick | ~1GB | 20 |
 | Standard | ~2GB | 12 |
-| Thorough | ~4GB | 6 |
-| Full | ~4GB | 6 |
+| Deep/Full | ~4GB | 6 |
 
 ## Architecture
 
@@ -809,8 +290,6 @@ docker compose up -d --scale worker=20
 
 ## Integrated Tools
 
-The scanner integrates multiple security tools:
-
 | Tool | Purpose |
 |------|---------|
 | **httpx** | HTTP probing and fingerprinting |
@@ -829,49 +308,39 @@ The scanner integrates multiple security tools:
 ### Services won't start
 
 ```bash
-# Check Docker is running
-docker info
-
-# Check for port conflicts
-lsof -i :3000
-lsof -i :8080
-
-# View detailed logs
-./scanner.sh logs -f
+docker info                    # Check Docker is running
+lsof -i :3000 && lsof -i :8080  # Check for port conflicts
+./scanner.sh logs -f           # View detailed logs
 ```
 
 ### Scans failing
 
 ```bash
-# Check worker logs
-./scanner.sh logs worker -f
-
-# Verify API health
-curl http://localhost:8080/health
-
-# Check queue status
-curl http://localhost:8080/queue/stats
+./scanner.sh logs worker -f              # Check worker logs
+curl http://localhost:8080/health         # Verify API health
+curl http://localhost:8080/queue/stats    # Check queue status
 ```
 
 ### Database issues
 
 ```bash
-# Reset database (WARNING: deletes all data)
-./scanner.sh reset
-
-# Connect to database directly
-docker compose exec postgres psql -U scanner
+docker compose ps postgres               # Check PostgreSQL health
+./scanner.sh reset                       # Reset database (deletes all data)
 ```
 
 ### Memory issues
 
 ```bash
-# Reduce worker count
-./scanner.sh start -w 2
-
-# Check memory usage
-docker stats
+./scanner.sh start -w 2                  # Reduce worker count
+docker stats                             # Check memory usage
 ```
+
+## Prerequisites
+
+- Docker and Docker Compose
+- curl and jq (CLI can auto-install missing prerequisites)
+- 8GB+ RAM recommended
+- Linux, macOS, or Windows with WSL2
 
 ## Contributing
 
@@ -897,30 +366,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ---
 
-## Legal Disclaimer & Terms of Use
-
-### Authorization Required
+## Legal Disclaimer
 
 **Only scan targets you own or have explicit written permission to test.** Unauthorized scanning may violate computer crime laws in your jurisdiction.
 
-### Warranty Disclaimer
-
-This software is provided under the Apache License 2.0. As stated in the license, the software is provided on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. See the [LICENSE](LICENSE) file for complete terms.
-
-### Security Considerations
-
-Active scanning modes (`full`, `aggressive`, `smart`) send probes that:
-- May trigger security alerts (WAF, IDS, SIEM)
-- Could be logged by target systems
-- May affect application state in rare cases
-
-For production use, consider:
-- Running in an isolated network
-- Using a VPN for external scans
-- Monitoring outbound traffic
-- Protecting the `./results` directory (may contain sensitive data)
-- Changing default database credentials
-
-### Liability
-
-The authors and contributors are not responsible for any misuse, damage, or legal consequences resulting from the use of this tool. Users assume all responsibility for ensuring they have proper authorization before conducting any security testing.
+This software is provided under the Apache License 2.0 on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Active scanning modes (`full`, `aggressive`, `smart`) send probes that may trigger security alerts, be logged by target systems, or affect application state. The authors are not responsible for any misuse, damage, or legal consequences resulting from use of this tool.
