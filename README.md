@@ -2,6 +2,8 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
+<video src="shakerscan.mp4" controls width="100%"></video>
+
 ## Quick Start
 
 ```bash
