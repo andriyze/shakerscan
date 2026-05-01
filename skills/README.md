@@ -22,12 +22,14 @@ This directory contains skills files for integrating Shaker Scan with Claude Cod
    - "Run a full security assessment on my-app.com"
 
 Available skills in this folder:
-- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules)
+- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate)
 - `ai-security-session/` - interactive `/session` Playwright workflows (BOLA/IDOR/manual testing)
 
 ## API Endpoints
 
 The scanner exposes these endpoints at `http://localhost:8080`:
+
+Agents that support HTTP tools can call these endpoints directly. Agents that support OpenAPI/tool import can use the live FastAPI schema at `http://localhost:8080/openapi.json`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -38,7 +40,7 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | `/scans/{id}/result` | GET | Get full scan result JSON |
 | `/scans/{id}/logs` | GET | Get live scan logs tail (limit param, default 200, max 1000) |
 | `/scans/{id}/cancel` | POST | Cancel a running or pending scan |
-| `/findings` | GET | List findings (filter by severity, status, seen_within_days, domain, search, verification filters) |
+| `/findings` | GET | List findings (filter by DAST/AI `source_type`, severity, status, seen_within_days, domain, search, verification filters) |
 | `/findings/{id}` | GET | Get finding details |
 | `/findings/{id}` | PATCH | Update finding status and notes |
 | `/findings/{id}` | DELETE | Delete a finding |
@@ -64,6 +66,10 @@ The scanner exposes these endpoints at `http://localhost:8080`:
 | `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
 | `/workers` | GET/POST | View/scale worker count (1-20) |
 | `/settings/ai` | GET/PUT | View/update runtime AI settings (optional `.env` persistence) |
+| `/ai/targets` | GET/POST | List/create AI Gate targets |
+| `/ai/targets/{id}` | PATCH/DELETE | Update/deactivate an AI Gate target |
+| `/ai/targets/{id}/scan` | POST | Queue an AI Gate probe-pack scan |
+| `/ai/scans/{id}/transcript` | GET | Get completed AI Gate scan transcripts |
 | `/gungnir/status` | GET | CT monitor status |
 | `/gungnir/start` | POST | Start CT monitor |
 | `/gungnir/stop` | POST | Stop CT monitor |
@@ -115,6 +121,10 @@ curl "http://localhost:8080/findings?severity=critical&status=active&seen_within
 # Filter to verified and AI-driven findings
 curl "http://localhost:8080/findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true"
 
+# Filter by product type
+curl "http://localhost:8080/findings?source_type=ai&status=active"
+curl "http://localhost:8080/findings?source_type=dast&status=active"
+
 # Queue retest (tiered)
 curl -X POST http://localhost:8080/findings/{finding_id}/retest \
   -H "Content-Type: application/json" \
@@ -144,6 +154,15 @@ curl http://localhost:8080/settings/ai
 curl -X PUT http://localhost:8080/settings/ai \
   -H "Content-Type: application/json" \
   -d '{"ai_verify_enabled": true, "ai_verify_min_severity": "high", "persist_to_env": false}'
+
+# AI Gate target + scan
+curl -X POST http://localhost:8080/ai/targets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Support bot","target_type":"api_chat","endpoint_url":"https://example.com/api/chat","method":"POST","request_template":{"message":"{{prompt}}","session_id":"{{session_id}}"},"response_path":"$.answer"}'
+
+curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
 
 # Authenticated scan (Bearer token)
 curl -X POST http://localhost:8080/scans \

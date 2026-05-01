@@ -175,6 +175,24 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const ai_logs = scanData.ai_logs || null
   const ai_summary = ai_logs?.summary || null
   const ai_executive = ai_summary?.executive_summary || null
+  const ai_gate = scanData.ai_gate || null
+  const aiGateDecision = ai_gate?.decision || {}
+  const aiGateStats = ai_gate?.statistics || {}
+  const aiGateSeverityCounts = aiGateDecision?.severity_counts || {}
+  const aiGateTranscripts = Array.isArray(ai_gate?.transcripts) ? ai_gate.transcripts : []
+  const aiGateErrors = Array.isArray(ai_gate?.errors) ? ai_gate.errors : []
+  const aiGateDecisionText = String(aiGateDecision?.decision || '').toLowerCase()
+  const aiGateDecisionClass =
+    aiGateDecisionText === 'block'
+      ? 'bg-red-900 text-red-200'
+      : aiGateDecisionText === 'needs_approval'
+      ? 'bg-yellow-900 text-yellow-200'
+      : aiGateDecisionText === 'allow'
+      ? 'bg-green-900 text-green-200'
+      : 'bg-slate-700 text-slate-300'
+  const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
+  const scanTypeLabel = isAIScan ? 'AI Gate' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const aiScanProfile = scan.options?.ai_scan_profile || ai_gate?.scan_profile || 'AI Gate'
 
   const [expandedAI, setExpandedAI] = useState<Set<string>>(new Set())
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set(['critical', 'high', 'medium', 'low', 'info']))
@@ -231,9 +249,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
       <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-        <div className="flex justify-between items-start mb-4">
-          <div>
-            <h1 className="text-3xl font-bold mb-2">
+        <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-3xl font-bold mb-2 break-words">
               {scan.url || scan.target_url || input.target || 'Unknown Target'}
             </h1>
             <p className="text-gray-400">
@@ -255,7 +273,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </p>
             )}
           </div>
-          <div className="text-right flex flex-col items-end gap-2">
+          <div className="flex flex-col items-start gap-2 lg:items-end lg:text-right">
             <div className="flex items-center gap-2 no-print">
               {shareControls}
               <ExportPDFButton />
@@ -276,20 +294,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 mt-6">
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Status</h3>
             <p className="text-lg font-semibold capitalize">{scan.status}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Scan Type</h3>
-            <p className="text-lg font-semibold capitalize">{scan.scan_type || 'Standard'}</p>
+            <p className="text-lg font-semibold capitalize">{scanTypeLabel}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">Scan Mode</h3>
+            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Profile' : 'Scan Mode'}</h3>
             <p className="text-lg font-semibold capitalize">
-              {scan.options?.quick ? 'Quick' : 'Thorough'}
-              {scan.options?.active && ' + Active'}
+              {isAIScan ? aiScanProfile : scan.options?.quick ? 'Quick' : 'Thorough'}
+              {!isAIScan && scan.options?.active && ' + Active'}
             </p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
@@ -298,6 +316,113 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>
+
+      {/* AI Gate */}
+      {ai_gate && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+            <div>
+              <h2 className="text-2xl font-bold">AI Gate</h2>
+              <p className="text-sm text-gray-400 mt-1">
+                {ai_gate.target_name || scan.target_name || scan.target_url || 'AI target'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {aiGateDecisionText && (
+                <span className={`rounded px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
+                  {aiGateDecisionText.replace('_', ' ')}
+                </span>
+              )}
+              {ai_gate.probe_pack && (
+                <span className="rounded bg-blue-900/40 px-3 py-1 text-sm text-blue-200">{ai_gate.probe_pack}</span>
+              )}
+              {ai_gate.scan_profile && (
+                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">{ai_gate.scan_profile}</span>
+              )}
+            </div>
+          </div>
+
+          {aiGateDecision?.rationale && (
+            <p className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4 text-sm text-gray-300">
+              {aiGateDecision.rationale}
+            </p>
+          )}
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 mb-5">
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Target Type</div>
+              <div className="text-sm font-semibold text-white">{ai_gate.target_type || 'api_chat'}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Probes</div>
+              <div className="text-lg font-semibold text-white">{aiGateStats.total_probes ?? aiGateTranscripts.length}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Successful</div>
+              <div className="text-lg font-semibold text-green-400">{aiGateStats.successful_requests ?? 0}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Findings</div>
+              <div className="text-lg font-semibold text-orange-400">{aiGateStats.finding_count ?? findings.length}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Errors</div>
+              <div className="text-lg font-semibold text-red-400">{aiGateStats.error_count ?? aiGateErrors.length}</div>
+            </div>
+          </div>
+
+          {Object.keys(aiGateSeverityCounts).length > 0 && (
+            <div className="mb-5 flex flex-wrap gap-2">
+              {Object.entries(aiGateSeverityCounts).map(([severity, count]) => (
+                Number(count) > 0 && (
+                  <span key={severity} className={`rounded px-2 py-1 text-xs font-medium ${getSeverityPill(severity)}`}>
+                    {severity}: {Number(count)}
+                  </span>
+                )
+              ))}
+            </div>
+          )}
+
+          {aiGateErrors.length > 0 && (
+            <div className="mb-5 rounded-lg border border-red-500/30 bg-red-900/10 p-4">
+              <h3 className="mb-2 text-sm font-semibold text-red-300">Errors</h3>
+              <ul className="space-y-1 text-sm text-red-200">
+                {aiGateErrors.slice(0, 5).map((error: string, idx: number) => (
+                  <li key={idx} className="break-words">{error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {aiGateTranscripts.length > 0 && (
+            <div>
+              <h3 className="mb-3 text-sm font-semibold text-gray-300">Probe Transcripts</h3>
+              <div className="space-y-3">
+                {aiGateTranscripts.slice(0, 5).map((transcript: any, idx: number) => (
+                  <div key={`${transcript.probe_id || 'probe'}-${idx}`} className="rounded-lg border border-gray-700 bg-gray-900 p-4">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate font-mono text-sm text-blue-300">{transcript.probe_id || `probe-${idx + 1}`}</div>
+                        <div className="text-xs text-gray-500">{transcript.probe_family || transcript.strategy_id || 'probe'}</div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {transcript.status_code && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">HTTP {transcript.status_code}</span>}
+                        {transcript.stop_reason && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{transcript.stop_reason}</span>}
+                        {transcript.turn_count !== undefined && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{transcript.turn_count} turn{transcript.turn_count === 1 ? '' : 's'}</span>}
+                      </div>
+                    </div>
+                    {transcript.response_excerpt && (
+                      <p className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-sm text-gray-300">
+                        {transcript.response_excerpt}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Triage + Coverage Gaps */}
       {(triage?.confirmed?.count !== undefined || (coverageGaps?.issues || []).length > 0) && (

@@ -17,6 +17,7 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 - **Worker Control**: Scale worker pool based on queue pressure
 - **CT Monitoring**: Start/stop Gungnir certificate transparency monitoring
 - **Interactive Testing**: Use `/session` APIs for manual browser-driven security validation
+- **AI Gate Testing**: Register AI targets and run probe packs against chat, RAG, agent trace, and MCP surfaces
 
 ## Scan Types
 
@@ -193,6 +194,8 @@ curl -X POST http://localhost:8080/scans/{scan_id}/cancel
 curl "http://localhost:8080/findings?status=active"
 curl "http://localhost:8080/findings?severity=critical&seen_within_days=30&sort_by=cvss&sort_order=desc"
 curl "http://localhost:8080/findings?verification_verdict=exploited&verification_mode=ai_driven&verified_only=true"
+curl "http://localhost:8080/findings?source_type=ai&status=active"
+curl "http://localhost:8080/findings?source_type=dast&status=active"
 
 # Update status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
@@ -239,7 +242,47 @@ curl "http://localhost:8080/retests/{retest_id}"
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-**Query Parameters:** `status`, `severity`, `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `verification_verdict`, `verification_mode`, `verified_only`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
+**Query Parameters:** `status`, `severity`, `source_type` (`dast` or `ai`), `seen_within_days` (7/30/60/90), `root_domain`, `target_id`, `scan_id`, `verification_verdict`, `verification_mode`, `verified_only`, `search`, `sort_by` (severity/first_seen/last_seen/cvss), `sort_order`, `limit`, `offset`
+
+### AI Gate
+
+Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The UI is at `http://localhost:3000/settings/ai-gate`; the API is fully usable by agents.
+
+Target types: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`.
+Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
+Scan profiles: `smoke`, `trace`, `standard`, `deep`.
+
+```bash
+# List AI Gate targets
+curl http://localhost:8080/ai/targets
+
+# Create a target. request_template must include {{prompt}} for non-GET API targets.
+curl -X POST http://localhost:8080/ai/targets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Support bot",
+    "target_type": "api_chat",
+    "endpoint_url": "https://example.com/api/chat",
+    "method": "POST",
+    "headers_template": {"Content-Type": "application/json"},
+    "request_template": {"message": "{{prompt}}", "session_id": "{{session_id}}"},
+    "response_path": "$.answer",
+    "streaming_mode": "json",
+    "rate_limit_rps": 2,
+    "request_budget": 10,
+    "credential": {"auth_kind": "bearer", "secret": "token-if-needed"}
+  }'
+
+# Queue an AI Gate scan
+curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"probe_pack":"shaker-agent-abuse","scan_profile":"standard","environment":"staging"}'
+
+# Read transcripts for a completed AI Gate scan
+curl http://localhost:8080/ai/scans/{scan_id}/transcript
+```
+
+After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do not poll unless the user explicitly asks.
 
 ### Target Management
 

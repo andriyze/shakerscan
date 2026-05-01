@@ -43,6 +43,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
+AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
@@ -253,6 +254,16 @@ async def init_db():
 
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
+    if options.get("run_kind") in AI_GATE_RUN_KINDS:
+        if scan_id:
+            await update_scan_progress(scan_id, "ai_gate", 15, job_id=job_id)
+        from ai_gate_scan import run_ai_target_scan
+
+        result = await run_ai_target_scan(target, options)
+        if scan_id:
+            await update_scan_progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
+        return result
+
     cmd = ['python3', SCANNER_PATH, target]
 
     # Map scan_type to CLI flags (mutually exclusive presets)
@@ -835,6 +846,134 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                 )
                 if result:
                     saved += 1
+
+    return saved
+
+
+async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> int:
+    """Save AI Gate findings against an AI target."""
+    if not findings:
+        return 0
+
+    saved = 0
+    ai_target_uuid = uuid.UUID(ai_target_id)
+    scan_uuid = uuid.UUID(scan_id)
+
+    async with db_pool.acquire() as conn:
+        for finding in findings:
+            fingerprint = generate_finding_fingerprint(finding)
+            evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+            ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
+
+            existing = await conn.fetchrow("""
+                SELECT id, status, resurfaced_count
+                FROM findings
+                WHERE ai_target_id = $1 AND fingerprint = $2
+            """, ai_target_uuid, fingerprint)
+
+            common_values = (
+                scan_uuid,
+                finding.get('title'),
+                finding.get('description'),
+                finding.get('severity', 'info'),
+                finding.get('cvss_score'),
+                finding.get('tool') or 'ai_gate',
+                finding.get('cwe'),
+                finding.get('cwe_name'),
+                finding.get('owasp'),
+                finding.get('url'),
+                evidence_json,
+                finding.get('ai_verdict'),
+                finding.get('ai_confidence'),
+                finding.get('ai_rationale'),
+                ai_recommendations_json,
+                finding.get('ai_classification_source'),
+            )
+
+            if existing:
+                if existing['status'] == 'resolved':
+                    await conn.execute("""
+                        UPDATE findings SET
+                            status = 'active',
+                            last_seen_at = NOW(),
+                            resurfaced_count = $1,
+                            scan_id = $2,
+                            title = $3,
+                            description = $4,
+                            severity = $5,
+                            cvss_score = $6,
+                            tool = $7,
+                            cwe = $8,
+                            cwe_name = $9,
+                            owasp = $10,
+                            url = $11,
+                            evidence = $12,
+                            ai_verdict = $13,
+                            ai_confidence = $14,
+                            ai_rationale = $15,
+                            ai_recommendations = $16,
+                            ai_classification_source = $17,
+                            source = 'ai_gate',
+                            updated_at = NOW()
+                        WHERE id = $18
+                    """, existing['resurfaced_count'] + 1, *common_values, existing['id'])
+                else:
+                    await conn.execute("""
+                        UPDATE findings SET
+                            last_seen_at = NOW(),
+                            scan_id = $1,
+                            title = $2,
+                            description = $3,
+                            severity = $4,
+                            cvss_score = $5,
+                            tool = $6,
+                            cwe = $7,
+                            cwe_name = $8,
+                            owasp = $9,
+                            url = $10,
+                            evidence = $11,
+                            ai_verdict = $12,
+                            ai_confidence = $13,
+                            ai_rationale = $14,
+                            ai_recommendations = $15,
+                            ai_classification_source = $16,
+                            source = 'ai_gate',
+                            updated_at = NOW()
+                        WHERE id = $17
+                    """, *common_values, existing['id'])
+                saved += 1
+                continue
+
+            result = await conn.fetchval("""
+                INSERT INTO findings (
+                    scan_id, target_id, ai_target_id, fingerprint, title, description,
+                    severity, cvss_score, tool, cwe, cwe_name, owasp,
+                    url, evidence, ai_verdict, ai_confidence, ai_rationale,
+                    ai_recommendations, ai_classification_source, source
+                ) VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'ai_gate')
+                RETURNING id
+            """,
+                scan_uuid,
+                ai_target_uuid,
+                fingerprint,
+                finding.get('title'),
+                finding.get('description'),
+                finding.get('severity', 'info'),
+                finding.get('cvss_score'),
+                finding.get('tool') or 'ai_gate',
+                finding.get('cwe'),
+                finding.get('cwe_name'),
+                finding.get('owasp'),
+                finding.get('url'),
+                evidence_json,
+                finding.get('ai_verdict'),
+                finding.get('ai_confidence'),
+                finding.get('ai_rationale'),
+                ai_recommendations_json,
+                finding.get('ai_classification_source'),
+            )
+            if result:
+                saved += 1
 
     return saved
 
@@ -2488,16 +2627,18 @@ async def process_scan_job(job_data: dict):
 
     # Update database
     target_id = None
+    ai_target_id = None
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1
             WHERE id = $2
         """, now, uuid.UUID(scan_id))
 
-        # Get target_id
-        row = await conn.fetchrow("SELECT target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
+        # Get target references
+        row = await conn.fetchrow("SELECT target_id, ai_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
         if row:
-            target_id = str(row['target_id'])
+            target_id = str(row['target_id']) if row['target_id'] else None
+            ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
 
     # Initial progress
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)
@@ -2591,6 +2732,14 @@ async def process_scan_job(job_data: dict):
                     WHERE id = $7
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
+                if ai_target_id:
+                    await conn.execute("""
+                        UPDATE ai_targets SET
+                            last_scan_id = $1,
+                            last_scanned_at = $2,
+                            updated_at = NOW()
+                        WHERE id = $3
+                    """, uuid.UUID(scan_id), completed_at, uuid.UUID(ai_target_id))
 
         # Save findings (pure DB persistence)
         saved_count = 0
@@ -2599,6 +2748,11 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_findings(scan_id, target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
+        elif ai_target_id and findings:
+            try:
+                saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
+            except Exception as e:
+                print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
 
         # Auto-retest severity-gated findings (separate from persistence)
         auto_retests = {"queued": 0, "skipped": 0}

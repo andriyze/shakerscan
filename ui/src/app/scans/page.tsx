@@ -37,6 +37,27 @@ function isAuthenticatedScan(scan: Scan): boolean {
   return AUTH_OPTION_KEYS.some((key) => hasConfiguredValue(optionMap[key]))
 }
 
+function formatScanTypeLabel(scan: Scan): string {
+  if (scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')) {
+    return 'AI Gate'
+  }
+  return scan.scan_type
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function formatAITargetType(value?: string | null): string | null {
+  if (!value) return null
+  const labels: Record<string, string> = {
+    api_chat: 'API chat',
+    mcp_trace: 'MCP trace',
+    rag_knowledge: 'RAG knowledge'
+  }
+  return labels[value] || value.replace(/_/g, ' ')
+}
+
 interface ScansFilters {
   [key: string]: string | number | undefined
   status?: string
@@ -298,7 +319,7 @@ function ScansContent() {
       )}
 
       {/* Scans Table */}
-      <div className="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
+      <div className="bg-gray-900 rounded-lg border border-gray-800">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
@@ -308,24 +329,30 @@ function ScansContent() {
             {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
           </div>
         ) : (
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] 2xl:min-w-full">
             <thead className="bg-gray-800/50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Target</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
+                <th className="hidden 2xl:table-cell px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Findings</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Duration</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Date</th>
+                <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Duration</th>
+                <th className="hidden 2xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Date</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
-              {scans.map((scan) => (
+              {scans.map((scan) => {
+                const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
+                const authenticated = isAuthenticatedScan(scan)
+                const aiTargetType = formatAITargetType(scan.ai_target_type)
+                const scanTypeLabel = formatScanTypeLabel(scan)
+                return (
                 <tr key={scan.id} className="hover:bg-gray-800/50 transition-colors">
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 max-w-[20rem]">
                     <Link
                       href={buildUrl(`/scans/${scan.id}`, {
                         return_status: statusFilter,
@@ -333,16 +360,24 @@ function ScansContent() {
                         return_search: searchQuery,
                         return_page: page > 1 ? page : undefined
                       })}
-                      className="text-sm text-blue-400 hover:text-blue-300"
+                      className="block truncate text-sm text-blue-400 hover:text-blue-300"
+                      title={scan.target_url}
                     >
                       {scan.target_url}
                     </Link>
                   </td>
-                  <td className="px-4 py-3">
-                    <span className="text-sm text-gray-400 capitalize">{scan.scan_type}</span>
+                  <td className="hidden xl:table-cell px-4 py-3">
+                    <div className="min-w-0">
+                      <span className="text-sm text-gray-300">{scanTypeLabel}</span>
+                      {(aiTargetType || authenticated) && (
+                        <div className="mt-0.5 truncate text-xs text-gray-500">
+                          {aiTargetType || 'Authenticated'}
+                        </div>
+                      )}
+                    </div>
                   </td>
-                  <td className="px-4 py-3 text-center">
-                    {isAuthenticatedScan(scan) ? (
+                  <td className="hidden 2xl:table-cell px-4 py-3 text-center">
+                    {authenticated ? (
                       <span
                         className="inline-flex items-center justify-center text-green-400"
                         title="Authenticated scan"
@@ -394,7 +429,7 @@ function ScansContent() {
                       {getDurationLabel(scan)}
                     </span>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="hidden 2xl:table-cell px-4 py-3">
                     <span className="text-sm text-gray-500">{formatDate(scan.created_at)}</span>
                   </td>
                   <td className="px-4 py-3">
@@ -406,6 +441,13 @@ function ScansContent() {
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                       </button>
+                    ) : isAIScan ? (
+                      <Link
+                        href="/settings/ai-gate"
+                        className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                      >
+                        AI Gate
+                      </Link>
                     ) : (
                       <div className={`relative ${openScanMenu === scan.id ? 'z-[100]' : ''}`} ref={openScanMenu === scan.id ? scanMenuRef : null}>
                         <button
@@ -442,9 +484,10 @@ function ScansContent() {
                     )}
                   </td>
                 </tr>
-              ))}
+              )})}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

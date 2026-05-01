@@ -1,4 +1,6 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
+import Link from 'next/link'
+import { Bot } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -11,6 +13,22 @@ export default function SettingsPage() {
           icons for quick explanations.
         </p>
       </div>
+
+      <Link
+        href="/settings/ai-gate"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600/20 text-blue-300">
+            <Bot className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">AI Gate</h2>
+            <p className="mt-1 text-sm text-gray-400">Chat, RAG, agent trace, and MCP probe targets</p>
+          </div>
+        </div>
+        <span className="text-sm text-blue-400">Open</span>
+      </Link>
 
       <AISettingsPanel />
     </div>

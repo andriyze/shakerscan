@@ -1,0 +1,64 @@
+# AI Gate
+
+Create/list AI Gate targets and queue AI safety scans.
+
+**Usage**: `/ai-gate [list|scan|create] [args]`
+
+## Instructions
+
+1. Check if scanner is running:
+   ```bash
+   curl -s http://localhost:8080/health
+   ```
+
+2. If the user asks to list targets:
+   ```bash
+   curl http://localhost:8080/ai/targets
+   ```
+
+3. If the user asks to create a target, gather or infer:
+   - `name`
+   - `target_type`: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, or `widget`
+   - `endpoint_url`
+   - auth: none, bearer token, API key header, custom header, basic auth, cookie, multi-header, or query param
+   - request template containing `{{prompt}}`
+   - response path, usually `$.answer`
+
+   Example:
+   ```bash
+   curl -X POST http://localhost:8080/ai/targets \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "Support bot",
+       "target_type": "api_chat",
+       "endpoint_url": "https://example.com/api/chat",
+       "method": "POST",
+       "headers_template": {"Content-Type": "application/json"},
+       "request_template": {"message": "{{prompt}}", "session_id": "{{session_id}}"},
+       "response_path": "$.answer",
+       "streaming_mode": "json",
+       "credential": {"auth_kind": "none"}
+     }'
+   ```
+
+4. If the user asks to scan an AI target:
+   ```bash
+   curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+     -H "Content-Type: application/json" \
+     -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
+   ```
+
+   Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
+
+5. After submitting, report:
+   - scan ID
+   - UI link: `http://localhost:3000/scans/{scan_id}`
+   - AI Gate page: `http://localhost:3000/settings/ai-gate`
+
+   Then stop. Do not poll unless explicitly asked.
+
+6. To review results later:
+   ```bash
+   curl "http://localhost:8080/findings?source_type=ai&status=active"
+   curl http://localhost:8080/ai/scans/{scan_id}/transcript
+   ```
