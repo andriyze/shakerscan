@@ -65,6 +65,38 @@ function sortBySeverity(findings: any[]): any[] {
   })
 }
 
+function asRecord(value: any): Record<string, any> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value
+  }
+  return {}
+}
+
+function parseEvidenceRecord(evidence: any): Record<string, any> {
+  if (!evidence) return {}
+  if (typeof evidence === 'string') {
+    try {
+      return asRecord(JSON.parse(evidence))
+    } catch {
+      return {}
+    }
+  }
+  return asRecord(evidence)
+}
+
+function formatConfidence(value: any): string | null {
+  if (typeof value !== 'number' || Number.isNaN(value)) return null
+  return value > 1 ? `${Math.round(value)}%` : `${Math.round(value * 100)}%`
+}
+
+function compactJson(value: any): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 function getGradeColor(grade?: string) {
   switch (grade) {
     case 'A': case 'A+': return 'text-green-500'
@@ -182,6 +214,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const aiGateTranscripts = Array.isArray(ai_gate?.transcripts) ? ai_gate.transcripts : []
   const aiGateErrors = Array.isArray(ai_gate?.errors) ? ai_gate.errors : []
   const aiGateDecisionText = String(aiGateDecision?.decision || '').toLowerCase()
+  const aiGateExecutionPlan = asRecord(ai_gate?.execution_plan)
+  const aiGateSemanticJudge = asRecord(aiGateExecutionPlan.semantic_judge)
+  const semanticReviewedIds = new Set(
+    [
+      ...(Array.isArray(aiGateExecutionPlan.semantic_reviewed) ? aiGateExecutionPlan.semantic_reviewed : []),
+      ...(Array.isArray(aiGateSemanticJudge.reviewed_probe_ids) ? aiGateSemanticJudge.reviewed_probe_ids : []),
+    ].map(String)
+  )
   const aiGateDecisionClass =
     aiGateDecisionText === 'block'
       ? 'bg-red-900 text-red-200'
@@ -193,6 +233,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const scanTypeLabel = isAIScan ? 'AI Gate' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const aiScanProfile = scan.options?.ai_scan_profile || ai_gate?.scan_profile || 'AI Gate'
+  const aiGateFindingsByProbe = findings.reduce<Record<string, any[]>>((groups, finding) => {
+    const evidence = parseEvidenceRecord(finding.evidence)
+    const sourceFindingId = String(finding.source_finding_id || finding.id || '')
+    const probeId = String(evidence.probe_id || sourceFindingId.split(':')[0] || '').trim()
+    if (!probeId) return groups
+    const enrichedFinding = { ...finding, evidence_record: evidence }
+    groups[probeId] = [...(groups[probeId] || []), enrichedFinding]
+    return groups
+  }, {})
 
   const [expandedAI, setExpandedAI] = useState<Set<string>>(new Set())
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set(['critical', 'high', 'medium', 'low', 'info']))
@@ -396,28 +445,191 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
           {aiGateTranscripts.length > 0 && (
             <div>
-              <h3 className="mb-3 text-sm font-semibold text-gray-300">Probe Transcripts</h3>
-              <div className="space-y-3">
-                {aiGateTranscripts.slice(0, 5).map((transcript: any, idx: number) => (
-                  <div key={`${transcript.probe_id || 'probe'}-${idx}`} className="rounded-lg border border-gray-700 bg-gray-900 p-4">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate font-mono text-sm text-blue-300">{transcript.probe_id || `probe-${idx + 1}`}</div>
-                        <div className="text-xs text-gray-500">{transcript.probe_family || transcript.strategy_id || 'probe'}</div>
-                      </div>
-                      <div className="flex flex-wrap gap-2 text-xs">
-                        {transcript.status_code && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">HTTP {transcript.status_code}</span>}
-                        {transcript.stop_reason && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{transcript.stop_reason}</span>}
-                        {transcript.turn_count !== undefined && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{transcript.turn_count} turn{transcript.turn_count === 1 ? '' : 's'}</span>}
-                      </div>
-                    </div>
-                    {transcript.response_excerpt && (
-                      <p className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-sm text-gray-300">
-                        {transcript.response_excerpt}
-                      </p>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-300">Probe Conversations</h3>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Review each adversarial prompt, target response, detector hit, and judge result.
+                  </p>
+                </div>
+                {Object.keys(aiGateSemanticJudge).length > 0 && (
+                  <div className="flex flex-wrap gap-2 text-xs text-gray-300">
+                    <span className="rounded bg-gray-800 px-2 py-1">
+                      semantic judge: {aiGateSemanticJudge.enabled ? 'on' : 'off'}
+                    </span>
+                    {aiGateSemanticJudge.provider_configured !== undefined && (
+                      <span className="rounded bg-gray-800 px-2 py-1">
+                        provider: {aiGateSemanticJudge.provider_configured ? 'configured' : 'not configured'}
+                      </span>
+                    )}
+                    {aiGateSemanticJudge.reviewed_count !== undefined && (
+                      <span className="rounded bg-gray-800 px-2 py-1">
+                        reviewed: {aiGateSemanticJudge.reviewed_count}
+                      </span>
                     )}
                   </div>
-                ))}
+                )}
+              </div>
+              <div className="space-y-3">
+                {aiGateTranscripts.map((transcript: any, idx: number) => {
+                  const probeId = String(transcript.probe_id || `probe-${idx + 1}`)
+                  const transcriptKey = `${probeId}-${idx}`
+                  const turns = Array.isArray(transcript.turns) && transcript.turns.length > 0
+                    ? transcript.turns
+                    : [transcript]
+                  const detectorHits = turns.flatMap((turn: any) => Array.isArray(turn?.detector_hits) ? turn.detector_hits : [])
+                  const probeFindings = aiGateFindingsByProbe[probeId] || []
+                  const isExpanded = expandedAI.has(transcriptKey)
+                  const wasSemanticallyReviewed = semanticReviewedIds.has(probeId)
+
+                  return (
+                    <div key={transcriptKey} className="rounded-lg border border-gray-700 bg-gray-900 p-4">
+                      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate font-mono text-sm text-blue-300">{probeId}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-xs text-gray-500">
+                            <span>{transcript.probe_family || transcript.strategy_id || 'probe'}</span>
+                            {transcript.technique && <span>{transcript.technique}</span>}
+                            {transcript.status_code && <span>HTTP {transcript.status_code}</span>}
+                            {transcript.stop_reason && <span>{transcript.stop_reason}</span>}
+                            {transcript.turn_count !== undefined && <span>{transcript.turn_count} turn{transcript.turn_count === 1 ? '' : 's'}</span>}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          {probeFindings.length > 0 && (
+                            <span className="rounded bg-orange-900/40 px-2 py-1 text-orange-200">
+                              {probeFindings.length} finding{probeFindings.length === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {detectorHits.length > 0 && (
+                            <span className="rounded bg-red-900/40 px-2 py-1 text-red-200">
+                              {detectorHits.length} detector hit{detectorHits.length === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {wasSemanticallyReviewed && (
+                            <span className="rounded bg-purple-900/40 px-2 py-1 text-purple-200">semantic reviewed</span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => toggleAIDetails(transcriptKey)}
+                            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800"
+                          >
+                            {isExpanded ? 'Collapse' : 'Open chat'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {(transcript.expected_safe_behavior || transcript.expected_attack_success) && (
+                        <div className="mb-3 grid gap-2 md:grid-cols-2">
+                          {transcript.expected_safe_behavior && (
+                            <div className="rounded border border-gray-800 bg-black/20 p-3">
+                              <div className="mb-1 text-xs font-medium text-green-300">Expected safe behavior</div>
+                              <p className="text-xs text-gray-400">{transcript.expected_safe_behavior}</p>
+                            </div>
+                          )}
+                          {transcript.expected_attack_success && (
+                            <div className="rounded border border-gray-800 bg-black/20 p-3">
+                              <div className="mb-1 text-xs font-medium text-red-300">Attack success condition</div>
+                              <p className="text-xs text-gray-400">{transcript.expected_attack_success}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="space-y-3">
+                        {(isExpanded ? turns : turns.slice(0, 1)).map((turn: any, turnIdx: number) => (
+                          <div key={`${transcriptKey}-turn-${turnIdx}`} className="space-y-2">
+                            {turn.prompt && (
+                              <div className="flex justify-start">
+                                <div className="max-w-[92%] rounded-lg border border-blue-500/30 bg-blue-950/30 p-3">
+                                  <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-blue-300">
+                                    Probe {turn.turn_index ? `turn ${turn.turn_index}` : ''}
+                                  </div>
+                                  <p className="whitespace-pre-wrap break-words text-sm text-blue-50">{turn.prompt}</p>
+                                </div>
+                              </div>
+                            )}
+                            {turn.response_excerpt && (
+                              <div className="flex justify-end">
+                                <div className="max-w-[92%] rounded-lg border border-gray-700 bg-gray-800 p-3">
+                                  <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                                    <span>Answer</span>
+                                    {turn.latency_ms !== undefined && <span>{Math.round(Number(turn.latency_ms))} ms</span>}
+                                    {turn.refusal_detected && <span className="text-green-300">refusal detected</span>}
+                                  </div>
+                                  <p className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm text-gray-100">{turn.response_excerpt}</p>
+                                </div>
+                              </div>
+                            )}
+                            {Array.isArray(turn.detector_hits) && turn.detector_hits.length > 0 && (
+                              <div className="ml-auto max-w-[92%] rounded-lg border border-red-500/30 bg-red-950/20 p-3">
+                                <div className="mb-2 text-xs font-medium text-red-300">Detector hits</div>
+                                <div className="space-y-2">
+                                  {turn.detector_hits.map((hit: any, hitIdx: number) => (
+                                    <div key={`${transcriptKey}-hit-${turnIdx}-${hitIdx}`} className="text-xs text-red-100">
+                                      <span className={`mr-2 rounded px-1.5 py-0.5 ${getSeverityPill(hit.severity)}`}>
+                                        {hit.severity || 'info'}
+                                      </span>
+                                      <span className="font-medium">{hit.title || hit.type || hit.id}</span>
+                                      {hit.judge_layer && <span className="text-red-200/70"> · {hit.judge_layer}</span>}
+                                      {Array.isArray(hit.matched_markers) && hit.matched_markers.length > 0 && (
+                                        <div className="mt-1 text-red-200/70">markers: {hit.matched_markers.join(', ')}</div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {!isExpanded && turns.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => toggleAIDetails(transcriptKey)}
+                          className="mt-3 text-xs text-blue-300 hover:text-blue-200"
+                        >
+                          Show {turns.length - 1} more turn{turns.length - 1 === 1 ? '' : 's'}
+                        </button>
+                      )}
+
+                      {isExpanded && probeFindings.length > 0 && (
+                        <div className="mt-4 rounded-lg border border-gray-700 bg-black/20 p-3">
+                          <h4 className="mb-2 text-xs font-semibold text-gray-300">Evaluations</h4>
+                          <div className="space-y-3">
+                            {probeFindings.map((finding: any, findingIdx: number) => {
+                              const evidenceRecord = asRecord(finding.evidence_record)
+                              const semanticResult = asRecord(evidenceRecord.semantic_result)
+                              const confidence = formatConfidence(finding.confidence)
+                              return (
+                                <div key={`${transcriptKey}-finding-${findingIdx}`} className="rounded border border-gray-800 bg-gray-950 p-3">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className={`rounded px-2 py-0.5 text-xs font-medium ${getSeverityPill(finding.severity)}`}>
+                                      {finding.severity || 'info'}
+                                    </span>
+                                    <span className="text-sm font-medium text-white">{finding.title}</span>
+                                    {confidence && <span className="text-xs text-gray-400">{confidence} confidence</span>}
+                                    {evidenceRecord.judge_layer && <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{evidenceRecord.judge_layer}</span>}
+                                  </div>
+                                  {finding.description && (
+                                    <p className="mt-2 text-xs text-gray-400">{finding.description}</p>
+                                  )}
+                                  {Object.keys(semanticResult).length > 0 && (
+                                    <div className="mt-2 rounded bg-purple-950/20 p-2 text-xs text-purple-100">
+                                      <div className="mb-1 font-medium">Semantic judge</div>
+                                      <pre className="whitespace-pre-wrap break-words">{compactJson(semanticResult)}</pre>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
