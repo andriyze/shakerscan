@@ -30,7 +30,7 @@ cd shakerscan
 ./scanner.sh start
 ```
 
-That starts the full stack and pulls prebuilt Docker images by default.
+That starts the full stack and pulls the `latest` prebuilt Docker images by default.
 
 - **Web UI**: http://localhost:3000
 - **API**: http://localhost:8080
@@ -220,7 +220,7 @@ Options:
   -y, --yes          Auto-confirm dependency installation prompts
   --local            Force local Docker build instead of prebuilt images
   --prebuilt         Force prebuilt Docker Hub images (default)
-  --image-tag TAG    Override Docker image tag (default: VERSION file)
+  --image-tag TAG    Override Docker image tag (default: latest)
 ```
 
 ### Authenticated Scan Examples

@@ -16,6 +16,7 @@ NC='\033[0m' # No Color
 
 # Default workers
 WORKERS=${WORKERS:-5}
+DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
 ASSUME_YES=0
 FOLLOW=""
 ARGS=()
@@ -470,7 +471,7 @@ set_build_env() {
     local image_tag
     local_commit=$(get_build_version)
     release_version=$(get_release_version)
-    image_tag="${SCANNER_IMAGE_TAG:-$release_version}"
+    image_tag="${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
 
     export SCANNER_RELEASE_VERSION="$release_version"
     export BUILD_GIT_COMMIT="$local_commit"
@@ -508,7 +509,7 @@ configure_runtime_mode() {
     export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
     export SCANNER_RELEASE_VERSION="$(get_release_version)"
-    export SCANNER_IMAGE_TAG="${SCANNER_IMAGE_TAG:-$SCANNER_RELEASE_VERSION}"
+    export SCANNER_IMAGE_TAG="${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
 
     case "$command" in
         build|rebuild)
@@ -562,13 +563,13 @@ print_help() {
     echo "  -y, --yes          Auto-confirm dependency installation"
     echo "  --local            Force local Docker build instead of prebuilt images"
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
-    echo "  --image-tag TAG    Override Docker image tag (default: VERSION file)"
+    echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo ""
     echo "Examples:"
-    echo "  ./scanner.sh start                    # Start with prebuilt images"
+    echo "  ./scanner.sh start                    # Start with latest prebuilt images"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
-    echo "  ./scanner.sh start --image-tag 0.2.0  # Use a specific published tag"
+    echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
     echo "  ./scanner.sh install-deps             # Install dependencies"

@@ -3,17 +3,17 @@
 
 services:
   api:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.3.1}
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     build: null
 
   worker:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.3.1}
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     build: null
 
   gungnir-worker:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-0.3.1}
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     build: null
 
   ui:
-    image: ${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}:${SCANNER_IMAGE_TAG:-0.3.1}
+    image: ${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}:${SCANNER_IMAGE_TAG:-latest}
     build: null
