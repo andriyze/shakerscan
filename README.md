@@ -20,6 +20,8 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 **[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
 
+**[Demo Video](https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e)** - Embedded walkthrough video of ShakerScan in action.
+
 **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
 
 ## Product Tour
