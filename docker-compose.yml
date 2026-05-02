@@ -45,8 +45,8 @@ services:
   # ============================================================
   api:
     build:
-      context: ./scanner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: scanner/Dockerfile
     ports:
       - "8080:8080"
     environment:
@@ -105,8 +105,8 @@ services:
   worker:
     init: true  # Use tini as PID 1 to reap zombie processes
     build:
-      context: ./scanner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: scanner/Dockerfile
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379
@@ -169,8 +169,8 @@ services:
   # ============================================================
   gungnir-worker:
     build:
-      context: ./scanner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: scanner/Dockerfile
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
