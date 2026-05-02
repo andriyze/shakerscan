@@ -1,5 +1,5 @@
 #!/bin/bash
-# Entrypoint script for DAST Scanner
+# Entrypoint script for ShakerScan
 # Configure DNS resolution
 configure_dns() {
 echo "Configuring DNS resolvers..."

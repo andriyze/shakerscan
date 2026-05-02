@@ -1,4 +1,4 @@
-# Shaker Scan prebuilt image overrides.
+# ShakerScan prebuilt image overrides.
 # Loaded by scanner.sh when running in prebuilt mode (default for start/restart).
 
 services:

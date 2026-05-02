@@ -1,4 +1,4 @@
-# CLAUDE.md - Shaker Scan
+# CLAUDE.md - ShakerScan
 
 This is an open-source Dynamic Application Security Testing (DAST) scanner. Users interact with it via Claude Code to scan websites for vulnerabilities.
 

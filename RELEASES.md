@@ -1,4 +1,4 @@
-# Shaker Scan Release Mapping
+# ShakerScan Release Mapping
 
 This file tracks which git commit produced each published Docker image tag.
 

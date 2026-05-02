@@ -1,4 +1,4 @@
-# DAST Scanner - Open Source Edition
+# ShakerScan - Open Source Edition
 # Multi-stage build for comprehensive security scanning
 
 # --- Stage 1: Build Go tools ---

@@ -1,1 +1,1 @@
-# Tests package for Shaker Scan
+# Tests package for ShakerScan

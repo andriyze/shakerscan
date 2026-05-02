@@ -1,4 +1,4 @@
--- DAST Scanner - PostgreSQL Schema
+-- ShakerScan - PostgreSQL Schema
 -- Open Source Edition (no auth, single-user)
 
 -- ============================================================

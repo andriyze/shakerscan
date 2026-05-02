@@ -1,4 +1,4 @@
-# DAST Scanner Python Dependencies
+# ShakerScan Python Dependencies
 # Core API/Worker dependencies
 fastapi>=0.109.0
 uvicorn>=0.27.0

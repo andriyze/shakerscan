@@ -1,7 +1,7 @@
 # Smart Scan Policy
 
 ## Purpose
-Define how Shaker Scan budgets time and attack effort in `smart` mode, while keeping scans safe, explainable, and commercially defensible.
+Define how ShakerScan budgets time and attack effort in `smart` mode, while keeping scans safe, explainable, and commercially defensible.
 
 ## Scope
 - Applies to automated `smart` scans and quality gates for scanner releases.

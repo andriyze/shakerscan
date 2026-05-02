@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Shaker Scan API - Open Source Edition
+ShakerScan API - Open Source Edition
 FastAPI server with PostgreSQL persistence and Redis queue.
 """
 
@@ -1047,7 +1047,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Shaker Scan API",
+    title="ShakerScan API",
     description="Open Source Dynamic Application Security Testing Scanner",
     version="1.0.0",
     lifespan=lifespan
@@ -1687,7 +1687,7 @@ def _build_ai_worker_options(
 async def root():
     """API info."""
     return {
-        "name": "Shaker Scan API",
+        "name": "ShakerScan API",
         "version": "1.0.0",
         "docs": "/docs",
         "endpoints": {

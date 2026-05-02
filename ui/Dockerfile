@@ -1,4 +1,4 @@
-# DAST Scanner UI
+# ShakerScan UI
 FROM node:20-alpine AS builder
 
 WORKDIR /app

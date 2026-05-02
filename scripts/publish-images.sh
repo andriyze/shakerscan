@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and optionally push Shaker Scan Docker Hub images with OCI labels.
+# Build and optionally push ShakerScan Docker Hub images with OCI labels.
 
 set -euo pipefail
 
@@ -187,7 +187,7 @@ COMMON_LABELS=(
     --label "org.opencontainers.image.url=$IMAGE_URL"
     --label "org.opencontainers.image.documentation=$SOURCE_URL#readme"
     --label "org.opencontainers.image.licenses=MIT"
-    --label "org.opencontainers.image.vendor=Shaker Scan"
+    --label "org.opencontainers.image.vendor=ShakerScan"
 )
 
 echo "Publishing metadata:"
@@ -210,7 +210,7 @@ docker buildx build \
     "${BUILD_ARGS[@]}" \
     "${OUTPUT_ARGS[@]}" \
     "${COMMON_LABELS[@]}" \
-    --label "org.opencontainers.image.title=Shaker Scan Scanner" \
+    --label "org.opencontainers.image.title=ShakerScan Scanner" \
     --label "org.opencontainers.image.description=Open-source DAST scanner API, worker, and security tooling image" \
     "${SCANNER_TAGS[@]}" \
     -f scanner/Dockerfile \
@@ -220,8 +220,8 @@ docker buildx build \
     "${BUILD_ARGS[@]}" \
     "${OUTPUT_ARGS[@]}" \
     "${COMMON_LABELS[@]}" \
-    --label "org.opencontainers.image.title=Shaker Scan UI" \
-    --label "org.opencontainers.image.description=Open-source Shaker Scan web dashboard" \
+    --label "org.opencontainers.image.title=ShakerScan UI" \
+    --label "org.opencontainers.image.description=Open-source ShakerScan web dashboard" \
     --build-arg "NEXT_PUBLIC_APP_VERSION=$TAG" \
     "${UI_TAGS[@]}" \
     -f ui/Dockerfile \

@@ -3,7 +3,7 @@ name: ShakerScan
 description: DAST security scanner. USE WHEN scan, security, vulnerability, XSS, SQLi, findings, subdomain discovery, pentest.
 ---
 
-# Shaker Scan Skill
+# ShakerScan Skill
 
 You have access to a local DAST (Dynamic Application Security Testing) scanner running at `http://localhost:8080`.
 

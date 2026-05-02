@@ -3,7 +3,7 @@ import './globals.css'
 import Sidebar from '@/components/Sidebar'
 
 export const metadata: Metadata = {
-  title: 'Shaker Scan',
+  title: 'ShakerScan',
   description: 'Open Source Dynamic Application Security Testing Scanner',
   icons: {
     icon: '/favicon.svg',

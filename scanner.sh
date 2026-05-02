@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shaker Scan - CLI Management Tool
+# ShakerScan - CLI Management Tool
 # Usage: ./scanner.sh [command] [options]
 
 set -e
@@ -527,7 +527,7 @@ configure_runtime_mode() {
 print_banner() {
     echo -e "${BLUE}"
     echo "╔══════════════════════════════════════════╗"
-    echo "║     Shaker Scan - Open Source Edition   ║"
+    echo "║     ShakerScan - Open Source Edition   ║"
     echo "╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -581,7 +581,7 @@ print_help() {
 
 start_services() {
     set_build_env
-    echo -e "${GREEN}Starting Shaker Scan with $WORKERS workers...${NC}"
+    echo -e "${GREEN}Starting ShakerScan with $WORKERS workers...${NC}"
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"
         echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
@@ -600,7 +600,7 @@ start_services() {
 }
 
 stop_services() {
-    echo -e "${YELLOW}Stopping Shaker Scan...${NC}"
+    echo -e "${YELLOW}Stopping ShakerScan...${NC}"
     compose down
     echo -e "${GREEN}Services stopped${NC}"
 }

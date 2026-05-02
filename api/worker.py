@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Shaker Scan Worker - Open Source Edition
+ShakerScan Worker - Open Source Edition
 Redis-based job worker with PostgreSQL persistence.
 """
 

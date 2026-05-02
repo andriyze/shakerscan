@@ -1,6 +1,6 @@
-# Shaker Scan - Visual Walkthrough
+# ShakerScan - Visual Walkthrough
 
-This guide shows how to use Shaker Scan via Claude Code (terminal) and the Web UI.
+This guide shows how to use ShakerScan via Claude Code (terminal) and the Web UI.
 
 ## Terminal Experience (Claude Code)
 
@@ -8,7 +8,7 @@ This guide shows how to use Shaker Scan via Claude Code (terminal) and the Web U
 
 Just ask Claude to start the scanner - it handles the Docker setup:
 
-![Starting Shaker Scan](pic/start.png)
+![Starting ShakerScan](pic/start.png)
 
 ### 2. Scanner Ready
 
@@ -62,7 +62,7 @@ Browse all findings with severity filters and status management:
 
 ```bash
 # Start scanner
-"start shaker scan"
+"start ShakerScan"
 
 # Run scans
 "scan example.com"

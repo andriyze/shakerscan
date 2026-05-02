@@ -1,4 +1,4 @@
-# Shaker Scan - Open Source Edition
+# ShakerScan - Open Source Edition
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
@@ -46,7 +46,7 @@ To build locally instead of using prebuilt images:
 Open this repo in your preferred AI coding agent and ask in plain language:
 
 ```
-"Start Shaker Scan"
+"Start ShakerScan"
 "Run a quick scan on https://example.com"
 "Show active high and critical findings"
 "Run AI Gate smoke tests against my chatbot API"

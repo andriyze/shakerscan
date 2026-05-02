@@ -1,6 +1,6 @@
-# Shaker Scan Skills for Claude Code
+# ShakerScan Skills for Claude Code
 
-This directory contains skills files for integrating Shaker Scan with Claude Code.
+This directory contains skills files for integrating ShakerScan with Claude Code.
 
 ## Setup
 

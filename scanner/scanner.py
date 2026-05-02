@@ -9788,7 +9788,7 @@ async def cli_main():
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse
 
-        app = FastAPI(title="Site Security Scanner", version="2.0 (playwright)")
+        app = FastAPI(title="ShakerScan", version="2.0 (playwright)")
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

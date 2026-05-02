@@ -1,4 +1,4 @@
-// Shared constants for Shaker Scan UI
+// Shared constants for ShakerScan UI
 
 export type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
 

@@ -1,4 +1,4 @@
-# AGENTS.md - Shaker Scan
+# AGENTS.md - ShakerScan
 
 This is an open-source Dynamic Application Security Testing (DAST) scanner. Users interact with it via AI coding agents to scan websites for vulnerabilities.
 
