@@ -2,6 +2,26 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
+## Contents
+
+- [Quick Start](#quick-start)
+- [Product Tour](#product-tour)
+- [Features](#features)
+- [Scan Types](#scan-types)
+- [CLI Reference](#cli-reference)
+- [API Quick Reference](#api-quick-reference)
+- [Claude Code Integration](#claude-code-integration)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Integrated Tools](#integrated-tools)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
+**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
+
+**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
+
 ## Product Tour
 
 ShakerScan gives local teams a full security scanning workspace: DAST scans, AI Gate probes, targets, schedules, findings triage, worker scaling, and detailed evidence views. The screenshots below use a `shakerscan.com` demo dataset so the main workflows are visible with real-looking scan and AI Gate results.
@@ -114,25 +134,6 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 "Run AI Gate smoke tests against my chatbot API"
 "Scale workers to 10"
 ```
-
-## Contents
-
-- [Product Tour](#product-tour)
-- [Features](#features)
-- [Scan Types](#scan-types)
-- [CLI Reference](#cli-reference)
-- [API Quick Reference](#api-quick-reference)
-- [Claude Code Integration](#claude-code-integration)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Integrated Tools](#integrated-tools)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
-**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
-
-**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
 
 ## Features
 
