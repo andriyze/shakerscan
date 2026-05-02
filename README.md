@@ -1,28 +1,82 @@
-# ShakerScan - Open Source Edition
+# ShakerScan
 
-A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
+Open-source Dynamic Application Security Testing (DAST) for web applications, with a local web UI, persistent storage, worker-based scanning, and optional AI Gate checks for chat, RAG, agent, and MCP surfaces.
 
 ## Contents
 
 - [Quick Start](#quick-start)
+- [Resources](#resources)
 - [Product Tour](#product-tour)
 - [Features](#features)
 - [Scan Types](#scan-types)
 - [CLI Reference](#cli-reference)
 - [API Quick Reference](#api-quick-reference)
-- [Claude Code Integration](#claude-code-integration)
+- [AI Agent Integration](#ai-agent-integration)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Integrated Tools](#integrated-tools)
 - [Troubleshooting](#troubleshooting)
+- [Prerequisites](#prerequisites)
 - [Contributing](#contributing)
+- [Acknowledgments](#acknowledgments)
 - [License](#license)
+- [Legal Disclaimer](#legal-disclaimer)
 
-**[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
+## Quick Start
 
-**[Demo Video](https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e)** - Embedded walkthrough video of ShakerScan in action.
+```bash
+git clone https://github.com/andriyze/shakerscan.git
+cd shakerscan
+./scanner.sh start
+```
 
-**[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
+That starts the full stack and pulls prebuilt Docker images by default.
+
+- **Web UI**: http://localhost:3000
+- **API**: http://localhost:8080
+
+If your machine is missing prerequisites:
+
+```bash
+./scanner.sh install-deps
+./scanner.sh start
+```
+
+To build locally instead of using prebuilt images:
+
+```bash
+./scanner.sh start --local
+```
+
+### Run a Scan
+
+```bash
+./scanner.sh scan https://example.com        # Quick scan
+./scanner.sh scan-full https://example.com   # Full assessment with active testing
+./scanner.sh scan-smart https://example.com  # Adaptive smart scan
+./scanner.sh status                          # Check status
+./scanner.sh logs worker -f                  # Follow worker logs
+./scanner.sh stop                            # Stop all services
+```
+
+> **Safety**: `scan-full` and `scan-smart` can send active probes. Only scan targets you own or have explicit permission to test.
+
+### Use with AI Agents
+
+Open this repo in Claude Code, Codex, OpenCode, or another agent that can read repository instructions, then ask in plain language:
+
+```text
+"Start ShakerScan"
+"Run a quick scan on https://example.com"
+"Show active high and critical findings"
+"Run AI Gate smoke tests against my chatbot API"
+"Scale workers to 10"
+```
+
+## Resources
+
+- **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
+- **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
 
 <video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
 
@@ -90,55 +144,6 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 
 ![AI Gate settings](docs/screenshots/ai-gate-settings.png)
 
-## Quick Start
-
-```bash
-git clone https://github.com/andriyze/shakerscan.git
-cd shakerscan
-./scanner.sh start
-```
-
-That starts the full stack (API, workers, UI). By default it pulls prebuilt Docker images.
-
-- **Web UI**: http://localhost:3000
-- **API**: http://localhost:8080
-
-If your machine is missing prerequisites:
-
-```bash
-./scanner.sh install-deps
-./scanner.sh start
-```
-
-To build locally instead of using prebuilt images:
-
-```bash
-./scanner.sh start --local
-```
-
-### Run a Scan
-
-```bash
-./scanner.sh scan https://example.com        # Quick scan
-./scanner.sh scan-full https://example.com   # Full assessment (active testing)
-./scanner.sh scan-smart https://example.com  # Adaptive smart scan
-./scanner.sh status                          # Check status
-./scanner.sh logs worker -f                  # Follow worker logs
-./scanner.sh stop                            # Stop all services
-```
-
-### Use with AI Agents (Claude, Codex, OpenCode)
-
-Open this repo in your preferred AI coding agent and ask in plain language:
-
-```
-"Start ShakerScan"
-"Run a quick scan on https://example.com"
-"Show active high and critical findings"
-"Run AI Gate smoke tests against my chatbot API"
-"Scale workers to 10"
-```
-
 ## Features
 
 - **Comprehensive Security Scanning**
@@ -152,11 +157,14 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 
 - **Active Vulnerability Testing** (opt-in)
   - XSS detection (dalfox), SQL injection testing (sqlmap)
-  - Nuclei templates (5000+ vulnerability checks)
+  - Nuclei template-based vulnerability checks
   - Auth-aware scanning across discovered endpoints
   - CSRF, IDOR, path traversal detection
 
-- **AI-Assisted Verification** (optional)
+- **AI Gate and AI-Assisted Verification** (optional)
+  - Chat, RAG, agent, and MCP probe packs
+  - Prompt injection, sensitive disclosure, approval bypass, and tool-abuse checks
+  - Chat-style evidence views with probe, target response, classifier output, and raw evidence
   - Confidence scoring and false-positive reduction
   - Cross-finding correlation and attack-chain analysis
 
@@ -165,7 +173,7 @@ Open this repo in your preferred AI coding agent and ask in plain language:
   - Finding tracking with status management and PDF export
   - Target organization, scheduling, and worker scaling
 
-- **Production-Ready Architecture**
+- **Containerized Architecture**
   - PostgreSQL persistent storage, Redis job queue
   - Horizontal scaling (1-20 workers)
 
@@ -270,9 +278,9 @@ curl -X POST http://localhost:8080/workers \
 
 Full API documentation including authenticated scanning, custom endpoints, AI Gate, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
 
-## Claude Code Integration
+## AI Agent Integration
 
-This project works seamlessly with Claude Code. Just clone, open, and ask:
+This project is designed to work well with coding agents. Clone the repo, open it in your agent, and ask it to operate ShakerScan through the documented CLI and API.
 
 ```bash
 cd shakerscan
@@ -287,7 +295,6 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/scan-full <url>` | Full assessment (asks permission first) |
 | `/scan-smart <url>` | Smart adaptive scan |
 | `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
-| `/save-finding [session_id]` | Save a discovered vulnerability |
 | `/findings` | List active vulnerabilities |
 | `/status` | Check scanner status |
 | `/subdomains <domain>` | Discover subdomains |
@@ -313,14 +320,14 @@ Create a `.env` file to customize settings:
 # AI Analysis (optional)
 AI_URL=https://api.openai.com/v1/chat/completions
 AI_API_KEY=sk-...
-AI_MODEL=gpt-4o
-AI_FALLBACK_MODEL=moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet
+AI_MODEL=your-model
+AI_FALLBACK_MODEL=provider/model-a,provider/model-b
 
 # AI Retest Verification (optional, runtime override via /settings/ai)
 AI_VERIFY_ENABLED=false
 AI_VERIFY_URL=https://api.openai.com/v1/chat/completions
 AI_VERIFY_API_KEY=sk-...
-AI_VERIFY_MODEL=gpt-4o-mini
+AI_VERIFY_MODEL=your-verification-model
 ```
 
 ### Scaling Workers
