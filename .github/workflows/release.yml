@@ -143,6 +143,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Create release notes
         shell: bash
         run: |
@@ -173,4 +176,3 @@ jobs:
           else
             gh release create "v${VERSION}" --title "Shaker Scan v${VERSION}" --notes-file release-notes.md
           fi
-
