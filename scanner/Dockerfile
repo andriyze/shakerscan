@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python-based security tools
 RUN pip3 install --no-cache-dir --break-system-packages \
-    sqlmap==1.10.4 \
+    sqlmap==1.10.5 \
     sslyze==6.3.1 commix==0.1 XSStrike==3.2.2 \
     certifi cryptography \
     dnspython pyOpenSSL \
