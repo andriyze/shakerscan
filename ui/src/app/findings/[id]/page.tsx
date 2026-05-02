@@ -72,6 +72,28 @@ function InfoItem({ label, children }: { label: string; children: React.ReactNod
   )
 }
 
+function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
+  if (!rawEvidence) return null
+  try {
+    const parsed = JSON.parse(rawEvidence)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function evidenceString(evidence: Record<string, unknown> | null, key: string): string {
+  const value = evidence?.[key]
+  return typeof value === 'string' ? value : ''
+}
+
+function evidenceStringList(evidence: Record<string, unknown> | null, key: string): string[] {
+  const value = evidence?.[key]
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -201,6 +223,16 @@ function FindingDetailContent() {
       : finding?.evidence
       ? JSON.stringify(finding.evidence, null, 2)
       : ''
+  const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
+  const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
+  const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
+  const aiProbeId = evidenceString(rawEvidenceObject, 'probe_id')
+  const aiTechnique = evidenceString(rawEvidenceObject, 'technique')
+  const aiProbeFamily = evidenceString(rawEvidenceObject, 'probe_family')
+  const aiJudgeLayer = evidenceString(rawEvidenceObject, 'judge_layer')
+  const aiTactics = evidenceStringList(rawEvidenceObject, 'tactics')
+  const hasAiProbeEvidence = isAiFinding && (aiProbePrompt || aiResponseExcerpt || aiProbeId || aiTechnique || aiProbeFamily || aiJudgeLayer)
 
   if (loading) {
     return (
@@ -574,6 +606,55 @@ function FindingDetailContent() {
         )}
       </SectionCard>
 
+      {hasAiProbeEvidence && (
+        <SectionCard title="AI Probe Evidence">
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+              {aiProbeId && <InfoItem label="Probe ID"><code className="text-blue-300 break-all">{aiProbeId}</code></InfoItem>}
+              {aiProbeFamily && <InfoItem label="Family">{aiProbeFamily.replaceAll('_', ' ')}</InfoItem>}
+              {aiTechnique && <InfoItem label="Technique">{aiTechnique.replaceAll('_', ' ')}</InfoItem>}
+              {aiJudgeLayer && <InfoItem label="Judge">{aiJudgeLayer.replaceAll('_', ' ')}</InfoItem>}
+            </div>
+
+            {aiTactics.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {aiTactics.map((tactic) => (
+                  <span key={tactic} className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+                    {tactic.replaceAll('_', ' ')}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {aiProbePrompt && (
+                <div className="flex justify-start">
+                  <div className="max-w-3xl rounded-lg border border-red-900/50 bg-red-950/30 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-red-300">Probe</p>
+                    <p className="mt-2 text-sm text-gray-100 whitespace-pre-wrap">{aiProbePrompt}</p>
+                  </div>
+                </div>
+              )}
+              {aiResponseExcerpt && (
+                <div className="flex justify-end">
+                  <div className="max-w-3xl rounded-lg border border-blue-900/50 bg-blue-950/30 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-blue-300">Target response</p>
+                    <p className="mt-2 text-sm text-gray-100 whitespace-pre-wrap">{aiResponseExcerpt}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {rawEvidence && (
+              <details open className="bg-gray-800/60 rounded-lg p-3">
+                <summary className="text-sm font-medium text-gray-300 cursor-pointer">Expanded raw evidence</summary>
+                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
+              </details>
+            )}
+          </div>
+        </SectionCard>
+      )}
+
       <SectionCard title="AI Analysis">
         {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations ? (
           <div className="space-y-3">
@@ -646,7 +727,7 @@ function FindingDetailContent() {
         </SectionCard>
       )}
 
-      {rawEvidence && (
+      {rawEvidence && !hasAiProbeEvidence && (
         <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
           <details>
             <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>

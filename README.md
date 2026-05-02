@@ -56,7 +56,7 @@ Use the `AI` source filter to focus on model, chatbot, RAG, or MCP probe results
 
 ### AI Probe Evidence
 
-AI Gate finding details show the probe conversation as a chat-style transcript, including attacker prompts, target responses, classifier evidence, and evaluation metadata.
+AI Gate finding details show probe context, classifier output, and expanded raw evidence for auditing why a response was graded as vulnerable.
 
 ![AI finding probe transcript](docs/screenshots/ai-finding-detail-chat.png)
 
@@ -65,12 +65,6 @@ AI Gate finding details show the probe conversation as a chat-style transcript, 
 Register AI targets, choose auth, select probe packs, run smoke or focused checks, and review prior AI Gate scan history.
 
 ![AI Gate settings](docs/screenshots/ai-gate-settings.png)
-
-### Interactive Sessions
-
-Use browser-backed interactive sessions for AI-assisted manual testing, BOLA/IDOR workflows, and saving verified findings back into the scanner.
-
-![Interactive security sessions](docs/screenshots/interactive-sessions.png)
 
 ## Quick Start
 
@@ -138,8 +132,6 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 
 **[Visual Walkthrough](WALKTHROUGH.md)** - Screenshots showing the terminal and web UI experience.
 
-**[Interactive Sessions Guide](docs/INTERACTIVE_SESSIONS_GUIDE.md)** - AI-assisted manual penetration testing.
-
 **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
 
 ## Features
@@ -171,10 +163,6 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 - **Production-Ready Architecture**
   - PostgreSQL persistent storage, Redis job queue
   - Horizontal scaling (1-20 workers)
-
-- **Interactive AI Security Sessions**
-  - Real-time browser-based testing with Playwright
-  - Multi-user BOLA/IDOR testing with finding persistence
 
 ## Scan Types
 
@@ -275,7 +263,7 @@ curl -X POST http://localhost:8080/workers \
   -d '{"count": 5}'
 ```
 
-Full API documentation including authenticated scanning, custom endpoints, AI Gate, interactive sessions, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
+Full API documentation including authenticated scanning, custom endpoints, AI Gate, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
 
 ## Claude Code Integration
 
@@ -293,7 +281,6 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/scan <url>` | Quick security scan |
 | `/scan-full <url>` | Full assessment (asks permission first) |
 | `/scan-smart <url>` | Smart adaptive scan |
-| `/ai-security-session <url>` | Interactive security testing with browser |
 | `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
 | `/save-finding [session_id]` | Save a discovered vulnerability |
 | `/findings` | List active vulnerabilities |
