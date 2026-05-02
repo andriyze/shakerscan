@@ -2,7 +2,75 @@
 
 A comprehensive Dynamic Application Security Testing (DAST) scanner for web applications. Run security assessments from your local machine with a modern web UI, persistent storage, and enterprise-grade scanning capabilities.
 
-<video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
+## Product Tour
+
+ShakerScan gives local teams a full security scanning workspace: DAST scans, AI Gate probes, targets, schedules, findings triage, worker scaling, and detailed evidence views. The screenshots below use a `shakerscan.com` demo dataset so the main workflows are visible with real-looking scan and AI Gate results.
+
+### Dashboard
+
+Monitor scanner health, queue activity, worker capacity, recent scans, and high-priority findings from one landing page.
+
+![Dashboard overview](docs/screenshots/dashboard.png)
+
+### Scan Management
+
+Filter scans by domain, review status and grades, cancel running work, or re-run a target with a different scan profile.
+
+![Scans filtered to shakerscan.com](docs/screenshots/scans-shakerscan-domain.png)
+
+### Detailed Scan Reports
+
+Open a completed scan to review score, grade, DNS/TLS/HTTP evidence, logs, compliance context, findings, and exportable reporting data.
+
+![Completed scan report](docs/screenshots/scan-detail-report.png)
+
+### New Scan Setup
+
+Start quick, standard, deep, full, aggressive, or smart scans with explicit controls for active testing, discovery, JavaScript analysis, and authenticated coverage.
+
+![New scan setup](docs/screenshots/new-scan.png)
+
+### Targets
+
+Organize root domains and subdomains, filter the attack surface, launch per-target scans, and trigger subdomain discovery.
+
+![Targets filtered to shakerscan.com](docs/screenshots/targets-shakerscan-domain.png)
+
+### Schedules
+
+Create recurring daily or weekly scans so important targets stay continuously monitored.
+
+![Recurring scan schedules](docs/screenshots/schedules.png)
+
+### Findings
+
+Filter and sort findings by source, severity, status, domain, recency, CVSS, first seen, or last seen. DAST and AI Gate findings share the same triage workflow.
+
+![Findings filtered to shakerscan.com](docs/screenshots/findings-shakerscan-domain.png)
+
+### AI Gate Findings
+
+Use the `AI` source filter to focus on model, chatbot, RAG, or MCP probe results, then combine it with severity and domain filters.
+
+![High AI findings filtered to shakerscan.com](docs/screenshots/findings-ai-high-shakerscan-domain.png)
+
+### AI Probe Evidence
+
+AI Gate finding details show the probe conversation as a chat-style transcript, including attacker prompts, target responses, classifier evidence, and evaluation metadata.
+
+![AI finding probe transcript](docs/screenshots/ai-finding-detail-chat.png)
+
+### AI Gate Settings
+
+Register AI targets, choose auth, select probe packs, run smoke or focused checks, and review prior AI Gate scan history.
+
+![AI Gate settings](docs/screenshots/ai-gate-settings.png)
+
+### Interactive Sessions
+
+Use browser-backed interactive sessions for AI-assisted manual testing, BOLA/IDOR workflows, and saving verified findings back into the scanner.
+
+![Interactive security sessions](docs/screenshots/interactive-sessions.png)
 
 ## Quick Start
 
@@ -55,6 +123,7 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 
 ## Contents
 
+- [Product Tour](#product-tour)
 - [Features](#features)
 - [Scan Types](#scan-types)
 - [CLI Reference](#cli-reference)
