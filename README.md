@@ -24,6 +24,8 @@ A comprehensive Dynamic Application Security Testing (DAST) scanner for web appl
 
 **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Budgeting, safety controls, and quality SLOs.
 
+<video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
+
 ## Product Tour
 
 ShakerScan gives local teams a full security scanning workspace: DAST scans, AI Gate probes, targets, schedules, findings triage, worker scaling, and detailed evidence views. The screenshots below use a `shakerscan.com` demo dataset so the main workflows are visible with real-looking scan and AI Gate results.
