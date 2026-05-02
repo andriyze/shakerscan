@@ -397,6 +397,8 @@ Notes:
 
 AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/settings/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool.
 
+AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
+
 Target types:
 | Type | Description |
 |------|-------------|

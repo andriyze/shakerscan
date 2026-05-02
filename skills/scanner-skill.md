@@ -248,6 +248,8 @@ Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The UI is at `http://localhost:3000/settings/ai-gate`; the API is fully usable by agents.
 
+AI Gate uses deterministic/regex detectors first. If AI settings have a configured provider, semantic AI judging also reviews probe transcripts, fills the standard AI analysis fields on findings, and can downgrade high-confidence false positives before scoring.
+
 Target types: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`.
 Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
 Scan profiles: `smoke`, `trace`, `standard`, `deep`.
