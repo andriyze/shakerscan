@@ -2,22 +2,22 @@
 # Multi-stage build for comprehensive security scanning
 
 # --- Stage 1: Build Go tools ---
-# Pin Go to a stable major/minor (not latest) while meeting tool requirements (tlsx needs >=1.24).
-FROM golang:1.24 AS go-builder
+# Pin Go to a stable major/minor while meeting current ProjectDiscovery tool requirements.
+FROM golang:1.25 AS go-builder
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner)
 RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 \
- && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.8.1 \
- && go install github.com/projectdiscovery/katana/cmd/katana@v1.4.0 \
- && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.12.0 \
- && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.7.0 \
+ && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0 \
+ && go install github.com/projectdiscovery/katana/cmd/katana@v1.5.0 \
+ && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.13.0 \
+ && go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.8.0 \
  && go install github.com/hahwul/dalfox/v2@v2.12.0 \
  && go install github.com/ffuf/ffuf/v2@v2.1.0 \
  && go install github.com/tomnomnom/meg@v0.3.0 \
  && go install github.com/g0ldencybersec/gungnir/cmd/gungnir@v1.4.0
 
 # --- Stage 2: Runtime with Playwright (Chromium) ---
-FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
 
 # System deps for network tooling and additional scanners
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,8 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python-based security tools
 RUN pip3 install --no-cache-dir --break-system-packages \
-    sqlmap \
-    sslyze commix XSStrike \
+    sqlmap==1.10.4 \
+    sslyze==6.3.1 commix==0.1 XSStrike==3.2.2 \
     certifi cryptography \
     dnspython pyOpenSSL \
     python-whois shodan \

@@ -3,9 +3,9 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json ./
-RUN npm install
+# Install pinned dependencies from the lockfile
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Copy source
 COPY . .
