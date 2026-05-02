@@ -49,6 +49,7 @@ Open this repo in your preferred AI coding agent and ask in plain language:
 "Start Shaker Scan"
 "Run a quick scan on https://example.com"
 "Show active high and critical findings"
+"Run AI Gate smoke tests against my chatbot API"
 "Scale workers to 10"
 ```
 
@@ -180,6 +181,16 @@ curl http://localhost:8080/scans/{scan_id}
 
 # List findings
 curl "http://localhost:8080/findings?severity=critical&status=active"
+curl "http://localhost:8080/findings?source_type=ai&status=active"
+
+# AI Gate target + scan
+curl -X POST http://localhost:8080/ai/targets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Support bot","target_type":"api_chat","endpoint_url":"https://example.com/api/chat","request_template":{"message":"{{prompt}}","session_id":"{{session_id}}"},"response_path":"$.answer"}'
+
+curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
 
 # Update finding status
 curl -X PATCH http://localhost:8080/findings/{id} \
@@ -195,7 +206,7 @@ curl -X POST http://localhost:8080/workers \
   -d '{"count": 5}'
 ```
 
-Full API documentation including authenticated scanning, custom endpoints, interactive sessions, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md).
+Full API documentation including authenticated scanning, custom endpoints, AI Gate, interactive sessions, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
 
 ## Claude Code Integration
 
@@ -214,6 +225,7 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/scan-full <url>` | Full assessment (asks permission first) |
 | `/scan-smart <url>` | Smart adaptive scan |
 | `/ai-security-session <url>` | Interactive security testing with browser |
+| `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
 | `/save-finding [session_id]` | Save a discovered vulnerability |
 | `/findings` | List active vulnerabilities |
 | `/status` | Check scanner status |
@@ -227,8 +239,9 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section
 - **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
-- **Findings (`/findings`)**: filter by severity/status/date/domain, bulk cleanup, CVSS sorting
+- **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/date/domain, bulk cleanup, CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
+- **AI Gate (`/settings/ai-gate`)**: add AI targets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
 - **New Scan (`/scan/new`)**: scan type picker with advanced toggles
 
 ## Configuration

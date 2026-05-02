@@ -56,6 +56,8 @@ CREATE TABLE scans (
     -- Scan configuration
     options JSONB DEFAULT '{}',
     scan_type TEXT DEFAULT 'quick',  -- quick, standard, thorough, full
+    run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp
+    subject_ref TEXT,
 
     -- Results
     result JSONB,
@@ -79,12 +81,70 @@ CREATE TABLE scans (
 );
 
 -- ============================================================
+-- AI TARGETS - Chat/RAG/agent/MCP surfaces for AI Gate scans
+-- ============================================================
+CREATE TABLE ai_targets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    name TEXT NOT NULL,
+    target_type TEXT NOT NULL DEFAULT 'api_chat',
+    endpoint_url TEXT UNIQUE NOT NULL,
+    method TEXT NOT NULL DEFAULT 'POST',
+    headers_template JSONB NOT NULL DEFAULT '{}',
+    request_template JSONB NOT NULL DEFAULT '{}',
+    response_path TEXT,
+    streaming_mode TEXT NOT NULL DEFAULT 'json',
+    rate_limit_rps INTEGER,
+    token_budget INTEGER,
+    request_budget INTEGER,
+    production_mode BOOLEAN DEFAULT false,
+
+    last_scanned_at TIMESTAMPTZ,
+    last_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    metadata_json JSONB NOT NULL DEFAULT '{}',
+    is_active BOOLEAN DEFAULT true,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT ai_targets_target_type_check
+        CHECK (target_type IN ('api_chat', 'widget', 'rag', 'agent_trace', 'mcp_trace')),
+    CONSTRAINT ai_targets_method_check
+        CHECK (method IN ('GET', 'POST', 'PUT', 'PATCH')),
+    CONSTRAINT ai_targets_streaming_mode_check
+        CHECK (streaming_mode IN ('json', 'sse'))
+);
+
+CREATE TABLE ai_target_credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ai_target_id UUID UNIQUE NOT NULL REFERENCES ai_targets(id) ON DELETE CASCADE,
+    auth_kind TEXT NOT NULL DEFAULT 'none',
+    header_name TEXT,
+    secret_value TEXT,
+    secret_preview TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    rotated_at TIMESTAMPTZ,
+
+    CONSTRAINT ai_target_credentials_auth_kind_check
+        CHECK (auth_kind IN (
+            'none', 'bearer', 'api_key_header', 'custom_header',
+            'basic_auth', 'cookie', 'multi_header', 'query_param'
+        ))
+);
+
+ALTER TABLE scans
+ADD COLUMN ai_target_id UUID REFERENCES ai_targets(id) ON DELETE SET NULL;
+
+-- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================
 CREATE TABLE findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
 
     -- Finding identification (for deduplication)
     fingerprint TEXT NOT NULL,
@@ -131,7 +191,7 @@ CREATE TABLE findings (
     verification_count INTEGER DEFAULT 0,
 
     -- Source tracking
-    source TEXT DEFAULT 'scan',  -- scan, manual, ai_session
+    source TEXT DEFAULT 'scan',  -- scan, manual, ai_session, ai_gate
     session_id TEXT,  -- For AI session findings
 
     -- Timestamps
@@ -260,13 +320,20 @@ CREATE INDEX idx_targets_is_root ON targets(is_root) WHERE is_root = true;
 
 -- Scans
 CREATE INDEX idx_scans_target_id ON scans(target_id);
+CREATE INDEX idx_scans_ai_target_id ON scans(ai_target_id) WHERE ai_target_id IS NOT NULL;
+CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
 CREATE INDEX idx_scans_job_id ON scans(job_id);
 
+-- AI targets
+CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;
+CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);
+
 -- Findings
 CREATE INDEX idx_findings_scan_id ON findings(scan_id);
 CREATE INDEX idx_findings_target_id ON findings(target_id);
+CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE INDEX idx_findings_severity ON findings(severity);
 CREATE INDEX idx_findings_status ON findings(status);
 CREATE INDEX idx_findings_fingerprint ON findings(fingerprint);

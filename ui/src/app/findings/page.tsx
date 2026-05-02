@@ -13,6 +13,7 @@ interface FindingsFilters {
   [key: string]: string | number | undefined
   severity?: string
   status?: string
+  source_type?: string
   domain?: string
   scan_id?: string
   target_id?: string
@@ -37,6 +38,24 @@ const VERIFICATION_VERDICTS = [
   'error'
 ] as const
 
+const SOURCE_TYPE_OPTIONS = [
+  { value: '', label: 'All' },
+  { value: 'dast', label: 'DAST' },
+  { value: 'ai', label: 'AI' }
+] as const
+
+function getFindingSourceType(finding: Finding): 'AI' | 'DAST' {
+  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
+    return 'AI'
+  }
+  return 'DAST'
+}
+
+function getSourceTypeClass(type: 'AI' | 'DAST'): string {
+  if (type === 'AI') return 'bg-purple-500/20 text-purple-300'
+  return 'bg-blue-500/20 text-blue-300'
+}
+
 function FindingsContent() {
   const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
     defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
@@ -57,6 +76,7 @@ function FindingsContent() {
 
   const severityFilter = filters.severity || ''
   const statusFilter = filters.status || ''
+  const sourceTypeFilter = filters.source_type || ''
   const domainFilter = filters.domain || ''
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
@@ -98,7 +118,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -106,6 +126,7 @@ function FindingsContent() {
       const data = await getFindings({
         severity: severityFilter || undefined,
         status: statusFilter || undefined,
+        source_type: sourceTypeFilter ? (sourceTypeFilter as 'dast' | 'ai') : undefined,
         root_domain: domainFilter || undefined,
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
@@ -186,6 +207,7 @@ function FindingsContent() {
     const params = new URLSearchParams()
     if (severityFilter) params.set('return_severity', severityFilter)
     if (statusFilter) params.set('return_status', statusFilter)
+    if (sourceTypeFilter) params.set('return_source_type', sourceTypeFilter)
     if (domainFilter) params.set('return_domain', domainFilter)
     if (scanIdFilter) params.set('return_scan_id', scanIdFilter)
     if (targetIdFilter) params.set('return_target_id', targetIdFilter)
@@ -319,6 +341,27 @@ function FindingsContent() {
 
       {/* Filters Row */}
       <div className="flex flex-wrap items-center gap-4">
+        {/* Source Type Filter */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400">Type:</label>
+          <div className="inline-flex rounded-lg border border-gray-800 bg-gray-900 p-0.5">
+            {SOURCE_TYPE_OPTIONS.map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                onClick={() => setFilter('source_type', option.value || undefined)}
+                className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                  sourceTypeFilter === option.value
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Domain Filter */}
         {domains.length > 0 && (
           <div className="flex items-center gap-2">
@@ -509,35 +552,41 @@ function FindingsContent() {
           </div>
         ) : (
           <div className="divide-y divide-gray-800">
-            {findings.map((finding) => (
-              <Link
-                key={finding.id}
-                href={buildDetailUrl(finding.id)}
-                className="block p-4 hover:bg-gray-800/50 transition-colors"
-              >
-                <div className="flex items-start gap-3">
-                  <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSeverityBg(finding.severity)}`}>
-                    {finding.severity}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="text-sm font-medium text-white">{finding.title}</h3>
-                    <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                      {finding.tool && <span>Tool: {finding.tool}</span>}
-                      {finding.cwe && <span>CWE: {finding.cwe}</span>}
-                      {finding.cvss_score && <span>CVSS: {finding.cvss_score}</span>}
+            {findings.map((finding) => {
+              const sourceType = getFindingSourceType(finding)
+              return (
+                <Link
+                  key={finding.id}
+                  href={buildDetailUrl(finding.id)}
+                  className="block p-4 hover:bg-gray-800/50 transition-colors"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSeverityBg(finding.severity)}`}>
+                      {finding.severity}
+                    </span>
+                    <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSourceTypeClass(sourceType)}`}>
+                      {sourceType}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-sm font-medium text-white">{finding.title}</h3>
+                      <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
+                        {finding.tool && <span>Tool: {finding.tool}</span>}
+                        {finding.cwe && <span>CWE: {finding.cwe}</span>}
+                        {finding.cvss_score && <span>CVSS: {finding.cvss_score}</span>}
+                      </div>
+                      <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
+                        <span>First seen: {formatDate(finding.first_seen_at)}</span>
+                        <span>Last seen: {formatDate(finding.last_seen_at)}</span>
+                      </div>
+                      {finding.url && (
+                        <p className="text-xs text-gray-600 truncate mt-1">{finding.url}</p>
+                      )}
                     </div>
-                    <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                      <span>First seen: {formatDate(finding.first_seen_at)}</span>
-                      <span>Last seen: {formatDate(finding.last_seen_at)}</span>
-                    </div>
-                    {finding.url && (
-                      <p className="text-xs text-gray-600 truncate mt-1">{finding.url}</p>
-                    )}
+                    <StatusBadge status={finding.status} />
                   </div>
-                  <StatusBadge status={finding.status} />
-                </div>
-              </Link>
-            ))}
+                </Link>
+              )
+            })}
           </div>
         )}
       </div>

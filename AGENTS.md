@@ -31,8 +31,9 @@ The scanner runs as Docker containers:
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning). Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
-- **Findings (`/findings`)**: filter by severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
+- **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
+- **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
 
 ## Your Role
 
@@ -210,7 +211,7 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
-Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI security session)
+Finding type filter: use `source_type=dast` for non-AI findings and `source_type=ai` for AI Gate or AI-session findings. The UI intentionally exposes only these two product categories: **DAST** and **AI**.
 
 **Findings Query Parameters:**
 
@@ -218,6 +219,7 @@ Finding sources: `scan` (automated), `manual` (manual testing), `ai_session` (AI
 |-----------|-------------|
 | `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
 | `severity` | Filter by severity (critical, high, medium, low, info) |
+| `source_type` | Filter by product type: `dast` or `ai` |
 | `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
@@ -390,6 +392,78 @@ curl -X POST http://localhost:8080/settings/ai/test \
 Notes:
 - Runtime settings apply to **new scans/retests** without restarting services.
 - `persist_to_env: true` writes values to `LOCAL_ENV_FILE` (default `/workspace/.env` in Docker).
+
+### AI Gate
+
+AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is managed in the UI at `/settings/ai-gate` and through REST APIs, so Claude, Codex, OpenCode, or any agent that can call HTTP can use it as a ShakerScan tool.
+
+AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
+
+Target types:
+| Type | Description |
+|------|-------------|
+| `api_chat` | Chat/completions-style JSON endpoint |
+| `rag` | RAG answer endpoint |
+| `agent_trace` | Agent/trace endpoint or trace replay API |
+| `mcp_trace` | MCP HTTP/SSE endpoint or MCP trace-compatible API |
+| `widget` | Browser widget target (API-supported; UI support may be limited) |
+
+Probe packs:
+| Pack | Focus |
+|------|-------|
+| `shaker-ai-smoke` | Small broad smoke test |
+| `shaker-owasp-llm` | OWASP LLM risks |
+| `shaker-agent-abuse` | Tool abuse, approval bypass, agent boundaries |
+| `shaker-mcp-security` | MCP tool/resource/scope issues |
+| `shaker-rag-lite` | RAG leakage and retrieval-boundary issues |
+
+Scan profiles: `smoke`, `trace`, `standard`, `deep`. Environments: `preview`, `staging`, `development`, `production`.
+
+```bash
+# List AI Gate targets
+curl http://localhost:8080/ai/targets
+
+# Create a chat API target. The request template must contain {{prompt}}.
+curl -X POST http://localhost:8080/ai/targets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Support bot",
+    "target_type": "api_chat",
+    "endpoint_url": "https://example.com/api/chat",
+    "method": "POST",
+    "headers_template": {"Content-Type": "application/json"},
+    "request_template": {"message": "{{prompt}}", "session_id": "{{session_id}}"},
+    "response_path": "$.answer",
+    "streaming_mode": "json",
+    "rate_limit_rps": 2,
+    "request_budget": 10,
+    "production_mode": false,
+    "credential": {"auth_kind": "bearer", "secret": "token-if-needed"}
+  }'
+
+# Queue an AI Gate scan
+curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "probe_pack": "shaker-agent-abuse",
+    "scan_profile": "standard",
+    "environment": "staging"
+  }'
+
+# Production targets require explicit confirmation
+curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
+  -H "Content-Type: application/json" \
+  -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
+
+# Get transcripts for a completed AI Gate scan
+curl http://localhost:8080/ai/scans/{scan_id}/transcript
+
+# Filter findings by product type
+curl "http://localhost:8080/findings?source_type=ai&status=active"
+curl "http://localhost:8080/findings?source_type=dast&status=active"
+```
+
+After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll; AI Gate scans can still take time depending on profile, target latency, and budget.
 
 ### Schedules (Recurring Scans)
 

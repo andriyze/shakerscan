@@ -2,7 +2,7 @@
 
 Show security findings from scans.
 
-**Usage**: `/findings [severity]`
+**Usage**: `/findings [severity|ai|dast]`
 
 ## Instructions
 
@@ -18,6 +18,11 @@ Show security findings from scans.
    curl "http://localhost:8080/findings?status=active&limit=50"
    ```
 
+   If type specified (`ai` or `dast`):
+   ```bash
+   curl "http://localhost:8080/findings?source_type=$ARGUMENTS&status=active&limit=50"
+   ```
+
    If severity specified (critical, high, medium, low):
    ```bash
    curl "http://localhost:8080/findings?severity=$ARGUMENTS&status=active&limit=50"
@@ -25,10 +30,10 @@ Show security findings from scans.
 
 3. Format output as a table:
    ```
-   | Severity | Title | Target | Tool |
-   |----------|-------|--------|------|
-   | critical | SQL Injection in /api | example.com | sqlmap |
-   | high | XSS in search | example.com | dalfox |
+   | Type | Severity | Title | Target | Tool |
+   |------|----------|-------|--------|------|
+   | DAST | critical | SQL Injection in /api | example.com | sqlmap |
+   | AI | high | Prompt injection compliance detected | support bot | shaker-ai-gate |
    ```
 
 4. Include summary counts at the end

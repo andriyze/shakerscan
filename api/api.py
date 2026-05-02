@@ -130,6 +130,8 @@ def _decode_json_value(value: Any) -> Any:
 
 SENSITIVE_SCAN_OPTION_KEYS = {
     "ai_api_key",
+    "secret",
+    "secret_value",
     "auth_cookies",
     "auth_header",
     "auth_headers_json",
@@ -145,11 +147,21 @@ def _sanitize_scan_options(value: Any) -> Any:
     options = _decode_json_value(value)
     if not isinstance(options, dict):
         return options
-    masked = dict(options)
-    for key in SENSITIVE_SCAN_OPTION_KEYS:
-        if key in masked and masked.get(key) not in (None, "", [], {}):
-            masked[key] = "***"
-    return masked
+
+    def mask_nested(candidate: Any) -> Any:
+        if isinstance(candidate, dict):
+            masked_dict = {}
+            for key, item in candidate.items():
+                if key in SENSITIVE_SCAN_OPTION_KEYS and item not in (None, "", [], {}):
+                    masked_dict[key] = "***"
+                else:
+                    masked_dict[key] = mask_nested(item)
+            return masked_dict
+        if isinstance(candidate, list):
+            return [mask_nested(item) for item in candidate]
+        return candidate
+
+    return mask_nested(options)
 
 
 def _mask_secret(value: str) -> str:
@@ -486,9 +498,15 @@ async def get_finding_record(conn, finding_id: str):
     try:
         finding_uuid = uuid.UUID(finding_id)
         finding = await conn.fetchrow("""
-            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            SELECT f.*,
+                   COALESCE(t.url, ait.endpoint_url) as target_url,
+                   COALESCE(t.name, ait.name) as target_name,
+                   t.root_domain,
+                   ait.endpoint_url as ai_target_url,
+                   ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE f.id = $1
         """, finding_uuid)
     except ValueError:
@@ -496,9 +514,15 @@ async def get_finding_record(conn, finding_id: str):
 
     if not finding:
         finding = await conn.fetchrow("""
-            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            SELECT f.*,
+                   COALESCE(t.url, ait.endpoint_url) as target_url,
+                   COALESCE(t.name, ait.name) as target_name,
+                   t.root_domain,
+                   ait.endpoint_url as ai_target_url,
+                   ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -507,9 +531,15 @@ async def get_finding_record(conn, finding_id: str):
     if not finding and ':' in finding_id:
         suffix = finding_id.split(':')[-1]
         finding = await conn.fetchrow("""
-            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            SELECT f.*,
+                   COALESCE(t.url, ait.endpoint_url) as target_url,
+                   COALESCE(t.name, ait.name) as target_name,
+                   t.root_domain,
+                   ait.endpoint_url as ai_target_url,
+                   ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -1138,6 +1168,81 @@ class BatchRequest(BaseModel):
     options: ScanOptions = Field(default_factory=ScanOptions)
 
 
+AI_TARGET_TYPES = {"api_chat", "widget", "rag", "agent_trace", "mcp_trace"}
+AI_TARGET_METHODS = {"GET", "POST", "PUT", "PATCH"}
+AI_STREAMING_MODES = {"json", "sse"}
+AI_AUTH_KINDS = {
+    "none",
+    "bearer",
+    "api_key_header",
+    "custom_header",
+    "basic_auth",
+    "cookie",
+    "multi_header",
+    "query_param",
+}
+AI_PROBE_PACKS = {
+    "shaker-ai-smoke",
+    "shaker-owasp-llm",
+    "shaker-agent-abuse",
+    "shaker-mcp-security",
+    "shaker-rag-lite",
+}
+AI_SCAN_PROFILES = {"smoke", "trace", "standard", "deep"}
+AI_ENVIRONMENTS = {"preview", "staging", "production", "development"}
+
+
+class AITargetCredential(BaseModel):
+    auth_kind: str = "none"
+    header_name: Optional[str] = None
+    secret: Optional[str] = None
+    metadata_json: Optional[dict[str, Any]] = None
+
+
+class AITargetCreate(BaseModel):
+    name: Optional[str] = None
+    target_type: str = "api_chat"
+    endpoint_url: str
+    method: str = "POST"
+    headers_template: dict[str, Any] = Field(default_factory=dict)
+    request_template: dict[str, Any] = Field(default_factory=dict)
+    response_path: Optional[str] = "$.answer"
+    streaming_mode: str = "json"
+    rate_limit_rps: Optional[int] = Field(default=None, ge=1)
+    token_budget: Optional[int] = Field(default=None, ge=1)
+    request_budget: Optional[int] = Field(default=None, ge=1)
+    production_mode: bool = False
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+    credential: AITargetCredential = Field(default_factory=AITargetCredential)
+
+
+class AITargetUpdate(BaseModel):
+    name: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    method: Optional[str] = None
+    headers_template: Optional[dict[str, Any]] = None
+    request_template: Optional[dict[str, Any]] = None
+    response_path: Optional[str] = None
+    streaming_mode: Optional[str] = None
+    rate_limit_rps: Optional[int] = Field(default=None, ge=1)
+    token_budget: Optional[int] = Field(default=None, ge=1)
+    request_budget: Optional[int] = Field(default=None, ge=1)
+    production_mode: Optional[bool] = None
+    metadata_json: Optional[dict[str, Any]] = None
+    is_active: Optional[bool] = None
+    credential: Optional[AITargetCredential] = None
+
+
+class AITargetScanRequest(BaseModel):
+    probe_pack: str = "shaker-ai-smoke"
+    scan_profile: str = "smoke"
+    environment: str = "preview"
+    confirm_production: bool = False
+    ai_judge_enabled: Optional[bool] = None
+    semantic_judge_enabled: Optional[bool] = None
+
+
 class TargetCreate(BaseModel):
     url: str
     name: Optional[str] = None
@@ -1267,6 +1372,313 @@ class AISettingsProbeRequest(BaseModel):
     ai_fallback_model: Optional[str] = None
 
 
+def _normalize_ai_endpoint_url(raw: str) -> str:
+    candidate = str(raw or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="endpoint_url is required")
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="endpoint_url must use http or https")
+    return urllib.parse.urlunparse(parsed)
+
+
+def _normalize_ai_target_type(value: str | None) -> str:
+    candidate = str(value or "api_chat").strip()
+    if candidate not in AI_TARGET_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_type must be one of: {', '.join(sorted(AI_TARGET_TYPES))}",
+        )
+    return candidate
+
+
+def _normalize_ai_method(value: str | None) -> str:
+    candidate = str(value or "POST").strip().upper()
+    if candidate not in AI_TARGET_METHODS:
+        raise HTTPException(status_code=400, detail="method must be GET, POST, PUT, or PATCH")
+    return candidate
+
+
+def _normalize_ai_streaming_mode(value: str | None) -> str:
+    candidate = str(value or "json").strip().lower()
+    if candidate not in AI_STREAMING_MODES:
+        raise HTTPException(status_code=400, detail="streaming_mode must be json or sse")
+    return candidate
+
+
+def _normalize_ai_headers_template(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for key, header_value in value.items():
+        if isinstance(key, str) and key.strip() and isinstance(header_value, str) and header_value.strip():
+            headers[key.strip()] = header_value
+    return headers
+
+
+def _contains_prompt_placeholder(value: Any) -> bool:
+    if isinstance(value, str):
+        return "{{prompt}}" in value
+    if isinstance(value, list):
+        return any(_contains_prompt_placeholder(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_prompt_placeholder(item) for item in value.values())
+    return False
+
+
+def _normalize_ai_request_template(value: Any, *, method: str, target_type: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="request_template must be a JSON object")
+    if target_type != "widget" and method != "GET" and not _contains_prompt_placeholder(value):
+        raise HTTPException(
+            status_code=400,
+            detail="request_template must contain a {{prompt}} placeholder for non-GET AI targets",
+        )
+    return value
+
+
+def _mask_ai_target_secret(secret: str | None) -> str | None:
+    if not secret:
+        return None
+    trimmed = secret.strip()
+    if not trimmed:
+        return None
+    if len(trimmed) <= 8:
+        return f"{trimmed[:2]}****"
+    return f"{trimmed[:4]}...{trimmed[-2:]}"
+
+
+def _parse_multi_header_lines(raw: str | None) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    pairs: list[dict[str, str]] = []
+    for line in raw.splitlines():
+        name, sep, value = line.partition(":")
+        if sep and name.strip() and value.strip():
+            pairs.append({"name": name.strip(), "value": value.strip()})
+    return pairs
+
+
+def _normalize_multi_header_pairs(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    pairs: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        header_value = str(item.get("value") or "").strip()
+        if name and header_value:
+            pairs.append({"name": name, "value": header_value})
+    return pairs
+
+
+def _build_ai_credential_db_record(
+    credential: AITargetCredential,
+    existing: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    auth_kind = str(credential.auth_kind or "none").strip()
+    if auth_kind not in AI_AUTH_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"auth_kind must be one of: {', '.join(sorted(AI_AUTH_KINDS))}",
+        )
+
+    metadata = credential.metadata_json if isinstance(credential.metadata_json, dict) else {}
+    header_name = str(credential.header_name or "").strip() or None
+    secret = str(credential.secret or "").strip()
+    existing_secret = (
+        str(existing.get("secret_value") or "")
+        if existing and existing.get("auth_kind") == auth_kind
+        else ""
+    )
+
+    if auth_kind == "none":
+        return {
+            "auth_kind": "none",
+            "header_name": None,
+            "secret_value": None,
+            "secret_preview": None,
+            "metadata_json": {},
+        }
+
+    if auth_kind == "bearer":
+        header_name = "Authorization"
+    elif auth_kind == "api_key_header":
+        header_name = header_name or "X-API-Key"
+    elif auth_kind == "basic_auth":
+        header_name = "Authorization"
+    elif auth_kind == "cookie":
+        header_name = "Cookie"
+    elif auth_kind == "custom_header" and not header_name:
+        raise HTTPException(status_code=400, detail="header_name is required for custom_header auth")
+    elif auth_kind == "query_param":
+        header_name = header_name or str(metadata.get("param_name") or "").strip() or None
+        if not header_name:
+            raise HTTPException(status_code=400, detail="Parameter name is required for query_param auth")
+        metadata = {**metadata, "param_name": header_name}
+
+    if auth_kind == "multi_header":
+        pairs = _normalize_multi_header_pairs(metadata.get("headers")) or _parse_multi_header_lines(secret)
+        if not pairs and existing_secret:
+            secret_value = existing_secret
+            try:
+                pairs = _normalize_multi_header_pairs(json.loads(existing_secret))
+            except json.JSONDecodeError:
+                pairs = []
+        elif pairs:
+            secret_value = json.dumps(pairs)
+        else:
+            raise HTTPException(status_code=400, detail="At least one header pair is required")
+        return {
+            "auth_kind": auth_kind,
+            "header_name": None,
+            "secret_value": secret_value,
+            "secret_preview": f"{len(pairs)} header{'s' if len(pairs) != 1 else ''}",
+            "metadata_json": {"headers": [{"name": pair["name"], "value": "***"} for pair in pairs]},
+        }
+
+    if not secret and existing_secret:
+        secret = existing_secret
+    if not secret:
+        raise HTTPException(status_code=400, detail=f"secret is required for {auth_kind} auth")
+
+    return {
+        "auth_kind": auth_kind,
+        "header_name": header_name,
+        "secret_value": secret,
+        "secret_preview": _mask_ai_target_secret(secret),
+        "metadata_json": metadata,
+    }
+
+
+def _sanitize_ai_credential(row: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not row:
+        return {
+            "auth_kind": "none",
+            "header_name": None,
+            "secret_configured": False,
+            "secret_preview": None,
+            "metadata_json": {},
+        }
+    return {
+        "auth_kind": row.get("auth_kind") or "none",
+        "header_name": row.get("header_name"),
+        "secret_configured": bool(row.get("secret_value")),
+        "secret_preview": row.get("secret_preview"),
+        "metadata_json": _decode_json_value(row.get("credential_metadata_json") or row.get("metadata_json") or {}),
+    }
+
+
+def _ai_target_response(target_row: Any, credential_row: Optional[Any] = None) -> dict[str, Any]:
+    target = row_to_dict(target_row)
+    for key in ("headers_template", "request_template", "metadata_json"):
+        target[key] = _decode_json_value(target.get(key)) or {}
+    credential = dict(credential_row) if credential_row else None
+    target["credential"] = _sanitize_ai_credential(credential)
+    return target
+
+
+def _ai_target_run_kind(target_type: str) -> str:
+    if target_type == "widget":
+        return "ai_widget"
+    if target_type == "rag":
+        return "ai_rag"
+    if target_type == "agent_trace":
+        return "ai_trace"
+    if target_type == "mcp_trace":
+        return "ai_mcp"
+    return "ai_api"
+
+
+def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not row or row.get("auth_kind") == "none":
+        return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
+
+    auth_kind = row.get("auth_kind")
+    metadata = _decode_json_value(row.get("metadata_json")) or {}
+    secret = row.get("secret_value")
+    if auth_kind == "multi_header":
+        try:
+            headers = json.loads(secret or "[]")
+        except json.JSONDecodeError:
+            headers = []
+        metadata = {**metadata, "headers": headers}
+        secret = None
+    elif auth_kind == "query_param":
+        metadata = {**metadata, "param_name": row.get("header_name") or metadata.get("param_name")}
+
+    return {
+        "auth_kind": auth_kind,
+        "header_name": row.get("header_name"),
+        "secret": secret,
+        "metadata_json": metadata,
+    }
+
+
+def _build_ai_worker_options(
+    *,
+    target: dict[str, Any],
+    credential: dict[str, Any],
+    request: AITargetScanRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    probe_pack = request.probe_pack if request.probe_pack in AI_PROBE_PACKS else "shaker-ai-smoke"
+    scan_profile = request.scan_profile if request.scan_profile in AI_SCAN_PROFILES else "smoke"
+    environment = request.environment if request.environment in AI_ENVIRONMENTS else "preview"
+    run_kind = _ai_target_run_kind(target["target_type"])
+    metadata_json = dict(target.get("metadata_json") or {})
+    metadata_json["scan_profile"] = scan_profile
+    if request.ai_judge_enabled is not None:
+        metadata_json["ai_judge_enabled"] = request.ai_judge_enabled
+    if request.semantic_judge_enabled is not None:
+        metadata_json["semantic_judge_enabled"] = request.semantic_judge_enabled
+
+    storage_options = {
+        "run_kind": run_kind,
+        "ai_enabled": True,
+        "ai_target_id": target["id"],
+        "ai_target_type": target["target_type"],
+        "ai_target_name": target["name"],
+        "ai_probe_pack": probe_pack,
+        "ai_scan_profile": scan_profile,
+        "ai_environment": environment,
+        "ai_response_path": target.get("response_path"),
+        "ai_streaming_mode": target.get("streaming_mode"),
+        "ai_request_budget": target.get("request_budget"),
+        "ai_token_budget": target.get("token_budget"),
+    }
+    worker_options = {
+        **storage_options,
+        "ai_target": {
+            "id": target["id"],
+            "name": target["name"],
+            "target_type": target["target_type"],
+            "endpoint_url": target["endpoint_url"],
+            "method": target["method"],
+            "headers_template": target.get("headers_template") or {},
+            "request_template": target.get("request_template") or {},
+            "response_path": target.get("response_path"),
+            "streaming_mode": target.get("streaming_mode") or "json",
+            "rate_limit_rps": target.get("rate_limit_rps"),
+            "token_budget": target.get("token_budget"),
+            "request_budget": target.get("request_budget"),
+            "production_mode": target.get("production_mode"),
+            "metadata_json": metadata_json,
+            "credential": credential,
+        },
+    }
+    ai_settings = _load_effective_ai_settings()
+    if ai_settings.get("ai_url") and ai_settings.get("ai_api_key"):
+        worker_options["ai_url"] = ai_settings.get("ai_url")
+        worker_options["ai_api_key"] = ai_settings.get("ai_api_key")
+        worker_options["ai_model"] = ai_settings.get("ai_model") or "gpt-4o-mini"
+    return worker_options, storage_options
+
+
 # ============================================================
 # HEALTH & INFO
 # ============================================================
@@ -1281,6 +1693,7 @@ async def root():
         "endpoints": {
             "scans": "/scans",
             "targets": "/targets",
+            "ai_targets": "/ai/targets",
             "findings": "/findings",
             "discovery": "/discovery",
             "dashboard": "/dashboard",
@@ -1476,6 +1889,312 @@ async def test_ai_settings(request: AISettingsProbeRequest):
 
 
 # ============================================================
+# AI GATE TARGETS
+# ============================================================
+
+@app.get("/ai/targets")
+async def list_ai_targets(include_inactive: bool = False, limit: int = Query(100, le=500), offset: int = 0):
+    """List saved AI Gate targets."""
+    async with db_pool.acquire() as conn:
+        query = "SELECT * FROM ai_targets"
+        params: list[Any] = []
+        if not include_inactive:
+            query += " WHERE is_active = true"
+        query += " ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+        params.extend([limit, offset])
+        targets = await conn.fetch(query, *params)
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM ai_targets" + ("" if include_inactive else " WHERE is_active = true")
+        )
+        target_ids = [row["id"] for row in targets]
+        credentials = []
+        if target_ids:
+            credentials = await conn.fetch(
+                "SELECT * FROM ai_target_credentials WHERE ai_target_id = ANY($1::uuid[])",
+                target_ids,
+            )
+
+    credential_by_target = {row["ai_target_id"]: row for row in credentials}
+    return {
+        "targets": [_ai_target_response(row, credential_by_target.get(row["id"])) for row in targets],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/ai/targets")
+async def create_ai_target(request: AITargetCreate):
+    """Create an AI Gate target."""
+    target_type = _normalize_ai_target_type(request.target_type)
+    endpoint_url = _normalize_ai_endpoint_url(request.endpoint_url)
+    method = _normalize_ai_method(request.method)
+    streaming_mode = _normalize_ai_streaming_mode(request.streaming_mode)
+    headers_template = _normalize_ai_headers_template(request.headers_template)
+    request_template = _normalize_ai_request_template(
+        request.request_template,
+        method=method,
+        target_type=target_type,
+    )
+    credential = _build_ai_credential_db_record(request.credential)
+    target_name = request.name or urllib.parse.urlparse(endpoint_url).hostname or endpoint_url
+
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM ai_targets WHERE endpoint_url = $1", endpoint_url)
+        if existing:
+            raise HTTPException(status_code=409, detail="AI target already exists for this endpoint_url")
+
+        async with conn.transaction():
+            target_id = await conn.fetchval("""
+                INSERT INTO ai_targets (
+                    name, target_type, endpoint_url, method, headers_template,
+                    request_template, response_path, streaming_mode, rate_limit_rps,
+                    token_budget, request_budget, production_mode, metadata_json, is_active
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                RETURNING id
+            """,
+                target_name,
+                target_type,
+                endpoint_url,
+                method,
+                json.dumps(headers_template),
+                json.dumps(request_template),
+                request.response_path,
+                streaming_mode,
+                request.rate_limit_rps,
+                request.token_budget,
+                request.request_budget,
+                request.production_mode,
+                json.dumps(request.metadata_json or {}),
+                request.is_active,
+            )
+            await conn.execute("""
+                INSERT INTO ai_target_credentials (
+                    ai_target_id, auth_kind, header_name, secret_value,
+                    secret_preview, metadata_json, rotated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            """,
+                target_id,
+                credential["auth_kind"],
+                credential["header_name"],
+                credential["secret_value"],
+                credential["secret_preview"],
+                json.dumps(credential["metadata_json"]),
+            )
+
+        target = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", target_id)
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            target_id,
+        )
+    return {"target": _ai_target_response(target, credential_row)}
+
+
+@app.patch("/ai/targets/{target_id}")
+async def update_ai_target(target_id: str, request: AITargetUpdate):
+    """Update an AI Gate target."""
+    payload = request.model_dump(exclude_unset=True)
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not existing:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        existing_credential = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+
+        update_data: dict[str, Any] = {}
+        if "name" in payload:
+            update_data["name"] = payload["name"] or existing["name"]
+        if "endpoint_url" in payload and payload["endpoint_url"] is not None:
+            update_data["endpoint_url"] = _normalize_ai_endpoint_url(payload["endpoint_url"])
+        effective_method = _normalize_ai_method(payload.get("method") or existing["method"])
+        if "method" in payload:
+            update_data["method"] = effective_method
+        if "headers_template" in payload:
+            update_data["headers_template"] = json.dumps(_normalize_ai_headers_template(payload.get("headers_template")))
+        if "request_template" in payload:
+            update_data["request_template"] = json.dumps(
+                _normalize_ai_request_template(
+                    payload.get("request_template"),
+                    method=effective_method,
+                    target_type=existing["target_type"],
+                )
+            )
+        if "response_path" in payload:
+            update_data["response_path"] = payload.get("response_path") or None
+        if "streaming_mode" in payload and payload["streaming_mode"] is not None:
+            update_data["streaming_mode"] = _normalize_ai_streaming_mode(payload["streaming_mode"])
+        for key in ("rate_limit_rps", "token_budget", "request_budget"):
+            if key in payload:
+                update_data[key] = payload[key]
+        if "production_mode" in payload:
+            update_data["production_mode"] = bool(payload["production_mode"])
+        if "metadata_json" in payload:
+            update_data["metadata_json"] = json.dumps(payload.get("metadata_json") or {})
+        if "is_active" in payload:
+            update_data["is_active"] = bool(payload["is_active"])
+
+        async with conn.transaction():
+            if update_data:
+                assignments = []
+                values = []
+                for idx, (key, value) in enumerate(update_data.items(), start=1):
+                    assignments.append(f"{key} = ${idx}")
+                    values.append(value)
+                assignments.append("updated_at = NOW()")
+                values.append(uuid.UUID(target_id))
+                await conn.execute(
+                    f"UPDATE ai_targets SET {', '.join(assignments)} WHERE id = ${len(values)}",
+                    *values,
+                )
+
+            if request.credential is not None:
+                credential = _build_ai_credential_db_record(
+                    request.credential,
+                    dict(existing_credential) if existing_credential else None,
+                )
+                await conn.execute("""
+                    INSERT INTO ai_target_credentials (
+                        ai_target_id, auth_kind, header_name, secret_value,
+                        secret_preview, metadata_json, rotated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    ON CONFLICT (ai_target_id) DO UPDATE SET
+                        auth_kind = EXCLUDED.auth_kind,
+                        header_name = EXCLUDED.header_name,
+                        secret_value = EXCLUDED.secret_value,
+                        secret_preview = EXCLUDED.secret_preview,
+                        metadata_json = EXCLUDED.metadata_json,
+                        rotated_at = NOW(),
+                        updated_at = NOW()
+                """,
+                    uuid.UUID(target_id),
+                    credential["auth_kind"],
+                    credential["header_name"],
+                    credential["secret_value"],
+                    credential["secret_preview"],
+                    json.dumps(credential["metadata_json"]),
+                )
+
+        target = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+    return {"target": _ai_target_response(target, credential_row)}
+
+
+@app.delete("/ai/targets/{target_id}")
+async def delete_ai_target(target_id: str):
+    """Deactivate an AI Gate target."""
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE ai_targets
+            SET is_active = false, updated_at = NOW()
+            WHERE id = $1
+        """, uuid.UUID(target_id))
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="AI target not found")
+    return {"status": "deleted", "target_id": target_id}
+
+
+@app.post("/ai/targets/{target_id}/scan")
+async def scan_ai_target(target_id: str, request: AITargetScanRequest):
+    """Queue an AI Gate scan for a saved AI target."""
+    if request.probe_pack not in AI_PROBE_PACKS:
+        raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
+    if request.scan_profile not in AI_SCAN_PROFILES:
+        raise HTTPException(status_code=400, detail=f"scan_profile must be one of: {', '.join(sorted(AI_SCAN_PROFILES))}")
+    if request.environment not in AI_ENVIRONMENTS:
+        raise HTTPException(status_code=400, detail=f"environment must be one of: {', '.join(sorted(AI_ENVIRONMENTS))}")
+
+    r = get_redis()
+    job_id = str(uuid.uuid4())
+    scan_id = str(uuid.uuid4())
+
+    async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        if not target_row["is_active"]:
+            raise HTTPException(status_code=409, detail="AI target is inactive")
+        if target_row["production_mode"] and not request.confirm_production:
+            raise HTTPException(
+                status_code=409,
+                detail="This AI target is marked production. Re-submit with confirm_production=true.",
+            )
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+
+        target = row_to_dict(target_row)
+        for key in ("headers_template", "request_template", "metadata_json"):
+            target[key] = _decode_json_value(target.get(key)) or {}
+        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+        worker_options, storage_options = _build_ai_worker_options(
+            target=target,
+            credential=credential,
+            request=request,
+        )
+        run_kind = storage_options["run_kind"]
+
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, ai_target_id, target_url, job_id, status,
+                options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, NULL, $2, $3, $4, 'pending', $5, 'ai_gate', $6, $7)
+        """,
+            uuid.UUID(scan_id),
+            uuid.UUID(target_id),
+            target["endpoint_url"],
+            job_id,
+            json.dumps(storage_options),
+            run_kind,
+            f"ai_target:{target_id}",
+        )
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": target["endpoint_url"],
+        "options": worker_options,
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
+
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "target": target["endpoint_url"],
+        "run_kind": run_kind,
+        "ai_target_id": target_id,
+        "probe_pack": request.probe_pack,
+        "scan_profile": request.scan_profile,
+    }
+
+
+@app.get("/ai/scans/{scan_id}/transcript")
+async def get_ai_scan_transcript(scan_id: str):
+    """Return AI Gate transcripts for a completed scan."""
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow(
+            "SELECT result, run_kind FROM scans WHERE id = $1",
+            uuid.UUID(scan_id),
+        )
+    if not scan or scan["run_kind"] not in {"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp"}:
+        raise HTTPException(status_code=404, detail="AI scan not found")
+    result = _decode_json_value(scan["result"]) or {}
+    ai_gate = result.get("ai_gate") if isinstance(result, dict) else None
+    transcripts = ai_gate.get("transcripts") if isinstance(ai_gate, dict) else None
+    if not transcripts:
+        raise HTTPException(status_code=404, detail="Transcript not available")
+    return {"scan_id": scan_id, "transcripts": transcripts}
+
+
+# ============================================================
 # DASHBOARD
 # ============================================================
 
@@ -1650,15 +2369,20 @@ async def list_scans(
     """List scans with optional filtering."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT s.*, t.name as target_name, t.root_domain
+            SELECT s.*,
+                   COALESCE(t.name, ait.name) as target_name,
+                   t.root_domain,
+                   ait.target_type as ai_target_type
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE 1=1
         """
         count_query = """
             SELECT COUNT(*)
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE 1=1
         """
         params = []
@@ -1716,9 +2440,12 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     """Get scan details."""
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow("""
-            SELECT s.*, t.name as target_name
+            SELECT s.*,
+                   COALESCE(t.name, ait.name) as target_name,
+                   ait.target_type as ai_target_type
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE s.id = $1
         """, uuid.UUID(scan_id))
 
@@ -2245,6 +2972,7 @@ async def mark_retest_enqueue_failed(
 async def list_findings(
     severity: Optional[str] = None,
     status: Optional[str] = None,
+    source_type: Optional[str] = Query(None, regex="^(dast|ai)$"),
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
@@ -2261,15 +2989,22 @@ async def list_findings(
     """List findings with filtering and sorting."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+            SELECT f.*,
+                   COALESCE(t.url, ait.endpoint_url) as target_url,
+                   COALESCE(t.name, ait.name) as target_name,
+                   t.root_domain,
+                   ait.endpoint_url as ai_target_url,
+                   ait.name as ai_target_name
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE 1=1
         """
         count_query = """
             SELECT COUNT(*)
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE 1=1
         """
         params = []
@@ -2292,6 +3027,13 @@ async def list_findings(
             count_params.append(status)
             param_idx += 1
             count_param_idx += 1
+
+        if source_type == "ai":
+            query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
+            count_query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
+        elif source_type == "dast":
+            query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session') AND f.ai_target_id IS NULL"
+            count_query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session') AND f.ai_target_id IS NULL"
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
@@ -2347,8 +3089,20 @@ async def list_findings(
 
         if search:
             search_pattern = f"%{search}%"
-            query += f" AND (f.title ILIKE ${param_idx} OR f.url ILIKE ${param_idx})"
-            count_query += f" AND (f.title ILIKE ${count_param_idx} OR f.url ILIKE ${count_param_idx})"
+            query += f""" AND (
+                f.title ILIKE ${param_idx}
+                OR f.url ILIKE ${param_idx}
+                OR t.url ILIKE ${param_idx}
+                OR ait.endpoint_url ILIKE ${param_idx}
+                OR ait.name ILIKE ${param_idx}
+            )"""
+            count_query += f""" AND (
+                f.title ILIKE ${count_param_idx}
+                OR f.url ILIKE ${count_param_idx}
+                OR t.url ILIKE ${count_param_idx}
+                OR ait.endpoint_url ILIKE ${count_param_idx}
+                OR ait.name ILIKE ${count_param_idx}
+            )"""
             params.append(search_pattern)
             count_params.append(search_pattern)
             param_idx += 1
@@ -2432,6 +3186,11 @@ async def retest_finding(
             raise HTTPException(status_code=404, detail="Finding not found")
 
         finding_data = dict(finding)
+        if finding_data.get("source") == "ai_gate" or finding_data.get("ai_target_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="AI Gate findings are not supported by the web retest endpoint; re-run the AI Gate target instead.",
+            )
         retest_inputs = extract_retest_inputs(
             finding_data,
             override_type=request.finding_type,
@@ -2617,9 +3376,15 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 )
 
             query = """
-                SELECT f.*, t.url as target_url, t.name as target_name, t.root_domain
+                SELECT f.*,
+                       COALESCE(t.url, ait.endpoint_url) as target_url,
+                       COALESCE(t.name, ait.name) as target_name,
+                       t.root_domain,
+                       ait.endpoint_url as ai_target_url,
+                       ait.name as ai_target_name
                 FROM findings f
                 LEFT JOIN targets t ON f.target_id = t.id
+                LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
                 WHERE 1=1
             """
             params: list[Any] = []
@@ -2656,7 +3421,13 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 params.append(request.root_domain)
                 idx += 1
             if request.search:
-                query += f" AND (f.title ILIKE ${idx} OR f.url ILIKE ${idx})"
+                query += f""" AND (
+                    f.title ILIKE ${idx}
+                    OR f.url ILIKE ${idx}
+                    OR t.url ILIKE ${idx}
+                    OR ait.endpoint_url ILIKE ${idx}
+                    OR ait.name ILIKE ${idx}
+                )"""
                 params.append(f"%{request.search}%")
                 idx += 1
 
@@ -2679,6 +3450,12 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
         queue_error: str | None = None
         for idx, row in enumerate(findings):
             finding_data = dict(row)
+            if finding_data.get("source") == "ai_gate" or finding_data.get("ai_target_id"):
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "ai_gate_findings_require_ai_gate_rescan",
+                })
+                continue
             retest_inputs = extract_retest_inputs(
                 finding_data,
                 override_type=request.finding_type,

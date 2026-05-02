@@ -27,6 +27,9 @@ export interface Scan {
   target_name?: string
   status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   scan_type: string
+  run_kind?: string
+  ai_target_id?: string | null
+  ai_target_type?: string | null
   progress?: number
   current_phase?: string
   score?: number
@@ -81,6 +84,10 @@ export interface Finding {
   target_name?: string
   scan_id?: string
   target_id?: string
+  ai_target_id?: string | null
+  ai_target_url?: string
+  ai_target_name?: string
+  source?: 'scan' | 'manual' | 'ai_session' | 'ai_gate' | string
   evidence?: string | Record<string, unknown>
   request?: string
   response?: string
@@ -205,6 +212,78 @@ export interface AIProbeResponse {
   }
 }
 
+export type AITargetType = 'api_chat' | 'widget' | 'rag' | 'agent_trace' | 'mcp_trace'
+export type AIAuthKind =
+  | 'none'
+  | 'bearer'
+  | 'api_key_header'
+  | 'custom_header'
+  | 'basic_auth'
+  | 'cookie'
+  | 'multi_header'
+  | 'query_param'
+export type AIProbePack =
+  | 'shaker-ai-smoke'
+  | 'shaker-owasp-llm'
+  | 'shaker-agent-abuse'
+  | 'shaker-mcp-security'
+  | 'shaker-rag-lite'
+export type AIScanProfile = 'smoke' | 'trace' | 'standard' | 'deep'
+export type AIEnvironment = 'preview' | 'staging' | 'production' | 'development'
+
+export interface AITargetCredential {
+  auth_kind: AIAuthKind
+  header_name?: string | null
+  secret_configured?: boolean
+  secret_preview?: string | null
+  metadata_json?: Record<string, unknown> | null
+}
+
+export interface AITarget {
+  id: string
+  name: string
+  target_type: AITargetType
+  endpoint_url: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH'
+  headers_template: Record<string, string>
+  request_template: Record<string, unknown>
+  response_path?: string | null
+  streaming_mode: 'json' | 'sse'
+  rate_limit_rps?: number | null
+  token_budget?: number | null
+  request_budget?: number | null
+  production_mode: boolean
+  last_scanned_at?: string | null
+  last_scan_id?: string | null
+  metadata_json?: Record<string, unknown> | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  credential: AITargetCredential
+}
+
+export interface AITargetPayload {
+  name?: string
+  target_type: AITargetType
+  endpoint_url: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH'
+  headers_template: Record<string, unknown>
+  request_template: Record<string, unknown>
+  response_path?: string | null
+  streaming_mode: 'json' | 'sse'
+  rate_limit_rps?: number | null
+  token_budget?: number | null
+  request_budget?: number | null
+  production_mode?: boolean
+  metadata_json?: Record<string, unknown>
+  credential: {
+    auth_kind: AIAuthKind
+    header_name?: string | null
+    secret?: string | null
+    metadata_json?: Record<string, unknown> | null
+  }
+}
+
 // Dashboard
 export async function getDashboard() {
   const res = await fetch(`${API_URL}/dashboard`)
@@ -323,6 +402,7 @@ export async function scanTarget(targetId: string, options: Record<string, boole
 export async function getFindings(params?: {
   severity?: string
   status?: string
+  source_type?: 'dast' | 'ai'
   limit?: number
   offset?: number
   root_domain?: string
@@ -339,6 +419,7 @@ export async function getFindings(params?: {
   const searchParams = new URLSearchParams()
   if (params?.severity) searchParams.set('severity', params.severity)
   if (params?.status) searchParams.set('status', params.status)
+  if (params?.source_type) searchParams.set('source_type', params.source_type)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   if (params?.offset) searchParams.set('offset', params.offset.toString())
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
@@ -505,6 +586,76 @@ export async function testAISettings(data: {
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to test AI settings'))
   }
+  return res.json()
+}
+
+export async function getAITargets(params?: {
+  includeInactive?: boolean
+  limit?: number
+  offset?: number
+}): Promise<{ targets: AITarget[]; total: number; limit: number; offset: number }> {
+  const searchParams = new URLSearchParams()
+  if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.offset) searchParams.set('offset', String(params.offset))
+  const res = await fetch(`${API_URL}/ai/targets?${searchParams}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI targets'))
+  return res.json()
+}
+
+export async function createAITarget(data: AITargetPayload): Promise<{ target: AITarget }> {
+  const res = await fetch(`${API_URL}/ai/targets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create AI target'))
+  return res.json()
+}
+
+export async function updateAITarget(
+  id: string,
+  data: Partial<AITargetPayload> & { is_active?: boolean }
+): Promise<{ target: AITarget }> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update AI target'))
+  return res.json()
+}
+
+export async function deleteAITarget(id: string): Promise<{ status: string; target_id: string }> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target'))
+  return res.json()
+}
+
+export async function scanAITarget(
+  id: string,
+  data: {
+    probe_pack: AIProbePack
+    scan_profile: AIScanProfile
+    environment: AIEnvironment
+    confirm_production?: boolean
+  }
+): Promise<{
+  scan_id: string
+  job_id: string
+  status: 'queued'
+  target: string
+  run_kind: string
+  ai_target_id: string
+  probe_pack: string
+  scan_profile: string
+}> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue AI Gate scan'))
   return res.json()
 }
 

@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without v prefix"
+        required: true
+      push_latest:
+        description: "Also tag Docker images as latest"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+env:
+  SCANNER_IMAGE: shakerscan/shakerscan-scanner
+  UI_IMAGE: shakerscan/shakerscan-ui
+  SOURCE_URL: https://github.com/andriyze/shakerscan
+
+jobs:
+  docker:
+    name: Build and Publish Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      scanner_image: ${{ env.SCANNER_IMAGE }}:${{ steps.meta.outputs.version }}
+      ui_image: ${{ env.UI_IMAGE }}:${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+            push_latest="${{ inputs.push_latest }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            push_latest="true"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "push_latest=$push_latest" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build scanner image tags
+        id: scanner_tags
+        shell: bash
+        run: |
+          tags="${SCANNER_IMAGE}:${{ steps.meta.outputs.version }}"
+          if [[ "${{ steps.meta.outputs.push_latest }}" == "true" ]]; then
+            tags="${tags},${SCANNER_IMAGE}:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Build UI image tags
+        id: ui_tags
+        shell: bash
+        run: |
+          tags="${UI_IMAGE}:${{ steps.meta.outputs.version }}"
+          if [[ "${{ steps.meta.outputs.push_latest }}" == "true" ]]; then
+            tags="${tags},${UI_IMAGE}:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push scanner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scanner/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.scanner_tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Shaker Scan Scanner
+            org.opencontainers.image.description=Open-source DAST scanner API, worker, and security tooling image
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-scanner
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.vendor=Shaker Scan
+
+      - name: Build and push UI image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ui
+          file: ui/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            NEXT_PUBLIC_APP_VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.ui_tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Shaker Scan UI
+            org.opencontainers.image.description=Open-source Shaker Scan web dashboard
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.vendor=Shaker Scan
+
+  github-release:
+    name: Create GitHub Release
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          Docker images:
+          - \`${{ needs.docker.outputs.scanner_image }}\`
+          - \`${{ needs.docker.outputs.ui_image }}\`
+
+          Multi-architecture platforms:
+          - \`linux/amd64\`
+          - \`linux/arm64\`
+
+          Run prebuilt images:
+
+          \`\`\`bash
+          ./scanner.sh start --prebuilt --image-tag ${{ needs.docker.outputs.version }}
+          \`\`\`
+          EOF
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.docker.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release edit "v${VERSION}" --notes-file release-notes.md
+          else
+            gh release create "v${VERSION}" --title "Shaker Scan v${VERSION}" --notes-file release-notes.md
+          fi
+

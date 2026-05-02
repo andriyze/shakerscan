@@ -434,11 +434,121 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS last_verification_confidence NUMERIC(3,2),
                 ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
-                ADD COLUMN IF NOT EXISTS ai_classification_source TEXT
+                ADD COLUMN IF NOT EXISTS ai_classification_source TEXT,
+                ADD COLUMN IF NOT EXISTS ai_target_id UUID
             """)
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
                 WHERE verification_count IS NULL
+            """)
+
+            # AI Gate targets (single-user OSS edition).
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_targets (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT NOT NULL,
+                    target_type TEXT NOT NULL DEFAULT 'api_chat',
+                    endpoint_url TEXT UNIQUE NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'POST',
+                    headers_template JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    request_template JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    response_path TEXT,
+                    streaming_mode TEXT NOT NULL DEFAULT 'json',
+                    rate_limit_rps INTEGER,
+                    token_budget INTEGER,
+                    request_budget INTEGER,
+                    production_mode BOOLEAN NOT NULL DEFAULT false,
+                    last_scanned_at TIMESTAMPTZ,
+                    last_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ai_targets_target_type_check
+                        CHECK (target_type IN ('api_chat', 'widget', 'rag', 'agent_trace', 'mcp_trace')),
+                    CONSTRAINT ai_targets_method_check
+                        CHECK (method IN ('GET', 'POST', 'PUT', 'PATCH')),
+                    CONSTRAINT ai_targets_streaming_mode_check
+                        CHECK (streaming_mode IN ('json', 'sse'))
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_target_credentials (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    ai_target_id UUID NOT NULL REFERENCES ai_targets(id) ON DELETE CASCADE,
+                    auth_kind TEXT NOT NULL DEFAULT 'none',
+                    header_name TEXT,
+                    secret_value TEXT,
+                    secret_preview TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    rotated_at TIMESTAMPTZ,
+                    CONSTRAINT ai_target_credentials_target_unique UNIQUE (ai_target_id),
+                    CONSTRAINT ai_target_credentials_auth_kind_check
+                        CHECK (auth_kind IN (
+                            'none',
+                            'bearer',
+                            'api_key_header',
+                            'custom_header',
+                            'basic_auth',
+                            'cookie',
+                            'multi_header',
+                            'query_param'
+                        ))
+                )
+            """)
+            await conn.execute("""
+                ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
+                ADD COLUMN IF NOT EXISTS subject_ref TEXT,
+                ADD COLUMN IF NOT EXISTS ai_target_id UUID REFERENCES ai_targets(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                UPDATE scans SET run_kind = 'web_dast'
+                WHERE run_kind IS NULL
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'scans_run_kind_check'
+                    ) THEN
+                        ALTER TABLE scans
+                        ADD CONSTRAINT scans_run_kind_check
+                        CHECK (run_kind IN ('web_dast', 'ai_api', 'ai_widget', 'ai_rag', 'ai_trace', 'ai_mcp'));
+                    END IF;
+                END $$;
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'findings_ai_target_id_fkey'
+                    ) THEN
+                        ALTER TABLE findings
+                        ADD CONSTRAINT findings_ai_target_id_fkey
+                        FOREIGN KEY (ai_target_id) REFERENCES ai_targets(id) ON DELETE CASCADE;
+                    END IF;
+                END $$;
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_targets_active_created
+                ON ai_targets(is_active, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scans_ai_target_created
+                ON scans(ai_target_id, created_at DESC)
+                WHERE ai_target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scans_run_kind_created
+                ON scans(run_kind, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_ai_target
+                ON findings(ai_target_id)
+                WHERE ai_target_id IS NOT NULL
             """)
 
             # finding_verifications table

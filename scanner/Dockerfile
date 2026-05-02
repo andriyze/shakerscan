@@ -90,7 +90,7 @@ ENV TESTSSL_BIN=/opt/testssl.sh/testssl.sh
 WORKDIR /app
 
 # Python deps for scanner
-COPY requirements.txt /app/requirements.txt
+COPY scanner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
 # Playwright browser path
@@ -104,16 +104,26 @@ RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head 
         ln -sf "$CHROME_PATH" /usr/bin/google-chrome; \
     fi
 
-# Copy application files
-COPY scanner.py /app/scanner.py
-COPY constants.py /app/constants.py
-COPY grading.py /app/grading.py
-COPY findings.py /app/findings.py
-COPY signals.py /app/signals.py
-COPY reporting.py /app/reporting.py
-COPY gungnir_worker.py /app/gungnir_worker.py
-COPY scanner_tools /app/scanner_tools
-COPY wordlists /app/wordlists
+# Copy scanner application files
+COPY scanner/scanner.py /app/scanner.py
+COPY scanner/constants.py /app/constants.py
+COPY scanner/grading.py /app/grading.py
+COPY scanner/findings.py /app/findings.py
+COPY scanner/signals.py /app/signals.py
+COPY scanner/reporting.py /app/reporting.py
+COPY scanner/gungnir_worker.py /app/gungnir_worker.py
+COPY scanner/scanner_tools /app/scanner_tools
+COPY scanner/wordlists /app/wordlists
+
+# Copy API/worker files used by prebuilt images.
+COPY api/api.py /app/api.py
+COPY api/worker.py /app/worker.py
+COPY api/gungnir_worker.py /app/gungnir_worker.py
+COPY api/session_manager.py /app/session_manager.py
+COPY api/retest_contract.py /app/retest_contract.py
+COPY api/ai_verifier.py /app/ai_verifier.py
+COPY api/ai_gate_scan.py /app/ai_gate_scan.py
+COPY api/ai_gate /app/ai_gate
 
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists
@@ -154,7 +164,7 @@ RUN useradd -m scanner
 ENV HOME=/tmp
 
 # Entry point
-COPY entrypoint.sh /app/entrypoint.sh
+COPY scanner/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]

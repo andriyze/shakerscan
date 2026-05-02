@@ -33,6 +33,27 @@ function StatusBadge({ status }: { status: Finding['status'] }) {
   )
 }
 
+function getFindingSourceType(finding: Finding): 'AI' | 'DAST' {
+  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
+    return 'AI'
+  }
+  return 'DAST'
+}
+
+function SourceTypeBadge({ finding }: { finding: Finding }) {
+  const type = getFindingSourceType(finding)
+  const styles: Record<'AI' | 'DAST', string> = {
+    AI: 'bg-purple-500/20 text-purple-300',
+    DAST: 'bg-blue-500/20 text-blue-300'
+  }
+
+  return (
+    <span className={`px-2 py-0.5 text-xs font-medium rounded ${styles[type]}`}>
+      {type}
+    </span>
+  )
+}
+
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
@@ -244,6 +265,7 @@ function FindingDetailContent() {
                   {finding.severity}
                 </span>
                 <StatusBadge status={finding.status} />
+                <SourceTypeBadge finding={finding} />
                 {finding.cvss_score !== undefined && (
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}
