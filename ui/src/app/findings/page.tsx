@@ -56,6 +56,16 @@ function getSourceTypeClass(type: 'AI' | 'DAST'): string {
   return 'bg-blue-500/20 text-blue-300'
 }
 
+function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
+  if (sortBy === 'last_seen' || sortBy === 'first_seen') {
+    return sortOrder === 'desc' ? 'Newest first' : 'Oldest first'
+  }
+  if (sortBy === 'cvss') {
+    return sortOrder === 'desc' ? 'Highest first' : 'Lowest first'
+  }
+  return sortOrder === 'desc' ? 'Critical first' : 'Info first'
+}
+
 function FindingsContent() {
   const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
     defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
@@ -408,10 +418,10 @@ function FindingsContent() {
           </select>
           <button
             onClick={() => setFilter('sort_order', sortOrder === 'desc' ? 'asc' : 'desc')}
-            className="px-2 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
-            title={sortOrder === 'desc' ? 'Descending (newest/highest first)' : 'Ascending (oldest/lowest first)'}
+            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
+            title={`Toggle sort direction: ${getSortOrderLabel(sortBy, sortOrder)}`}
           >
-            {sortOrder === 'desc' ? '\u2193' : '\u2191'}
+            {getSortOrderLabel(sortBy, sortOrder)}
           </button>
         </div>
 

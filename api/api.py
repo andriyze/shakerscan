@@ -2709,7 +2709,7 @@ async def list_targets_grouped(
 
 @app.get("/domains")
 async def list_domains():
-    """List unique root domains from targets."""
+    """List unique root domains from DAST and AI targets."""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT DISTINCT root_domain
@@ -2717,9 +2717,17 @@ async def list_domains():
             WHERE root_domain IS NOT NULL AND is_active = true
             ORDER BY root_domain
         """)
+        ai_rows = await conn.fetch("""
+            SELECT endpoint_url
+            FROM ai_targets
+            WHERE endpoint_url IS NOT NULL AND is_active = true
+        """)
 
     return {
-        'domains': [r['root_domain'] for r in rows]
+        'domains': sorted({
+            *(r['root_domain'] for r in rows),
+            *(extract_root_domain(r['endpoint_url']) for r in ai_rows if r['endpoint_url'])
+        })
     }
 
 
@@ -3052,8 +3060,14 @@ async def list_findings(
             count_param_idx += 1
 
         if root_domain:
-            query += f" AND t.root_domain = ${param_idx}"
-            count_query += f" AND t.root_domain = ${count_param_idx}"
+            query += f""" AND (
+                t.root_domain = ${param_idx}
+                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${param_idx}) || '%'
+            )"""
+            count_query += f""" AND (
+                t.root_domain = ${count_param_idx}
+                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${count_param_idx}) || '%'
+            )"""
             params.append(root_domain)
             count_params.append(root_domain)
             param_idx += 1
@@ -3119,13 +3133,13 @@ async def list_findings(
         # Build ORDER BY clause based on sort_by parameter
         order_dir = "DESC" if sort_order == "desc" else "ASC"
         if sort_by == "first_seen":
-            order_clause = f"f.first_seen_at {order_dir}"
+            order_clause = f"f.first_seen_at {order_dir} NULLS LAST"
         elif sort_by == "last_seen":
-            order_clause = f"f.last_seen_at {order_dir}"
+            order_clause = f"f.last_seen_at {order_dir} NULLS LAST"
         elif sort_by == "cvss":
             order_clause = f"f.cvss_score {order_dir} NULLS LAST"
         else:
-            # Default: severity (always show critical first regardless of sort_order)
+            severity_dir = "ASC" if sort_order == "desc" else "DESC"
             order_clause = """
                 CASE f.severity
                     WHEN 'critical' THEN 1
@@ -3133,7 +3147,7 @@ async def list_findings(
                     WHEN 'medium' THEN 3
                     WHEN 'low' THEN 4
                     ELSE 5
-                END""" + (", f.first_seen_at DESC" if sort_order == "desc" else ", f.first_seen_at ASC")
+                END""" + f" {severity_dir}, f.last_seen_at DESC NULLS LAST"
 
         query += f"""
             ORDER BY {order_clause}
