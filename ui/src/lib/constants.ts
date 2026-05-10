@@ -90,7 +90,7 @@ export type SortOption = typeof SORT_OPTIONS[number]['value']
 
 export type SortOrder = 'asc' | 'desc'
 
-export const DISCOVERY_SOURCES = ['manual', 'subfinder', 'gungnir-monitor', 'import'] as const
+export const DISCOVERY_SOURCES = ['manual', 'subfinder', 'gungnir-monitor', 'import', 'model-intake'] as const
 export type DiscoverySource = typeof DISCOVERY_SOURCES[number]
 
 export const GRADES = ['A', 'B', 'C', 'D', 'F'] as const

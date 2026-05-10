@@ -27,13 +27,15 @@ The scanner runs as Docker containers:
 
 - **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
-- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export, compliance section, and resolved coverage budget when complete. Preserves list filter context on back navigation.
+- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export, compliance section, resolved coverage budget, AI Gate evidence, and Model Intake artifact checks when complete. Preserves list filter context on back navigation.
+- **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
 - **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
+- **Model Intake (`/settings/model-intake`)**: queue model artifact checks with artifact URL, metadata URL/JSON, checksum, signature, model card, approval flags, timeout, and download cap.
 
 ## Your Role
 
@@ -283,7 +285,7 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 | Parameter | Description |
 |-----------|-------------|
 | `search` | Search by URL or domain |
-| `discovery_source` | Filter: manual, subfinder, gungnir-monitor, import |
+| `discovery_source` | Filter: manual, subfinder, gungnir-monitor, import, model-intake |
 | `grade` | Filter by grade: A, B, C, D, F |
 | `has_findings` | Filter: true (with findings) or false (no findings) |
 | `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
@@ -464,6 +466,28 @@ curl "http://localhost:8080/findings?source_type=dast&status=active"
 ```
 
 After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll; AI Gate scans can still take time depending on profile, target latency, and budget.
+
+### Model Intake
+
+Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, and deployment approval checks.
+
+Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+```bash
+# Queue a model intake scan
+curl -X POST http://localhost:8080/model-intake/scan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "artifact_url": "https://example.com/models/model.safetensors",
+    "metadata_url": "https://example.com/models/model.metadata.json",
+    "expected_sha256": "optional-known-good-sha256",
+    "signature_url": "https://example.com/models/model.sig",
+    "model_card_url": "https://example.com/models/model-card.md",
+    "deployment_approved": true
+  }'
+```
+
+After submitting a Model Intake scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
 
 ### Schedules (Recurring Scans)
 

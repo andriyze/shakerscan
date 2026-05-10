@@ -26,6 +26,7 @@ Modules:
 - breach_check: Credential breach monitoring (HIBP, GitHub code search, email detection)
 - sarif_output: SARIF output format for CI/CD integration (GitHub Security, Azure DevOps)
 - vendor_risk: Third-party/vendor risk scoring (CDN analysis, supply chain security)
+- model_intake: Model artifact intake checks (provenance, serialization, signatures, approval)
 """
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "form_login",
     "grpc_discovery",
     "http_scanner",
+    "model_intake",
     "network_services",
     "nmap",
     "nuclei",

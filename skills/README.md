@@ -20,9 +20,10 @@ This directory contains skills files for integrating ShakerScan with Claude Code
    - "Show me the latest scan results"
    - "List all critical findings"
    - "Run a full security assessment on my-app.com"
+   - "Run model intake on this artifact"
 
 Available skills in this folder:
-- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate)
+- `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate/model intake)
 - `ai-security-session/` - interactive `/session` Playwright workflows (BOLA/IDOR/manual testing)
 
 ## API Endpoints
@@ -61,6 +62,7 @@ Agents that support HTTP tools can call these endpoints directly. Agents that su
 | `/discovery` | POST | Start subdomain discovery |
 | `/discovery` | GET | List discovery runs |
 | `/discovery/{id}` | GET | Get discovery run details |
+| `/exposure/graph` | GET | Build exposure graph from targets, APIs, vendors, AI surfaces, model artifacts, scans, and findings |
 | `/schedules` | GET/POST | Manage recurring scans |
 | `/schedules/{id}` | GET | Get schedule details |
 | `/schedules/{id}` | PATCH/DELETE | Update or remove a schedule |
@@ -70,6 +72,7 @@ Agents that support HTTP tools can call these endpoints directly. Agents that su
 | `/ai/targets/{id}` | PATCH/DELETE | Update/deactivate an AI Gate target |
 | `/ai/targets/{id}/scan` | POST | Queue an AI Gate probe-pack scan |
 | `/ai/scans/{id}/transcript` | GET | Get completed AI Gate scan transcripts |
+| `/model-intake/scan` | POST | Queue a model artifact intake scan |
 | `/gungnir/status` | GET | CT monitor status |
 | `/gungnir/start` | POST | Start CT monitor |
 | `/gungnir/stop` | POST | Stop CT monitor |

@@ -509,16 +509,20 @@ async def run_schema_migrations(pool) -> None:
                 WHERE run_kind IS NULL
             """)
             await conn.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint WHERE conname = 'scans_run_kind_check'
-                    ) THEN
-                        ALTER TABLE scans
-                        ADD CONSTRAINT scans_run_kind_check
-                        CHECK (run_kind IN ('web_dast', 'ai_api', 'ai_widget', 'ai_rag', 'ai_trace', 'ai_mcp'));
-                    END IF;
-                END $$;
+                ALTER TABLE scans DROP CONSTRAINT IF EXISTS scans_run_kind_check
+            """)
+            await conn.execute("""
+                ALTER TABLE scans
+                ADD CONSTRAINT scans_run_kind_check
+                CHECK (run_kind IN (
+                    'web_dast',
+                    'ai_api',
+                    'ai_widget',
+                    'ai_rag',
+                    'ai_trace',
+                    'ai_mcp',
+                    'model_intake'
+                ))
             """)
             await conn.execute("""
                 DO $$

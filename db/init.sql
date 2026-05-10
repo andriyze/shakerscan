@@ -14,7 +14,7 @@ CREATE TABLE targets (
     is_root BOOLEAN DEFAULT false,  -- true for root domains, false for subdomains
 
     -- Discovery metadata
-    discovery_source TEXT DEFAULT 'manual',  -- manual, subfinder, gungnir-monitor, import
+    discovery_source TEXT DEFAULT 'manual',  -- manual, subfinder, gungnir-monitor, import, model-intake
     parent_target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
 
     -- Scan configuration
@@ -56,7 +56,7 @@ CREATE TABLE scans (
     -- Scan configuration
     options JSONB DEFAULT '{}',
     scan_type TEXT DEFAULT 'quick',  -- quick, standard, thorough, full
-    run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp
+    run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp, model_intake
     subject_ref TEXT,
 
     -- Results

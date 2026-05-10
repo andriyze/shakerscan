@@ -43,6 +43,32 @@ export interface Scan {
   options?: Record<string, unknown> | null
 }
 
+export interface ModelIntakeScanRequest {
+  artifact_url: string
+  name?: string
+  metadata_url?: string
+  metadata_json?: Record<string, unknown>
+  expected_sha256?: string
+  signature_url?: string
+  model_card_url?: string
+  deployment_approved?: boolean
+  require_deployment_approval?: boolean
+  require_signature?: boolean
+  require_hash?: boolean
+  max_download_bytes?: number
+  timeout_seconds?: number
+}
+
+export interface ModelIntakeScanResponse {
+  scan_id: string
+  job_id: string
+  status: string
+  target: string
+  scan_type: 'model_intake'
+  run_kind: 'model_intake'
+  ui_url: string
+}
+
 export interface Target {
   id: string
   url: string
@@ -397,6 +423,18 @@ export async function submitScan(target: string, options: Record<string, unknown
     body: JSON.stringify({ target, options })
   })
   if (!res.ok) throw new Error('Failed to submit scan')
+  return res.json()
+}
+
+export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promise<ModelIntakeScanResponse> {
+  const res = await fetch(`${API_URL}/model-intake/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to submit model intake scan'))
+  }
   return res.json()
 }
 

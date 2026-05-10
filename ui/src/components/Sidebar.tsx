@@ -2,7 +2,7 @@
 
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, Network } from 'lucide-react'
+import { Bot, Network, PackageCheck } from 'lucide-react'
 
 const navItems = [
   {
@@ -59,6 +59,11 @@ const navItems = [
     href: '/settings/ai-gate',
     label: 'AI Gate',
     icon: <Bot className="w-5 h-5" />,
+  },
+  {
+    href: '/settings/model-intake',
+    label: 'Model Intake',
+    icon: <PackageCheck className="w-5 h-5" />,
   },
 ]
 

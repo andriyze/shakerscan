@@ -210,6 +210,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const ai_logs = scanData.ai_logs || null
   const ai_summary = ai_logs?.summary || null
   const ai_executive = ai_summary?.executive_summary || null
+  const model_intake = scanData.model_intake || null
+  const modelIntakeSummary = model_intake?.summary || null
+  const modelIntakeArtifact = model_intake?.artifact || null
+  const modelIntakeChecks = model_intake?.checks || null
   const ai_gate = scanData.ai_gate || null
   const aiGateDecision = ai_gate?.decision || {}
   const aiGateStats = ai_gate?.statistics || {}
@@ -234,7 +238,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       ? 'bg-green-900 text-green-200'
       : 'bg-slate-700 text-slate-300'
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
-  const scanTypeLabel = isAIScan ? 'AI Gate' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
+  const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const aiScanProfile = scan.options?.ai_scan_profile || ai_gate?.scan_profile || 'AI Gate'
   const aiGateFindingsByProbe = findings.reduce<Record<string, any[]>>((groups, finding) => {
     const evidence = parseEvidenceRecord(finding.evidence)
@@ -356,13 +361,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <p className="text-lg font-semibold capitalize">{scanTypeLabel}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Profile' : 'Scan Mode'}</h3>
+            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Profile' : isModelIntakeScan ? 'Intake Mode' : 'Scan Mode'}</h3>
             <p className="text-lg font-semibold capitalize">
-              {isAIScan ? aiScanProfile : scan.options?.quick ? 'Quick' : 'Thorough'}
-              {!isAIScan && scan.options?.active && ' + Active'}
+              {isAIScan ? aiScanProfile : isModelIntakeScan ? 'Artifact checks' : scan.options?.quick ? 'Quick' : 'Thorough'}
+              {!isAIScan && !isModelIntakeScan && scan.options?.active && ' + Active'}
             </p>
           </div>
-          {!isAIScan && (
+          {!isAIScan && !isModelIntakeScan && (
             <div className="bg-gray-700/50 rounded-lg p-4">
               <h3 className="text-sm text-gray-400 mb-1">Coverage Budget</h3>
               <p className="text-lg font-semibold capitalize">{budgetProfile || 'Balanced'}</p>
@@ -647,6 +652,62 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   )
                 })}
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Model Intake */}
+      {model_intake && (
+        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+          <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+            <div>
+              <h2 className="text-2xl font-bold">Model Intake</h2>
+              <p className="text-sm text-gray-400 mt-1 break-all">
+                {modelIntakeSummary?.artifact_ref || scan.target_url}
+              </p>
+            </div>
+            {modelIntakeSummary?.format_posture && (
+              <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">
+                {String(modelIntakeSummary.format_posture).replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-5">
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Artifact</div>
+              <div className="text-sm font-semibold text-white break-all">{modelIntakeSummary?.artifact_name || modelIntakeArtifact?.name || 'artifact'}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Format</div>
+              <div className="text-sm font-semibold text-white">{modelIntakeSummary?.extension || 'unknown'}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Source</div>
+              <div className="text-sm font-semibold text-white">{modelIntakeSummary?.source_kind || 'unknown'}</div>
+            </div>
+            <div className="bg-gray-700/40 rounded-lg p-3">
+              <div className="text-xs text-gray-400">Findings</div>
+              <div className="text-lg font-semibold text-orange-400">{modelIntakeSummary?.findings_count ?? findings.length}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            {Object.entries(modelIntakeChecks || {}).map(([check, passed]) => (
+              <div key={check} className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-xs text-gray-400">{check.replace(/_/g, ' ')}</div>
+                <div className={`mt-1 text-sm font-semibold ${passed ? 'text-green-300' : passed === null ? 'text-gray-400' : 'text-red-300'}`}>
+                  {passed === null ? 'not required' : passed ? 'passed' : 'failed'}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {modelIntakeSummary?.sha256 && (
+            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="text-xs text-gray-400">Observed SHA-256</div>
+              <div className="mt-1 break-all font-mono text-xs text-gray-300">{modelIntakeSummary.sha256}</div>
             </div>
           )}
         </div>

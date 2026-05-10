@@ -1186,6 +1186,22 @@ class BatchRequest(BaseModel):
     options: ScanOptions = Field(default_factory=ScanOptions)
 
 
+class ModelIntakeScanRequest(BaseModel):
+    artifact_url: str
+    name: Optional[str] = None
+    metadata_url: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    expected_sha256: Optional[str] = None
+    signature_url: Optional[str] = None
+    model_card_url: Optional[str] = None
+    deployment_approved: bool = False
+    require_deployment_approval: bool = True
+    require_signature: bool = True
+    require_hash: bool = True
+    max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
+    timeout_seconds: int = Field(default=20, ge=1, le=120)
+
+
 AI_TARGET_TYPES = {"api_chat", "widget", "rag", "agent_trace", "mcp_trace"}
 AI_TARGET_METHODS = {"GET", "POST", "PUT", "PATCH"}
 AI_STREAMING_MODES = {"json", "sse"}
@@ -1910,11 +1926,12 @@ def _build_exposure_graph(
         target_node_by_id[target_id] = node_id
         root_domain = target.get("root_domain") or extract_root_domain(target.get("url") or "")
         active_findings = int(target.get("active_findings_count") or target.get("active_findings") or 0)
+        is_model_artifact = target.get("discovery_source") == "model-intake"
         add_node(_graph_node(
             node_id,
-            "web_target",
+            "model_artifact" if is_model_artifact else "web_target",
             _short_url_label(target.get("url")),
-            subtitle=target.get("name") or root_domain,
+            subtitle=target.get("name") or ("Model artifact" if is_model_artifact else root_domain),
             status="active" if target.get("is_active", True) else "inactive",
             href=f"/targets?search={urllib.parse.quote(str(target.get('url') or ''))}",
             meta={
@@ -2106,6 +2123,30 @@ def _build_exposure_graph(
             ))
             edges.append(_graph_edge(subject_id, tool_node_id, "exposes_mcp_tool", label="exposes MCP tool", severity=tool.get("severity")))
 
+        model_intake = _parse_graph_json(result.get("model_intake"))
+        model_summary = _parse_graph_json(model_intake.get("summary"))
+        if model_summary:
+            add_node(_graph_node(
+                subject_id,
+                "model_artifact",
+                model_summary.get("artifact_name") or _short_url_label(model_summary.get("artifact_ref") or scan.get("target_url")),
+                subtitle=model_summary.get("format_posture") or "Model artifact",
+                status="approved" if model_summary.get("deployment_approved") else "needs approval",
+                href=f"/scans/{scan_id}",
+                meta={
+                    "artifact_ref": model_summary.get("artifact_ref"),
+                    "source_kind": model_summary.get("source_kind"),
+                    "extension": model_summary.get("extension"),
+                    "sha256": model_summary.get("sha256"),
+                    "format_posture": model_summary.get("format_posture"),
+                    "provenance_present": model_summary.get("provenance_present"),
+                    "signature_present": model_summary.get("signature_present"),
+                    "expected_hash_present": model_summary.get("expected_hash_present"),
+                    "deployment_approved": model_summary.get("deployment_approved"),
+                },
+            ))
+            edges.append(_graph_edge(scan_node_id, subject_id, "inspected_model_artifact", label="inspected model artifact"))
+
         vendor_risk = _parse_graph_json(result.get("vendor_risk"))
         for domain in (vendor_risk.get("third_party_domains") or [])[:20]:
             if not domain:
@@ -2239,7 +2280,7 @@ def _build_exposure_graph(
             severity = str(node["severity"])
             severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
-    hotspot_types = {"domain", "web_target", "ai_target", "attack_chain"}
+    hotspot_types = {"domain", "web_target", "ai_target", "model_artifact", "attack_chain"}
     hotspots = sorted(
         [node for node in node_list if node["type"] in hotspot_types and node.get("severity")],
         key=lambda item: (_severity_sort_value(item.get("severity")), int(item.get("meta", {}).get("active_findings_count") or 0)),
@@ -2358,8 +2399,10 @@ async def root():
             "scans": "/scans",
             "targets": "/targets",
             "ai_targets": "/ai/targets",
+            "model_intake": "/model-intake/scan",
             "findings": "/findings",
             "discovery": "/discovery",
+            "exposure_graph": "/exposure/graph",
             "dashboard": "/dashboard",
             "queue": "/queue/stats"
         }
@@ -2549,6 +2592,85 @@ async def test_ai_settings(request: AISettingsProbeRequest):
         "status": "ok" if probe.get("ok") else "failed",
         "scope": scope,
         "probe": probe,
+    }
+
+
+# ============================================================
+# MODEL INTAKE
+# ============================================================
+
+@app.post("/model-intake/scan")
+async def scan_model_intake(request: ModelIntakeScanRequest):
+    """Queue a model artifact intake scan."""
+    artifact_ref = (request.artifact_url or "").strip()
+    if not artifact_ref:
+        raise HTTPException(status_code=400, detail="artifact_url is required")
+    parsed = urllib.parse.urlparse(artifact_ref)
+    if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci"}:
+        raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, or oci://")
+
+    r = get_redis()
+    job_id = str(uuid.uuid4())
+    scan_id = str(uuid.uuid4())
+    target_name = request.name or f"Model artifact: {_short_url_label(artifact_ref)}"
+    options = {
+        "run_kind": "model_intake",
+        "artifact_name": request.name,
+        "metadata_url": request.metadata_url,
+        "metadata_json": request.metadata_json or {},
+        "expected_sha256": request.expected_sha256,
+        "signature_url": request.signature_url,
+        "model_card_url": request.model_card_url,
+        "deployment_approved": request.deployment_approved,
+        "require_deployment_approval": request.require_deployment_approval,
+        "require_signature": request.require_signature,
+        "require_hash": request.require_hash,
+        "max_download_bytes": request.max_download_bytes,
+        "timeout_seconds": request.timeout_seconds,
+    }
+
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id FROM targets WHERE url = $1", artifact_ref)
+        if target:
+            target_id = target["id"]
+        else:
+            target_id = await conn.fetchval("""
+                INSERT INTO targets (url, name, root_domain, discovery_source)
+                VALUES ($1, $2, $3, 'model-intake')
+                RETURNING id
+            """, artifact_ref, target_name, extract_root_domain(artifact_ref))
+
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, target_url, job_id, status, options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, $2, $3, $4, 'pending', $5, 'model_intake', 'model_intake', $6)
+        """,
+            uuid.UUID(scan_id),
+            target_id,
+            artifact_ref,
+            job_id,
+            json.dumps(options),
+            f"model_artifact:{hashlib.sha256(artifact_ref.encode()).hexdigest()[:16]}",
+        )
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": artifact_ref,
+        "options": options,
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
+
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "target": artifact_ref,
+        "scan_type": "model_intake",
+        "run_kind": "model_intake",
+        "ui_url": f"/scans/{scan_id}",
     }
 
 
@@ -3370,7 +3492,7 @@ async def list_targets(
 async def list_targets_grouped(
     include_inactive: bool = False,
     search: Optional[str] = None,
-    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import)$"),
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import|model-intake)$"),
     grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
     has_findings: Optional[bool] = None,
     sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),

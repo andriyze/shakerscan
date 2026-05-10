@@ -1,6 +1,6 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
 import Link from 'next/link'
-import { Bot } from 'lucide-react'
+import { Bot, PackageCheck } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -28,6 +28,22 @@ export default function SettingsPage() {
           </div>
         </div>
         <span className="text-sm text-blue-400">Open</span>
+      </Link>
+
+      <Link
+        href="/settings/model-intake"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-600/20 text-cyan-300">
+            <PackageCheck className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">Model Intake</h2>
+            <p className="mt-1 text-sm text-gray-400">Provenance, unsafe serialization, signing, checksum, and approval checks</p>
+          </div>
+        </div>
+        <span className="text-sm text-cyan-300">Open</span>
       </Link>
 
       <AISettingsPanel />

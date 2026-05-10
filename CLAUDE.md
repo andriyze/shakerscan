@@ -339,6 +339,28 @@ curl "http://localhost:8080/findings?source_type=dast&status=active"
 
 After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll; AI Gate scans can still take time depending on profile, target latency, and budget.
 
+### Model Intake
+
+Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, and deployment approval checks.
+
+Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+```bash
+# Queue a model intake scan
+curl -X POST http://localhost:8080/model-intake/scan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "artifact_url": "https://example.com/models/model.safetensors",
+    "metadata_url": "https://example.com/models/model.metadata.json",
+    "expected_sha256": "optional-known-good-sha256",
+    "signature_url": "https://example.com/models/model.sig",
+    "model_card_url": "https://example.com/models/model-card.md",
+    "deployment_approved": true
+  }'
+```
+
+After submitting a Model Intake scan, report the scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+
 ### Schedules (Recurring Scans)
 
 ```bash

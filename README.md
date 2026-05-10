@@ -1,6 +1,6 @@
 # ShakerScan
 
-Open-source Dynamic Application Security Testing (DAST) for web applications, with a local web UI, persistent storage, worker-based scanning, and optional AI Gate checks for chat, RAG, agent, and MCP surfaces.
+Open-source Dynamic Application Security Testing (DAST) for web applications, with a local web UI, persistent storage, worker-based scanning, optional AI Gate checks for chat/RAG/agent/MCP surfaces, and model artifact intake checks.
 
 ## Contents
 
@@ -77,6 +77,7 @@ Open this repo in Claude Code, Codex, OpenCode, or another agent that can read r
 
 - **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
 - **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
+- **[Honey Model Intake Prompt](docs/HONEY_MODEL_INTAKE_PROMPT.md)** - LLM prompt for adding model-intake calibration scenarios to the Honey test app.
 
 <video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
 
@@ -168,6 +169,11 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
   - Chat-style evidence views with probe, target response, classifier output, and raw evidence
   - Confidence scoring and false-positive reduction
   - Cross-finding correlation and attack-chain analysis
+
+- **Model Intake Checks**
+  - Model provenance, checksum, signature/attestation, model-card, and deployment approval checks
+  - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, joblib/pickle files, and executable archive contents
+  - Safe, non-executing artifact inspection for pre-deployment model approval workflows
 
 - **Modern Web Interface**
   - Real-time dashboard with metrics and scan management
@@ -279,6 +285,11 @@ curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
   -H "Content-Type: application/json" \
   -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
 
+# Model artifact intake scan
+curl -X POST http://localhost:8080/model-intake/scan \
+  -H "Content-Type: application/json" \
+  -d '{"artifact_url":"https://example.com/models/model.safetensors","metadata_url":"https://example.com/models/model.metadata.json"}'
+
 # Update finding status
 curl -X PATCH http://localhost:8080/findings/{id} \
   -H "Content-Type: application/json" \
@@ -293,7 +304,7 @@ curl -X POST http://localhost:8080/workers \
   -d '{"count": 5}'
 ```
 
-Full API documentation including authenticated scanning, custom endpoints, AI Gate, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
+Full API documentation including authenticated scanning, custom endpoints, AI Gate, model intake, schedules, and advanced options is in [`CLAUDE.md`](CLAUDE.md). FastAPI also exposes the live OpenAPI schema at `http://localhost:8080/openapi.json`.
 
 ## AI Agent Integration
 
@@ -312,6 +323,7 @@ claude    # Claude reads CLAUDE.md and understands the project
 | `/scan-full <url>` | Full assessment (asks permission first) |
 | `/scan-smart <url>` | Smart adaptive scan |
 | `/ai-gate` | Manage AI Gate targets and run AI safety probe packs |
+| `/model-intake` | Queue model artifact intake checks |
 | `/findings` | List active vulnerabilities |
 | `/status` | Check scanner status |
 | `/subdomains <domain>` | Discover subdomains |
@@ -321,12 +333,14 @@ claude    # Claude reads CLAUDE.md and understands the project
 
 - **Dashboard (`/`)**: real-time metrics, queue health, worker scaling, Gungnir CT monitor toggle
 - **Scans (`/scans`)**: filter by status/domain/search, cancel running jobs, re-scan
-- **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section
+- **Scan Report (`/scans/{id}`)**: live logs, progress bar, PDF export, compliance section, AI Gate evidence, and Model Intake artifact checks
+- **Exposure (`/exposure`)**: graph of domains, targets, APIs, auth roles, vendors, AI surfaces, MCP tools, model artifacts, scans, and findings
 - **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/date/domain, bulk cleanup, CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
 - **AI Gate (`/settings/ai-gate`)**: add AI targets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
+- **Model Intake (`/settings/model-intake`)**: submit model artifact checks for provenance, unsafe serialization, signing, checksum, model card, and approval metadata
 - **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
 
 ## Configuration

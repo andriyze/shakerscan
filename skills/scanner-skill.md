@@ -1,6 +1,6 @@
 ---
 name: ShakerScan
-description: DAST security scanner. USE WHEN scan, security, vulnerability, XSS, SQLi, findings, subdomain discovery, pentest.
+description: DAST security scanner. USE WHEN scan, security, vulnerability, XSS, SQLi, findings, subdomain discovery, pentest, AI Gate, model intake.
 ---
 
 # ShakerScan Skill
@@ -13,11 +13,13 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 - **Subdomain Discovery**: Enumerate subdomains using CT logs and passive sources
 - **Finding Management**: Track, triage, and manage security findings
 - **Target Management**: Maintain a list of assets to scan
+- **Exposure Graph**: Link domains, endpoints, APIs, auth roles, vendors, AI targets, MCP tools, model artifacts, scans, and findings
 - **Recurring Schedules**: Automate daily/weekly scans per target
 - **Worker Control**: Scale worker pool based on queue pressure
 - **CT Monitoring**: Start/stop Gungnir certificate transparency monitoring
 - **Interactive Testing**: Use `/session` APIs for manual browser-driven security validation
 - **AI Gate Testing**: Register AI targets and run probe packs against chat, RAG, agent trace, and MCP surfaces
+- **Model Intake**: Check model artifacts for unsafe serialization, provenance, signatures, checksums, model cards, and deployment approval
 
 ## Scan Types
 
@@ -294,6 +296,27 @@ curl http://localhost:8080/ai/scans/{scan_id}/transcript
 ```
 
 After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do not poll unless the user explicitly asks.
+
+### Model Intake
+
+Use Model Intake when the user wants to check a model artifact before deployment. The UI is at `http://localhost:3000/settings/model-intake`. The scanner reads artifact bytes and metadata without importing or executing model code.
+
+Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+```bash
+curl -X POST http://localhost:8080/model-intake/scan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "artifact_url": "https://example.com/models/model.safetensors",
+    "metadata_url": "https://example.com/models/model.metadata.json",
+    "expected_sha256": "optional-known-good-sha256",
+    "signature_url": "https://example.com/models/model.sig",
+    "model_card_url": "https://example.com/models/model-card.md",
+    "deployment_approved": true
+  }'
+```
+
+After submitting a Model Intake scan, report the scan ID and UI link, then stop. Do not poll unless the user explicitly asks.
 
 ### Target Management
 

@@ -219,6 +219,7 @@ function TargetsContent() {
       'subfinder': 'bg-purple-500/20 text-purple-400',
       'gungnir-monitor': 'bg-green-500/20 text-green-400',
       'import': 'bg-gray-500/20 text-gray-400',
+      'model-intake': 'bg-cyan-500/20 text-cyan-300',
     }
     return styles[source] || styles['manual']
   }

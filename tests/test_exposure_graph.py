@@ -73,6 +73,16 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
                 "is_active": True,
                 "active_findings_count": 1,
                 "total_scans": 2,
+            },
+            {
+                "id": "77777777-7777-4777-8777-777777777777",
+                "url": "https://models.example.com/safe/model.safetensors",
+                "name": "Safe model",
+                "root_domain": "example.com",
+                "discovery_source": "model-intake",
+                "is_active": True,
+                "active_findings_count": 0,
+                "total_scans": 1,
             }
         ],
         ai_targets=[
@@ -161,6 +171,29 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
                         ]
                     }
                 },
+            },
+            {
+                "id": "88888888-8888-4888-8888-888888888888",
+                "target_id": "77777777-7777-4777-8777-777777777777",
+                "target_url": "https://models.example.com/safe/model.safetensors",
+                "status": "completed",
+                "scan_type": "model_intake",
+                "run_kind": "model_intake",
+                "result": {
+                    "model_intake": {
+                        "summary": {
+                            "artifact_name": "model.safetensors",
+                            "artifact_ref": "https://models.example.com/safe/model.safetensors",
+                            "source_kind": "http",
+                            "extension": ".safetensors",
+                            "format_posture": "safer_static_format",
+                            "provenance_present": True,
+                            "signature_present": True,
+                            "expected_hash_present": True,
+                            "deployment_approved": True,
+                        }
+                    }
+                },
             }
         ],
         findings=[
@@ -192,6 +225,7 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
 
     assert "domain:example.com" in node_ids
     assert "target:11111111-1111-1111-1111-111111111111" in node_ids
+    assert "target:77777777-7777-4777-8777-777777777777" in node_ids
     assert "ai_target:22222222-2222-2222-2222-222222222222" in node_ids
     assert "vendor:cdn.example.net" in node_ids
     assert any(node_id.startswith("api:33333333-3333-3333-3333-333333333333:openapi") for node_id in node_ids)
@@ -208,8 +242,10 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
     assert "tests_auth_role" in edge_types
     assert "has_cloud_hint" in edge_types
     assert "exposes_mcp_tool" in edge_types
+    assert "inspected_model_artifact" in edge_types
     assert "loads_third_party" in edge_types
     assert "loads_script" in edge_types
     assert "produced_chain" in edge_types
+    assert graph["summary"]["node_type_counts"]["model_artifact"] == 1
     assert graph["summary"]["severity_counts"]["critical"] == 1
     assert graph["summary"]["severity_counts"]["high"] == 1

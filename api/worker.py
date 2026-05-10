@@ -49,6 +49,7 @@ RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
+MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
@@ -259,6 +260,19 @@ async def init_db():
 
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
+    if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
+        if scan_id:
+            await update_scan_progress(scan_id, "model_intake", 15, job_id=job_id)
+        try:
+            from scanner_tools.model_intake import run_model_intake_scan
+        except ImportError:
+            from scanner.scanner_tools.model_intake import run_model_intake_scan
+
+        result = await run_model_intake_scan(target, options)
+        if scan_id:
+            await update_scan_progress(scan_id, "model_intake_finalize", 95, job_id=job_id)
+        return result
+
     if options.get("run_kind") in AI_GATE_RUN_KINDS:
         if scan_id:
             await update_scan_progress(scan_id, "ai_gate", 15, job_id=job_id)
