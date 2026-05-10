@@ -54,7 +54,7 @@ export const SCAN_TYPES: ScanTypeOption[] = [
     value: 'smart',
     label: 'Smart',
     description: 'Adaptive intelligent scan',
-    duration: '5-20 min typical',
+    duration: 'Budget-dependent',
     requiresPermission: true,
     options: { scan_type: 'smart' }
   },

@@ -27,8 +27,8 @@ The scanner runs as Docker containers:
 
 - **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.
 - **Scans (`/scans`)**: filter by status/domain/search, pagination (50/page), cancel running/pending scans, re-scan dropdown (all 6 scan types), auto-refresh every 5s. Shows target, type, status, score/grade, findings count, duration, date.
-- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export and compliance section when complete. Preserves list filter context on back navigation.
-- **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning). Warning for active testing types.
+- **Scan Detail (`/scans/{id}`)**: live logs with auto-scroll while running (5s refresh), progress bar + current phase, partial-results view for failed scans (warning banner), full report with PDF export, compliance section, and resolved coverage budget when complete. Preserves list filter context on back navigation.
+- **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
@@ -779,8 +779,10 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
 | `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
 | `verified_findings_only` | Keep only findings that have exploit verification evidence |
+| `budget_profile` | Coverage budget profile: `fast`, `balanced`, `thorough`, or `exhaustive` |
+| `custom_budget` | Advanced budget overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, and `active_params_per_endpoint` |
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
-| `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
+| `thorough_params` | Legacy shortcut for deeper smart active checks; when no budget is specified it promotes the scan to the `thorough` budget |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
 | `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
 | `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
@@ -793,7 +795,7 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
-Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS`.
+Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS` and `SCAN_BUDGET_DEFAULTS`.
 
 ### Smart Scan Tuning
 
@@ -813,15 +815,37 @@ curl -X POST http://localhost:8080/scans \
   }'
 ```
 
+Preferred depth control is `budget_profile`; scan type controls which modules run and budget controls how much depth/time they receive:
+
+```bash
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "options": {
+      "scan_type": "smart",
+      "budget_profile": "thorough",
+      "custom_budget": {
+        "max_urls": 2500,
+        "browser_max_pages": 100,
+        "active_max_endpoints": 150,
+        "active_params_per_endpoint": 12
+      }
+    }
+  }'
+```
+
 By default, smart scan:
 - **Stops early** when 3+ critical or 5+ high severity findings are found
-- **Tests 50 endpoints × 5 params per method (GET + POST)** for SQLi/XSS
+- **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
 
 With `no_early_stop` and `thorough_params`:
 - **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
-- **Tests 100 endpoints × 10 params per method (GET + POST)** for more complete coverage
+- **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
 
 ## Scan Types Explained
+
+Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules, then adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
 
 | Type | API Option | Time | What It Does |
 |------|------------|------|--------------|
@@ -1136,7 +1160,7 @@ Users can also use the CLI directly:
 ./scanner.sh gungnir status                  # CT monitor status
 ```
 
-For authenticated scans, focused XSS/SQLi-only checks, and advanced smart tuning (`no_early_stop`, `thorough_params`, `custom_endpoints`, etc.), use the REST API `POST /scans` options.
+For authenticated scans, focused XSS/SQLi-only checks, budget profiles/custom budgets, and advanced smart tuning (`budget_profile`, `custom_budget`, `no_early_stop`, `thorough_params`, `custom_endpoints`, etc.), use the REST API `POST /scans` options.
 
 ## Files Structure
 

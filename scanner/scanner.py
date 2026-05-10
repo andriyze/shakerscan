@@ -2264,7 +2264,10 @@ async def build_report(target: str,
         else "quick" if quick_mode
         else "standard"
     )
-    scan_budget = resolve_scan_budget(budget_scan_type, budget_profile, custom_budget)
+    effective_budget_profile = budget_profile
+    if thorough_params and not effective_budget_profile and not custom_budget:
+        effective_budget_profile = "thorough"
+    scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
     if scan_budget.get("active_max_endpoints"):
         max_active = int(scan_budget["active_max_endpoints"])
     smart_bola_max_endpoints = int(scan_budget.get("smart_bola_max_endpoints") or smart_bola_max_endpoints)

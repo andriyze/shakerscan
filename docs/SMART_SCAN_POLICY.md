@@ -8,18 +8,33 @@ Define how ShakerScan budgets time and attack effort in `smart` mode, while keep
 - Covers budgeting, safety controls, verification, and benchmark acceptance criteria.
 
 ## Budget Model
-Use four independent budgets per scan:
-- `time_budget_seconds`
-- `request_budget_total`
-- `active_payload_budget`
-- `verification_budget`
+Scan type controls which modules run. Coverage budget controls how much depth, time, and active probing those modules receive.
 
-Default smart profile targets:
-- `time_budget_seconds`: `3600` (60 minutes)
-- `request_budget_total`: `6000`
-- `active_payload_budget`: `2200`
-- `verification_budget`: `350`
-- `reserve_budget_percent`: `10`
+Supported coverage profiles:
+- `fast`: small coverage budget for smoke/CI feedback.
+- `balanced`: default depth and runtime limits.
+- `thorough`: release/staging scans where useful findings matter more than speed.
+- `exhaustive`: long-running authorized testing with maximum coverage.
+
+Resolved smart-scan budget fields include:
+- `max_duration_minutes`
+- `discovery_depth`
+- `max_urls`
+- `browser_max_pages`
+- `browser_max_depth`
+- `api_probe_limit`
+- `nuclei_max_targets`
+- `nuclei_early_stop`
+- `active_max_seconds`
+- `active_max_endpoints`
+- `active_params_per_endpoint`
+- `max_findings_per_family`
+- `smart_bola_max_endpoints`
+- `dom_xss_max_files`
+- `sqli_extract_max`
+- `oob_max_findings`
+
+Default profile values are centralized in `scanner/constants.py` as `SCAN_BUDGET_DEFAULTS`. Per-scan overrides are accepted through `custom_budget`.
 
 ## Phase Allocation
 Initial allocation before reserve rebalancing:
@@ -107,6 +122,8 @@ How to answer common buyer questions:
 ## Implementation Notes
 Recent policy-aligned hardening:
 - Smart budget defaults are centralized in `scanner/constants.py` as `SMART_SCAN_BUDGETS` and consumed by scanner CLI/API.
+- Scan depth/time defaults are centralized in `scanner/constants.py` as `SCAN_BUDGET_DEFAULTS` and resolved from `scan_type + budget_profile + custom_budget`.
+- Scan reports include the resolved coverage budget under `scan_config.resolved_budget`.
 - Session startup cleanup avoids lock re-entry deadlock.
 - Synthetic BOLA generation excludes auth/session-style paths.
 - Synthetic query URLs preserve valid URL encoding.

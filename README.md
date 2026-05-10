@@ -104,7 +104,7 @@ Open a completed scan to review score, grade, DNS/TLS/HTTP evidence, logs, compl
 
 ### New Scan Setup
 
-Start quick, standard, deep, full, aggressive, or smart scans with explicit controls for active testing, discovery, JavaScript analysis, and authenticated coverage.
+Start quick, standard, deep, full, aggressive, or smart scans with separate coverage budgets for fast, balanced, thorough, or exhaustive testing.
 
 ![New scan setup](docs/screenshots/new-scan.png)
 
@@ -158,6 +158,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 - **Active Vulnerability Testing** (opt-in)
   - XSS detection (dalfox), SQL injection testing (sqlmap)
   - Nuclei template-based vulnerability checks
+  - Coverage budget profiles (`fast`, `balanced`, `thorough`, `exhaustive`) plus advanced depth/time overrides
   - Auth-aware scanning across discovered endpoints
   - CSRF, IDOR, path traversal detection
 
@@ -179,6 +180,8 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 
 ## Scan Types
 
+Scan type controls **what** ShakerScan tests. Coverage budget controls **how hard** it tests.
+
 | Type | Duration | What It Does |
 |------|----------|--------------|
 | **Quick** | 1-2 min | DNS, TLS, headers, basic tech detection |
@@ -186,9 +189,20 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 | **Deep** | 30-60 min | + Full Nuclei, top-1000 port scan, JS secrets |
 | **Full** | 1-2 hrs | + Active XSS/SQLi, all security tests |
 | **Aggressive** | 2-5 hrs | + Bruteforce, fuzzing, full port scan |
-| **Smart** | 5-20 min typical | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
+| **Smart** | Budget-dependent | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
 
 > **Note**: `full`, `aggressive`, and `smart` include active testing. Only run these against targets you have permission to test.
+
+### Coverage Budgets
+
+| Budget | Use Case |
+|--------|----------|
+| `fast` | CI smoke or quick feedback |
+| `balanced` | Default depth and runtime limits |
+| `thorough` | Staging/release checks where useful findings matter more than speed |
+| `exhaustive` | Long-running authorized testing with maximum coverage |
+
+Advanced users can override resolved limits with `custom_budget`, including `max_duration_minutes`, `discovery_depth`, `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, `active_params_per_endpoint`, `smart_bola_max_endpoints`, and `dom_xss_max_files`.
 
 **Smart scan** highlights: staged Nuclei waves with early stopping, DBMS fingerprinting, context-aware XSS, DOM XSS analysis, authenticated Playwright crawl, adaptive rate limiting, attack chain correlation, and coverage tracking. See [Smart Scan Policy](docs/SMART_SCAN_POLICY.md) for details.
 
@@ -223,14 +237,12 @@ Options:
   --image-tag TAG    Override Docker image tag (default: latest)
 ```
 
-### Authenticated Scan Examples
+### Advanced Scan Examples
+
+`scanner.sh` wraps common scans. Use the REST API for authenticated scans, focused XSS/SQLi-only scans, and custom budgets.
 
 ```bash
-./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"
-./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1" --user2-header "Bearer user2"
-./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
+./scanner.sh scan-smart https://example.com --budget-profile thorough
 ```
 
 ## API Quick Reference
@@ -242,6 +254,11 @@ Base URL: `http://localhost:8080`
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
+
+# Thorough smart scan with explicit coverage budget
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {"scan_type": "smart", "budget_profile": "thorough"}}'
 
 # List scans
 curl "http://localhost:8080/scans?status=completed&limit=10"
@@ -310,7 +327,7 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/date/domain, bulk cleanup, CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
 - **AI Gate (`/settings/ai-gate`)**: add AI targets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **New Scan (`/scan/new`)**: scan type picker with advanced toggles
+- **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
 
 ## Configuration
 

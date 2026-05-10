@@ -564,6 +564,7 @@ print_help() {
     echo "  --local            Force local Docker build instead of prebuilt images"
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
+    echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
     echo ""
     echo "Examples:"
     echo "  ./scanner.sh start                    # Start with latest prebuilt images"
@@ -572,6 +573,7 @@ print_help() {
     echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
+    echo "  ./scanner.sh scan-smart https://example.com --budget-profile thorough"
     echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
@@ -701,19 +703,44 @@ full_scan() {
 
 smart_scan() {
     TARGET=$1
+    shift || true
     if [ -z "$TARGET" ]; then
         echo -e "${RED}Error: Please provide a target URL${NC}"
-        echo "Usage: ./scanner.sh scan-smart <target>"
+        echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
         exit 1
     fi
+    BUDGET_PROFILE=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --budget-profile)
+                BUDGET_PROFILE="${2:-}"
+                shift 2
+                ;;
+            --budget-profile=*)
+                BUDGET_PROFILE="${1#*=}"
+                shift
+                ;;
+            *)
+                echo -e "${RED}Unknown scan-smart option: $1${NC}"
+                echo "Usage: ./scanner.sh scan-smart <target> [--budget-profile fast|balanced|thorough|exhaustive]"
+                exit 1
+                ;;
+        esac
+    done
 
     echo -e "${YELLOW}Starting smart adaptive scan: $TARGET${NC}"
     echo -e "${YELLOW}Warning: This includes active vulnerability testing with DBMS-aware attacks.${NC}"
     echo ""
 
+    OPTIONS="{\"scan_type\": \"smart\""
+    if [ -n "$BUDGET_PROFILE" ]; then
+        OPTIONS="$OPTIONS, \"budget_profile\": \"$BUDGET_PROFILE\""
+    fi
+    OPTIONS="$OPTIONS}"
+
     RESULT=$(curl -s -X POST http://localhost:8080/scans \
         -H "Content-Type: application/json" \
-        -d "{\"target\": \"$TARGET\", \"options\": {\"scan_type\": \"smart\"}}")
+        -d "{\"target\": \"$TARGET\", \"options\": $OPTIONS}")
 
     SCAN_ID=$(echo $RESULT | jq -r '.scan_id')
     echo "Scan ID: $SCAN_ID"
@@ -969,7 +996,7 @@ case $COMMAND in
         full_scan "${ARGS[0]}"
         ;;
     scan-smart)
-        smart_scan "${ARGS[0]}"
+        smart_scan "${ARGS[@]}"
         ;;
     install-deps)
         install_dependencies

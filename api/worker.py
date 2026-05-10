@@ -537,9 +537,12 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         if scan_type:
             resolved_budget = options.get("resolved_budget")
             if not isinstance(resolved_budget, dict):
+                effective_budget_profile = options.get("budget_profile")
+                if options.get("thorough_params") and not effective_budget_profile and not options.get("custom_budget"):
+                    effective_budget_profile = "thorough"
                 resolved_budget = resolve_scan_budget(
                     scan_type,
-                    options.get("budget_profile"),
+                    effective_budget_profile,
                     options.get("custom_budget") if isinstance(options.get("custom_budget"), dict) else None,
                 )
             max_duration_minutes = int(

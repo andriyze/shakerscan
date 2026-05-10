@@ -21,6 +21,8 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 
 ## Scan Types
 
+Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests (`fast`, `balanced`, `thorough`, `exhaustive`).
+
 | Type | API Option | Time | Description |
 |------|------------|------|-------------|
 | **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS, headers, basic tech detection |
@@ -49,13 +51,18 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 ### Smart Scan Tuning
 
 ```bash
-# Thorough mode: no early stop + more params
+# Thorough coverage budget with optional custom limits
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {
     "scan_type": "smart",
-    "no_early_stop": true,
-    "thorough_params": true
+    "budget_profile": "thorough",
+    "custom_budget": {
+      "max_urls": 2500,
+      "browser_max_pages": 100,
+      "active_max_endpoints": 150,
+      "active_params_per_endpoint": 12
+    }
   }}'
 
 # Custom endpoints with params
@@ -76,8 +83,10 @@ curl -X POST http://localhost:8080/scans \
 | Option | Description |
 |--------|-------------|
 | `no_early_stop` | Disable early stopping (continue scanning even after finding many vulns) |
-| `thorough_params` | Test 100 endpoints x 10 params per method instead of default 50x5 |
+| `thorough_params` | Legacy shortcut for deeper smart active checks; promotes to `thorough` budget when no explicit budget is provided |
 | `custom_endpoints` | Array of endpoints with params to test (format: `[METHOD] /path [params]`) |
+| `budget_profile` | Coverage budget profile: `fast`, `balanced`, `thorough`, or `exhaustive` |
+| `custom_budget` | Advanced depth/time overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, and `active_params_per_endpoint` |
 | `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
@@ -441,4 +450,4 @@ Coverage interpretation: `< 0.5` possible rate limiting, `0.5-0.8` normal, `> 0.
 3. **Use smart** for sophisticated targets - it adapts based on what it finds
 4. **Report rich data** - include CSP grade, TLS info, tech stack
 5. **Link to UI** - always include the report URL
-6. **CLI scope** - `scanner.sh` wraps `scan`, `scan-full`, `scan-smart`; use API for advanced options
+6. **CLI scope** - `scanner.sh` wraps `scan`, `scan-full`, `scan-smart`, and `scan-smart --budget-profile`; use API for auth, focused checks, and custom budgets

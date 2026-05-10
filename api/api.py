@@ -767,9 +767,12 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
 
             # Check 2: Max duration exceeded (safety net)
             if not is_stale and started_at:
+                effective_budget_profile = options.get("budget_profile") if isinstance(options, dict) else None
+                if isinstance(options, dict) and options.get("thorough_params") and not effective_budget_profile and not options.get("custom_budget"):
+                    effective_budget_profile = "thorough"
                 resolved_budget = resolve_scan_budget(
                     scan_type,
-                    options.get("budget_profile") if isinstance(options, dict) else None,
+                    effective_budget_profile,
                     options.get("custom_budget") if isinstance(options, dict) else None,
                 )
                 max_duration = int(resolved_budget.get("max_duration_minutes") or MAX_SCAN_DURATION.get(scan_type, 120))
@@ -3054,9 +3057,12 @@ async def submit_scan(request: ScanRequest):
         )
 
     options_payload = request.options.dict()
+    effective_budget_profile = options_payload.get("budget_profile")
+    if options_payload.get("thorough_params") and not effective_budget_profile and not options_payload.get("custom_budget"):
+        effective_budget_profile = "thorough"
     resolved_budget = resolve_scan_budget(
         scan_type,
-        options_payload.get("budget_profile"),
+        effective_budget_profile,
         options_payload.get("custom_budget"),
     )
     options_payload["budget_profile"] = resolved_budget["budget_profile"]

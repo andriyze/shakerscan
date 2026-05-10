@@ -88,6 +88,8 @@ Agents that support HTTP tools can call these endpoints directly. Agents that su
 
 ## Scan Types
 
+Scan type chooses the modules to run; `budget_profile` chooses how much depth/time to spend. Supported budgets are `fast`, `balanced`, `thorough`, and `exhaustive`.
+
 | Type | Duration | Description |
 |------|----------|-------------|
 | `quick` | 1-2 min | DNS, TLS, headers, basic tech detection |
@@ -114,6 +116,11 @@ curl -X POST http://localhost:8080/scans \
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
+
+# Smart scan with a deeper coverage budget
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {"scan_type": "smart", "budget_profile": "thorough"}}'
 
 # List findings (with recency filter)
 curl "http://localhost:8080/findings?severity=critical&status=active&seen_within_days=30"

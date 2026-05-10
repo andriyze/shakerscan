@@ -192,6 +192,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const kubernetes_exposure = scanData.kubernetes_exposure || {}
   const container_registry = scanData.container_registry || {}
   const scan_metadata = scanData.scan_metadata || {}
+  const scan_config = scanData.scan_config || {}
+  const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
+  const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
   const attack_chains = scanData.attack_chains || scanData.result?.attack_chains || null
@@ -343,7 +346,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 mt-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5 mt-6">
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Status</h3>
             <p className="text-lg font-semibold capitalize">{scan.status}</p>
@@ -359,6 +362,19 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               {!isAIScan && scan.options?.active && ' + Active'}
             </p>
           </div>
+          {!isAIScan && (
+            <div className="bg-gray-700/50 rounded-lg p-4">
+              <h3 className="text-sm text-gray-400 mb-1">Coverage Budget</h3>
+              <p className="text-lg font-semibold capitalize">{budgetProfile || 'Balanced'}</p>
+              {(resolved_budget.max_urls || resolved_budget.active_max_endpoints) && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {resolved_budget.max_urls ? `${resolved_budget.max_urls} URLs` : ''}
+                  {resolved_budget.max_urls && resolved_budget.active_max_endpoints ? ' / ' : ''}
+                  {resolved_budget.active_max_endpoints ? `${resolved_budget.active_max_endpoints} active endpoints` : ''}
+                </p>
+              )}
+            </div>
+          )}
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Issues Found</h3>
             <p className="text-lg font-semibold">{Array.isArray(findings) ? findings.length : 0}</p>

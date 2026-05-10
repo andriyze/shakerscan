@@ -584,8 +584,10 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
 | `custom_endpoints` | Array of endpoints with params to test (see format above) |
+| `budget_profile` | Coverage budget profile: `fast`, `balanced`, `thorough`, or `exhaustive` |
+| `custom_budget` | Advanced budget overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, and `active_params_per_endpoint` |
 | `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
-| `thorough_params` | Test more parameters: 100 endpoints × 10 params per method instead of default 50×5 per method |
+| `thorough_params` | Legacy shortcut for deeper smart active checks; when no budget is specified it promotes the scan to the `thorough` budget |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
 | `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
 | `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
@@ -598,7 +600,7 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
-Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS`.
+Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS` and `SCAN_BUDGET_DEFAULTS`.
 
 ### Smart Scan Tuning
 
@@ -618,15 +620,37 @@ curl -X POST http://localhost:8080/scans \
   }'
 ```
 
+Preferred depth control is `budget_profile`; scan type controls which modules run and budget controls how much depth/time they receive:
+
+```bash
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "options": {
+      "scan_type": "smart",
+      "budget_profile": "thorough",
+      "custom_budget": {
+        "max_urls": 2500,
+        "browser_max_pages": 100,
+        "active_max_endpoints": 150,
+        "active_params_per_endpoint": 12
+      }
+    }
+  }'
+```
+
 By default, smart scan:
 - **Stops early** when 3+ critical or 5+ high severity findings are found
-- **Tests 50 endpoints × 5 params per method (GET + POST)** for SQLi/XSS
+- **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
 
 With `no_early_stop` and `thorough_params`:
 - **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
-- **Tests 100 endpoints × 10 params per method (GET + POST)** for more complete coverage
+- **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
 
 ## Scan Types Explained
+
+Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules, then adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
 
 | Type | API Option | Time | What It Does |
 |------|------------|------|--------------|
@@ -1016,19 +1040,10 @@ Users can also use the CLI directly:
 ./scanner.sh scan-full https://example.com  # Full assessment
 ./scanner.sh scan-smart https://example.com # Smart adaptive scan
 
-# Authenticated scans
-./scanner.sh scan-smart https://example.com --auth-header "Bearer token"
-./scanner.sh scan-smart https://example.com --auth-cookies "session=abc123"
+# Deeper smart coverage budget
+./scanner.sh scan-smart https://example.com --budget-profile thorough
 
-# Focused active checks
-./scanner.sh scan-smart https://example.com --sqli --auth-header "Bearer token"   # SQLi-only
-./scanner.sh scan-smart https://example.com --xss --auth-cookies "session=abc123" # XSS-only
-
-# Dual-auth BOLA testing
-./scanner.sh scan-smart https://api.example.com --auth-header "Bearer user1_token" --user2-header "Bearer user2_token"
-
-# Thorough mode (no early stop, more params)
-./scanner.sh scan-smart https://example.com --no-early-stop --thorough-params
+# Use POST /scans for auth, focused XSS/SQLi, dual-auth BOLA, or custom budgets.
 
 # Management
 ./scanner.sh status                          # Check status

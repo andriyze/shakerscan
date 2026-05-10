@@ -54,24 +54,27 @@ When smart mode is enabled, the following settings are applied:
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `discovery_scan_type` | `"smart"` | Enables recursive fuzzing |
-| `browser_crawl` | `max_pages=30, max_depth=4` | Multi-page authenticated crawl |
+| `budget_profile` | `balanced` by default | Resolves depth/time limits; can be `fast`, `balanced`, `thorough`, or `exhaustive` |
+| `browser_crawl` | budget-controlled | Multi-page authenticated crawl |
 | `active_checks` | `enabled` | XSS/SQLi testing |
 | `nuclei` | `staged` | 4-wave adaptive scanning |
-| `max_active` | `50` | Increased active check limit |
+| `max_active` | budget-controlled | Active endpoint budget |
 
 ### Tuning Options
 
 | Option | Default | With Flag | Effect |
 |--------|---------|-----------|--------|
+| `budget_profile` | `balanced` | `fast`, `thorough`, `exhaustive` | Controls depth/time budgets without changing enabled modules |
+| `custom_budget` | none | JSON object/API or CLI budget flags | Overrides selected resolved limits such as `max_urls`, `browser_max_pages`, and `active_max_endpoints` |
 | `no_early_stop` | `false` | `true` | Disables confidence-weighted early stopping in staged Nuclei |
-| `thorough_params` | `false` | `true` | Tests 100 endpoints × 10 params per method (vs 50×5 per method) |
+| `thorough_params` | `false` | `true` | Legacy shortcut that promotes to the `thorough` budget when no explicit budget is provided |
 | `oob_callback_url` | none | URL | OOB callback server for blind SQLi verification |
 
 ### Safety/Performance Limits
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `smart_bola_max_endpoints` | 30 | Max endpoints for BOLA testing |
+| `smart_bola_max_endpoints` | budget-controlled (`100` in balanced smart) | Max endpoints for BOLA testing |
 | `dom_xss_max_files` | 20 | Max JS files for DOM XSS analysis |
 | `sqli_extract_max` | 3 | Max SQLi findings for data extraction |
 | `oob_max_findings` | 3 | Max SQLi findings for OOB testing |
