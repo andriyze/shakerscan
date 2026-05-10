@@ -66,6 +66,190 @@ def days_until(iso_dt: str | None) -> int | None:
             return None
 
 
+def _normalize_tls_version(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip().lower().replace(" ", "_").replace(".", "_")
+    aliases = {
+        "ssl2": "ssl_2_0",
+        "sslv2": "ssl_2_0",
+        "ssl3": "ssl_3_0",
+        "sslv3": "ssl_3_0",
+        "tls1": "tls_1_0",
+        "tls10": "tls_1_0",
+        "tlsv1": "tls_1_0",
+        "tlsv1_0": "tls_1_0",
+        "tls1_0": "tls_1_0",
+        "tls11": "tls_1_1",
+        "tlsv1_1": "tls_1_1",
+        "tls1_1": "tls_1_1",
+        "tls12": "tls_1_2",
+        "tlsv1_2": "tls_1_2",
+        "tls1_2": "tls_1_2",
+        "tls13": "tls_1_3",
+        "tlsv1_3": "tls_1_3",
+        "tls1_3": "tls_1_3",
+    }
+    return aliases.get(text, text)
+
+
+def _cipher_name(cipher: Any) -> str | None:
+    if isinstance(cipher, dict):
+        return cipher.get("name") or cipher.get("cipher") or cipher.get("cipher_suite")
+    if cipher:
+        return str(cipher)
+    return None
+
+
+def build_crypto_inventory(tls: dict[str, Any], host: str | None = None, port: int | None = None) -> dict[str, Any]:
+    """Normalize TLS evidence into crypto posture and PQC readiness signals."""
+    tls = tls or {}
+    cert = tls.get("certificate") or {}
+    sslyze = tls.get("sslyze") or {}
+    cipher_suites = tls.get("cipher_suites") or {}
+    endpoints = tls.get("endpoints") or []
+
+    versions: set[str] = set()
+    for version, supported in (sslyze.get("tls_versions") or {}).items():
+        if supported:
+            normalized = _normalize_tls_version(version)
+            if normalized:
+                versions.add(normalized)
+    for endpoint in endpoints:
+        if isinstance(endpoint, dict):
+            normalized = _normalize_tls_version(endpoint.get("tlsversion") or endpoint.get("tls_version"))
+            if normalized:
+                versions.add(normalized)
+    for version in cipher_suites:
+        normalized = _normalize_tls_version(version)
+        if normalized:
+            versions.add(normalized)
+
+    cipher_names: set[str] = set()
+    for suites in cipher_suites.values():
+        if isinstance(suites, list):
+            for suite in suites:
+                name = _cipher_name(suite)
+                if name:
+                    cipher_names.add(name)
+    for endpoint in endpoints:
+        if isinstance(endpoint, dict) and endpoint.get("cipher"):
+            cipher_names.add(str(endpoint["cipher"]))
+
+    cert_chain = sslyze.get("certificate_chain") or []
+    cert_key_algorithms = {
+        str(value)
+        for value in [
+            cert.get("key_algo"),
+            *(item.get("public_key_algorithm") for item in cert_chain if isinstance(item, dict)),
+        ]
+        if value
+    }
+    cert_signature_algorithms = {
+        str(value)
+        for value in [
+            cert.get("sig_algo"),
+            *(item.get("signature_algorithm") for item in cert_chain if isinstance(item, dict)),
+        ]
+        if value
+    }
+
+    lower_ciphers = " ".join(cipher_names).lower()
+    lower_algorithms = " ".join([*cert_key_algorithms, *cert_signature_algorithms]).lower()
+    legacy_versions = sorted(v for v in versions if v in {"ssl_2_0", "ssl_3_0", "tls_1_0", "tls_1_1"})
+    weak_cipher_markers = ("rc4", "3des", "des-cbc", "null", "anon", "export", "md5")
+    weak_ciphers = sorted(name for name in cipher_names if any(marker in name.lower() for marker in weak_cipher_markers))
+    static_rsa_key_exchange = any(
+        name.upper().startswith("TLS_RSA_") or "_RSA_WITH_" in name.upper()
+        for name in cipher_names
+    )
+    weak_signatures = sorted(
+        algorithm
+        for algorithm in cert_signature_algorithms
+        if any(marker in algorithm.lower() for marker in ("sha1", "md5", "md2"))
+    )
+    weak_keys = sorted(
+        algorithm
+        for algorithm in cert_key_algorithms
+        if any(marker in algorithm.lower() for marker in ("rsa 1024", "dsa", "512"))
+    )
+    has_hybrid_or_pqc = any(
+        marker in lower_ciphers or marker in lower_algorithms
+        for marker in ("kyber", "ml-kem", "x25519mlkem", "pqc", "post-quantum", "hybrid")
+    )
+    has_tls13 = "tls_1_3" in versions or bool((tls.get("testssl") or {}).get("supports_tls13"))
+    days_remaining = cert.get("days_remaining")
+
+    lifecycle_flags = []
+    if isinstance(days_remaining, int):
+        if days_remaining < 0:
+            lifecycle_flags.append("expired")
+        elif days_remaining <= 30:
+            lifecycle_flags.append("expires_within_30_days")
+        elif days_remaining <= 90:
+            lifecycle_flags.append("expires_within_90_days")
+
+    pqc_blockers = []
+    if legacy_versions:
+        pqc_blockers.append("legacy_tls_enabled")
+    if static_rsa_key_exchange:
+        pqc_blockers.append("static_rsa_key_exchange")
+    if not has_tls13:
+        pqc_blockers.append("tls_1_3_not_observed")
+
+    issues = []
+    if legacy_versions:
+        issues.append("legacy_tls_versions_enabled")
+    if weak_ciphers:
+        issues.append("weak_ciphers_enabled")
+    if static_rsa_key_exchange:
+        issues.append("static_rsa_key_exchange")
+    if weak_signatures:
+        issues.append("weak_certificate_signature")
+    if weak_keys:
+        issues.append("weak_certificate_key")
+    issues.extend(lifecycle_flags)
+
+    pqc_status = "hybrid_or_pqc_observed" if has_hybrid_or_pqc else "classical_only_observed"
+    if pqc_blockers:
+        pqc_status = "migration_blocked_by_legacy_posture"
+
+    return {
+        "target": {"host": host, "port": port},
+        "protocols": {
+            "observed": sorted(versions),
+            "legacy": legacy_versions,
+            "tls_1_3": has_tls13,
+        },
+        "algorithms": {
+            "ciphers": sorted(cipher_names),
+            "certificate_key_algorithms": sorted(cert_key_algorithms),
+            "certificate_signature_algorithms": sorted(cert_signature_algorithms),
+            "weak_ciphers": weak_ciphers,
+            "weak_signatures": weak_signatures,
+            "weak_keys": weak_keys,
+            "static_rsa_key_exchange": static_rsa_key_exchange,
+        },
+        "certificate_lifecycle": {
+            "not_before": cert.get("not_before"),
+            "not_after": cert.get("not_after"),
+            "days_remaining": days_remaining,
+            "flags": lifecycle_flags,
+        },
+        "pqc_readiness": {
+            "status": pqc_status,
+            "hybrid_or_pqc_observed": has_hybrid_or_pqc,
+            "blockers": pqc_blockers,
+            "recommendations": [
+                "Inventory externally exposed TLS algorithms and certificate key types.",
+                "Remove SSL/TLS 1.0/1.1 and static RSA key exchange before PQC migration.",
+                "Track vendor support for TLS 1.3 hybrid post-quantum key exchange.",
+            ],
+        },
+        "issues": issues,
+    }
+
+
 async def openssl_ocsp(host: str, port: int) -> dict[str, Any]:
     out, err, rc = await run(["openssl", "s_client", "-connect", f"{host}:{port}", "-servername", host, "-status"], timeout=45)
     stapled = False

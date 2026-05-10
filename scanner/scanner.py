@@ -1740,6 +1740,7 @@ try:
         discover_technologies as _discover_technologies_mod,
     )
     from scanner_tools.tls_scanner import (
+        build_crypto_inventory as _build_crypto_inventory_mod,
         days_until as _days_until_mod,
         openssl_ocsp as _openssl_ocsp_mod,
         parse_openssl_cert as _parse_openssl_cert_mod,
@@ -1887,6 +1888,7 @@ try:
     check_domain_intelligence = _check_domain_intelligence_mod
     # CT Monitoring
     check_certificate_transparency = _check_ct_transparency_mod
+    build_crypto_inventory = _build_crypto_inventory_mod
     # SMTP Security
     check_smtp_security = _check_smtp_security_mod
     # ASN Discovery
@@ -1989,6 +1991,9 @@ except Exception as e:
         """Fallback tlsx_probe when modular import fails."""
         return {"endpoints": [], "certificate": {}}
 
+    def _fallback_build_crypto_inventory(*args, **kwargs):
+        return {"protocols": {"observed": [], "legacy": []}, "pqc_readiness": {"status": "unknown", "blockers": []}}
+
     async def _fallback_check_forced_browsing(*args, **kwargs):
         return {"vulnerable": False, "findings": [], "summary": {}}
 
@@ -2000,6 +2005,7 @@ except Exception as e:
 
     # Ensure critical functions are defined even if import failed
     tlsx_probe = _fallback_tlsx_probe
+    build_crypto_inventory = _fallback_build_crypto_inventory
     check_forced_browsing = _fallback_check_forced_browsing
     format_forced_browsing_findings = _fallback_format_forced_browsing_findings
     ssh_auth_methods = _fallback_ssh_auth_methods
@@ -4827,6 +4833,7 @@ async def build_report(target: str,
         "discovery": discovery,
         "findings": []
     }
+    report["tls"]["crypto_inventory"] = build_crypto_inventory(report["tls"], host, port)
 
     # Save initial checkpoint with baseline data
     save_checkpoint(report, "baseline")

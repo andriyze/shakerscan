@@ -287,7 +287,13 @@ export interface AITargetPayload {
 export type ExposureNodeType =
   | 'domain'
   | 'web_target'
+  | 'endpoint'
+  | 'api_surface'
+  | 'auth_role'
+  | 'third_party_js'
+  | 'cloud_hint'
   | 'ai_target'
+  | 'mcp_tool'
   | 'scan'
   | 'finding'
   | 'vendor'

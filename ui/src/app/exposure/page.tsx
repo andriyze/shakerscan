@@ -6,10 +6,14 @@ import {
   AlertTriangle,
   Bot,
   Boxes,
+  Cloud,
+  Code2,
   GitBranch,
   Globe2,
+  KeyRound,
   Network,
   RefreshCw,
+  Route,
   Search,
   ShieldAlert,
   Target,
@@ -28,7 +32,13 @@ import {
 const NODE_LABELS: Record<string, string> = {
   domain: 'Domains',
   web_target: 'Web targets',
+  endpoint: 'Endpoints',
+  api_surface: 'APIs',
+  auth_role: 'Auth roles',
+  third_party_js: 'Third-party JS',
+  cloud_hint: 'Cloud hints',
   ai_target: 'AI surfaces',
+  mcp_tool: 'MCP tools',
   scan: 'Scans',
   finding: 'Findings',
   vendor: 'Vendors',
@@ -38,7 +48,13 @@ const NODE_LABELS: Record<string, string> = {
 const NODE_STYLES: Record<string, string> = {
   domain: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200',
   web_target: 'border-blue-500/30 bg-blue-500/10 text-blue-200',
+  endpoint: 'border-sky-500/30 bg-sky-500/10 text-sky-200',
+  api_surface: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-200',
+  auth_role: 'border-lime-500/30 bg-lime-500/10 text-lime-200',
+  third_party_js: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200',
+  cloud_hint: 'border-teal-500/30 bg-teal-500/10 text-teal-200',
   ai_target: 'border-purple-500/30 bg-purple-500/10 text-purple-200',
+  mcp_tool: 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200',
   scan: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
   finding: 'border-orange-500/30 bg-orange-500/10 text-orange-200',
   vendor: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
@@ -49,7 +65,13 @@ function nodeIcon(type: ExposureNodeType) {
   const className = 'h-4 w-4'
   if (type === 'domain') return <Globe2 className={className} />
   if (type === 'web_target') return <Target className={className} />
+  if (type === 'endpoint') return <Route className={className} />
+  if (type === 'api_surface') return <Code2 className={className} />
+  if (type === 'auth_role') return <KeyRound className={className} />
+  if (type === 'third_party_js') return <Code2 className={className} />
+  if (type === 'cloud_hint') return <Cloud className={className} />
   if (type === 'ai_target') return <Bot className={className} />
+  if (type === 'mcp_tool') return <Boxes className={className} />
   if (type === 'scan') return <Search className={className} />
   if (type === 'finding') return <ShieldAlert className={className} />
   if (type === 'vendor') return <Boxes className={className} />

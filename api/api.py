@@ -1666,6 +1666,183 @@ def _short_url_label(value: str | None) -> str:
         return str(value)[:90]
 
 
+def _graph_hash(*values: Any) -> str:
+    raw = "|".join(str(value or "") for value in values)
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:14]
+
+
+def _graph_list(value: Any) -> list[Any]:
+    decoded = _decode_json_value(value)
+    if isinstance(decoded, list):
+        return decoded
+    if isinstance(decoded, tuple):
+        return list(decoded)
+    return []
+
+
+def _graph_get(container: dict[str, Any], *path: str) -> Any:
+    cursor: Any = container
+    for key in path:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(key)
+    return cursor
+
+
+def _normalize_graph_endpoint_url(base_url: str | None, value: str | None) -> str | None:
+    if not value:
+        return None
+    value_s = str(value)
+    if value_s.startswith(("http://", "https://")):
+        return value_s
+    if base_url:
+        try:
+            return urllib.parse.urljoin(base_url if str(base_url).endswith("/") else f"{base_url}/", value_s.lstrip("/"))
+        except Exception:
+            return value_s
+    return value_s
+
+
+def _endpoint_path_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(value if "://" in value else f"https://placeholder.local{value if str(value).startswith('/') else '/' + str(value)}")
+        return (parsed.path or "/").rstrip("/") or "/"
+    except Exception:
+        return str(value).split("?", 1)[0].rstrip("/") or "/"
+
+
+def _iter_graph_openapi_endpoints(result: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = [
+        _graph_get(result, "discovery", "api_security", "openapi", "endpoints"),
+        _graph_get(result, "discovery", "openapi", "endpoints"),
+        _graph_get(result, "api_security", "openapi", "endpoints"),
+        _graph_get(result, "openapi", "endpoints"),
+    ]
+    for candidate in candidates:
+        endpoints = _graph_list(candidate)
+        if endpoints:
+            normalized = []
+            for item in endpoints:
+                if isinstance(item, dict):
+                    method = str(item.get("method") or "GET").upper()
+                    path = item.get("path") or item.get("url")
+                    if path:
+                        normalized.append({**item, "method": method, "path": path})
+                elif isinstance(item, str):
+                    match = re.match(r"^\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+?)\s*$", item, re.I)
+                    if match:
+                        normalized.append({"method": match.group(1).upper(), "path": match.group(2)})
+                    else:
+                        normalized.append({"method": "GET", "path": item})
+            return normalized
+    return []
+
+
+def _openapi_meta(result: dict[str, Any]) -> dict[str, Any]:
+    candidates = [
+        _graph_get(result, "discovery", "api_security", "openapi"),
+        _graph_get(result, "discovery", "openapi"),
+        _graph_get(result, "api_security", "openapi"),
+        _graph_get(result, "openapi"),
+    ]
+    for candidate in candidates:
+        meta = _parse_graph_json(candidate)
+        if meta:
+            return meta
+    return {}
+
+
+def _iter_browser_api_endpoints(result: dict[str, Any]) -> list[dict[str, Any]]:
+    endpoints = _graph_list(_graph_get(result, "discovery", "browser_api_endpoints"))
+    normalized = []
+    for item in endpoints:
+        if isinstance(item, dict):
+            url = item.get("url") or item.get("endpoint")
+            if url:
+                normalized.append({
+                    "url": url,
+                    "method": str(item.get("method") or "GET").upper(),
+                    "source": "browser",
+                    **item,
+                })
+        elif isinstance(item, str):
+            normalized.append({"url": item, "method": "GET", "source": "browser"})
+    return normalized
+
+
+def _iter_graph_cloud_hints(result: dict[str, Any]) -> list[dict[str, Any]]:
+    cloud = _parse_graph_json(_graph_get(result, "discovery", "cloud_services") or result.get("cloud_services"))
+    hints: list[dict[str, Any]] = []
+    for key in ("providers", "detected_providers", "services", "hints"):
+        for item in _graph_list(cloud.get(key)):
+            if isinstance(item, dict):
+                label = item.get("provider") or item.get("service") or item.get("name") or item.get("type")
+                if label:
+                    hints.append({**item, "label": str(label)})
+            elif item:
+                hints.append({"label": str(item), "source": key})
+    for key in ("aws", "azure", "gcp", "cloudflare"):
+        if cloud.get(key):
+            hints.append({"label": key, "evidence": cloud.get(key)})
+    return hints[:20]
+
+
+def _iter_graph_auth_roles(result: dict[str, Any], ai_target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    roles: list[dict[str, Any]] = []
+    auth_states = _graph_list(_graph_get(result, "smart_coverage", "auth_states_tested"))
+    for item in auth_states:
+        if item:
+            roles.append({"label": str(item), "source": "smart_coverage"})
+    for key in ("roles_tested", "auth_roles", "scopes_tested"):
+        for item in _graph_list(_graph_get(result, "auth", key) or _graph_get(result, "identity", key)):
+            if isinstance(item, dict):
+                label = item.get("role") or item.get("scope") or item.get("name")
+                if label:
+                    roles.append({**item, "label": str(label), "source": key})
+            elif item:
+                roles.append({"label": str(item), "source": key})
+    metadata = _parse_graph_json((ai_target or {}).get("metadata_json"))
+    for item in _graph_list(metadata.get("oauth_scopes") or metadata.get("default_scopes")):
+        if item:
+            roles.append({"label": str(item), "source": "ai_target_oauth_scope"})
+    deduped: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        deduped.setdefault(str(role.get("label")), role)
+    return list(deduped.values())[:25]
+
+
+def _iter_graph_mcp_tools(result: dict[str, Any]) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    ai_gate = _parse_graph_json(result.get("ai_gate"))
+    transcripts = _graph_list(ai_gate.get("transcripts"))
+    for transcript in transcripts:
+        evidence = _parse_graph_json(transcript.get("widget_evidence")) or _parse_graph_json(transcript.get("evidence"))
+        for item in _graph_list(evidence.get("tool_inventory") or evidence.get("tools") or evidence.get("mcp_tools")):
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("tool") or item.get("id")
+                if name:
+                    tools.append({**item, "label": str(name)})
+            elif item:
+                tools.append({"label": str(item)})
+    for finding in _graph_list(ai_gate.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        ev = _parse_graph_json(finding.get("evidence"))
+        for marker in _graph_list(ev.get("matched_markers")):
+            if "mcp" in str(marker).lower() or "tool" in str(marker).lower():
+                tools.append({
+                    "label": str(marker).replace("_", " "),
+                    "source_finding_id": finding.get("id"),
+                    "severity": finding.get("severity"),
+                })
+    deduped: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        deduped.setdefault(str(tool.get("label")), tool)
+    return list(deduped.values())[:30]
+
+
 def _build_exposure_graph(
     *,
     targets: list[dict[str, Any]],
@@ -1705,7 +1882,9 @@ def _build_exposure_graph(
 
     target_node_by_id: dict[str, str] = {}
     ai_node_by_id: dict[str, str] = {}
+    ai_target_by_id: dict[str, dict[str, Any]] = {}
     scan_subject_by_id: dict[str, str] = {}
+    endpoint_node_by_path: dict[tuple[str | None, str | None], list[str]] = {}
 
     for target in targets:
         target_id = str(target.get("id"))
@@ -1738,6 +1917,7 @@ def _build_exposure_graph(
         ai_id = str(ai_target.get("id"))
         node_id = f"ai_target:{ai_id}"
         ai_node_by_id[ai_id] = node_id
+        ai_target_by_id[ai_id] = ai_target
         root_domain = extract_root_domain(ai_target.get("endpoint_url") or "")
         add_node(_graph_node(
             node_id,
@@ -1792,6 +1972,122 @@ def _build_exposure_graph(
         edges.append(_graph_edge(subject_id, scan_node_id, "scanned_by", label="scanned by"))
 
         result = _parse_graph_json(scan.get("result"))
+        subject_root_domain = scan.get("root_domain") or extract_root_domain(scan.get("target_url") or scan.get("ai_endpoint_url") or "")
+
+        openapi_endpoints = _iter_graph_openapi_endpoints(result)
+        openapi_meta = _openapi_meta(result)
+        if openapi_endpoints:
+            api_node_id = f"api:{scan_id}:openapi:{_graph_hash(openapi_meta.get('url'), scan.get('target_url'))}"
+            add_node(_graph_node(
+                api_node_id,
+                "api_surface",
+                openapi_meta.get("title") or "OpenAPI schema",
+                subtitle=f"{len(openapi_endpoints)} operations",
+                href=f"/scans/{scan_id}",
+                meta={
+                    "source": "openapi",
+                    "url": openapi_meta.get("url"),
+                    "version": openapi_meta.get("version"),
+                    "endpoint_count": openapi_meta.get("endpoint_count") or len(openapi_endpoints),
+                },
+            ))
+            edges.append(_graph_edge(subject_id, api_node_id, "exposes_api", label="exposes API"))
+            edges.append(_graph_edge(scan_node_id, api_node_id, "observed_api", label="observed API"))
+
+            for endpoint in openapi_endpoints[:120]:
+                method = str(endpoint.get("method") or "GET").upper()
+                path = str(endpoint.get("path") or endpoint.get("url") or "/")
+                endpoint_url = _normalize_graph_endpoint_url(scan.get("target_url"), endpoint.get("url") or path)
+                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _endpoint_path_key(endpoint_url) or path)}"
+                endpoint_node_by_path.setdefault((subject_root_domain, _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
+                add_node(_graph_node(
+                    endpoint_node_id,
+                    "endpoint",
+                    f"{method} {_endpoint_path_key(endpoint_url) or path}",
+                    subtitle="OpenAPI operation",
+                    href=f"/scans/{scan_id}",
+                    meta={
+                        "method": method,
+                        "path": _endpoint_path_key(endpoint_url) or path,
+                        "url": endpoint_url,
+                        "source": "openapi",
+                        "operation_id": endpoint.get("operation_id"),
+                        "query_params": endpoint.get("query_params") or endpoint.get("params") or [],
+                        "body_params": endpoint.get("body_params") or [],
+                    },
+                ))
+                edges.append(_graph_edge(api_node_id, endpoint_node_id, "defines_endpoint", label="defines endpoint"))
+                edges.append(_graph_edge(subject_id, endpoint_node_id, "exposes_endpoint", label="exposes endpoint"))
+
+        browser_api_endpoints = _iter_browser_api_endpoints(result)
+        if browser_api_endpoints:
+            browser_api_node_id = f"api:{scan_id}:browser"
+            add_node(_graph_node(
+                browser_api_node_id,
+                "api_surface",
+                "Browser-observed API",
+                subtitle=f"{len(browser_api_endpoints)} captured calls",
+                href=f"/scans/{scan_id}",
+                meta={"source": "browser_network", "endpoint_count": len(browser_api_endpoints)},
+            ))
+            edges.append(_graph_edge(subject_id, browser_api_node_id, "observed_api", label="browser observed API"))
+            for endpoint in browser_api_endpoints[:80]:
+                endpoint_url = _normalize_graph_endpoint_url(scan.get("target_url"), endpoint.get("url"))
+                if not endpoint_url:
+                    continue
+                method = str(endpoint.get("method") or "GET").upper()
+                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _endpoint_path_key(endpoint_url))}"
+                endpoint_node_by_path.setdefault((subject_root_domain, _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
+                add_node(_graph_node(
+                    endpoint_node_id,
+                    "endpoint",
+                    f"{method} {_endpoint_path_key(endpoint_url) or _short_url_label(endpoint_url)}",
+                    subtitle="Browser-captured API call",
+                    href=f"/scans/{scan_id}",
+                    meta={"method": method, "url": endpoint_url, "path": _endpoint_path_key(endpoint_url), "source": "browser_network"},
+                ))
+                edges.append(_graph_edge(browser_api_node_id, endpoint_node_id, "observed_endpoint", label="observed endpoint"))
+
+        for role in _iter_graph_auth_roles(result, ai_target_by_id.get(str(scan.get("ai_target_id"))) if scan.get("ai_target_id") else None):
+            label = str(role.get("label") or "unknown")
+            role_node_id = f"auth_role:{_graph_hash(subject_id, label)}"
+            add_node(_graph_node(
+                role_node_id,
+                "auth_role",
+                label,
+                subtitle=role.get("source") or "authorization context",
+                href=f"/scans/{scan_id}",
+                meta=role,
+            ))
+            edges.append(_graph_edge(subject_id, role_node_id, "tests_auth_role", label="tests auth role"))
+
+        for hint in _iter_graph_cloud_hints(result):
+            label = str(hint.get("label") or "cloud")
+            cloud_node_id = f"cloud_hint:{_graph_hash(subject_id, label)}"
+            add_node(_graph_node(
+                cloud_node_id,
+                "cloud_hint",
+                label,
+                subtitle="Cloud exposure hint",
+                href=f"/scans/{scan_id}",
+                meta=hint,
+            ))
+            edges.append(_graph_edge(subject_id, cloud_node_id, "has_cloud_hint", label="cloud hint"))
+
+        for tool in _iter_graph_mcp_tools(result):
+            label = str(tool.get("label") or "MCP tool")
+            tool_node_id = f"mcp_tool:{_graph_hash(subject_id, label)}"
+            add_node(_graph_node(
+                tool_node_id,
+                "mcp_tool",
+                label,
+                subtitle="MCP/tool surface",
+                severity=tool.get("severity"),
+                href=f"/scans/{scan_id}",
+                meta=tool,
+            ))
+            edges.append(_graph_edge(subject_id, tool_node_id, "exposes_mcp_tool", label="exposes MCP tool", severity=tool.get("severity")))
+
         vendor_risk = _parse_graph_json(result.get("vendor_risk"))
         for domain in (vendor_risk.get("third_party_domains") or [])[:20]:
             if not domain:
@@ -1809,6 +2105,35 @@ def _build_exposure_graph(
                 },
             ))
             edges.append(_graph_edge(subject_id, vendor_node_id, "loads_third_party", label="loads third party"))
+
+        for resource in _graph_list(vendor_risk.get("resources"))[:30]:
+            if not isinstance(resource, dict) or resource.get("type") != "script":
+                continue
+            script_url = resource.get("url")
+            if not script_url:
+                continue
+            script_node_id = f"third_party_js:{_graph_hash(script_url)}"
+            vendor_node_id = f"vendor:{resource.get('domain') or extract_root_domain(script_url)}"
+            add_node(_graph_node(
+                script_node_id,
+                "third_party_js",
+                _short_url_label(script_url),
+                subtitle=resource.get("provider") or "Third-party script",
+                status=resource.get("trust_level"),
+                href=f"/scans/{scan_id}",
+                meta={
+                    "url": script_url,
+                    "domain": resource.get("domain"),
+                    "provider": resource.get("provider"),
+                    "category": resource.get("category"),
+                    "security_score": resource.get("security_score"),
+                    "risk_factors": resource.get("risk_factors") or [],
+                    "sri_present": resource.get("sri_present"),
+                },
+            ))
+            if vendor_node_id in nodes:
+                edges.append(_graph_edge(vendor_node_id, script_node_id, "serves_script", label="serves script"))
+            edges.append(_graph_edge(subject_id, script_node_id, "loads_script", label="loads script"))
 
         attack_chains = _parse_graph_json(result.get("attack_chains"))
         for idx, chain in enumerate((attack_chains.get("chains") or [])[:10]):
@@ -1871,6 +2196,9 @@ def _build_exposure_graph(
             subject_id = scan_subject_by_id.get(str(finding.get("scan_id")))
         if subject_id:
             edges.append(_graph_edge(subject_id, finding_node_id, "has_finding", label="has finding", severity=severity))
+        finding_path = _endpoint_path_key(finding.get("url"))
+        for endpoint_node_id in endpoint_node_by_path.get((root_domain, finding_path), [])[:5]:
+            edges.append(_graph_edge(endpoint_node_id, finding_node_id, "affected_by", label="affected by", severity=severity))
         if finding.get("scan_id"):
             scan_node_id = f"scan:{finding.get('scan_id')}"
             if scan_node_id in nodes:

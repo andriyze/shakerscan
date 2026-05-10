@@ -93,10 +93,43 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
                 "status": "completed",
                 "scan_type": "smart",
                 "result": {
+                    "smart_coverage": {
+                        "auth_states_tested": ["anonymous", "user"]
+                    },
+                    "discovery": {
+                        "api_security": {
+                            "openapi": {
+                                "url": "https://app.example.com/openapi.json",
+                                "title": "Example API",
+                                "endpoint_count": 2,
+                                "endpoints": [
+                                    {"method": "GET", "path": "/api/users/{id}", "query_params": ["id"]},
+                                    {"method": "POST", "path": "/api/upload", "body_params": ["file"]},
+                                ],
+                            }
+                        },
+                        "browser_api_endpoints": [
+                            {"method": "GET", "url": "https://app.example.com/api/session"}
+                        ],
+                        "cloud_services": {
+                            "providers": ["aws"],
+                            "services": [{"provider": "aws", "service": "s3"}],
+                        },
+                    },
                     "vendor_risk": {
                         "third_party_domains": ["cdn.example.net"],
                         "risk_level": "medium",
                         "risk_score": 42,
+                        "resources": [
+                            {
+                                "url": "https://cdn.example.net/app.js",
+                                "domain": "cdn.example.net",
+                                "type": "script",
+                                "provider": "Example CDN",
+                                "trust_level": "unknown",
+                                "security_score": 55,
+                            }
+                        ],
                     },
                     "attack_chains": {
                         "chains": [
@@ -108,6 +141,25 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
                             }
                         ]
                     },
+                },
+            },
+            {
+                "id": "66666666-6666-4666-8666-666666666666",
+                "ai_target_id": "22222222-2222-2222-2222-222222222222",
+                "target_url": "https://api.example.com/chat",
+                "status": "completed",
+                "scan_type": "ai_gate",
+                "run_kind": "ai_mcp",
+                "result": {
+                    "ai_gate": {
+                        "findings": [
+                            {
+                                "id": "mcp.scope",
+                                "severity": "high",
+                                "evidence": {"matched_markers": ["mcp_scope_expansion"]},
+                            }
+                        ]
+                    }
                 },
             }
         ],
@@ -121,6 +173,7 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
                 "status": "active",
                 "tool": "dalfox",
                 "root_domain": "example.com",
+                "url": "https://app.example.com/api/upload",
             },
             {
                 "id": "55555555-5555-5555-5555-555555555555",
@@ -141,9 +194,22 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
     assert "target:11111111-1111-1111-1111-111111111111" in node_ids
     assert "ai_target:22222222-2222-2222-2222-222222222222" in node_ids
     assert "vendor:cdn.example.net" in node_ids
+    assert any(node_id.startswith("api:33333333-3333-3333-3333-333333333333:openapi") for node_id in node_ids)
+    assert any(node_id.startswith("endpoint:") for node_id in node_ids)
+    assert any(node_id.startswith("auth_role:") for node_id in node_ids)
+    assert any(node_id.startswith("third_party_js:") for node_id in node_ids)
+    assert any(node_id.startswith("cloud_hint:") for node_id in node_ids)
+    assert any(node_id.startswith("mcp_tool:") for node_id in node_ids)
     assert "has_finding" in edge_types
+    assert "affected_by" in edge_types
     assert "exposes_ai_surface" in edge_types
+    assert "exposes_api" in edge_types
+    assert "defines_endpoint" in edge_types
+    assert "tests_auth_role" in edge_types
+    assert "has_cloud_hint" in edge_types
+    assert "exposes_mcp_tool" in edge_types
     assert "loads_third_party" in edge_types
+    assert "loads_script" in edge_types
     assert "produced_chain" in edge_types
     assert graph["summary"]["severity_counts"]["critical"] == 1
     assert graph["summary"]["severity_counts"]["high"] == 1

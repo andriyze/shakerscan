@@ -521,6 +521,203 @@ OWASP_TOP10_2021 = {
 }
 
 
+# Evidence-first mappings used by the GRC matrix. These mappings are deliberately
+# compact: they connect scanner-native signals to audit controls without implying
+# that a black-box scan can prove full organizational compliance.
+GRC_EVIDENCE_FRAMEWORKS = {
+    "owasp_top10_2025": {
+        "name": "OWASP Top 10:2025",
+        "controls": {
+            "A01:2025": {
+                "title": "Broken Access Control",
+                "checks": ["access_control", "authorization", "idor", "rbac", "least_privilege"],
+                "owasp_prefixes": ["A01:"],
+            },
+            "A02:2025": {
+                "title": "Cryptographic Failures",
+                "checks": ["tls_configuration", "encryption", "cipher_strength", "weak_crypto", "https"],
+                "owasp_prefixes": ["A02:"],
+            },
+            "A03:2025": {
+                "title": "Injection",
+                "checks": ["xss", "sqli", "injection", "command_injection", "input_validation"],
+                "owasp_prefixes": ["A03:"],
+            },
+            "A05:2025": {
+                "title": "Security Misconfiguration",
+                "checks": ["security_headers", "configuration", "insecure_defaults", "cloud_security"],
+                "owasp_prefixes": ["A05:"],
+            },
+            "A06:2025": {
+                "title": "Vulnerable and Outdated Components",
+                "checks": ["vulnerable_components", "outdated_software", "cve_detection"],
+                "owasp_prefixes": ["A06:"],
+            },
+            "A08:2025": {
+                "title": "Software and Data Integrity Failures",
+                "checks": ["deserialization", "data_integrity", "subresource_integrity", "hardcoded_secrets"],
+                "owasp_prefixes": ["A08:"],
+            },
+        },
+    },
+    "owasp_api_security": {
+        "name": "OWASP API Security",
+        "controls": {
+            "API1": {
+                "title": "Broken Object Level Authorization",
+                "checks": ["idor", "authorization", "access_control"],
+                "keywords": ["bola", "idor", "object level authorization"],
+            },
+            "API2": {
+                "title": "Broken Authentication",
+                "checks": ["authentication", "session_management", "session_tokens"],
+                "keywords": ["jwt", "session", "token replay", "authentication"],
+            },
+            "API3": {
+                "title": "Broken Object Property Level Authorization",
+                "checks": ["authorization", "access_control", "api_security"],
+                "keywords": ["property level", "field level", "mass assignment", "excessive data exposure"],
+            },
+            "API5": {
+                "title": "Broken Function Level Authorization",
+                "checks": ["authorization", "rbac", "least_privilege"],
+                "keywords": ["function level", "privilege escalation", "admin"],
+            },
+            "API7": {
+                "title": "Server-Side Request Forgery",
+                "checks": ["ssrf", "url_validation"],
+                "keywords": ["ssrf", "server-side request forgery"],
+            },
+            "API8": {
+                "title": "Security Misconfiguration",
+                "checks": ["security_headers", "configuration", "api_security"],
+                "keywords": ["openapi", "cors", "misconfiguration"],
+            },
+            "API9": {
+                "title": "Improper Inventory Management",
+                "checks": ["asset_inventory", "api_security", "version_disclosure"],
+                "keywords": ["undocumented", "deprecated api", "inventory", "shadow api"],
+            },
+        },
+    },
+    "owasp_llm_agentic": {
+        "name": "OWASP LLM and Agentic AI",
+        "controls": {
+            "LLM01": {
+                "title": "Prompt Injection",
+                "checks": ["ai_security", "prompt_injection"],
+                "owasp_prefixes": ["LLM01:"],
+                "keywords": ["prompt injection", "jailbreak", "instruction override"],
+            },
+            "LLM02": {
+                "title": "Sensitive Information Disclosure",
+                "checks": ["ai_security"],
+                "owasp_prefixes": ["LLM02:"],
+                "keywords": ["system prompt", "secret", "tenant", "trace leak"],
+            },
+            "LLM05": {
+                "title": "Improper Output Handling and RAG Integrity",
+                "checks": ["ai_security", "rag_security"],
+                "owasp_prefixes": ["LLM05:"],
+                "keywords": ["rag", "corpus poisoning", "retrieval", "poisoning"],
+            },
+            "LLM07": {
+                "title": "System Prompt Leakage",
+                "checks": ["ai_security"],
+                "owasp_prefixes": ["LLM07:"],
+                "keywords": ["system prompt", "developer prompt"],
+            },
+            "LLM08": {
+                "title": "Excessive Agency and Unsafe Tool Use",
+                "checks": ["ai_security", "agentic_tool_use"],
+                "owasp_prefixes": ["LLM08:"],
+                "keywords": ["tool", "mcp", "oauth", "scope", "pkce", "local command", "approval"],
+            },
+            "LLM10": {
+                "title": "Unbounded Consumption",
+                "checks": ["ai_security"],
+                "owasp_prefixes": ["LLM10:"],
+                "keywords": ["cost abuse", "resource exhaustion", "token exhaustion"],
+            },
+        },
+    },
+    "nist_ai_rmf": {
+        "name": "NIST AI RMF",
+        "controls": {
+            "GOVERN": {
+                "title": "Govern AI Risk",
+                "checks": ["ai_security"],
+                "keywords": ["approval", "consent", "scope", "policy"],
+            },
+            "MAP": {
+                "title": "Map Context and Exposure",
+                "checks": ["ai_security"],
+                "keywords": ["tenant", "data boundary", "tool inventory", "trace"],
+            },
+            "MEASURE": {
+                "title": "Measure Model and System Behavior",
+                "checks": ["ai_security"],
+                "keywords": ["ai gate", "probe", "transcript", "judge"],
+            },
+            "MANAGE": {
+                "title": "Manage AI Risk",
+                "checks": ["ai_security"],
+                "keywords": ["mcp", "rag", "cost abuse", "unsafe tool"],
+            },
+        },
+    },
+    "iso_27001_2022": {
+        "name": "ISO/IEC 27001:2022",
+        "controls": {
+            "A.5.15": {
+                "title": "Access Control",
+                "checks": ["access_control", "authorization", "authentication"],
+            },
+            "A.5.19": {
+                "title": "Information Security in Supplier Relationships",
+                "checks": ["vendor_risk", "third_party_security", "subresource_integrity"],
+            },
+            "A.8.8": {
+                "title": "Management of Technical Vulnerabilities",
+                "checks": ["vulnerability_scanning", "cve_detection", "patch_management"],
+            },
+            "A.8.9": {
+                "title": "Configuration Management",
+                "checks": ["configuration", "security_headers", "insecure_defaults"],
+            },
+            "A.8.24": {
+                "title": "Use of Cryptography",
+                "checks": ["tls_configuration", "encryption", "cipher_strength", "weak_crypto"],
+            },
+            "A.8.28": {
+                "title": "Secure Coding",
+                "checks": ["xss", "sqli", "injection", "input_validation", "deserialization"],
+            },
+        },
+    },
+    "internal_sla": {
+        "name": "Internal Risk SLA",
+        "controls": {
+            "SLA-CRITICAL": {
+                "title": "Critical findings require immediate owner routing",
+                "severities": ["critical"],
+                "sla_hours": 24,
+            },
+            "SLA-HIGH": {
+                "title": "High findings require near-term remediation",
+                "severities": ["high"],
+                "sla_hours": 72,
+            },
+            "SLA-MEDIUM": {
+                "title": "Medium findings require planned remediation",
+                "severities": ["medium"],
+                "sla_hours": 720,
+            },
+        },
+    },
+}
+
+
 # ============================================================================
 # FINDING TO CHECK TYPE MAPPING
 # ============================================================================
@@ -595,6 +792,259 @@ def _map_finding_to_check_types(finding: dict[str, Any]) -> set[str]:
         check_types.add("security_testing")
 
     return check_types
+
+
+def _finding_text_blob(finding: dict[str, Any]) -> str:
+    """Return a normalized text blob for keyword-based control mapping."""
+    evidence = finding.get("evidence")
+    parts = [
+        finding.get("id"),
+        finding.get("title"),
+        finding.get("description"),
+        finding.get("category"),
+        finding.get("tool"),
+        finding.get("type"),
+        finding.get("source"),
+        finding.get("owasp"),
+        finding.get("cwe"),
+        finding.get("url"),
+        finding.get("endpoint"),
+        evidence if isinstance(evidence, str) else None,
+    ]
+    if isinstance(evidence, dict):
+        parts.extend(
+            str(evidence.get(key, ""))
+            for key in (
+                "summary",
+                "proof",
+                "request",
+                "response",
+                "replay_command",
+                "transcript",
+                "business_impact",
+                "remediation",
+            )
+        )
+    return " ".join(str(part).lower() for part in parts if part)
+
+
+def _finding_ref(finding: dict[str, Any]) -> str | None:
+    """Stable display identifier for a finding in compliance evidence."""
+    for key in ("id", "finding_id", "source_id"):
+        value = finding.get(key)
+        if value:
+            return str(value)
+    title = finding.get("title")
+    url = finding.get("url") or finding.get("endpoint")
+    if title and url:
+        return f"{title} @ {url}"
+    return str(title) if title else None
+
+
+def _has_nested_value(value: Any, keys: tuple[str, ...]) -> bool:
+    """Find whether any nested dict/list value has a populated key."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in keys and item:
+                return True
+            if _has_nested_value(item, keys):
+                return True
+    elif isinstance(value, list):
+        return any(_has_nested_value(item, keys) for item in value)
+    return False
+
+
+def _finding_evidence_profile(finding: dict[str, Any]) -> dict[str, bool]:
+    """Summarize whether the finding carries audit-grade proof artifacts."""
+    evidence = finding.get("evidence")
+    return {
+        "proof_present": bool(
+            finding.get("proof")
+            or _has_nested_value(evidence, ("proof", "exploit_proof", "verification_proof", "artifacts"))
+        ),
+        "replay_available": bool(
+            finding.get("replay_command")
+            or _has_nested_value(evidence, ("replay_command", "curl", "request_replay"))
+        ),
+        "transcript_present": bool(
+            finding.get("transcript")
+            or _has_nested_value(evidence, ("transcript", "messages", "conversation"))
+        ),
+        "request_response_present": bool(
+            finding.get("request")
+            or finding.get("response")
+            or _has_nested_value(evidence, ("request", "response", "raw_request", "raw_response"))
+        ),
+    }
+
+
+def _finding_business_impact(finding: dict[str, Any]) -> str | None:
+    """Extract business impact text when available."""
+    for key in ("business_impact", "impact"):
+        value = finding.get(key)
+        if value:
+            return str(value)
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        for key in ("business_impact", "impact"):
+            value = evidence.get(key)
+            if value:
+                return str(value)
+    severity = str(finding.get("severity", "")).lower()
+    if severity == "critical":
+        return "Potential material exposure or compromise path requiring immediate review."
+    if severity == "high":
+        return "Likely exploitable exposure requiring owner triage and remediation."
+    return None
+
+
+def _control_matches_finding(control: dict[str, Any], finding: dict[str, Any], check_types: set[str]) -> bool:
+    """Return whether a GRC control should include this finding."""
+    severity = str(finding.get("severity", "")).lower()
+    if severity and severity in control.get("severities", []):
+        return True
+
+    if any(check in control.get("checks", []) for check in check_types):
+        return True
+
+    owasp = str(finding.get("owasp", ""))
+    if any(owasp.startswith(prefix) or prefix in owasp for prefix in control.get("owasp_prefixes", [])):
+        return True
+
+    blob = _finding_text_blob(finding)
+    return any(keyword in blob for keyword in control.get("keywords", []))
+
+
+def _finding_evidence_item(finding: dict[str, Any]) -> dict[str, Any]:
+    """Create a compact, audit-ready finding reference."""
+    evidence_profile = _finding_evidence_profile(finding)
+    return {
+        "id": _finding_ref(finding),
+        "title": finding.get("title"),
+        "severity": finding.get("severity"),
+        "tool": finding.get("tool"),
+        "source_type": finding.get("source_type") or finding.get("source"),
+        "url": finding.get("url") or finding.get("endpoint"),
+        "cwe": finding.get("cwe"),
+        "owasp": finding.get("owasp"),
+        "proof_present": evidence_profile["proof_present"],
+        "replay_available": evidence_profile["replay_available"],
+        "transcript_present": evidence_profile["transcript_present"],
+        "request_response_present": evidence_profile["request_response_present"],
+        "business_impact": _finding_business_impact(finding),
+    }
+
+
+def _control_evidence_requirements(control_id: str, control: dict[str, Any]) -> list[str]:
+    """Return the proof artifacts expected for a control."""
+    requirements = ["finding title", "severity", "affected URL or asset", "remediation guidance"]
+    if control_id.startswith("LLM") or "ai" in " ".join(control.get("checks", [])).lower():
+        requirements.extend(["probe transcript", "detector verdict", "AI judge rationale when configured"])
+    if any(check in control.get("checks", []) for check in ("authorization", "access_control", "idor", "authentication")):
+        requirements.extend(["authenticated request/response", "role or token context"])
+    if any(check in control.get("checks", []) for check in ("xss", "sqli", "injection", "ssrf")):
+        requirements.extend(["replay command", "exploit proof"])
+    if any(check in control.get("checks", []) for check in ("tls_configuration", "encryption", "cipher_strength", "weak_crypto")):
+        requirements.extend(["certificate or TLS evidence", "observed algorithm/cipher"])
+    if "sla_hours" in control:
+        requirements.extend(["owner", "first seen", "last seen", f"SLA target: {control['sla_hours']} hours"])
+    return sorted(set(requirements))
+
+
+def generate_grc_evidence_matrix(
+    findings: list[dict[str, Any]],
+    scan_results: dict[str, Any],
+    frameworks: list[str] | None = None
+) -> dict[str, Any]:
+    """Generate evidence-first framework mappings for audit and delta workflows."""
+    selected_frameworks = frameworks or list(GRC_EVIDENCE_FRAMEWORKS.keys())
+    matrix = {
+        "frameworks": {},
+        "summary": {
+            "total_frameworks": 0,
+            "total_controls": 0,
+            "controls_with_findings": 0,
+            "findings_with_proof": 0,
+            "findings_with_replay": 0,
+            "findings_with_transcript": 0,
+            "findings_with_request_response": 0,
+        },
+        "evidence_quality": {
+            "proof_coverage": 0.0,
+            "replay_coverage": 0.0,
+            "transcript_coverage": 0.0,
+            "request_response_coverage": 0.0,
+        },
+        "scan_context": {
+            "target": scan_results.get("target") or scan_results.get("url"),
+            "scan_type": scan_results.get("scan_type"),
+            "scan_id": scan_results.get("scan_id") or scan_results.get("id"),
+        },
+    }
+
+    unique_findings: dict[str, dict[str, bool]] = {}
+
+    for framework_key in selected_frameworks:
+        framework = GRC_EVIDENCE_FRAMEWORKS.get(framework_key)
+        if not framework:
+            continue
+
+        framework_result = {
+            "name": framework["name"],
+            "controls": {},
+            "summary": {
+                "total_controls": len(framework["controls"]),
+                "controls_with_findings": 0,
+                "total_findings": 0,
+            },
+        }
+
+        for control_id, control in framework["controls"].items():
+            control_findings = []
+            for finding in findings:
+                check_types = _map_finding_to_check_types(finding)
+                if not _control_matches_finding(control, finding, check_types):
+                    continue
+                item = _finding_evidence_item(finding)
+                control_findings.append(item)
+                ref = item["id"] or f"{item.get('title')}:{item.get('url')}"
+                unique_findings[ref] = {
+                    "proof_present": item["proof_present"],
+                    "replay_available": item["replay_available"],
+                    "transcript_present": item["transcript_present"],
+                    "request_response_present": item["request_response_present"],
+                }
+
+            if control_findings:
+                framework_result["summary"]["controls_with_findings"] += 1
+                framework_result["summary"]["total_findings"] += len(control_findings)
+
+            framework_result["controls"][control_id] = {
+                "title": control["title"],
+                "findings": control_findings,
+                "count": len(control_findings),
+                "evidence_requirements": _control_evidence_requirements(control_id, control),
+                **({"sla_hours": control["sla_hours"]} if "sla_hours" in control else {}),
+            }
+
+        matrix["frameworks"][framework_key] = framework_result
+        matrix["summary"]["total_frameworks"] += 1
+        matrix["summary"]["total_controls"] += framework_result["summary"]["total_controls"]
+        matrix["summary"]["controls_with_findings"] += framework_result["summary"]["controls_with_findings"]
+
+    denominator = max(len(unique_findings), 1)
+    matrix["summary"]["findings_with_proof"] = sum(1 for item in unique_findings.values() if item["proof_present"])
+    matrix["summary"]["findings_with_replay"] = sum(1 for item in unique_findings.values() if item["replay_available"])
+    matrix["summary"]["findings_with_transcript"] = sum(1 for item in unique_findings.values() if item["transcript_present"])
+    matrix["summary"]["findings_with_request_response"] = sum(1 for item in unique_findings.values() if item["request_response_present"])
+    matrix["evidence_quality"]["proof_coverage"] = round(matrix["summary"]["findings_with_proof"] / denominator, 3)
+    matrix["evidence_quality"]["replay_coverage"] = round(matrix["summary"]["findings_with_replay"] / denominator, 3)
+    matrix["evidence_quality"]["transcript_coverage"] = round(matrix["summary"]["findings_with_transcript"] / denominator, 3)
+    matrix["evidence_quality"]["request_response_coverage"] = round(
+        matrix["summary"]["findings_with_request_response"] / denominator, 3
+    )
+
+    return matrix
 
 
 # ============================================================================
@@ -936,6 +1386,7 @@ def generate_compliance_report(
         },
         "frameworks": {},
         "owasp_mapping": _map_to_owasp(findings),
+        "grc_evidence": generate_grc_evidence_matrix(findings, scan_results),
         "executive_summary": None,
         "remediation_priority": []
     }
