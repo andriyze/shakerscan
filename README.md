@@ -186,7 +186,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 | **Deep** | 30-60 min | + Full Nuclei, top-1000 port scan, JS secrets |
 | **Full** | 1-2 hrs | + Active XSS/SQLi, all security tests |
 | **Aggressive** | 2-5 hrs | + Bruteforce, fuzzing, full port scan |
-| **Smart** | Variable | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
+| **Smart** | 5-20 min typical | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chain analysis |
 
 > **Note**: `full`, `aggressive`, and `smart` include active testing. Only run these against targets you have permission to test.
 

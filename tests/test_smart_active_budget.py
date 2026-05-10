@@ -3,6 +3,14 @@ import asyncio
 from scanner.scanner_tools import active_checks
 
 
+def test_sqli_payload_selection_keeps_cross_dbms_fallbacks():
+    payloads = active_checks._select_sqli_payloads("oracle")
+    payload_values = [payload for payload, _, _ in payloads]
+
+    assert "' UNION SELECT NULL,@@version,NULL-- -" in payload_values
+    assert "' OR 1=1-- -" in payload_values
+
+
 def test_smart_sqli_respects_time_budget_before_probe(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("curl should not run after the SQLi time budget is exhausted")
