@@ -284,10 +284,71 @@ export interface AITargetPayload {
   }
 }
 
+export type ExposureNodeType =
+  | 'domain'
+  | 'web_target'
+  | 'ai_target'
+  | 'scan'
+  | 'finding'
+  | 'vendor'
+  | 'attack_chain'
+
+export interface ExposureNode {
+  id: string
+  type: ExposureNodeType
+  label: string
+  subtitle?: string | null
+  severity?: 'critical' | 'high' | 'medium' | 'low' | 'info' | string | null
+  status?: string | null
+  href?: string | null
+  meta: Record<string, unknown>
+}
+
+export interface ExposureEdge {
+  source: string
+  target: string
+  type: string
+  label: string
+  severity?: string | null
+  meta: Record<string, unknown>
+}
+
+export interface ExposureGraph {
+  nodes: ExposureNode[]
+  edges: ExposureEdge[]
+  summary: {
+    node_count: number
+    edge_count: number
+    node_type_counts: Record<string, number>
+    severity_counts: Record<string, number>
+    hotspots: ExposureNode[]
+  }
+}
+
 // Dashboard
 export async function getDashboard() {
   const res = await fetch(`${API_URL}/dashboard`)
   if (!res.ok) throw new Error('Failed to fetch dashboard')
+  return res.json()
+}
+
+export async function getExposureGraph(params?: {
+  root_domain?: string
+  includeInactive?: boolean
+  includeResolved?: boolean
+  limitFindings?: number
+  limitScans?: number
+}): Promise<ExposureGraph> {
+  const searchParams = new URLSearchParams()
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.includeResolved) searchParams.set('include_resolved', 'true')
+  if (params?.limitFindings) searchParams.set('limit_findings', String(params.limitFindings))
+  if (params?.limitScans) searchParams.set('limit_scans', String(params.limitScans))
+
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/exposure/graph${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure graph'))
   return res.json()
 }
 

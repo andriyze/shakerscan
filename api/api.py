@@ -1595,6 +1595,324 @@ def _ai_target_run_kind(target_type: str) -> str:
     return "ai_api"
 
 
+def _graph_node(
+    node_id: str,
+    node_type: str,
+    label: str,
+    *,
+    subtitle: str | None = None,
+    severity: str | None = None,
+    status: str | None = None,
+    href: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "type": node_type,
+        "label": label,
+        "subtitle": subtitle,
+        "severity": severity,
+        "status": status,
+        "href": href,
+        "meta": meta or {},
+    }
+
+
+def _graph_edge(
+    source: str,
+    target: str,
+    edge_type: str,
+    *,
+    label: str | None = None,
+    severity: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "target": target,
+        "type": edge_type,
+        "label": label or edge_type.replace("_", " "),
+        "severity": severity,
+        "meta": meta or {},
+    }
+
+
+def _severity_sort_value(value: Any) -> int:
+    return SEVERITY_ORDER.get(str(value or "").lower(), 0)
+
+
+def _highest_severity(values: list[str | None]) -> str | None:
+    severities = [v for v in values if v in SEVERITY_ORDER]
+    if not severities:
+        return None
+    return max(severities, key=_severity_sort_value)
+
+
+def _parse_graph_json(value: Any) -> dict[str, Any]:
+    decoded = _decode_json_value(value)
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _short_url_label(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    try:
+        parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
+        host = parsed.netloc or parsed.path
+        path = parsed.path if parsed.netloc else ""
+        label = f"{host}{path}" if path and path != "/" else host
+        return label[:90] if label else value[:90]
+    except Exception:
+        return str(value)[:90]
+
+
+def _build_exposure_graph(
+    *,
+    targets: list[dict[str, Any]],
+    ai_targets: list[dict[str, Any]],
+    scans: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a UI-friendly exposure graph from existing ShakerScan records."""
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    domain_severities: dict[str, list[str | None]] = {}
+
+    def add_node(node: dict[str, Any]) -> None:
+        existing = nodes.get(node["id"])
+        if not existing:
+            nodes[node["id"]] = node
+            return
+        existing_severity = existing.get("severity")
+        next_severity = node.get("severity")
+        if _severity_sort_value(next_severity) > _severity_sort_value(existing_severity):
+            existing["severity"] = next_severity
+        existing["meta"] = {**existing.get("meta", {}), **node.get("meta", {})}
+
+    def add_domain(root_domain: str | None) -> str | None:
+        if not root_domain:
+            return None
+        node_id = f"domain:{root_domain}"
+        add_node(_graph_node(
+            node_id,
+            "domain",
+            root_domain,
+            subtitle="Root domain",
+            href=f"/targets?search={urllib.parse.quote(root_domain)}",
+        ))
+        domain_severities.setdefault(root_domain, [])
+        return node_id
+
+    target_node_by_id: dict[str, str] = {}
+    ai_node_by_id: dict[str, str] = {}
+    scan_subject_by_id: dict[str, str] = {}
+
+    for target in targets:
+        target_id = str(target.get("id"))
+        node_id = f"target:{target_id}"
+        target_node_by_id[target_id] = node_id
+        root_domain = target.get("root_domain") or extract_root_domain(target.get("url") or "")
+        active_findings = int(target.get("active_findings_count") or target.get("active_findings") or 0)
+        add_node(_graph_node(
+            node_id,
+            "web_target",
+            _short_url_label(target.get("url")),
+            subtitle=target.get("name") or root_domain,
+            status="active" if target.get("is_active", True) else "inactive",
+            href=f"/targets?search={urllib.parse.quote(str(target.get('url') or ''))}",
+            meta={
+                "url": target.get("url"),
+                "root_domain": root_domain,
+                "last_score": target.get("last_score"),
+                "last_grade": target.get("last_grade"),
+                "active_findings_count": active_findings,
+                "total_scans": target.get("total_scans") or 0,
+                "discovery_source": target.get("discovery_source"),
+            },
+        ))
+        domain_id = add_domain(root_domain)
+        if domain_id:
+            edges.append(_graph_edge(domain_id, node_id, "contains", label="contains target"))
+
+    for ai_target in ai_targets:
+        ai_id = str(ai_target.get("id"))
+        node_id = f"ai_target:{ai_id}"
+        ai_node_by_id[ai_id] = node_id
+        root_domain = extract_root_domain(ai_target.get("endpoint_url") or "")
+        add_node(_graph_node(
+            node_id,
+            "ai_target",
+            ai_target.get("name") or _short_url_label(ai_target.get("endpoint_url")),
+            subtitle=f"{ai_target.get('target_type') or 'ai'} surface",
+            status="production" if ai_target.get("production_mode") else "non-production",
+            href="/settings/ai-gate",
+            meta={
+                "endpoint_url": ai_target.get("endpoint_url"),
+                "root_domain": root_domain,
+                "target_type": ai_target.get("target_type"),
+                "method": ai_target.get("method"),
+                "production_mode": bool(ai_target.get("production_mode")),
+                "last_scanned_at": ai_target.get("last_scanned_at"),
+            },
+        ))
+        domain_id = add_domain(root_domain)
+        if domain_id:
+            edges.append(_graph_edge(domain_id, node_id, "exposes_ai_surface", label="AI surface"))
+
+    for scan in scans:
+        scan_id = str(scan.get("id"))
+        if not scan_id:
+            continue
+        subject_id = None
+        if scan.get("ai_target_id"):
+            subject_id = ai_node_by_id.get(str(scan.get("ai_target_id")))
+        if not subject_id and scan.get("target_id"):
+            subject_id = target_node_by_id.get(str(scan.get("target_id")))
+        if not subject_id:
+            continue
+        scan_node_id = f"scan:{scan_id}"
+        scan_subject_by_id[scan_id] = subject_id
+        add_node(_graph_node(
+            scan_node_id,
+            "scan",
+            f"{scan.get('scan_type') or scan.get('run_kind') or 'scan'} scan",
+            subtitle=_short_url_label(scan.get("target_url")),
+            status=scan.get("status"),
+            href=f"/scans/{scan_id}",
+            meta={
+                "scan_type": scan.get("scan_type"),
+                "run_kind": scan.get("run_kind"),
+                "score": scan.get("score"),
+                "grade": scan.get("grade"),
+                "findings_count": scan.get("findings_count") or 0,
+                "created_at": scan.get("created_at"),
+                "completed_at": scan.get("completed_at"),
+            },
+        ))
+        edges.append(_graph_edge(subject_id, scan_node_id, "scanned_by", label="scanned by"))
+
+        result = _parse_graph_json(scan.get("result"))
+        vendor_risk = _parse_graph_json(result.get("vendor_risk"))
+        for domain in (vendor_risk.get("third_party_domains") or [])[:20]:
+            if not domain:
+                continue
+            vendor_node_id = f"vendor:{domain}"
+            add_node(_graph_node(
+                vendor_node_id,
+                "vendor",
+                str(domain),
+                subtitle="Third-party resource",
+                status=vendor_risk.get("risk_level"),
+                meta={
+                    "risk_score": vendor_risk.get("risk_score"),
+                    "risk_level": vendor_risk.get("risk_level"),
+                },
+            ))
+            edges.append(_graph_edge(subject_id, vendor_node_id, "loads_third_party", label="loads third party"))
+
+        attack_chains = _parse_graph_json(result.get("attack_chains"))
+        for idx, chain in enumerate((attack_chains.get("chains") or [])[:10]):
+            if not isinstance(chain, dict):
+                continue
+            chain_type = chain.get("chain_type") or chain.get("name") or idx
+            chain_node_id = f"chain:{scan_id}:{chain_type}:{idx}"
+            severity = str(chain.get("severity") or "").lower() or None
+            add_node(_graph_node(
+                chain_node_id,
+                "attack_chain",
+                chain.get("name") or str(chain_type),
+                subtitle="Correlated exploit path",
+                severity=severity,
+                href=f"/scans/{scan_id}",
+                meta={
+                    "chain_type": chain.get("chain_type"),
+                    "confidence": chain.get("confidence"),
+                    "completeness": chain.get("completeness"),
+                    "business_impact": chain.get("business_impact"),
+                },
+            ))
+            edges.append(_graph_edge(scan_node_id, chain_node_id, "produced_chain", label="produced chain", severity=severity))
+
+    for finding in findings:
+        finding_id = str(finding.get("id"))
+        if not finding_id:
+            continue
+        severity = str(finding.get("severity") or "info").lower()
+        finding_node_id = f"finding:{finding_id}"
+        href = f"/findings/{finding_id}"
+        add_node(_graph_node(
+            finding_node_id,
+            "finding",
+            finding.get("title") or "Finding",
+            subtitle=finding.get("tool") or finding.get("source") or "finding",
+            severity=severity,
+            status=finding.get("status"),
+            href=href,
+            meta={
+                "severity": severity,
+                "status": finding.get("status"),
+                "tool": finding.get("tool"),
+                "source": finding.get("source"),
+                "cvss_score": finding.get("cvss_score"),
+                "last_seen_at": finding.get("last_seen_at"),
+                "last_verification_verdict": finding.get("last_verification_verdict"),
+                "url": finding.get("url"),
+            },
+        ))
+
+        subject_id = None
+        root_domain = finding.get("root_domain")
+        if finding.get("ai_target_id"):
+            subject_id = ai_node_by_id.get(str(finding.get("ai_target_id")))
+            root_domain = root_domain or extract_root_domain(finding.get("ai_target_url") or finding.get("target_url") or "")
+        if not subject_id and finding.get("target_id"):
+            subject_id = target_node_by_id.get(str(finding.get("target_id")))
+        if not subject_id and finding.get("scan_id"):
+            subject_id = scan_subject_by_id.get(str(finding.get("scan_id")))
+        if subject_id:
+            edges.append(_graph_edge(subject_id, finding_node_id, "has_finding", label="has finding", severity=severity))
+        if finding.get("scan_id"):
+            scan_node_id = f"scan:{finding.get('scan_id')}"
+            if scan_node_id in nodes:
+                edges.append(_graph_edge(scan_node_id, finding_node_id, "reported_finding", label="reported finding", severity=severity))
+        if root_domain:
+            domain_severities.setdefault(str(root_domain), []).append(severity)
+
+    for root_domain, severities in domain_severities.items():
+        node_id = f"domain:{root_domain}"
+        if node_id in nodes:
+            nodes[node_id]["severity"] = _highest_severity(severities)
+            nodes[node_id]["meta"]["active_findings_count"] = len([s for s in severities if s])
+
+    node_list = list(nodes.values())
+    node_type_counts: dict[str, int] = {}
+    severity_counts: dict[str, int] = {}
+    for node in node_list:
+        node_type_counts[node["type"]] = node_type_counts.get(node["type"], 0) + 1
+        if node.get("type") == "finding" and node.get("severity"):
+            severity = str(node["severity"])
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+    hotspot_types = {"domain", "web_target", "ai_target", "attack_chain"}
+    hotspots = sorted(
+        [node for node in node_list if node["type"] in hotspot_types and node.get("severity")],
+        key=lambda item: (_severity_sort_value(item.get("severity")), int(item.get("meta", {}).get("active_findings_count") or 0)),
+        reverse=True,
+    )[:10]
+
+    return {
+        "nodes": node_list,
+        "edges": edges,
+        "summary": {
+            "node_count": len(node_list),
+            "edge_count": len(edges),
+            "node_type_counts": node_type_counts,
+            "severity_counts": severity_counts,
+            "hotspots": hotspots,
+        },
+    }
+
+
 def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not row or row.get("auth_kind") == "none":
         return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
@@ -2227,6 +2545,104 @@ async def dashboard():
         "recent_scans": [dict(s) for s in recent_scans],
         "recent_findings": [dict(f) for f in recent_findings]
     }
+
+
+@app.get("/exposure/graph")
+async def exposure_graph(
+    root_domain: Optional[str] = None,
+    include_inactive: bool = False,
+    include_resolved: bool = False,
+    limit_findings: int = Query(250, ge=1, le=500),
+    limit_scans: int = Query(150, ge=1, le=300),
+):
+    """Return a derived exposure graph across web targets, AI targets, scans, findings, vendors, and chains."""
+    async with db_pool.acquire() as conn:
+        target_query = """
+            SELECT
+                id, url, name, root_domain, is_root, discovery_source, is_active,
+                last_score, last_grade, last_scanned_at, total_scans,
+                active_findings_count, created_at, updated_at
+            FROM targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR root_domain = $2::text)
+            ORDER BY active_findings_count DESC, updated_at DESC
+            LIMIT 500
+        """
+        targets = [row_to_dict(row) for row in await conn.fetch(target_query, include_inactive, root_domain)]
+
+        ai_query = """
+            SELECT
+                id, name, target_type, endpoint_url, method, streaming_mode,
+                production_mode, rate_limit_rps, token_budget, request_budget,
+                last_scanned_at, last_scan_id, metadata_json, is_active,
+                created_at, updated_at
+            FROM ai_targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY production_mode DESC, updated_at DESC
+            LIMIT 250
+        """
+        ai_targets = [row_to_dict(row) for row in await conn.fetch(ai_query, include_inactive, root_domain)]
+
+        scans_query = """
+            SELECT
+                s.id, s.target_id, s.ai_target_id, s.target_url, s.status, s.scan_type,
+                s.run_kind, s.result, s.score, s.grade, s.findings_count,
+                s.created_at, s.completed_at,
+                t.root_domain,
+                ait.endpoint_url as ai_endpoint_url
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
+            WHERE (
+                $1::text IS NULL
+                OR t.root_domain = $1::text
+                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%'
+            )
+            ORDER BY s.created_at DESC
+            LIMIT $2
+        """
+        scans = [row_to_dict(row) for row in await conn.fetch(scans_query, root_domain, limit_scans)]
+
+        findings_query = """
+            SELECT
+                f.id, f.scan_id, f.target_id, f.ai_target_id, f.title, f.severity,
+                f.status, f.tool, f.source, f.cvss_score, f.url, f.last_seen_at,
+                f.last_verification_verdict,
+                t.root_domain,
+                t.url as target_url,
+                ait.endpoint_url as ai_target_url
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            WHERE ($1::boolean = true OR f.status = 'active')
+              AND (
+                $2::text IS NULL
+                OR t.root_domain = $2::text
+                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%'
+              )
+            ORDER BY
+                CASE f.severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    ELSE 5
+                END,
+                f.last_seen_at DESC NULLS LAST
+            LIMIT $3
+        """
+        findings = [
+            row_to_dict(row)
+            for row in await conn.fetch(findings_query, include_resolved, root_domain, limit_findings)
+        ]
+
+    return _build_exposure_graph(
+        targets=targets,
+        ai_targets=ai_targets,
+        scans=scans,
+        findings=findings,
+    )
 
 
 # ============================================================
