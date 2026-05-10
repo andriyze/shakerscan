@@ -7,6 +7,7 @@ scanner.py and other modules, following the DRY principle.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 # =============================================================================
@@ -40,6 +41,122 @@ SMART_SCAN_BUDGET_DESCRIPTIONS: dict[str, str] = {
     "sqli_extract_max": "Max SQLi findings for data extraction attempts",
     "oob_max_findings": "Max findings for OOB SQLi verification",
 }
+
+
+# =============================================================================
+# SCAN DEPTH / TIME BUDGETS
+# =============================================================================
+
+SCAN_BUDGET_PROFILES = ("fast", "balanced", "thorough", "exhaustive")
+DEFAULT_SCAN_BUDGET_PROFILE = "balanced"
+
+SCAN_BUDGET_FIELDS = {
+    "max_duration_minutes",
+    "discovery_depth",
+    "max_urls",
+    "browser_max_pages",
+    "browser_max_depth",
+    "api_probe_limit",
+    "nuclei_max_targets",
+    "nuclei_early_stop",
+    "active_max_seconds",
+    "active_max_endpoints",
+    "active_params_per_endpoint",
+    "max_findings_per_family",
+    "dom_xss_max_files",
+    "smart_bola_max_endpoints",
+    "sqli_extract_max",
+    "oob_max_findings",
+}
+
+
+SCAN_BUDGET_DEFAULTS: dict[str, dict[str, dict[str, Any]]] = {
+    "quick": {
+        "fast": {"max_duration_minutes": 5, "discovery_depth": 1, "max_urls": 50, "browser_max_pages": 0, "browser_max_depth": 0, "api_probe_limit": 50, "nuclei_max_targets": 0, "nuclei_early_stop": True},
+        "balanced": {"max_duration_minutes": 15, "discovery_depth": 2, "max_urls": 100, "browser_max_pages": 3, "browser_max_depth": 1, "api_probe_limit": 120, "nuclei_max_targets": 120, "nuclei_early_stop": True},
+        "thorough": {"max_duration_minutes": 25, "discovery_depth": 3, "max_urls": 200, "browser_max_pages": 6, "browser_max_depth": 2, "api_probe_limit": 250, "nuclei_max_targets": 250, "nuclei_early_stop": True},
+        "exhaustive": {"max_duration_minutes": 45, "discovery_depth": 4, "max_urls": 400, "browser_max_pages": 10, "browser_max_depth": 2, "api_probe_limit": 400, "nuclei_max_targets": 400, "nuclei_early_stop": False},
+    },
+    "standard": {
+        "fast": {"max_duration_minutes": 20, "discovery_depth": 2, "max_urls": 150, "browser_max_pages": 4, "browser_max_depth": 1, "api_probe_limit": 150, "nuclei_max_targets": 250, "nuclei_early_stop": True},
+        "balanced": {"max_duration_minutes": 45, "discovery_depth": 3, "max_urls": 300, "browser_max_pages": 6, "browser_max_depth": 2, "api_probe_limit": 250, "nuclei_max_targets": 400, "nuclei_early_stop": True},
+        "thorough": {"max_duration_minutes": 90, "discovery_depth": 4, "max_urls": 750, "browser_max_pages": 20, "browser_max_depth": 3, "api_probe_limit": 700, "nuclei_max_targets": 1000, "nuclei_early_stop": True},
+        "exhaustive": {"max_duration_minutes": 180, "discovery_depth": 5, "max_urls": 1500, "browser_max_pages": 50, "browser_max_depth": 4, "api_probe_limit": 1500, "nuclei_max_targets": 2000, "nuclei_early_stop": False},
+    },
+    "deep": {
+        "fast": {"max_duration_minutes": 60, "discovery_depth": 3, "max_urls": 350, "browser_max_pages": 8, "browser_max_depth": 2, "api_probe_limit": 300, "nuclei_max_targets": 600, "nuclei_early_stop": True},
+        "balanced": {"max_duration_minutes": 120, "discovery_depth": 4, "max_urls": 500, "browser_max_pages": 12, "browser_max_depth": 2, "api_probe_limit": 450, "nuclei_max_targets": 800, "nuclei_early_stop": True},
+        "thorough": {"max_duration_minutes": 240, "discovery_depth": 5, "max_urls": 1500, "browser_max_pages": 60, "browser_max_depth": 4, "api_probe_limit": 1500, "nuclei_max_targets": 2500, "nuclei_early_stop": False},
+        "exhaustive": {"max_duration_minutes": 480, "discovery_depth": 6, "max_urls": 4000, "browser_max_pages": 150, "browser_max_depth": 5, "api_probe_limit": 4000, "nuclei_max_targets": 5000, "nuclei_early_stop": False},
+    },
+    "full": {
+        "fast": {"max_duration_minutes": 120, "discovery_depth": 4, "max_urls": 500, "browser_max_pages": 12, "browser_max_depth": 2, "api_probe_limit": 500, "nuclei_max_targets": 800, "nuclei_early_stop": True, "active_max_seconds": 600, "active_max_endpoints": 30, "active_params_per_endpoint": 5, "max_findings_per_family": 8},
+        "balanced": {"max_duration_minutes": 600, "discovery_depth": 5, "max_urls": 1000, "browser_max_pages": 20, "browser_max_depth": 3, "api_probe_limit": 800, "nuclei_max_targets": 1200, "nuclei_early_stop": True, "active_max_seconds": 900, "active_max_endpoints": 50, "active_params_per_endpoint": 6, "max_findings_per_family": 10},
+        "thorough": {"max_duration_minutes": 720, "discovery_depth": 6, "max_urls": 2500, "browser_max_pages": 100, "browser_max_depth": 5, "api_probe_limit": 2500, "nuclei_max_targets": 3000, "nuclei_early_stop": False, "active_max_seconds": 2400, "active_max_endpoints": 150, "active_params_per_endpoint": 12, "max_findings_per_family": None},
+        "exhaustive": {"max_duration_minutes": 900, "discovery_depth": 7, "max_urls": 6000, "browser_max_pages": 300, "browser_max_depth": 6, "api_probe_limit": 6000, "nuclei_max_targets": 7000, "nuclei_early_stop": False, "active_max_seconds": 7200, "active_max_endpoints": 350, "active_params_per_endpoint": 20, "max_findings_per_family": None},
+    },
+    "aggressive": {
+        "fast": {"max_duration_minutes": 180, "discovery_depth": 4, "max_urls": 750, "browser_max_pages": 20, "browser_max_depth": 3, "api_probe_limit": 700, "nuclei_max_targets": 1000, "nuclei_early_stop": True, "active_max_seconds": 900, "active_max_endpoints": 50, "active_params_per_endpoint": 6, "max_findings_per_family": 10},
+        "balanced": {"max_duration_minutes": 600, "discovery_depth": 6, "max_urls": 2000, "browser_max_pages": 30, "browser_max_depth": 3, "api_probe_limit": 1200, "nuclei_max_targets": 1800, "nuclei_early_stop": True, "active_max_seconds": 1200, "active_max_endpoints": 80, "active_params_per_endpoint": 8, "max_findings_per_family": None},
+        "thorough": {"max_duration_minutes": 900, "discovery_depth": 7, "max_urls": 5000, "browser_max_pages": 160, "browser_max_depth": 5, "api_probe_limit": 5000, "nuclei_max_targets": 6000, "nuclei_early_stop": False, "active_max_seconds": 3600, "active_max_endpoints": 250, "active_params_per_endpoint": 16, "max_findings_per_family": None},
+        "exhaustive": {"max_duration_minutes": 1200, "discovery_depth": 8, "max_urls": 10000, "browser_max_pages": 500, "browser_max_depth": 7, "api_probe_limit": 10000, "nuclei_max_targets": 12000, "nuclei_early_stop": False, "active_max_seconds": 10800, "active_max_endpoints": 600, "active_params_per_endpoint": 25, "max_findings_per_family": None},
+    },
+    "smart": {
+        "fast": {"max_duration_minutes": 30, "discovery_depth": 3, "max_urls": 500, "browser_max_pages": 20, "browser_max_depth": 3, "api_probe_limit": 400, "nuclei_max_targets": 600, "nuclei_early_stop": True, "active_max_seconds": 450, "active_max_endpoints": 25, "active_params_per_endpoint": 4, "max_findings_per_family": 6, "smart_bola_max_endpoints": 50, "dom_xss_max_files": 12, "sqli_extract_max": 2, "oob_max_findings": 2},
+        "balanced": {"max_duration_minutes": 90, "discovery_depth": 4, "max_urls": 1000, "browser_max_pages": 40, "browser_max_depth": 4, "api_probe_limit": 800, "nuclei_max_targets": 1000, "nuclei_early_stop": True, "active_max_seconds": 900, "active_max_endpoints": 50, "active_params_per_endpoint": 6, "max_findings_per_family": 8, "smart_bola_max_endpoints": 100, "dom_xss_max_files": 25, "sqli_extract_max": 3, "oob_max_findings": 3},
+        "thorough": {"max_duration_minutes": 240, "discovery_depth": 5, "max_urls": 2500, "browser_max_pages": 100, "browser_max_depth": 5, "api_probe_limit": 2000, "nuclei_max_targets": 2500, "nuclei_early_stop": False, "active_max_seconds": 2400, "active_max_endpoints": 150, "active_params_per_endpoint": 12, "max_findings_per_family": None, "smart_bola_max_endpoints": 250, "dom_xss_max_files": 75, "sqli_extract_max": 5, "oob_max_findings": 5},
+        "exhaustive": {"max_duration_minutes": 480, "discovery_depth": 7, "max_urls": 5000, "browser_max_pages": 250, "browser_max_depth": 6, "api_probe_limit": 5000, "nuclei_max_targets": 5000, "nuclei_early_stop": False, "active_max_seconds": 7200, "active_max_endpoints": 300, "active_params_per_endpoint": 20, "max_findings_per_family": None, "smart_bola_max_endpoints": 500, "dom_xss_max_files": 150, "sqli_extract_max": 8, "oob_max_findings": 8},
+    },
+}
+
+
+def _coerce_budget_value(key: str, value: Any) -> Any:
+    if key == "nuclei_early_stop":
+        if value is None:
+            return None
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    if key == "max_findings_per_family" and value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        number = int(float(str(value)))
+    except (TypeError, ValueError):
+        return None
+    if key == "max_findings_per_family" and number < 0:
+        return None
+    return max(0, number)
+
+
+def normalize_budget_profile(value: Any) -> str:
+    profile = str(value or DEFAULT_SCAN_BUDGET_PROFILE).strip().lower()
+    return profile if profile in SCAN_BUDGET_PROFILES else DEFAULT_SCAN_BUDGET_PROFILE
+
+
+def resolve_scan_budget(
+    scan_type: str | None,
+    budget_profile: str | None = None,
+    custom_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve scan depth/time controls from scan type, profile, and overrides."""
+    normalized_scan_type = str(scan_type or "standard").strip().lower()
+    if normalized_scan_type not in SCAN_BUDGET_DEFAULTS:
+        normalized_scan_type = "standard"
+    normalized_profile = normalize_budget_profile(budget_profile)
+    budget = dict(SCAN_BUDGET_DEFAULTS[normalized_scan_type][normalized_profile])
+    budget["scan_type"] = normalized_scan_type
+    budget["budget_profile"] = normalized_profile
+
+    if isinstance(custom_budget, dict):
+        for key, raw_value in custom_budget.items():
+            if key not in SCAN_BUDGET_FIELDS:
+                continue
+            value = _coerce_budget_value(key, raw_value)
+            if value is None and key != "max_findings_per_family":
+                continue
+            budget[key] = value
+
+    return budget
 
 
 # =============================================================================

@@ -6917,7 +6917,11 @@ async def run_smart_active_tests(
     auth_session: Any | None = None,
     run_xss: bool = True,
     run_sqli: bool = True,
-    thorough_params: bool = False
+    thorough_params: bool = False,
+    active_max_seconds: int | float | None = None,
+    active_max_endpoints: int | None = None,
+    active_params_per_endpoint: int | None = None,
+    max_findings_per_family: int | None | str = "default",
 ) -> dict:
     """
     Run all smart active tests (SQLi + XSS).
@@ -6938,6 +6942,7 @@ async def run_smart_active_tests(
     """
     tech_stack = tech_stack or []
     signals = signals or {}
+    requested_active_max_seconds = active_max_seconds
 
     # Thorough mode uses expanded limits
     if thorough_params:
@@ -6945,16 +6950,31 @@ async def run_smart_active_tests(
         sqli_max_params = 10
         xss_max_endpoints = 100
         xss_max_params = 10
-        active_max_seconds = 1200.0
-        max_findings_per_family = None
+        default_active_max_seconds = 1200.0
+        default_max_findings_per_family = None
         print(f"[active] Thorough mode: testing up to {sqli_max_endpoints} endpoints x {sqli_max_params} params", file=sys.stderr)
     else:
         sqli_max_endpoints = 35
         sqli_max_params = 5
         xss_max_endpoints = 35
         xss_max_params = 5
-        active_max_seconds = 600.0
-        max_findings_per_family = 8
+        default_active_max_seconds = 600.0
+        default_max_findings_per_family = 8
+
+    if active_max_endpoints is not None:
+        sqli_max_endpoints = max(1, int(active_max_endpoints))
+        xss_max_endpoints = max(1, int(active_max_endpoints))
+    if active_params_per_endpoint is not None:
+        sqli_max_params = max(1, int(active_params_per_endpoint))
+        xss_max_params = max(1, int(active_params_per_endpoint))
+    if requested_active_max_seconds is None:
+        active_max_seconds = default_active_max_seconds
+    else:
+        active_max_seconds = float(requested_active_max_seconds)
+    if max_findings_per_family == "default":
+        max_findings_per_family = default_max_findings_per_family
+    elif max_findings_per_family is not None:
+        max_findings_per_family = max(0, int(max_findings_per_family))
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
     if signals:
@@ -7085,6 +7105,12 @@ async def run_smart_active_tests(
         },
         "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
         "dbms_detected": sqli_results.get("dbms_detected"),
+        "budget": {
+            "active_max_seconds": active_max_seconds,
+            "active_max_endpoints": max(sqli_max_endpoints, xss_max_endpoints),
+            "active_params_per_endpoint": max(sqli_max_params, xss_max_params),
+            "max_findings_per_family": max_findings_per_family,
+        },
         "total_endpoints_tested": sqli_results.get("endpoints_tested", 0) + xss_results.get("endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
         "total_params_tested": sqli_results.get("params_tested", 0) + xss_results.get("params_tested", 0) + hash_route_results.get("params_tested", 0),
     }

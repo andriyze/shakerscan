@@ -3,12 +3,13 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { submitScan } from '@/lib/api'
-import { SCAN_TYPES, getScanOptions, type ScanType } from '@/lib/constants'
+import { BUDGET_PROFILES, SCAN_TYPES, getScanOptions, type BudgetProfile, type ScanType } from '@/lib/constants'
 
 export default function NewScanPage() {
   const router = useRouter()
   const [target, setTarget] = useState('')
   const [scanType, setScanType] = useState<ScanType>('quick')
+  const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -21,6 +22,21 @@ export default function NewScanPage() {
     enhanced_dns: false,
     js_dependency_scanning: false,
     js_secret_scanning: false
+  })
+  const [customBudgetEnabled, setCustomBudgetEnabled] = useState(false)
+  const [customBudget, setCustomBudget] = useState({
+    max_duration_minutes: '',
+    discovery_depth: '',
+    max_urls: '',
+    browser_max_pages: '',
+    browser_max_depth: '',
+    api_probe_limit: '',
+    nuclei_max_targets: '',
+    active_max_seconds: '',
+    active_max_endpoints: '',
+    active_params_per_endpoint: '',
+    smart_bola_max_endpoints: '',
+    dom_xss_max_files: ''
   })
 
   async function handleSubmit(e: React.FormEvent) {
@@ -35,9 +51,19 @@ export default function NewScanPage() {
 
     try {
       // Combine scan type options with advanced options
-      const scanOptions = {
+      const customBudgetPayload = Object.fromEntries(
+        Object.entries(customBudget)
+          .filter(([, value]) => value.trim() !== '')
+          .map(([key, value]) => [key, Number.parseInt(value, 10)])
+          .filter(([, value]) => Number.isFinite(value as number))
+      )
+      const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
-        ...(showAdvanced ? options : {})
+        budget_profile: budgetProfile,
+        ...(showAdvanced ? options : {}),
+        ...(showAdvanced && customBudgetEnabled && Object.keys(customBudgetPayload).length > 0
+          ? { custom_budget: customBudgetPayload }
+          : {})
       }
 
       const result = await submitScan(target.trim(), scanOptions)
@@ -72,6 +98,30 @@ export default function NewScanPage() {
           <p className="text-xs text-gray-500 mt-2">
             Enter a URL or domain to scan (e.g., https://example.com or example.com)
           </p>
+        </div>
+
+        {/* Coverage Budget */}
+        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <label className="block text-sm font-medium text-gray-400 mb-3">
+            Coverage Budget
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            {BUDGET_PROFILES.map((profile) => (
+              <button
+                key={profile.value}
+                type="button"
+                onClick={() => setBudgetProfile(profile.value)}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  budgetProfile === profile.value
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+                }`}
+              >
+                <div className="font-medium text-white">{profile.label}</div>
+                <div className="text-xs text-gray-500 mt-1">{profile.description}</div>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Scan Type Selection */}
@@ -160,6 +210,31 @@ export default function NewScanPage() {
                 checked={options.js_secret_scanning}
                 onChange={(checked) => setOptions({ ...options, js_secret_scanning: checked })}
               />
+              <OptionToggle
+                label="Custom Budget"
+                description="Override selected depth and timeout limits"
+                checked={customBudgetEnabled}
+                onChange={setCustomBudgetEnabled}
+              />
+              {customBudgetEnabled && (
+                <div className="grid grid-cols-2 gap-3 border-t border-gray-800 pt-3">
+                  {Object.entries(customBudget).map(([key, value]) => (
+                    <label key={key} className="space-y-1">
+                      <span className="block text-xs text-gray-500">
+                        {key.replaceAll('_', ' ')}
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={value}
+                        onChange={(event) => setCustomBudget({ ...customBudget, [key]: event.target.value })}
+                        placeholder="profile default"
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

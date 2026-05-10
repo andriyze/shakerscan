@@ -26,9 +26,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
-    from constants import SMART_SCAN_BUDGETS
+    from constants import SMART_SCAN_BUDGETS, resolve_scan_budget
 except ImportError:
-    from scanner.constants import SMART_SCAN_BUDGETS
+    from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget
 
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
@@ -706,7 +706,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         # Get all running scans
         running_scans = await conn.fetch("""
-            SELECT id, scan_type, started_at, target_id, current_phase, progress
+            SELECT id, scan_type, started_at, target_id, current_phase, progress, options
             FROM scans
             WHERE status = 'running' AND started_at IS NOT NULL
         """)
@@ -714,6 +714,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
         for scan in running_scans:
             scan_id = str(scan['id'])
             scan_type = scan['scan_type'] or 'standard'
+            options = _decode_json_value(scan['options']) or {}
             started_at = scan['started_at']
             current_phase = (scan['current_phase'] or '').lower()
             progress = int(scan['progress'] or 0)
@@ -766,7 +767,12 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
 
             # Check 2: Max duration exceeded (safety net)
             if not is_stale and started_at:
-                max_duration = MAX_SCAN_DURATION.get(scan_type, 120)
+                resolved_budget = resolve_scan_budget(
+                    scan_type,
+                    options.get("budget_profile") if isinstance(options, dict) else None,
+                    options.get("custom_budget") if isinstance(options, dict) else None,
+                )
+                max_duration = int(resolved_budget.get("max_duration_minutes") or MAX_SCAN_DURATION.get(scan_type, 120))
                 scan_duration = (now - started_at.replace(tzinfo=None)).total_seconds() / 60
 
                 if scan_duration > max_duration:
@@ -1135,6 +1141,15 @@ class ScanOptions(BaseModel):
     no_early_stop: bool = False                    # Disable early stopping in smart scan
     thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
+    budget_profile: Optional[str] = Field(
+        default=None,
+        pattern="^(fast|balanced|thorough|exhaustive)$",
+        description="Depth/time budget profile. Scan type controls modules; budget controls how hard to run them.",
+    )
+    custom_budget: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Advanced per-scan budget overrides such as max_urls, active_max_seconds, or browser_max_pages.",
+    )
 
     # Safety/performance limits
     smart_bola_max_endpoints: Optional[int] = Field(
@@ -3038,6 +3053,15 @@ async def submit_scan(request: ScanRequest):
             }
         )
 
+    options_payload = request.options.dict()
+    resolved_budget = resolve_scan_budget(
+        scan_type,
+        options_payload.get("budget_profile"),
+        options_payload.get("custom_budget"),
+    )
+    options_payload["budget_profile"] = resolved_budget["budget_profile"]
+    options_payload["resolved_budget"] = resolved_budget
+
     # Create or find target
     async with db_pool.acquire() as conn:
         # Check if target exists
@@ -3059,14 +3083,14 @@ async def submit_scan(request: ScanRequest):
             INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
             VALUES ($1, $2, $3, $4, 'pending', $5, $6)
         """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
-             json.dumps(_attach_target_note(request.options.dict(), request.target, target_note, scheme_inferred)), scan_type)
+             json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)), scan_type)
 
     # Queue the job
     job_data = {
         'job_id': job_id,
         'scan_id': scan_id,
         'target': scan_target,
-        'options': _attach_target_note(request.options.dict(), request.target, target_note, scheme_inferred),
+        'options': _attach_target_note(options_payload, request.target, target_note, scheme_inferred),
         'submitted_at': datetime.utcnow().isoformat()
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))

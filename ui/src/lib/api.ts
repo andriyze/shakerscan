@@ -390,7 +390,7 @@ export async function getScanLogs(id: string, limit: number = 200) {
   return res.json()
 }
 
-export async function submitScan(target: string, options: Record<string, boolean | string> = {}) {
+export async function submitScan(target: string, options: Record<string, unknown> = {}) {
   const res = await fetch(`${API_URL}/scans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

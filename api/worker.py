@@ -37,6 +37,11 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 
+try:
+    from constants import resolve_scan_budget
+except ImportError:
+    from scanner.constants import resolve_scan_budget
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -338,6 +343,35 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.append('--thorough-params')
     if options.get('oob_callback_url'):
         cmd.extend(['--oob-callback-url', options['oob_callback_url']])
+    if options.get('budget_profile'):
+        cmd.extend(['--budget-profile', str(options['budget_profile'])])
+
+    custom_budget = options.get("custom_budget")
+    if isinstance(custom_budget, dict):
+        custom_budget_flag_map = {
+            "max_duration_minutes": "--budget-max-duration-minutes",
+            "discovery_depth": "--budget-discovery-depth",
+            "max_urls": "--budget-max-urls",
+            "browser_max_pages": "--budget-browser-max-pages",
+            "browser_max_depth": "--budget-browser-max-depth",
+            "api_probe_limit": "--budget-api-probe-limit",
+            "nuclei_max_targets": "--budget-nuclei-max-targets",
+            "active_max_seconds": "--budget-active-max-seconds",
+            "active_max_endpoints": "--budget-active-max-endpoints",
+            "active_params_per_endpoint": "--budget-active-params-per-endpoint",
+            "dom_xss_max_files": "--dom-xss-max-files",
+            "smart_bola_max_endpoints": "--smart-bola-max-endpoints",
+            "sqli_extract_max": "--sqli-extract-max",
+            "oob_max_findings": "--oob-max-findings",
+        }
+        for budget_key, flag in custom_budget_flag_map.items():
+            if custom_budget.get(budget_key) is not None:
+                cmd.extend([flag, str(custom_budget[budget_key])])
+        if custom_budget.get("nuclei_early_stop") is False:
+            cmd.append("--budget-disable-nuclei-early-stop")
+        if "max_findings_per_family" in custom_budget:
+            value = custom_budget.get("max_findings_per_family")
+            cmd.extend(["--budget-max-findings-per-family", "-1" if value is None else str(value)])
 
     # Safety/performance limits
     if options.get('smart_bola_max_endpoints'):
@@ -501,7 +535,17 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
     else:
         if scan_type:
-            max_duration_minutes = MAX_SCAN_DURATION.get(scan_type, DEFAULT_MAX_DURATION_MINUTES)
+            resolved_budget = options.get("resolved_budget")
+            if not isinstance(resolved_budget, dict):
+                resolved_budget = resolve_scan_budget(
+                    scan_type,
+                    options.get("budget_profile"),
+                    options.get("custom_budget") if isinstance(options.get("custom_budget"), dict) else None,
+                )
+            max_duration_minutes = int(
+                resolved_budget.get("max_duration_minutes")
+                or MAX_SCAN_DURATION.get(scan_type, DEFAULT_MAX_DURATION_MINUTES)
+            )
 
     async def _watchdog_timeout() -> None:
         nonlocal timeout_reason

@@ -21,6 +21,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from scanner_tools.common import is_in_scope_url, run
+try:
+    from constants import resolve_scan_budget
+except ImportError:
+    from scanner.constants import resolve_scan_budget
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.har_discovery import (
     extract_discovery_from_har,
@@ -2232,6 +2236,8 @@ async def build_report(target: str,
                        no_early_stop: bool=False,
                        thorough_params: bool=False,
                        oob_callback_url: str | None=None,
+                       budget_profile: str | None=None,
+                       custom_budget: dict[str, Any] | None=None,
                        # Safety/performance limits
                        smart_bola_max_endpoints: int=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
                        dom_xss_max_files: int=SMART_SCAN_BUDGETS.dom_xss_max_files,
@@ -2251,6 +2257,20 @@ async def build_report(target: str,
 
     focus_rules = parse_scope_rules_json(focus_rules_json, "focus")
     avoid_rules = parse_scope_rules_json(avoid_rules_json, "avoid")
+    budget_scan_type = (
+        "smart" if smart_mode
+        else complete_tier if complete_mode and complete_tier in {"full", "aggressive"}
+        else "deep" if complete_mode
+        else "quick" if quick_mode
+        else "standard"
+    )
+    scan_budget = resolve_scan_budget(budget_scan_type, budget_profile, custom_budget)
+    if scan_budget.get("active_max_endpoints"):
+        max_active = int(scan_budget["active_max_endpoints"])
+    smart_bola_max_endpoints = int(scan_budget.get("smart_bola_max_endpoints") or smart_bola_max_endpoints)
+    dom_xss_max_files = int(scan_budget.get("dom_xss_max_files") or dom_xss_max_files)
+    sqli_extract_max = int(scan_budget.get("sqli_extract_max") or sqli_extract_max)
+    oob_max_findings = int(scan_budget.get("oob_max_findings") or oob_max_findings)
     # Runtime AI controls are injected by worker env and should drive scan behavior.
     scan_ai_classification_enabled = _is_truthy_env(
         os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
@@ -2412,6 +2432,8 @@ async def build_report(target: str,
                     "smart_mode": smart_mode,
                     "no_early_stop": no_early_stop,
                     "thorough_params": thorough_params,
+                    "budget_profile": scan_budget.get("budget_profile"),
+                    "resolved_budget": scan_budget,
                     "verified_findings_only": verified_findings_only,
                     "focus_rules": len(focus_rules),
                     "avoid_rules": len(avoid_rules),
@@ -3094,9 +3116,9 @@ async def build_report(target: str,
         # Smart mode: Use recursive discovery
         # Note: signals=None because discovery runs before nuclei; nuclei signals are used
         # later in run_smart_active_tests for adaptive XSS/SQLi testing
-        katana_task = asyncio.create_task(smart_discovery(base_url, signals=None, scan_type="smart"))
+        katana_task = asyncio.create_task(smart_discovery(base_url, signals=None, scan_type="smart", budget=scan_budget))
     else:
-        katana_task = asyncio.create_task(katana_crawl(base_url, scan_type=discovery_scan_type))
+        katana_task = asyncio.create_task(katana_crawl(base_url, scan_type=discovery_scan_type, budget=scan_budget))
 
     if auth_session:
         await auth_session.refresh_if_needed()
@@ -3110,6 +3132,10 @@ async def build_report(target: str,
         "smart": {"max_pages": 30, "max_depth": 4},
     }
     crawl_limits = browser_crawl_limits.get(discovery_scan_type, {"max_pages": 6, "max_depth": 2})
+    crawl_limits = {
+        "max_pages": int(scan_budget.get("browser_max_pages") if scan_budget.get("browser_max_pages") is not None else crawl_limits["max_pages"]),
+        "max_depth": int(scan_budget.get("browser_max_depth") if scan_budget.get("browser_max_depth") is not None else crawl_limits["max_depth"]),
+    }
     enable_browser_crawl = smart_mode or complete_mode or bool(auth_session)
 
     # For smart mode: Quick JS route discovery to seed browser crawl
@@ -3802,7 +3828,7 @@ async def build_report(target: str,
             "aggressive": 1800,
             "smart": 1000,
         }
-        nuclei_target_limit = nuclei_target_limits.get(discovery_scan_type, 400)
+        nuclei_target_limit = int(scan_budget.get("nuclei_max_targets") or nuclei_target_limits.get(discovery_scan_type, 400))
 
         if auth_session:
             await auth_session.refresh_if_needed()
@@ -3816,7 +3842,7 @@ async def build_report(target: str,
             nuclei_task = asyncio.create_task(staged_nuclei_scan(
                 base_url,
                 detected_tech=early_techs,
-                early_stopping=not no_early_stop,  # Disable early stopping if --no-early-stop flag is set
+                early_stopping=bool(scan_budget.get("nuclei_early_stop", True)) and not no_early_stop,
                 targets=crawl_urls,
                 auth_session=auth_session,
                 max_targets=nuclei_target_limit,
@@ -4787,6 +4813,8 @@ async def build_report(target: str,
             "smart_mode": smart_mode,
             "no_early_stop": no_early_stop,
             "thorough_params": thorough_params,
+            "budget_profile": scan_budget.get("budget_profile"),
+            "resolved_budget": scan_budget,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -7383,6 +7411,10 @@ async def build_report(target: str,
                     run_xss=run_xss,
                     run_sqli=run_sqli,
                     thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
+                    active_max_seconds=scan_budget.get("active_max_seconds"),
+                    active_max_endpoints=scan_budget.get("active_max_endpoints"),
+                    active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
+                    max_findings_per_family=scan_budget.get("max_findings_per_family"),
                 )
 
                 smart_sqli_findings = []
@@ -9733,25 +9765,40 @@ async def cli_main():
     ap.add_argument("--no-early-stop", action="store_true", help="Disable early stopping in smart scan (continue even after finding many vulns)")
     ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
     ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
+    ap.add_argument("--budget-profile", choices=["fast", "balanced", "thorough", "exhaustive"], default=None,
+                    help="Depth/time budget profile. Scan type selects checks; budget controls how hard they run.")
+    ap.add_argument("--budget-max-duration-minutes", type=int, dest="budget_max_duration_minutes")
+    ap.add_argument("--budget-discovery-depth", type=int, dest="budget_discovery_depth")
+    ap.add_argument("--budget-max-urls", type=int, dest="budget_max_urls")
+    ap.add_argument("--budget-browser-max-pages", type=int, dest="budget_browser_max_pages")
+    ap.add_argument("--budget-browser-max-depth", type=int, dest="budget_browser_max_depth")
+    ap.add_argument("--budget-api-probe-limit", type=int, dest="budget_api_probe_limit")
+    ap.add_argument("--budget-nuclei-max-targets", type=int, dest="budget_nuclei_max_targets")
+    ap.add_argument("--budget-disable-nuclei-early-stop", action="store_true", dest="budget_disable_nuclei_early_stop")
+    ap.add_argument("--budget-active-max-seconds", type=int, dest="budget_active_max_seconds")
+    ap.add_argument("--budget-active-max-endpoints", type=int, dest="budget_active_max_endpoints")
+    ap.add_argument("--budget-active-params-per-endpoint", type=int, dest="budget_active_params_per_endpoint")
+    ap.add_argument("--budget-max-findings-per-family", type=int, dest="budget_max_findings_per_family",
+                    help="-1 disables the per-family active finding cap")
     # Safety/performance limits
     ap.add_argument(
         "--smart-bola-max-endpoints",
         type=int,
-        default=SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+        default=None,
         dest="smart_bola_max_endpoints",
         help=f"Max endpoints for smart BOLA testing (default: {SMART_SCAN_BUDGETS.smart_bola_max_endpoints})",
     )
     ap.add_argument(
         "--dom-xss-max-files",
         type=int,
-        default=SMART_SCAN_BUDGETS.dom_xss_max_files,
+        default=None,
         dest="dom_xss_max_files",
         help=f"Max JS files for DOM XSS analysis (default: {SMART_SCAN_BUDGETS.dom_xss_max_files})",
     )
     ap.add_argument(
         "--sqli-extract-max",
         type=int,
-        default=SMART_SCAN_BUDGETS.sqli_extract_max,
+        default=None,
         dest="sqli_extract_max",
         help=f"Max SQLi findings to attempt data extraction (default: {SMART_SCAN_BUDGETS.sqli_extract_max})",
     )
@@ -10595,6 +10642,32 @@ async def cli_main():
     # Active check selection (defaults to both unless filtered)
     active_xss = args.xss or not (args.xss or args.sqli)
     active_sqli = args.sqli or not (args.xss or args.sqli)
+    custom_budget = {
+        key: value
+        for key, value in {
+            "max_duration_minutes": getattr(args, "budget_max_duration_minutes", None),
+            "discovery_depth": getattr(args, "budget_discovery_depth", None),
+            "max_urls": getattr(args, "budget_max_urls", None),
+            "browser_max_pages": getattr(args, "budget_browser_max_pages", None),
+            "browser_max_depth": getattr(args, "budget_browser_max_depth", None),
+            "api_probe_limit": getattr(args, "budget_api_probe_limit", None),
+            "nuclei_max_targets": getattr(args, "budget_nuclei_max_targets", None),
+            "active_max_seconds": getattr(args, "budget_active_max_seconds", None),
+            "active_max_endpoints": getattr(args, "budget_active_max_endpoints", None),
+            "active_params_per_endpoint": getattr(args, "budget_active_params_per_endpoint", None),
+            "max_findings_per_family": (
+                None if getattr(args, "budget_max_findings_per_family", None) == -1
+                else getattr(args, "budget_max_findings_per_family", None)
+            ),
+            "smart_bola_max_endpoints": getattr(args, "smart_bola_max_endpoints", None),
+            "dom_xss_max_files": getattr(args, "dom_xss_max_files", None),
+            "sqli_extract_max": getattr(args, "sqli_extract_max", None),
+            "oob_max_findings": getattr(args, "oob_max_findings", None),
+        }.items()
+        if value is not None
+    }
+    if getattr(args, "budget_disable_nuclei_early_stop", False):
+        custom_budget["nuclei_early_stop"] = False
 
     report = await build_report(
         args.target,
@@ -10709,11 +10782,13 @@ async def cli_main():
         no_early_stop=getattr(args, 'no_early_stop', False),
         thorough_params=getattr(args, 'thorough_params', False),
         oob_callback_url=getattr(args, 'oob_callback_url', None),
+        budget_profile=getattr(args, 'budget_profile', None),
+        custom_budget=custom_budget or None,
         # Safety/performance limits
-        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', SMART_SCAN_BUDGETS.smart_bola_max_endpoints),
-        dom_xss_max_files=getattr(args, 'dom_xss_max_files', SMART_SCAN_BUDGETS.dom_xss_max_files),
-        sqli_extract_max=getattr(args, 'sqli_extract_max', SMART_SCAN_BUDGETS.sqli_extract_max),
-        oob_max_findings=getattr(args, 'oob_max_findings', SMART_SCAN_BUDGETS.oob_max_findings),
+        smart_bola_max_endpoints=getattr(args, 'smart_bola_max_endpoints', None) or SMART_SCAN_BUDGETS.smart_bola_max_endpoints,
+        dom_xss_max_files=getattr(args, 'dom_xss_max_files', None) or SMART_SCAN_BUDGETS.dom_xss_max_files,
+        sqli_extract_max=getattr(args, 'sqli_extract_max', None) or SMART_SCAN_BUDGETS.sqli_extract_max,
+        oob_max_findings=getattr(args, 'oob_max_findings', None) or SMART_SCAN_BUDGETS.oob_max_findings,
         # Active enforcement metadata
         active_enforced=getattr(args, 'active_enforced', False),
     )

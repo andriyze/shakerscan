@@ -1176,7 +1176,11 @@ async def discover_endpoint_parameters(
     return accepted_params
 
 
-async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[str, Any]:
+async def enhanced_url_discovery(
+    url: str,
+    scan_type: str = "standard",
+    budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Multi-level URL discovery with configurable depth based on scan type.
 
@@ -1188,14 +1192,15 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
         Dict with discovered URLs, forms, API endpoints, and parameters
     """
     config = DISCOVERY_CONFIG.get(scan_type, DISCOVERY_CONFIG["standard"])
-    depth = config["katana_depth"]
-    max_urls = config["max_urls"]
+    budget = budget or {}
+    depth = int(budget.get("discovery_depth") or config["katana_depth"])
+    max_urls = int(budget.get("max_urls") or config["max_urls"])
     use_browser = config["browser_fallback"]
     do_param_discovery = config["parameter_discovery"]
     do_js_parsing = config.get("js_parsing", False)
     ffuf_wordlist = config.get("ffuf_wordlist", "common")
     do_recursive_fuzzing = config.get("recursive_fuzzing", False)
-    api_probe_limit = config.get("api_probe_limit", 0)
+    api_probe_limit = int(budget.get("api_probe_limit") or config.get("api_probe_limit", 0))
     common_probe_limit = config.get("common_probe_limit", 0)
     api_root_resource_limit = config.get("api_root_resource_limit", 0)
 
@@ -1514,7 +1519,11 @@ async def enhanced_url_discovery(url: str, scan_type: str = "standard") -> dict[
     }
 
 
-async def katana_crawl(url: str, scan_type: str = "standard") -> list[str]:
+async def katana_crawl(
+    url: str,
+    scan_type: str = "standard",
+    budget: dict[str, Any] | None = None,
+) -> list[str]:
     """
     Wrapper for enhanced_url_discovery that returns just the URL list.
 
@@ -1526,8 +1535,9 @@ async def katana_crawl(url: str, scan_type: str = "standard") -> list[str]:
         List of discovered URLs
     """
     config = DISCOVERY_CONFIG.get(scan_type, DISCOVERY_CONFIG["standard"])
-    max_urls = config["max_urls"]
-    discovery = await enhanced_url_discovery(url, scan_type)
+    budget = budget or {}
+    max_urls = int(budget.get("max_urls") or config["max_urls"])
+    discovery = await enhanced_url_discovery(url, scan_type, budget=budget)
     return discovery.get("all_urls", [])[:max_urls]
 
 async def schemathesis_run(
@@ -3073,7 +3083,8 @@ def calculate_adaptive_depth(signals: dict, base_depth: int = 3) -> tuple[int, i
 async def smart_discovery(
     url: str,
     signals: dict | None = None,
-    scan_type: str = "smart"
+    scan_type: str = "smart",
+    budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Smart discovery combining enhanced URL discovery with recursive fuzzing.
@@ -3092,7 +3103,7 @@ async def smart_discovery(
 
     # Start with enhanced URL discovery
     print(f"[discovery] Phase 1: Enhanced URL discovery", file=sys.stderr)
-    initial_discovery = await enhanced_url_discovery(url, scan_type=scan_type)
+    initial_discovery = await enhanced_url_discovery(url, scan_type=scan_type, budget=budget)
     spa_catch_all = initial_discovery.get("spa_catch_all", False)
 
     # Get initial directories for recursive fuzzing
@@ -3142,7 +3153,8 @@ async def smart_discovery(
     # Phase 2: Probe API bases for common resources
     probed_endpoints: list[dict[str, Any]] = []
     config = initial_discovery.get("config", {})
-    api_probe_limit = config.get("api_probe_limit", 600)
+    budget = budget or {}
+    api_probe_limit = int(budget.get("api_probe_limit") or config.get("api_probe_limit", 600))
 
     if api_bases and not spa_catch_all:
         print(f"[discovery] Phase 2a: Probing {len(api_bases)} API bases for common resources", file=sys.stderr)
@@ -3162,7 +3174,10 @@ async def smart_discovery(
     # Phase 2b: Recursive fuzzing with adaptive depth (P1-1 fix)
     recursive_result: dict[str, Any] = {}
     if not spa_catch_all:
-        adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(signals, base_depth=3)
+        adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(
+            signals,
+            base_depth=int(budget.get("discovery_depth") or 3),
+        )
         print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories, depth={adaptive_depth})", file=sys.stderr)
         recursive_result = await recursive_directory_discovery(
             url,
@@ -3177,7 +3192,7 @@ async def smart_discovery(
 
     # Merge results and apply URL cap from config
     config = initial_discovery.get("config", {})
-    max_urls = config.get("max_urls", 1000)
+    max_urls = int(budget.get("max_urls") or config.get("max_urls", 1000))
     recursive_paths = [
         urllib.parse.urljoin(url, p) for p in (recursive_result.get("paths", []) or [])
     ]

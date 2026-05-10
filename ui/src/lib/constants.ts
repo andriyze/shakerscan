@@ -1,6 +1,7 @@
 // Shared constants for ShakerScan UI
 
 export type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
+export type BudgetProfile = 'fast' | 'balanced' | 'thorough' | 'exhaustive'
 
 export interface ScanTypeOption {
   value: ScanType
@@ -57,6 +58,17 @@ export const SCAN_TYPES: ScanTypeOption[] = [
     requiresPermission: true,
     options: { scan_type: 'smart' }
   },
+]
+
+export const BUDGET_PROFILES: Array<{
+  value: BudgetProfile
+  label: string
+  description: string
+}> = [
+  { value: 'fast', label: 'Fast', description: 'Small coverage budget for quick feedback' },
+  { value: 'balanced', label: 'Balanced', description: 'Default depth and runtime limits' },
+  { value: 'thorough', label: 'Thorough', description: 'Higher coverage for staging and release checks' },
+  { value: 'exhaustive', label: 'Exhaustive', description: 'Maximum coverage; can run for hours' },
 ]
 
 export const SEVERITY_LEVELS = ['critical', 'high', 'medium', 'low', 'info'] as const
