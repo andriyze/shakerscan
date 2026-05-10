@@ -3748,6 +3748,7 @@ async def _rubric_judge_one(
         ],
         "temperature": 0.1,
         "max_tokens": 200,
+        "response_format": {"type": "json_object"},
     }
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
@@ -4279,7 +4280,8 @@ async def _semantic_judge_one(
             {"role": "user", "content": user_message},
         ],
         "temperature": 0.1,
-        "max_tokens": 220,
+        "max_tokens": 600,
+        "response_format": {"type": "json_object"},
     }
     headers = {
         "Authorization": f"Bearer {config['api_key']}",

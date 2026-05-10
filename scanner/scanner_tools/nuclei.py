@@ -28,22 +28,22 @@ class WaveBudget:
     @classmethod
     def wave1(cls) -> "WaveBudget":
         """Wave 1: Quick critical scan - short timeout."""
-        return cls(max_duration=60, min_duration=20, yield_threshold=0.3)
+        return cls(max_duration=45, min_duration=15, yield_threshold=0.3)
 
     @classmethod
     def wave2(cls) -> "WaveBudget":
         """Wave 2: Signal expansion - medium timeout."""
-        return cls(max_duration=120, min_duration=45, yield_threshold=0.4)
+        return cls(max_duration=90, min_duration=30, yield_threshold=0.4)
 
     @classmethod
     def wave3(cls) -> "WaveBudget":
         """Wave 3: Injection focused - longer timeout for complex templates."""
-        return cls(max_duration=300, min_duration=60, yield_threshold=0.3)
+        return cls(max_duration=180, min_duration=45, yield_threshold=0.3)
 
     @classmethod
     def wave4(cls) -> "WaveBudget":
         """Wave 4: Deep scan - longest timeout."""
-        return cls(max_duration=480, min_duration=90, yield_threshold=0.2)
+        return cls(max_duration=300, min_duration=60, yield_threshold=0.2)
 
 
 @dataclass
@@ -116,7 +116,10 @@ def adjust_next_wave_budget(
         print(f"[nuclei] High yield ({current_metrics.findings_per_minute:.1f}/min) - extending next wave to {adjusted.max_duration}s", file=sys.stderr)
     elif current_metrics.is_low_yield:
         # Low yield - reduce timeout for next wave
-        adjusted.max_duration = max(adjusted.min_duration + 10, int(base_budget.max_duration * 0.7))
+        if current_metrics.findings_count == 0:
+            adjusted.max_duration = adjusted.min_duration
+        else:
+            adjusted.max_duration = max(adjusted.min_duration + 10, int(base_budget.max_duration * 0.6))
         print(f"[nuclei] Low yield ({current_metrics.findings_per_minute:.1f}/min) - reducing next wave to {adjusted.max_duration}s", file=sys.stderr)
 
     # Boost if signals suggest more to find
@@ -535,7 +538,7 @@ async def nuclei_scan(
     else:
         return {"error": f"Templates directory not found: {templates_dir}", "scan_completed": False}
 
-    out, err, rc = await run(cmd, timeout=timeout)
+    out, err, rc = await run(cmd, timeout=timeout, kill_process_group=True)
     if target_file and os.path.exists(target_file):
         try:
             os.unlink(target_file)

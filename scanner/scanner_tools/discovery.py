@@ -1649,19 +1649,59 @@ def _default_value_from_schema(prop: dict[str, Any]) -> Any:
     return "test"
 
 
-def _extract_schema_details(schema: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+def _resolve_schema_ref(spec: dict[str, Any] | None, ref_path: str) -> dict[str, Any]:
+    if not spec or not isinstance(ref_path, str):
+        return {}
+    if ref_path.startswith("#/components/schemas/"):
+        schema_name = ref_path.split("/")[-1]
+        return spec.get("components", {}).get("schemas", {}).get(schema_name, {})
+    if ref_path.startswith("#/definitions/"):
+        schema_name = ref_path.split("/")[-1]
+        return spec.get("definitions", {}).get(schema_name, {})
+    return {}
+
+
+def _extract_schema_details(
+    schema: dict[str, Any],
+    spec: dict[str, Any] | None = None,
+    seen_refs: set[str] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
     required = []
     defaults: dict[str, Any] = {}
     if not isinstance(schema, dict):
         return required, defaults
+
+    if seen_refs is None:
+        seen_refs = set()
+
+    ref_path = schema.get("$ref")
+    if isinstance(ref_path, str):
+        if ref_path in seen_refs:
+            return required, defaults
+        seen_refs.add(ref_path)
+        return _extract_schema_details(_resolve_schema_ref(spec, ref_path), spec, seen_refs)
+
+    for combiner in ("allOf", "anyOf", "oneOf"):
+        entries = schema.get(combiner)
+        if isinstance(entries, list):
+            for entry in entries:
+                entry_required, entry_defaults = _extract_schema_details(entry, spec, seen_refs)
+                required.extend(name for name in entry_required if name not in required)
+                defaults.update(entry_defaults)
+
     if isinstance(schema.get("required"), list):
-        required = list(schema.get("required", []))
+        required.extend(name for name in schema.get("required", []) if name not in required)
     properties = schema.get("properties", {})
     if isinstance(properties, dict):
         for name, prop in properties.items():
             if isinstance(prop, dict):
                 defaults[name] = _default_value_from_schema(prop)
     return required, defaults
+
+
+def _extract_body_params_from_schema(schema: dict[str, Any], spec: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    required, defaults = _extract_schema_details(schema, spec)
+    return list(defaults.keys()), required, defaults
 
 
 def extract_openapi_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1701,36 +1741,14 @@ def extract_openapi_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
                         schema_def = content[ct]
                         if isinstance(schema_def, dict):
                             schema = schema_def.get("schema", {})
-                            # Handle inline schema
-                            if "properties" in schema:
-                                body_params = list(schema.get("properties", {}).keys())
-                                body_required_params, body_param_defaults = _extract_schema_details(schema)
-                            # Handle $ref to components/schemas
-                            elif "$ref" in schema:
-                                ref_path = schema["$ref"]  # e.g., "#/components/schemas/LoginRequest"
-                                if ref_path.startswith("#/components/schemas/"):
-                                    schema_name = ref_path.split("/")[-1]
-                                    components = spec.get("components", {}).get("schemas", {})
-                                    ref_schema = components.get(schema_name, {})
-                                    body_params = list(ref_schema.get("properties", {}).keys())
-                                    body_required_params, body_param_defaults = _extract_schema_details(ref_schema)
+                            body_params, body_required_params, body_param_defaults = _extract_body_params_from_schema(schema, spec)
                         break
 
             # Swagger 2.x uses 'body' parameter type
             for p in details.get("parameters", []):
                 if isinstance(p, dict) and p.get("in") == "body":
                     schema = p.get("schema", {})
-                    if "properties" in schema:
-                        body_params = list(schema.get("properties", {}).keys())
-                        body_required_params, body_param_defaults = _extract_schema_details(schema)
-                    elif "$ref" in schema:
-                        ref_path = schema["$ref"]
-                        if ref_path.startswith("#/definitions/"):
-                            def_name = ref_path.split("/")[-1]
-                            definitions = spec.get("definitions", {})
-                            ref_schema = definitions.get(def_name, {})
-                            body_params = list(ref_schema.get("properties", {}).keys())
-                            body_required_params, body_param_defaults = _extract_schema_details(ref_schema)
+                    body_params, body_required_params, body_param_defaults = _extract_body_params_from_schema(schema, spec)
                     content_type = "application/json"
                     break
 
@@ -2204,15 +2222,37 @@ async def api_security_test(url: str) -> dict[str, Any]:
                 if status_code == "200":
                     response_body = "\n".join(lines[:-1])
                     is_html = any(html_indicator in response_body[:500].lower() for html_indicator in ["<!doctype", "<html", "text/html", "<head>", "<body>"])
+                    has_api_spec = False
                     if not is_html and response_body:
                         has_api_spec = any(api_indicator in response_body[:2000] for api_indicator in ["\"swagger\"", "\"openapi\"", "\"paths\"", "\"components\"", "\"definitions\"", "\"servers\"", "\"info\"", "\"version\"", "swagger:", "openapi:", "paths:", "servers:", "<?xml"])
                         if has_api_spec:
-                            results["endpoints_discovered"].append(endpoint)
+                            if endpoint not in results["endpoints_discovered"]:
+                                results["endpoints_discovered"].append(endpoint)
                             if "\"swagger\"" in response_body or "swagger:" in response_body:
                                 results["api_type"] = "swagger"
                             elif "\"openapi\"" in response_body or "openapi:" in response_body:
                                 results["api_type"] = "openapi"
-                    if any(sensitive in response_body.lower() for sensitive in ["password", "token", "api_key", "secret", "private"]):
+
+                            spec = _parse_openapi_spec(response_body)
+                            if spec:
+                                version = spec.get("openapi") or spec.get("swagger") or "unknown"
+                                openapi_endpoints = extract_openapi_endpoints(spec)
+                                results["openapi"] = {
+                                    "url": test_url,
+                                    "version": version,
+                                    "title": spec.get("info", {}).get("title", ""),
+                                    "endpoint_count": len(openapi_endpoints),
+                                    "endpoints": openapi_endpoints[:100],
+                                }
+                                for operation in openapi_endpoints:
+                                    path = operation.get("path")
+                                    method = operation.get("method", "GET")
+                                    if not path:
+                                        continue
+                                    label = f"{method} {path}"
+                                    if label not in results["endpoints_discovered"]:
+                                        results["endpoints_discovered"].append(label)
+                    if not has_api_spec and any(sensitive in response_body.lower() for sensitive in ["password", "token", "api_key", "secret", "private"]):
                         if not is_html:
                             results["vulnerabilities"].append({"type": "sensitive_data_exposure", "severity": "high", "endpoint": endpoint, "description": "Potential sensitive data exposed in API response"})
                 elif status_code in ["401", "403"]:
@@ -2586,7 +2626,8 @@ async def recursive_directory_discovery(
     initial_paths: list[str],
     signals: dict | None = None,
     max_depth: int = 3,
-    max_paths_per_level: int = 20
+    max_paths_per_level: int = 20,
+    per_path_timeout: int = 20,
 ) -> dict[str, Any]:
     """
     Recursively discover directories by fuzzing at each level.
@@ -2627,7 +2668,7 @@ async def recursive_directory_discovery(
         print(f"[discovery] Depth {depth + 1}: Fuzzing {len(priority_paths)} directories", file=sys.stderr)
 
         for dir_path in priority_paths:
-            discovered = await _run_ffuf_on_path(base_url, dir_path, timeout=45)
+            discovered = await _run_ffuf_on_path(base_url, dir_path, timeout=per_path_timeout)
             stats["total_fuzz_calls"] += 1
 
             for path in discovered:
@@ -2989,10 +3030,10 @@ def calculate_adaptive_depth(signals: dict, base_depth: int = 3) -> tuple[int, i
         Tuple of (depth, paths_per_level)
     """
     depth = base_depth
-    paths_per_level = 15  # Default
+    paths_per_level = 8  # Default
 
     if not signals:
-        return depth, paths_per_level
+        return min(depth, 2), paths_per_level
 
     # Increase depth for high-value signals
     if signals.get("sql_errors") or signals.get("database_errors"):
@@ -3128,7 +3169,8 @@ async def smart_discovery(
             directories,
             signals=signals,
             max_depth=adaptive_depth,
-            max_paths_per_level=adaptive_paths_per_level
+            max_paths_per_level=adaptive_paths_per_level,
+            per_path_timeout=20,
         )
     else:
         print(f"[discovery] Phase 2b: Skipped recursive fuzzing (SPA catch-all)", file=sys.stderr)

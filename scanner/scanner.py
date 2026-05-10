@@ -7317,13 +7317,37 @@ async def build_report(target: str,
                 # Get tech stack from discovery for DBMS hints
                 tech_stack = smart_discovery_data.get("tech_stack_guess", []) if smart_discovery_data else []
 
-                # Prioritize endpoints: real discovered endpoints before synthetic/inferred
-                # Uses _SOURCE_PRIORITY defined in _merge_endpoint (lower = higher priority)
-                def _endpoint_priority(ep: dict) -> tuple[int, str]:
-                    """Return (priority, url) for stable sorting."""
+                # Prioritize endpoints: high-signal params and sensitive API paths first,
+                # then real discovered endpoints before synthetic/inferred.
+                def _endpoint_priority(ep: dict) -> tuple[int, int, int, int, str]:
+                    """Return a stable sort key where lower values are tested first."""
                     source = ep.get("source", "")
-                    priority = _SOURCE_PRIORITY.get(source, _DEFAULT_SOURCE_PRIORITY)
-                    return (priority, ep.get("url", ""))
+                    source_priority = _SOURCE_PRIORITY.get(source, _DEFAULT_SOURCE_PRIORITY)
+                    method = (ep.get("method") or "GET").upper()
+                    url_s = ep.get("url", "")
+                    path_l = urllib.parse.urlparse(url_s).path.lower()
+                    param_names = [
+                        str(p).lower()
+                        for p in ((ep.get("params") or []) + (ep.get("body_params") or []))
+                    ]
+                    high_signal_tokens = (
+                        "id", "user", "uid", "account", "token", "file", "path", "url",
+                        "redirect", "next", "q", "query", "search", "filter", "name",
+                        "email", "password",
+                    )
+                    sensitive_path_tokens = (
+                        "/api/", "login", "auth", "upload", "logs", "admin", "users",
+                        "orders", "payment", "checkout", "debug",
+                    )
+                    param_score = sum(
+                        1
+                        for p in param_names
+                        if any(tok == p or tok in p for tok in high_signal_tokens)
+                    )
+                    path_score = sum(1 for tok in sensitive_path_tokens if tok in path_l)
+                    post_bonus = 1 if method in ("POST", "PUT", "PATCH") else 0
+                    # Negative scores sort before lower-risk endpoints.
+                    return (-param_score, -path_score, -post_bonus, source_priority, url_s)
 
                 endpoints = sorted(endpoints, key=_endpoint_priority)
 
@@ -7490,12 +7514,19 @@ async def build_report(target: str,
                         new_query = urllib.parse.urlencode(query_params, doseq=True)
                         return urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-                    param_endpoints = [
-                        ep for ep in endpoints
-                        if (ep.get("method") or "GET").upper() == "GET"
-                        and _coerce_param_list(ep.get("params") or ep.get("query_params"))
-                    ]
-                    param_endpoints = param_endpoints[: (8 if thorough_params else 4)]
+                    auxiliary_injection_enabled = not (run_sqli and not run_xss)
+                    if not auxiliary_injection_enabled:
+                        active_block["auxiliary_injection_skipped"] = "sql_tests_only"
+                        print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
+
+                    param_endpoints = []
+                    if auxiliary_injection_enabled:
+                        param_endpoints = [
+                            ep for ep in endpoints
+                            if (ep.get("method") or "GET").upper() == "GET"
+                            and _coerce_param_list(ep.get("params") or ep.get("query_params"))
+                        ]
+                        param_endpoints = param_endpoints[: (8 if thorough_params else 4)]
 
                     ssrf_param_keywords = {
                         "url", "uri", "path", "dest", "redirect", "link", "proxy",
@@ -7620,13 +7651,15 @@ async def build_report(target: str,
                             ))
 
                     # Parameter-aware POST/JSON injection tests
-                    post_json_endpoints = [
-                        ep for ep in endpoints
-                        if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
-                        and _coerce_param_list(ep.get("body_params") or ep.get("params"))
-                        and ("json" in (ep.get("content_type") or "application/json").lower())
-                    ]
-                    post_json_endpoints = post_json_endpoints[: (6 if thorough_params else 3)]
+                    post_json_endpoints = []
+                    if auxiliary_injection_enabled:
+                        post_json_endpoints = [
+                            ep for ep in endpoints
+                            if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH")
+                            and _coerce_param_list(ep.get("body_params") or ep.get("params"))
+                            and ("json" in (ep.get("content_type") or "application/json").lower())
+                        ]
+                        post_json_endpoints = post_json_endpoints[: (6 if thorough_params else 3)]
 
                     if post_json_endpoints:
                         ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}

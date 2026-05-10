@@ -5343,7 +5343,9 @@ async def smart_sqli_test(
     dbms: str | None = None,
     auth_session: Any | None = None,
     max_endpoints: int = 50,
-    max_params_per_endpoint: int = 5
+    max_params_per_endpoint: int = 5,
+    max_seconds: float | None = None,
+    max_findings: int | None = None,
 ) -> dict:
     """
     SQLi testing with DBMS-aware payload selection.
@@ -5373,7 +5375,26 @@ async def smart_sqli_test(
         "vulnerabilities_found": 0,
         "get_endpoints_tested": 0,
         "post_endpoints_tested": 0,
+        "budget_exhausted": False,
     }
+    deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
+    budget_logged = False
+
+    def _budget_exhausted() -> bool:
+        nonlocal budget_logged
+        if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
+            results["budget_exhausted"] = True
+            if not budget_logged:
+                print(f"[sqli] Finding budget reached ({max_findings}); stopping SQLi probes", file=sys.stderr)
+                budget_logged = True
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            results["budget_exhausted"] = True
+            if not budget_logged:
+                print("[sqli] Time budget exhausted; stopping SQLi probes", file=sys.stderr)
+                budget_logged = True
+            return True
+        return False
 
     auth_args = get_auth_curl_args(auth_session)
 
@@ -5399,6 +5420,8 @@ async def smart_sqli_test(
 
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:
+        if _budget_exhausted():
+            break
         endpoint_url = endpoint.get("url", "")
         params = endpoint.get("params", []) or endpoint.get("query_params", [])
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
@@ -5421,6 +5444,8 @@ async def smart_sqli_test(
         payloads = DBMS_SQLI_PAYLOADS.get(dbms_key, DBMS_SQLI_PAYLOADS["generic"])
 
         for param in params[:max_params_per_endpoint]:
+            if _budget_exhausted():
+                break
             results["params_tested"] += 1
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
@@ -5451,6 +5476,8 @@ async def smart_sqli_test(
                 continue
 
             for payload, technique, description in payloads:
+                if _budget_exhausted():
+                    break
                 # Inject payload
                 test_params = dict(baseline_params)
                 test_params[param] = payload
@@ -5498,6 +5525,8 @@ async def smart_sqli_test(
 
     # Test POST endpoints
     for endpoint in post_endpoints[:max_endpoints]:
+        if _budget_exhausted():
+            break
         endpoint_url = endpoint.get("url", "")
         method = endpoint.get("method", "POST").upper()
         body_params = endpoint.get("body_params", [])
@@ -5536,6 +5565,8 @@ async def smart_sqli_test(
         print(f"[sqli] Testing {method} endpoint: {endpoint_url} with params: {body_params[:max_params_per_endpoint]}", file=sys.stderr)
 
         for param in body_params[:max_params_per_endpoint]:
+            if _budget_exhausted():
+                break
             results["params_tested"] += 1
             # Build baseline for THIS param
             if is_array_body:
@@ -5580,6 +5611,8 @@ async def smart_sqli_test(
 
             # Test payloads for THIS param
             for payload, technique, description in payloads:
+                if _budget_exhausted():
+                    break
                 test_body = _apply_body_param(baseline_body, param, payload)
                 test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
 
@@ -6114,7 +6147,9 @@ async def smart_xss_test(
     endpoints: list[dict],
     auth_session: Any | None = None,
     max_endpoints: int = 50,
-    max_params_per_endpoint: int = 5
+    max_params_per_endpoint: int = 5,
+    max_seconds: float | None = None,
+    max_findings: int | None = None,
 ) -> dict:
     """
     Context-aware XSS testing.
@@ -6140,7 +6175,26 @@ async def smart_xss_test(
         "vulnerabilities_found": 0,
         "get_endpoints_tested": 0,
         "post_endpoints_tested": 0,
+        "budget_exhausted": False,
     }
+    deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
+    budget_logged = False
+
+    def _budget_exhausted() -> bool:
+        nonlocal budget_logged
+        if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
+            results["budget_exhausted"] = True
+            if not budget_logged:
+                print(f"[xss] Finding budget reached ({max_findings}); stopping XSS probes", file=sys.stderr)
+                budget_logged = True
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            results["budget_exhausted"] = True
+            if not budget_logged:
+                print("[xss] Time budget exhausted; stopping XSS probes", file=sys.stderr)
+                budget_logged = True
+            return True
+        return False
 
     auth_args = get_auth_curl_args(auth_session)
 
@@ -6177,6 +6231,8 @@ async def smart_xss_test(
 
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:
+        if _budget_exhausted():
+            break
         endpoint_url = endpoint.get("url", "")
         # Resolve path parameters like {id} or :id
         if "{" in endpoint_url or re.search(r"/:[^/?#]+", endpoint_url):
@@ -6193,6 +6249,8 @@ async def smart_xss_test(
         results["get_endpoints_tested"] += 1
 
         for param in params[:max_params_per_endpoint]:
+            if _budget_exhausted():
+                break
             results["params_tested"] += 1
             # Send canary to detect reflection
             canary = f"xss{random.randint(10000, 99999)}test"
@@ -6229,6 +6287,8 @@ async def smart_xss_test(
             payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
 
             for payload, technique, description in payloads:
+                if _budget_exhausted():
+                    break
                 test_params[param] = payload
                 test_query = urllib.parse.urlencode(test_params)
                 payload_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
@@ -6323,6 +6383,8 @@ async def smart_xss_test(
 
     # Test POST/PUT/PATCH endpoints with body params
     for endpoint in post_endpoints[:max_endpoints]:
+        if _budget_exhausted():
+            break
         endpoint_url = endpoint.get("url", "")
         # Resolve path parameters like {id} or :id
         if "{" in endpoint_url or re.search(r"/:[^/?#]+", endpoint_url):
@@ -6348,6 +6410,8 @@ async def smart_xss_test(
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
 
         for param in body_params[:max_params_per_endpoint]:
+            if _budget_exhausted():
+                break
             if "multipart/form-data" in content_type.lower() and _is_file_param(param):
                 continue
             results["params_tested"] += 1
@@ -6377,6 +6441,8 @@ async def smart_xss_test(
             payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
 
             for payload, technique, description in payloads:
+                if _budget_exhausted():
+                    break
                 payload_body = _apply_body_param(base_body, param, payload)
                 payload_args, payload_headers = _build_curl_body_args(payload_body, content_type)
 
@@ -6862,12 +6928,16 @@ async def run_smart_active_tests(
         sqli_max_params = 10
         xss_max_endpoints = 100
         xss_max_params = 10
+        active_max_seconds = 1200.0
+        max_findings_per_family = None
         print(f"[active] Thorough mode: testing up to {sqli_max_endpoints} endpoints x {sqli_max_params} params", file=sys.stderr)
     else:
-        sqli_max_endpoints = 50
+        sqli_max_endpoints = 35
         sqli_max_params = 5
-        xss_max_endpoints = 50
+        xss_max_endpoints = 35
         xss_max_params = 5
+        active_max_seconds = 600.0
+        max_findings_per_family = 8
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
     if signals:
@@ -6891,12 +6961,21 @@ async def run_smart_active_tests(
             reverse=True
         )
 
-    # Run SQLi and XSS tests with signal awareness
+    # Run SQLi and XSS tests with signal awareness. Smart scans should remain
+    # adaptive, but they still need an overall active probing budget so one
+    # slow target or broad OpenAPI schema cannot dominate the full scan.
+    active_started = time.monotonic()
+
+    def _remaining_active_seconds() -> float:
+        return max(0.0, active_max_seconds - (time.monotonic() - active_started))
+
     if run_sqli:
         sqli_results = await smart_sqli_test(
             url, prioritized_endpoints, dbms, auth_session,
             max_endpoints=sqli_max_endpoints,
-            max_params_per_endpoint=sqli_max_params
+            max_params_per_endpoint=sqli_max_params,
+            max_seconds=_remaining_active_seconds(),
+            max_findings=max_findings_per_family,
         )
     else:
         sqli_results = {
@@ -6911,11 +6990,26 @@ async def run_smart_active_tests(
         }
 
     if run_xss:
-        xss_results = await smart_xss_test(
-            url, endpoints, auth_session=auth_session,
-            max_endpoints=xss_max_endpoints,
-            max_params_per_endpoint=xss_max_params
-        )
+        remaining = _remaining_active_seconds()
+        if remaining <= 1.0:
+            print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
+            xss_results = {
+                "findings": [],
+                "reflections_found": 0,
+                "vulnerabilities_found": 0,
+                "endpoints_tested": 0,
+                "skipped": True,
+                "reason": "active_time_budget_exhausted",
+                "budget_exhausted": True,
+            }
+        else:
+            xss_results = await smart_xss_test(
+                url, endpoints, auth_session=auth_session,
+                max_endpoints=xss_max_endpoints,
+                max_params_per_endpoint=xss_max_params,
+                max_seconds=remaining,
+                max_findings=max_findings_per_family,
+            )
     else:
         xss_results = {
             "findings": [],
@@ -6950,6 +7044,7 @@ async def run_smart_active_tests(
             "post_endpoints_tested": sqli_results.get("post_endpoints_tested", 0),
             "endpoints_tested": sqli_results.get("endpoints_tested", 0),
             "params_tested": sqli_results.get("params_tested", 0),
+            "budget_exhausted": sqli_results.get("budget_exhausted", False),
         },
         "xss": {
             "findings": xss_findings + hash_route_findings,  # Include hash route DOM XSS in XSS results
@@ -6959,6 +7054,7 @@ async def run_smart_active_tests(
             "params_tested": xss_results.get("params_tested", 0) + hash_route_results.get("params_tested", 0),
             "get_endpoints_tested": xss_results.get("get_endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
             "post_endpoints_tested": xss_results.get("post_endpoints_tested", 0),
+            "budget_exhausted": xss_results.get("budget_exhausted", False),
         },
         "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
         "dbms_detected": sqli_results.get("dbms_detected"),
