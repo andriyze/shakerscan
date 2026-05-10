@@ -273,6 +273,8 @@ AI Gate tests AI application surfaces for prompt injection, sensitive disclosure
 
 AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
 
+AI Gate also builds an AI control-evidence pack from target `metadata_json`: asset owner, risk tier, data classification, RAG ACL/ingestion/tenant-isolation controls, agent tool scopes, delegated identity, token audience validation, approval/dry-run/transaction limits, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to convert missing required controls into a finding.
+
 Target types:
 | Type | Description |
 |------|-------------|
@@ -312,6 +314,14 @@ curl -X POST http://localhost:8080/ai/targets \
     "rate_limit_rps": 2,
     "request_budget": 10,
     "production_mode": false,
+    "metadata_json": {
+      "asset_owner": "security",
+      "risk_tier": "high",
+      "data_classification": "restricted",
+      "retrieval_acl_matrix": "tenant-user-doc",
+      "tool_inventory": ["search_docs"],
+      "enforce_ai_control_baseline": true
+    },
     "credential": {"auth_kind": "bearer", "secret": "token-if-needed"}
   }'
 
@@ -341,7 +351,7 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, and deployment approval checks.
+Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
@@ -355,7 +365,15 @@ curl -X POST http://localhost:8080/model-intake/scan \
     "expected_sha256": "optional-known-good-sha256",
     "signature_url": "https://example.com/models/model.sig",
     "model_card_url": "https://example.com/models/model-card.md",
-    "deployment_approved": true
+    "deployment_approved": true,
+    "metadata_json": {
+      "license": "apache-2.0",
+      "sbom": {"components": []},
+      "malware_scan_result": {"status": "clean"},
+      "security_evals": {"status": "passed"},
+      "deployment_restrictions": ["staging", "production"],
+      "monitoring_plan": "model-monitoring-v1"
+    }
   }'
 ```
 

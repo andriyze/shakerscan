@@ -39,6 +39,7 @@ export default function ModelIntakeSettingsPage() {
   const [requireDeploymentApproval, setRequireDeploymentApproval] = useState(true)
   const [requireSignature, setRequireSignature] = useState(true)
   const [requireHash, setRequireHash] = useState(true)
+  const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
   const [submitting, setSubmitting] = useState(false)
@@ -66,6 +67,7 @@ export default function ModelIntakeSettingsPage() {
       require_deployment_approval: requireDeploymentApproval,
       require_signature: requireSignature,
       require_hash: requireHash,
+      require_model_governance: requireModelGovernance,
       max_download_bytes: Number(maxDownloadBytes || 10000000),
       timeout_seconds: Number(timeoutSeconds || 20),
     }
@@ -159,7 +161,7 @@ export default function ModelIntakeSettingsPage() {
               onChange={(e) => setMetadataJson(e.target.value)}
               className={textareaClass}
               rows={9}
-              placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","training_data_ref":"dataset:v1","signed_by":"sigstore"}'
+              placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","training_data_ref":"dataset:v1","signed_by":"sigstore","license":"apache-2.0","sbom":{"components":[]},"malware_scan_result":{"status":"clean"},"security_evals":{"status":"passed"},"monitoring_plan":"model-monitoring-v1"}'
             />
             <span className="text-xs text-gray-500">
               {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'Optional inline metadata'}
@@ -182,6 +184,10 @@ export default function ModelIntakeSettingsPage() {
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
               Require approval
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Require governance evidence
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />

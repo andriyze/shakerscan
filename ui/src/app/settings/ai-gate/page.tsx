@@ -166,6 +166,7 @@ export default function AIGateSettingsPage() {
   const [requestBudget, setRequestBudget] = useState('3')
   const [tokenBudget, setTokenBudget] = useState('')
   const [canaryTokens, setCanaryTokens] = useState('')
+  const [controlMetadata, setControlMetadata] = useState('')
   const [productionMode, setProductionMode] = useState(false)
 
   const selectedType = useMemo(
@@ -221,6 +222,7 @@ export default function AIGateSettingsPage() {
     setHeaderName('')
     setSecret('')
     setCanaryTokens('')
+    setControlMetadata('')
     setProductionMode(false)
     applyTargetType('api_chat')
   }
@@ -228,7 +230,9 @@ export default function AIGateSettingsPage() {
   function buildPayload(): AITargetPayload {
     const headers = parseJsonObject('Headers template', headersTemplate)
     const request = parseJsonObject('Request template', requestTemplate)
-    const metadata: Record<string, unknown> = {}
+    const metadata: Record<string, unknown> = controlMetadata.trim()
+      ? parseJsonObject('Control metadata', controlMetadata)
+      : {}
     const canaries = parseList(canaryTokens)
     if (canaries.length) metadata.canary_tokens = canaries
 
@@ -445,6 +449,17 @@ export default function AIGateSettingsPage() {
           <label className="grid gap-1 text-sm text-gray-300">
             Canary tokens
             <textarea value={canaryTokens} onChange={(e) => setCanaryTokens(e.target.value)} className={textareaClass} rows={3} placeholder="One per line or comma-separated" />
+          </label>
+
+          <label className="grid gap-1 text-sm text-gray-300">
+            Control metadata JSON
+            <textarea
+              value={controlMetadata}
+              onChange={(e) => setControlMetadata(e.target.value)}
+              className={textareaClass}
+              rows={5}
+              placeholder='{"asset_owner":"security","risk_tier":"high","data_classification":"restricted","retrieval_acl_matrix":"tenant-user-doc","tool_inventory":["refund"],"enforce_ai_control_baseline":true}'
+            />
           </label>
 
           <label className="flex items-center gap-2 text-sm text-gray-300">

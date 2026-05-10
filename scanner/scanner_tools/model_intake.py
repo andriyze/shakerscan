@@ -278,6 +278,13 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     require_approval = _boolish(options.get("require_deployment_approval"))
     require_signature = _boolish(options.get("require_signature", True))
     require_hash = _boolish(options.get("require_hash", True))
+    require_governance = _boolish(options.get("require_model_governance", True))
+    license_ref = _metadata_value(metadata, "license", "model_license", "license_url")
+    sbom_ref = _metadata_value(metadata, "sbom_url", "sbom", "dependencies", "package_dependencies")
+    malware_scan_ref = _metadata_value(metadata, "malware_scan_url", "malware_scan_result", "yara_scan", "av_scan")
+    eval_ref = _metadata_value(metadata, "eval_report_url", "security_evals", "red_team_report", "eval_results")
+    deployment_restrictions = _metadata_value(metadata, "deployment_restrictions", "allowed_environments", "use_restrictions")
+    monitoring_plan = _metadata_value(metadata, "monitoring_plan", "monitoring_plan_url", "drift_monitoring", "incident_response_plan")
 
     if artifact_meta.get("error"):
         findings.append(_finding(
@@ -388,6 +395,72 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Route the artifact through approval before deployment and record approver, timestamp, and policy version.",
         ))
 
+    if require_governance and not license_ref:
+        findings.append(_finding(
+            finding_id="missing_license_review",
+            title="Model license review missing",
+            severity="medium",
+            description="The intake metadata did not include a model license, license URL, or license review result.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Record model license, usage constraints, and legal/security review status before deployment.",
+        ))
+
+    if require_governance and not sbom_ref:
+        findings.append(_finding(
+            finding_id="missing_sbom_or_dependencies",
+            title="Model dependency/SBOM evidence missing",
+            severity="medium",
+            description="No SBOM, dependency inventory, or package exposure evidence was supplied for the model artifact.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Attach SBOM or dependency inventory for model package code, adapters, tokenizers, and serving dependencies.",
+        ))
+
+    if require_governance and not malware_scan_ref:
+        findings.append(_finding(
+            finding_id="missing_malware_scan",
+            title="Model malware scan evidence missing",
+            severity="medium",
+            description="The intake metadata did not include malware, YARA, or antivirus scan evidence.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Require static malware/YARA scanning and record scan result, engine, and timestamp before approval.",
+        ))
+
+    if require_governance and not eval_ref:
+        findings.append(_finding(
+            finding_id="missing_eval_evidence",
+            title="Model security evaluation evidence missing",
+            severity="medium",
+            description="No security eval, red-team report, or model behavior evaluation evidence was supplied.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Attach safety/security eval results, red-team coverage, and deployment-specific acceptance criteria.",
+        ))
+
+    if require_governance and not deployment_restrictions:
+        findings.append(_finding(
+            finding_id="missing_deployment_restrictions",
+            title="Model deployment restrictions missing",
+            severity="low",
+            description="No approved environments, usage restrictions, or deployment constraints were supplied.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Record approved environments, data-use restrictions, prohibited use cases, and rollback constraints.",
+        ))
+
+    if require_governance and not monitoring_plan:
+        findings.append(_finding(
+            finding_id="missing_monitoring_plan",
+            title="Model monitoring plan missing",
+            severity="low",
+            description="No post-deployment monitoring, drift, abuse, or incident-response plan was supplied.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Define monitoring for drift, abuse, data leakage, cost anomalies, incidents, and periodic reassessment.",
+        ))
+
     if ext in SAFER_MODEL_EXTENSIONS and not any(f["id"].endswith("unsafe_serialization") for f in findings):
         format_posture = "safer_static_format"
     elif ext in RISKY_EXTENSIONS or pickle_like:
@@ -407,6 +480,12 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "signature_present": bool(signature_url or signed_by),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
+        "license_present": bool(license_ref),
+        "sbom_present": bool(sbom_ref),
+        "malware_scan_present": bool(malware_scan_ref),
+        "eval_evidence_present": bool(eval_ref),
+        "deployment_restrictions_present": bool(deployment_restrictions),
+        "monitoring_plan_present": bool(monitoring_plan),
         "findings_count": len(findings),
     }
 
@@ -429,6 +508,12 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "artifact_signing": bool(signature_url or signed_by),
                 "checksum": bool(expected_sha256 and sha256 and str(expected_sha256).lower() == sha256.lower()),
                 "approval": deployment_approved if require_approval else None,
+                "license_review": bool(license_ref) if require_governance else None,
+                "sbom_dependencies": bool(sbom_ref) if require_governance else None,
+                "malware_scan": bool(malware_scan_ref) if require_governance else None,
+                "security_evals": bool(eval_ref) if require_governance else None,
+                "deployment_restrictions": bool(deployment_restrictions) if require_governance else None,
+                "monitoring_plan": bool(monitoring_plan) if require_governance else None,
             },
         },
         "findings": findings,

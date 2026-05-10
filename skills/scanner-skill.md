@@ -261,6 +261,8 @@ Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/
 
 AI Gate uses deterministic/regex detectors first. If AI settings have a configured provider, semantic AI judging also reviews probe transcripts, fills the standard AI analysis fields on findings, and can downgrade high-confidence false positives before scoring.
 
+AI Gate target `metadata_json` can carry control evidence: `asset_owner`, `risk_tier`, `data_classification`, RAG ACL/ingestion/isolation controls, agent tool scopes, token audience validation, approval/dry-run/transaction controls, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to create a finding when required controls are missing.
+
 Target types: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`.
 Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
 Scan profiles: `smoke`, `trace`, `standard`, `deep`.
@@ -283,6 +285,12 @@ curl -X POST http://localhost:8080/ai/targets \
     "streaming_mode": "json",
     "rate_limit_rps": 2,
     "request_budget": 10,
+    "metadata_json": {
+      "asset_owner": "security",
+      "risk_tier": "high",
+      "data_classification": "restricted",
+      "enforce_ai_control_baseline": true
+    },
     "credential": {"auth_kind": "bearer", "secret": "token-if-needed"}
   }'
 
@@ -299,7 +307,7 @@ After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do 
 
 ### Model Intake
 
-Use Model Intake when the user wants to check a model artifact before deployment. The UI is at `http://localhost:3000/settings/model-intake`. The scanner reads artifact bytes and metadata without importing or executing model code.
+Use Model Intake when the user wants to check a model artifact before deployment. The UI is at `http://localhost:3000/settings/model-intake`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
@@ -312,7 +320,15 @@ curl -X POST http://localhost:8080/model-intake/scan \
     "expected_sha256": "optional-known-good-sha256",
     "signature_url": "https://example.com/models/model.sig",
     "model_card_url": "https://example.com/models/model-card.md",
-    "deployment_approved": true
+    "deployment_approved": true,
+    "metadata_json": {
+      "license": "apache-2.0",
+      "sbom": {"components": []},
+      "malware_scan_result": {"status": "clean"},
+      "security_evals": {"status": "passed"},
+      "deployment_restrictions": ["staging", "production"],
+      "monitoring_plan": "model-monitoring-v1"
+    }
   }'
 ```
 

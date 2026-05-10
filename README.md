@@ -77,6 +77,7 @@ Open this repo in Claude Code, Codex, OpenCode, or another agent that can read r
 
 - **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
 - **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
+- **[Honey AI Gate Prompt](docs/HONEY_AI_GATE_CONTROL_PROMPT.md)** - LLM prompt for adding AI Gate RAG/agent/MCP control-evidence scenarios to Honey.
 - **[Honey Model Intake Prompt](docs/HONEY_MODEL_INTAKE_PROMPT.md)** - LLM prompt for adding model-intake calibration scenarios to the Honey test app.
 
 <video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
@@ -166,6 +167,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 - **AI Gate and AI-Assisted Verification** (optional)
   - Chat, RAG, agent, and MCP probe packs
   - Prompt injection, sensitive disclosure, approval bypass, and tool-abuse checks
+  - AI asset inventory, risk tiering, RAG/agent control evidence, and optional missing-control findings from target metadata
   - Chat-style evidence views with probe, target response, classifier output, and raw evidence
   - Confidence scoring and false-positive reduction
   - Cross-finding correlation and attack-chain analysis
@@ -173,6 +175,7 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 - **Model Intake Checks**
   - Model provenance, checksum, signature/attestation, model-card, and deployment approval checks
   - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, joblib/pickle files, and executable archive contents
+  - License review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, and monitoring-plan checks
   - Safe, non-executing artifact inspection for pre-deployment model approval workflows
 
 - **Modern Web Interface**

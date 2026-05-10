@@ -1203,6 +1203,303 @@ def _build_finding(
     }
 
 
+def _metadata_has(metadata: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = metadata.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        return True
+    return False
+
+
+def _target_requires_rag_controls(target_type: str, probe_pack: str) -> bool:
+    return target_type in {"rag", "ai_rag"} or "rag" in (probe_pack or "").lower()
+
+
+def _target_requires_agent_controls(target_type: str, probe_pack: str) -> bool:
+    normalized_pack = (probe_pack or "").lower()
+    return target_type in {"agent_trace", "mcp_trace", "ai_mcp", "widget"} or "agent" in normalized_pack or "mcp" in normalized_pack
+
+
+AI_CONTROL_REQUIREMENTS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "ai.asset_owner",
+        "label": "AI asset owner",
+        "applies_to": "all",
+        "keys": ("asset_owner", "owner", "service_owner"),
+        "frameworks": {"nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.9", "csa_ai": "AIM-01"},
+    },
+    {
+        "id": "ai.risk_tier",
+        "label": "AI risk tier",
+        "applies_to": "all",
+        "keys": ("risk_tier", "ai_risk_tier"),
+        "frameworks": {"nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.8", "csa_ai": "AIM-02"},
+    },
+    {
+        "id": "ai.data_classification",
+        "label": "Data classification",
+        "applies_to": "all",
+        "keys": ("data_classification", "document_classification", "data_classes"),
+        "frameworks": {"nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.12", "csa_ai": "DSI-03"},
+    },
+    {
+        "id": "ai.logging_incident_response",
+        "label": "Logging and incident response",
+        "applies_to": "all",
+        "keys": ("logging_policy", "audit_logs", "incident_response_plan", "ai_incident_response"),
+        "frameworks": {"nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24", "csa_ai": "LOG-01"},
+    },
+    {
+        "id": "ai.governance_mapping",
+        "label": "Governance/control mapping",
+        "applies_to": "all",
+        "keys": ("governance_mapping", "control_mapping", "compliance_mapping", "nist_ai_rmf_mapping"),
+        "frameworks": {"nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.36", "csa_ai": "GRM-01"},
+    },
+    {
+        "id": "rag.document_classification",
+        "label": "RAG document classification",
+        "applies_to": "rag",
+        "keys": ("document_classification", "document_classification_policy", "classification_labels"),
+        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.12"},
+    },
+    {
+        "id": "rag.ingestion_controls",
+        "label": "RAG ingestion controls",
+        "applies_to": "rag",
+        "keys": ("ingestion_controls", "source_validation", "ingestion_sanitization", "document_source_allowlist"),
+        "frameworks": {"owasp_llm_agentic": "LLM01", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.28"},
+    },
+    {
+        "id": "rag.retrieval_acl_matrix",
+        "label": "RAG retrieval ACL matrix",
+        "applies_to": "rag",
+        "keys": ("retrieval_acl_matrix", "acl_matrix", "per_user_document_acls"),
+        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.15"},
+    },
+    {
+        "id": "rag.metadata_filtering",
+        "label": "RAG metadata filtering",
+        "applies_to": "rag",
+        "keys": ("metadata_filtering", "retrieval_metadata_filters", "acl_metadata_filters"),
+        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.3"},
+    },
+    {
+        "id": "rag.vector_tenant_isolation",
+        "label": "Vector DB tenant isolation",
+        "applies_to": "rag",
+        "keys": ("vector_tenant_isolation", "tenant_isolation", "vector_namespace_isolation"),
+        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.15"},
+    },
+    {
+        "id": "rag.malicious_document_tests",
+        "label": "Malicious document tests",
+        "applies_to": "rag",
+        "keys": ("malicious_document_tests", "rag_redteam_tests", "corpus_poisoning_tests"),
+        "frameworks": {"owasp_llm_agentic": "LLM01", "nist_ai_rmf": "MEASURE", "iso_27001_2022": "A.8.29"},
+    },
+    {
+        "id": "rag.output_citations_retention",
+        "label": "RAG citations and retention policy",
+        "applies_to": "rag",
+        "keys": ("source_citation_policy", "retrieved_content_delimiting", "no_training_on_private_docs", "data_retention_policy"),
+        "frameworks": {"owasp_llm_agentic": "LLM05", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.34"},
+    },
+    {
+        "id": "agent.tool_inventory",
+        "label": "Agent tool inventory",
+        "applies_to": "agent",
+        "keys": ("tool_inventory", "tools", "mcp_tools"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.9"},
+    },
+    {
+        "id": "agent.per_tool_scopes",
+        "label": "Per-tool scopes",
+        "applies_to": "agent",
+        "keys": ("per_tool_scopes", "tool_scopes", "mcp_scopes", "scope_minimization"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.15"},
+    },
+    {
+        "id": "agent.delegated_identity",
+        "label": "Delegated identity",
+        "applies_to": "agent",
+        "keys": ("delegated_identity",),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
+    },
+    {
+        "id": "agent.token_audience_validation",
+        "label": "Token audience validation",
+        "applies_to": "agent",
+        "keys": ("token_audience_validation", "audience_binding"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
+    },
+    {
+        "id": "agent.no_token_passthrough",
+        "label": "No token passthrough",
+        "applies_to": "agent",
+        "keys": ("no_token_passthrough", "token_exchange_policy"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
+    },
+    {
+        "id": "agent.user_consent",
+        "label": "User consent",
+        "applies_to": "agent",
+        "keys": ("user_consent", "consent_policy"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
+    },
+    {
+        "id": "agent.write_action_approval",
+        "label": "Write/destructive action approval",
+        "applies_to": "agent",
+        "keys": ("write_action_approval", "destructive_action_approval", "human_approval_required"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
+    },
+    {
+        "id": "agent.dry_run_mode",
+        "label": "Dry-run mode",
+        "applies_to": "agent",
+        "keys": ("dry_run_mode", "dry_run_supported"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
+    },
+    {
+        "id": "agent.transaction_limits",
+        "label": "Transaction limits",
+        "applies_to": "agent",
+        "keys": ("transaction_limits", "tool_rate_limits", "spend_limits"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
+    },
+    {
+        "id": "agent.sandboxing",
+        "label": "Sandboxing",
+        "applies_to": "agent",
+        "keys": ("sandboxing", "local_execution_sandbox"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
+    },
+    {
+        "id": "agent.audit_logs",
+        "label": "Audit logs",
+        "applies_to": "agent",
+        "keys": ("audit_logs", "tool_audit_logs"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
+    },
+    {
+        "id": "agent.anomaly_detection",
+        "label": "Anomaly detection",
+        "applies_to": "agent",
+        "keys": ("anomaly_detection", "abuse_detection"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
+    },
+    {
+        "id": "agent.kill_switch",
+        "label": "Kill switch",
+        "applies_to": "agent",
+        "keys": ("kill_switch", "emergency_disable"),
+        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
+    },
+)
+
+
+def _build_ai_control_evidence(
+    *,
+    target_type: str,
+    probe_pack: str,
+    scan_profile: str,
+    metadata_json: dict[str, Any],
+) -> dict[str, Any]:
+    applies_rag = _target_requires_rag_controls(target_type, probe_pack)
+    applies_agent = _target_requires_agent_controls(target_type, probe_pack)
+    controls: list[dict[str, Any]] = []
+    for control in AI_CONTROL_REQUIREMENTS:
+        applies_to = control["applies_to"]
+        required = (
+            applies_to == "all"
+            or (applies_to == "rag" and applies_rag)
+            or (applies_to == "agent" and applies_agent)
+        )
+        if not required:
+            continue
+        present = _metadata_has(metadata_json, *control["keys"])
+        controls.append({
+            "id": control["id"],
+            "label": control["label"],
+            "status": "present" if present else "missing",
+            "required": True,
+            "evidence_keys": [key for key in control["keys"] if _metadata_has(metadata_json, key)],
+            "frameworks": control["frameworks"],
+        })
+
+    missing = [control for control in controls if control["status"] == "missing"]
+    risk_tier = str(metadata_json.get("risk_tier") or metadata_json.get("ai_risk_tier") or "").strip().lower()
+    if not risk_tier:
+        if target_type in {"agent_trace", "mcp_trace", "ai_mcp"}:
+            risk_tier = "high"
+        elif target_type in {"rag", "ai_rag"}:
+            risk_tier = "medium"
+        else:
+            risk_tier = "unknown"
+
+    return {
+        "schema_version": "2026-05-10.ai-control-evidence.v1",
+        "target_type": target_type,
+        "probe_pack": probe_pack,
+        "scan_profile": scan_profile,
+        "risk_tier": risk_tier,
+        "asset_inventory": {
+            "asset_owner": metadata_json.get("asset_owner") or metadata_json.get("owner"),
+            "data_classification": metadata_json.get("data_classification") or metadata_json.get("data_classes"),
+            "vendors": metadata_json.get("vendors") or metadata_json.get("ai_vendors") or [],
+            "tools": metadata_json.get("tool_inventory") or metadata_json.get("tools") or metadata_json.get("mcp_tools") or [],
+            "models": metadata_json.get("models") or metadata_json.get("model_artifacts") or [],
+            "rag_corpora": metadata_json.get("rag_corpora") or metadata_json.get("knowledge_bases") or [],
+        },
+        "controls": controls,
+        "missing_required_controls": missing,
+        "summary": {
+            "required": len(controls),
+            "present": len(controls) - len(missing),
+            "missing": len(missing),
+            "evidence_ready": len(missing) == 0,
+        },
+    }
+
+
+def _control_gap_findings(control_evidence: dict[str, Any], metadata_json: dict[str, Any]) -> list[dict[str, Any]]:
+    enforce = metadata_json.get("enforce_ai_control_baseline") is True or metadata_json.get("control_gaps_as_findings") is True
+    missing = control_evidence.get("missing_required_controls") or []
+    if not enforce or not missing:
+        return []
+    severity = "high" if len(missing) >= 5 or control_evidence.get("risk_tier") == "high" else "medium"
+    probe = {
+        "id": "ai-controls.baseline",
+        "family": "governance",
+        "owasp": "LLM10:2025",
+    }
+    return [
+        _build_finding(
+            probe=probe,
+            title="AI security control baseline gaps",
+            severity=severity,
+            description="Required AI security program controls were missing from target metadata, limiting auditability and deployment readiness.",
+            remediation="Document the missing controls in AI target metadata and require them before production deployment.",
+            owasp="LLM10:2025",
+            evidence={
+                "judge_layer": "metadata_control_baseline",
+                "risk_tier": control_evidence.get("risk_tier"),
+                "missing_controls": [
+                    {"id": item.get("id"), "label": item.get("label"), "frameworks": item.get("frameworks")}
+                    for item in missing
+                ],
+            },
+            source_suffix="missing_controls",
+        )
+    ]
+
+
 PROMPT_STYLE_PREFIXES = (
     "you are ",
     "system prompt:",
@@ -4625,6 +4922,12 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     raw_probe_pack = options.get("ai_probe_pack")
     probe_pack = raw_probe_pack if isinstance(raw_probe_pack, str) and raw_probe_pack else "shaker-ai-smoke"
     scan_profile = _normalize_scan_profile(options.get("ai_scan_profile") or metadata_json.get("scan_profile"))
+    control_evidence = _build_ai_control_evidence(
+        target_type=target_type,
+        probe_pack=probe_pack,
+        scan_profile=scan_profile,
+        metadata_json=metadata_json,
+    )
     probe_plan = plan_probe_pack(probe_pack, scan_profile, metadata_json)
     probes = probe_plan.probes
     request_budget = target.get("request_budget")
@@ -4819,6 +5122,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
         except Exception as exc:
             logger.warning("Semantic judge batch failed, using original findings: %s", exc)
 
+    findings.extend(_control_gap_findings(control_evidence, metadata_json))
     findings = _dedupe_findings(findings)
     execution_plan["semantic_judge"] = _semantic_judge_execution_summary(
         enabled=semantic_judge_enabled,
@@ -4867,6 +5171,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             "target_name": target.get("name"),
             "transcripts": transcripts,
             "statistics": statistics,
+            "control_evidence": control_evidence,
             "errors": errors,
             "execution_plan": execution_plan,
             "widget_summary": widget_summary,
@@ -4883,6 +5188,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
                     "target_type": target_type,
                     "target_name": target.get("name"),
                     "statistics": statistics,
+                    "control_evidence": control_evidence,
                     "execution_plan": execution_plan,
                     "widget_summary": widget_summary,
                     "top_findings": _pick_top_findings(findings),

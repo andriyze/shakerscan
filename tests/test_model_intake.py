@@ -46,6 +46,12 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
                     "source_repo": "https://github.com/example/model",
                     "commit_sha": "abc123",
                     "training_data_ref": "dataset:v1",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging", "production"],
+                    "monitoring_plan": "model-monitoring-v1",
                 },
             },
         )
@@ -80,3 +86,32 @@ def test_model_intake_records_fetch_failures_as_findings(tmp_path):
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert "model_intake:artifact_fetch_failed" in finding_ids
     assert result["model_intake"]["artifact"]["fetch"]["error"].startswith("FileNotFoundError")
+
+
+def test_model_intake_flags_missing_governance_metadata(tmp_path):
+    artifact = tmp_path / "model.onnx"
+    artifact.write_bytes(b"onnx bytes")
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "expected_sha256": expected_sha,
+                "signature_url": "https://example.test/model.onnx.sig",
+                "model_card_url": "https://example.test/model-card",
+                "deployment_approved": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "commit_sha": "abc123",
+                    "training_data_ref": "dataset:v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:missing_license_review" in finding_ids
+    assert "model_intake:missing_sbom_or_dependencies" in finding_ids
+    assert "model_intake:missing_eval_evidence" in finding_ids
+    assert result["model_intake"]["checks"]["malware_scan"] is False

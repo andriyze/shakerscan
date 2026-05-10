@@ -215,6 +215,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeArtifact = model_intake?.artifact || null
   const modelIntakeChecks = model_intake?.checks || null
   const ai_gate = scanData.ai_gate || null
+  const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
   const aiGateStats = ai_gate?.statistics || {}
   const aiGateSeverityCounts = aiGateDecision?.severity_counts || {}
@@ -450,6 +451,32 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   </span>
                 )
               ))}
+            </div>
+          )}
+
+          {aiGateControlEvidence?.summary && (
+            <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-300">AI Control Evidence</h3>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {aiGateControlEvidence.summary.present || 0} present / {aiGateControlEvidence.summary.required || 0} required controls
+                  </p>
+                </div>
+                <span className={`rounded px-2 py-1 text-xs font-medium ${aiGateControlEvidence.summary.evidence_ready ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+                  {aiGateControlEvidence.summary.evidence_ready ? 'evidence ready' : `${aiGateControlEvidence.summary.missing || 0} missing`}
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(aiGateControlEvidence.controls || []).slice(0, 12).map((control: any) => (
+                  <div key={control.id} className="rounded border border-gray-800 bg-black/20 p-2">
+                    <div className="text-xs font-medium text-gray-200">{control.label}</div>
+                    <div className={`mt-1 text-xs ${control.status === 'present' ? 'text-green-300' : 'text-yellow-300'}`}>
+                      {control.status}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

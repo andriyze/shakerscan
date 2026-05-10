@@ -45,6 +45,12 @@ Manifest fields:
 - training_data_ref
 - attestation_url
 - signed_by
+- license
+- sbom or sbom_url
+- malware_scan_result or malware_scan_url
+- security_evals or eval_report_url
+- deployment_restrictions
+- monitoring_plan or monitoring_plan_url
 - deployment_approved: true
 - approved_by
 - approved_at
@@ -63,6 +69,12 @@ Expected findings:
 - model_intake:missing_provenance
 - model_intake:missing_model_card
 - model_intake:missing_deployment_approval
+- model_intake:missing_license_review
+- model_intake:missing_sbom_or_dependencies
+- model_intake:missing_malware_scan
+- model_intake:missing_eval_evidence
+- model_intake:missing_deployment_restrictions
+- model_intake:missing_monitoring_plan
 
 5. PyTorch archive scenario
 Artifacts:
@@ -93,7 +105,7 @@ Also omit controls so missing control findings appear.
 Artifacts:
 - /model-intake/artifacts/tampered/model.safetensors
 - /model-intake/manifests/tampered.json
-Manifest must include an intentionally wrong sha256 value plus otherwise plausible provenance/signature/model-card/approval metadata.
+Manifest must include an intentionally wrong sha256 value plus otherwise plausible provenance/signature/model-card/approval/governance metadata.
 Expected finding:
 - model_intake:sha256_mismatch
 
@@ -101,7 +113,7 @@ Expected finding:
 Artifacts:
 - /model-intake/artifacts/unapproved/model.onnx
 - /model-intake/manifests/unapproved.json
-Manifest should include correct sha256, signature_url, model_card_url, source_repo, commit_sha, training_data_ref, attestation_url, signed_by, but deployment_approved: false.
+Manifest should include correct sha256, signature_url, model_card_url, source_repo, commit_sha, training_data_ref, attestation_url, signed_by, license, SBOM, malware scan, security evals, deployment restrictions, and monitoring plan, but deployment_approved: false.
 Expected finding:
 - model_intake:missing_deployment_approval
 
@@ -119,6 +131,7 @@ Add calibration examples to /api/model-intake/scenarios:
 Acceptance checks:
 - All scenario URLs are absolute https://honey.shakerscan.com/... URLs in JSON responses.
 - Safe scenario returns a matching sha256 and all required controls.
+- Safe scenario includes license, SBOM/dependency evidence, malware/YARA scan evidence, security eval evidence, deployment restrictions, and monitoring plan.
 - Unsafe scenarios are inert but detectable by byte signatures, file names, extensions, or archive contents.
 - The server never executes artifact contents.
 - Re-running the same scenario produces the same bytes and same hashes.

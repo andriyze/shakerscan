@@ -1198,6 +1198,7 @@ class ModelIntakeScanRequest(BaseModel):
     require_deployment_approval: bool = True
     require_signature: bool = True
     require_hash: bool = True
+    require_model_governance: bool = True
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
 
@@ -2625,6 +2626,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "require_deployment_approval": request.require_deployment_approval,
         "require_signature": request.require_signature,
         "require_hash": request.require_hash,
+        "require_model_governance": request.require_model_governance,
         "max_download_bytes": request.max_download_bytes,
         "timeout_seconds": request.timeout_seconds,
     }
