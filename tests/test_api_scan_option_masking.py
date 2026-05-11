@@ -95,3 +95,62 @@ def test_sanitize_scan_options_decodes_json_string():
     sanitized = api_module._sanitize_scan_options(raw)
     assert sanitized["scan_type"] == "smart"
     assert sanitized["auth_header"] == "***"
+
+
+def test_ai_demo_target_detection_handles_new_and_legacy_targets():
+    assert api_module._is_ai_demo_target_row({
+        "name": "Honey demo mcp.unsafe.oauth_audience_wildcard.v1",
+        "endpoint_url": "https://honey.example/api/v1/mcp/trace",
+        "metadata_json": {"shakerscan_demo": True},
+    })
+    assert api_module._is_ai_demo_target_row({
+        "name": "Local Honey calibration mcp.safe.oauth_audience_pkce_rejection.v1 local-honey-1",
+        "endpoint_url": "http://host.docker.internal:18080/api/v1/mcp/trace?calibration_run=local-honey-1",
+        "metadata_json": {},
+    })
+    assert api_module._is_ai_demo_target_row({
+        "name": "Local MCP OAuth calibration",
+        "endpoint_url": "http://host.docker.internal:18080/mcp/oauth/token",
+        "metadata_json": {},
+    })
+    assert not api_module._is_ai_demo_target_row({
+        "name": "Support bot staging",
+        "endpoint_url": "https://example.com/api/chat",
+        "metadata_json": {},
+    })
+
+
+def test_demo_target_url_rewrites_base_and_adds_calibration_query():
+    rewritten = api_module._demo_target_url(
+        "https://honey.shakerscan.com/api/v1/mcp/trace?existing=1",
+        "http://host.docker.internal:18080/",
+        "demo-123",
+        "mcp.unsafe.oauth_audience_wildcard.v1",
+    )
+
+    assert rewritten.startswith("http://host.docker.internal:18080/api/v1/mcp/trace?")
+    assert "existing=1" in rewritten
+    assert "calibration_run=demo-123" in rewritten
+    assert "calibration_scenario=mcp.unsafe.oauth_audience_wildcard.v1" in rewritten
+
+
+def test_demo_request_template_preserves_mcp_shape_and_injects_prompt():
+    template = {"jsonrpc": "2.0", "id": "fixed", "method": "tools/list", "params": {"scenario_id": "x"}}
+    rewritten = api_module._demo_request_template_with_prompt(template, "mcp")
+
+    assert rewritten["id"] == "fixed"
+    assert rewritten["params"]["scenario_id"] == "x"
+    assert rewritten["params"]["prompt"] == "{{prompt}}"
+    assert "prompt" not in template["params"]
+
+
+def test_sanitize_ai_settings_includes_demo_fields():
+    settings = api_module._sanitize_ai_settings_response({
+        "demo_mode_enabled": True,
+        "demo_honey_public_url": "https://honey.example",
+        "demo_honey_scanner_url": "http://host.docker.internal:18080",
+    })
+
+    assert settings["demo_mode_enabled"] is True
+    assert settings["demo_honey_public_url"] == "https://honey.example"
+    assert settings["demo_honey_scanner_url"] == "http://host.docker.internal:18080"

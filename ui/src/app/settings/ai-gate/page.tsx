@@ -7,9 +7,13 @@ import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash
 import {
   createAITarget,
   deleteAITarget,
+  getAISettings,
   getAITestScenarios,
   getAITargets,
+  runAIDemo,
   scanAITarget,
+  type AIDemoRunResponse,
+  type AISettings,
   type AITestReadinessControl,
   type AITestScenario,
   type AITestTargetTemplate,
@@ -189,6 +193,11 @@ export default function AIGateSettingsPage() {
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
+  const [aiSettings, setAISettings] = useState<AISettings | null>(null)
+  const [showAddTarget, setShowAddTarget] = useState(false)
+  const [showDemoTargets, setShowDemoTargets] = useState(false)
+  const [demoRunning, setDemoRunning] = useState(false)
+  const [demoResult, setDemoResult] = useState<AIDemoRunResponse | null>(null)
 
   const [name, setName] = useState('')
   const [targetType, setTargetType] = useState<AITargetType>(initialType.value)
@@ -216,7 +225,7 @@ export default function AIGateSettingsPage() {
   async function loadTargets() {
     setLoading(true)
     try {
-      const payload = await getAITargets({ includeInactive: false })
+      const payload = await getAITargets({ includeInactive: false, includeDemo: showDemoTargets })
       setTargets(payload.targets)
       setRunConfigs((prev) => {
         const next = { ...prev }
@@ -235,9 +244,12 @@ export default function AIGateSettingsPage() {
 
   useEffect(() => {
     loadTargets()
-  }, [])
+  }, [showDemoTargets])
 
   useEffect(() => {
+    getAISettings()
+      .then(setAISettings)
+      .catch(() => setAISettings(null))
     getAITestScenarios()
       .then((payload) => {
         setScenario(payload.scenarios.find((item) => item.id === 'secure-rag-agent') || null)
@@ -353,6 +365,7 @@ export default function AIGateSettingsPage() {
       const result = await createAITarget(payload)
       setMessage(`Saved ${result.target.name}.`)
       resetForm()
+      setShowAddTarget(false)
       await loadTargets()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save AI target')
@@ -393,6 +406,23 @@ export default function AIGateSettingsPage() {
     }
   }
 
+  async function handleRunDemo() {
+    if (demoRunning) return
+    setDemoRunning(true)
+    setError(null)
+    setMessage(null)
+    setDemoResult(null)
+    try {
+      const result = await runAIDemo({ scan_profile: 'smoke', request_budget: 1 })
+      setDemoResult(result)
+      setMessage(`Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to queue Honey demo')
+    } finally {
+      setDemoRunning(false)
+    }
+  }
+
   function updateRunConfig(targetId: string, patch: Partial<RunConfig>) {
     setRunConfigs((prev) => ({
       ...prev,
@@ -409,6 +439,7 @@ export default function AIGateSettingsPage() {
   const formControlSummary = scenario
     ? controlSummary(targetType, formMetadata, scenario.readiness_controls || [])
     : null
+  const shouldShowCreate = showAddTarget || (!loading && targets.length === 0)
 
   return (
     <div className="space-y-6">
@@ -420,15 +451,69 @@ export default function AIGateSettingsPage() {
           </div>
           <p className="mt-1 text-gray-400">Manage AI chat, RAG, agent trace, and MCP targets.</p>
         </div>
-        <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-          Settings
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowAddTarget((value) => !value)}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          >
+            <Plus className="h-4 w-4" />
+            {showAddTarget ? 'Close' : 'Add Target'}
+          </button>
+          <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+            Settings
+          </Link>
+        </div>
       </div>
 
       {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
       {message && <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-400">{message}</div>}
 
-      {scenario && (
+      {aiSettings?.demo_mode_enabled && (
+        <section className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-emerald-100">
+                <ShieldCheck className="h-4 w-4" />
+                <h2 className="text-sm font-semibold">Honey AI Demo</h2>
+              </div>
+              <p className="mt-1 max-w-3xl text-sm text-emerald-100/80">
+                Queue a small RAG, agent, and MCP demo suite. Demo targets stay hidden from the normal target list.
+              </p>
+              <div className="mt-2 text-xs text-emerald-100/70">
+                Scanner URL: {aiSettings.demo_honey_scanner_url}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunDemo}
+              disabled={demoRunning}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {demoRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              Run Demo
+            </button>
+          </div>
+          {demoResult && (
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {demoResult.queued.map((item) => (
+                <Link
+                  key={item.scan_id}
+                  href={`/scans/${item.scan_id}`}
+                  className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
+                >
+                  <div className="font-medium">{item.name}</div>
+                  <div className="mt-1 text-xs text-emerald-100/60">
+                    {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {shouldShowCreate && scenario && (
         <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -488,7 +573,8 @@ export default function AIGateSettingsPage() {
         </section>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+      {shouldShowCreate && (
+      <div className="grid gap-6">
         <form onSubmit={handleCreate} className="space-y-4 rounded-lg border border-gray-800 bg-gray-900 p-4">
           <div className="flex items-center gap-2 text-white">
             <Plus className="h-4 w-4 text-blue-400" />
@@ -624,23 +710,51 @@ export default function AIGateSettingsPage() {
           </div>
         </form>
 
+      </div>
+      )}
+
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-300">Targets</h2>
-            <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
-              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300">Targets</h2>
+              <p className="mt-1 text-xs text-gray-500">Saved AI surfaces ready for probe packs and deployment checks.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="inline-flex items-center gap-2 text-xs text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={showDemoTargets}
+                  onChange={(event) => setShowDemoTargets(event.target.checked)}
+                  className="h-4 w-4 rounded border-gray-700 bg-gray-800"
+                />
+                Show demo targets
+              </label>
+              <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
+                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
           </div>
 
           {targets.length === 0 && !loading ? (
-            <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 text-center text-sm text-gray-500">No AI Gate targets yet.</div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 text-center text-sm text-gray-500">
+              <div>No AI Gate targets yet.</div>
+              <button
+                type="button"
+                onClick={() => setShowAddTarget(true)}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                <Plus className="h-4 w-4" />
+                Add Target
+              </button>
+            </div>
           ) : (
             targets.map((target) => {
               const config = runConfigs[target.id] || defaultRunConfig(target)
               const targetControlSummary = scenario
                 ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
                 : null
+              const isDemoTarget = Boolean(target.metadata_json?.shakerscan_demo) || target.name.startsWith('Honey demo') || target.name.startsWith('Local Honey calibration')
               return (
                 <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -648,6 +762,7 @@ export default function AIGateSettingsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-medium text-white">{target.name}</h3>
                         <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
+                        {isDemoTarget && <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
                         {target.production_mode && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
                       </div>
                       <div className="mt-1 truncate text-sm text-gray-500">{target.method} {target.endpoint_url}</div>
@@ -701,7 +816,6 @@ export default function AIGateSettingsPage() {
             })
           )}
         </div>
-      </div>
     </div>
   )
 }

@@ -5,12 +5,15 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 """
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
 import random
 import re
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -226,6 +229,14 @@ def _default_ai_settings() -> dict[str, Any]:
             os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
             default=False,
         ),
+        "demo_mode_enabled": _is_truthy(
+            os.environ.get("AI_DEMO_MODE_ENABLED", "false"),
+            default=False,
+        ),
+        "demo_honey_public_url": os.environ.get("AI_DEMO_HONEY_PUBLIC_URL", "https://honey.shakerscan.com").strip()
+        or "https://honey.shakerscan.com",
+        "demo_honey_scanner_url": os.environ.get("AI_DEMO_HONEY_SCANNER_URL", "https://honey.shakerscan.com").strip()
+        or "https://honey.shakerscan.com",
     }
 
 
@@ -304,6 +315,20 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["proof_required_for_smart"] = _is_truthy(
             overrides.get("proof_required_for_smart"), default=settings["proof_required_for_smart"]
         )
+    if "demo_mode_enabled" in overrides:
+        settings["demo_mode_enabled"] = _is_truthy(
+            overrides.get("demo_mode_enabled"), default=settings["demo_mode_enabled"]
+        )
+    if "demo_honey_public_url" in overrides:
+        settings["demo_honey_public_url"] = _normalize_demo_base_url(
+            overrides.get("demo_honey_public_url"),
+            default=settings["demo_honey_public_url"],
+        )
+    if "demo_honey_scanner_url" in overrides:
+        settings["demo_honey_scanner_url"] = _normalize_demo_base_url(
+            overrides.get("demo_honey_scanner_url"),
+            default=settings["demo_honey_scanner_url"],
+        )
     return settings
 
 
@@ -330,7 +355,20 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "verification_min_severity": settings.get("verification_min_severity") or settings.get("auto_retest_min_severity") or "medium",
         "ai_escalation_min_severity": settings.get("ai_escalation_min_severity") or settings.get("ai_verify_min_severity") or "high",
         "proof_required_for_smart": bool(settings.get("proof_required_for_smart", False)),
+        "demo_mode_enabled": bool(settings.get("demo_mode_enabled", False)),
+        "demo_honey_public_url": settings.get("demo_honey_public_url") or "https://honey.shakerscan.com",
+        "demo_honey_scanner_url": settings.get("demo_honey_scanner_url") or "https://honey.shakerscan.com",
     }
+
+
+def _normalize_demo_base_url(value: Any, *, default: str = "https://honey.shakerscan.com") -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        raw = default.rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Demo Honey URL must be an http(s) URL")
+    return raw
 
 
 def _normalize_env_value(value: str) -> str:
@@ -1230,6 +1268,12 @@ AI_PROBE_PACKS = {
 }
 AI_SCAN_PROFILES = {"smoke", "trace", "standard", "deep"}
 AI_ENVIRONMENTS = {"preview", "staging", "production", "development"}
+AI_DEMO_DEFAULT_SCENARIOS = (
+    "rag.safe.tenant_scoped_answer.v1",
+    "rag.unsafe.cross_tenant_inventory.v1",
+    "agent.unsafe.approval_bypass.v1",
+    "mcp.unsafe.oauth_audience_wildcard.v1",
+)
 
 
 class AITargetCredential(BaseModel):
@@ -1281,6 +1325,12 @@ class AITargetScanRequest(BaseModel):
     confirm_production: bool = False
     ai_judge_enabled: Optional[bool] = None
     semantic_judge_enabled: Optional[bool] = None
+
+
+class AIDemoRunRequest(BaseModel):
+    scenario_ids: Optional[list[str]] = None
+    scan_profile: str = Field(default="smoke", pattern="^(smoke|trace|standard|deep)$")
+    request_budget: int = Field(default=1, ge=1, le=10)
 
 
 class TargetCreate(BaseModel):
@@ -1401,6 +1451,9 @@ class AISettingsUpdate(BaseModel):
     verification_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     ai_escalation_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     proof_required_for_smart: Optional[bool] = None
+    demo_mode_enabled: Optional[bool] = None
+    demo_honey_public_url: Optional[str] = None
+    demo_honey_scanner_url: Optional[str] = None
     persist_to_env: bool = False
 
 
@@ -1633,6 +1686,150 @@ def _ai_target_run_kind(target_type: str) -> str:
     if target_type == "mcp_trace":
         return "ai_mcp"
     return "ai_api"
+
+
+def _ai_demo_target_sql_predicate() -> str:
+    return """(
+        COALESCE(metadata_json->>'shakerscan_demo', '') = 'true'
+        OR COALESCE(metadata_json->>'calibration_run', '') <> ''
+        OR name LIKE 'Local Honey calibration%'
+        OR LOWER(name) LIKE '%calibration%'
+        OR endpoint_url LIKE '%calibration_run=%'
+    )"""
+
+
+def _is_ai_demo_target_row(row: dict[str, Any]) -> bool:
+    metadata = _decode_json_value(row.get("metadata_json")) or {}
+    return (
+        metadata.get("shakerscan_demo") is True
+        or bool(metadata.get("calibration_run"))
+        or str(row.get("name") or "").startswith("Local Honey calibration")
+        or "calibration" in str(row.get("name") or "").lower()
+        or "calibration_run=" in str(row.get("endpoint_url") or "")
+    )
+
+
+def _demo_target_url(url: str, scanner_base_url: str, run_id: str, scenario_id: str) -> str:
+    parsed = urllib.parse.urlparse(str(url or ""))
+    if not parsed.path:
+        raise HTTPException(status_code=400, detail=f"Honey scenario {scenario_id} has no target path")
+    base = urllib.parse.urlparse(_normalize_demo_base_url(scanner_base_url))
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query["calibration_run"] = run_id
+    query["calibration_scenario"] = scenario_id
+    return urllib.parse.urlunparse((base.scheme, base.netloc, parsed.path, "", urllib.parse.urlencode(query), ""))
+
+
+def _demo_request_template_with_prompt(template: Any, surface: str) -> dict[str, Any]:
+    updated = copy.deepcopy(template) if isinstance(template, dict) else {}
+    if surface in {"rag", "agent"}:
+        updated["message"] = "{{prompt}}"
+        updated.setdefault("session_id", "{{session_id}}")
+    elif surface == "mcp":
+        params = updated.setdefault("params", {})
+        if not isinstance(params, dict):
+            params = {}
+            updated["params"] = params
+        params["prompt"] = "{{prompt}}"
+        updated.setdefault("id", "{{session_id}}")
+    else:
+        updated["message"] = "{{prompt}}"
+    return updated
+
+
+def _fetch_json_url(url: str, *, timeout: int = 15) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"Honey registry returned HTTP {exc.code}: {body[:200]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Unable to read Honey registry: {exc}") from exc
+
+
+async def _fetch_honey_ai_gate_registry(base_url: str) -> dict[str, Any]:
+    url = f"{_normalize_demo_base_url(base_url)}/api/ai-gate/scenarios"
+    return await asyncio.to_thread(_fetch_json_url, url)
+
+
+async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) -> dict[str, Any]:
+    if request.probe_pack not in AI_PROBE_PACKS:
+        raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
+    if request.scan_profile not in AI_SCAN_PROFILES:
+        raise HTTPException(status_code=400, detail=f"scan_profile must be one of: {', '.join(sorted(AI_SCAN_PROFILES))}")
+    if request.environment not in AI_ENVIRONMENTS:
+        raise HTTPException(status_code=400, detail=f"environment must be one of: {', '.join(sorted(AI_ENVIRONMENTS))}")
+
+    r = get_redis()
+    job_id = str(uuid.uuid4())
+    scan_id = str(uuid.uuid4())
+
+    async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        if not target_row["is_active"]:
+            raise HTTPException(status_code=409, detail="AI target is inactive")
+        if target_row["production_mode"] and not request.confirm_production:
+            raise HTTPException(
+                status_code=409,
+                detail="This AI target is marked production. Re-submit with confirm_production=true.",
+            )
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+
+        target = row_to_dict(target_row)
+        for key in ("headers_template", "request_template", "metadata_json"):
+            target[key] = _decode_json_value(target.get(key)) or {}
+        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+        worker_options, storage_options = _build_ai_worker_options(
+            target=target,
+            credential=credential,
+            request=request,
+        )
+        run_kind = storage_options["run_kind"]
+
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, ai_target_id, target_url, job_id, status,
+                options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, NULL, $2, $3, $4, 'pending', $5, 'ai_gate', $6, $7)
+        """,
+            uuid.UUID(scan_id),
+            uuid.UUID(target_id),
+            target["endpoint_url"],
+            job_id,
+            json.dumps(storage_options),
+            run_kind,
+            f"ai_target:{target_id}",
+        )
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": target["endpoint_url"],
+        "options": worker_options,
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
+
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "target": target["endpoint_url"],
+        "run_kind": run_kind,
+        "ai_target_id": target_id,
+        "probe_pack": request.probe_pack,
+        "scan_profile": request.scan_profile,
+        "ui_url": f"/scans/{scan_id}",
+    }
 
 
 def _graph_node(
@@ -2422,6 +2619,124 @@ async def list_ai_test_scenarios():
     return get_ai_test_scenarios()
 
 
+@app.post("/ai/demo/run")
+async def run_ai_honey_demo(request: AIDemoRunRequest):
+    """Queue a small Honey AI Gate demo suite when demo mode is enabled."""
+    settings = _load_effective_ai_settings()
+    if not settings.get("demo_mode_enabled"):
+        raise HTTPException(status_code=403, detail="AI demo mode is disabled in settings")
+
+    scenario_ids = request.scenario_ids or list(AI_DEMO_DEFAULT_SCENARIOS)
+    scenario_ids = [str(item).strip() for item in scenario_ids if str(item).strip()]
+    if not scenario_ids:
+        raise HTTPException(status_code=400, detail="At least one demo scenario is required")
+    if len(scenario_ids) > 10:
+        raise HTTPException(status_code=400, detail="Demo run is limited to 10 scenarios")
+
+    registry = await _fetch_honey_ai_gate_registry(str(settings.get("demo_honey_scanner_url") or ""))
+    scenarios = {
+        str(scenario.get("id")): scenario
+        for scenario in registry.get("scenarios", [])
+        if isinstance(scenario, dict) and scenario.get("id")
+    }
+    missing = [scenario_id for scenario_id in scenario_ids if scenario_id not in scenarios]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Honey registry does not include scenarios: {', '.join(missing)}")
+
+    surface_config = {
+        "rag": ("rag", "$.answer", "shaker-rag-lite"),
+        "agent": ("agent_trace", "$", "shaker-agent-abuse"),
+        "mcp": ("mcp_trace", "$.result", "shaker-mcp-security"),
+    }
+    run_id = f"demo-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    scanner_base_url = str(settings.get("demo_honey_scanner_url") or "")
+    queued: list[dict[str, Any]] = []
+
+    async with db_pool.acquire() as conn:
+        for scenario_id in scenario_ids:
+            scenario = scenarios[scenario_id]
+            surface = str(scenario.get("surface") or "rag")
+            target_type, response_path, probe_pack = surface_config.get(surface, surface_config["rag"])
+            metadata = copy.deepcopy(scenario.get("metadata_json") or {})
+            expected = scenario.get("expected_shakerscan_findings") or []
+            metadata.update({
+                "shakerscan_demo": True,
+                "demo_run_id": run_id,
+                "calibration_run": run_id,
+                "honey_scenario_id": scenario_id,
+                "expected_shakerscan_findings": expected,
+                "safe_fixture": scenario.get("safe_fixture") is True,
+            })
+            endpoint_url = _demo_target_url(
+                str(scenario.get("target_url") or ""),
+                scanner_base_url,
+                run_id,
+                scenario_id,
+            )
+            request_template = _normalize_ai_request_template(
+                _demo_request_template_with_prompt(scenario.get("target_template"), surface),
+                method=str(scenario.get("method") or "POST"),
+                target_type=target_type,
+            )
+
+            async with conn.transaction():
+                target_id = await conn.fetchval("""
+                    INSERT INTO ai_targets (
+                        name, target_type, endpoint_url, method, headers_template,
+                        request_template, response_path, streaming_mode, rate_limit_rps,
+                        token_budget, request_budget, production_mode, metadata_json, is_active
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', 10, 4000, $8, false, $9, true)
+                    RETURNING id
+                """,
+                    f"Honey demo {scenario_id}",
+                    target_type,
+                    endpoint_url,
+                    _normalize_ai_method(str(scenario.get("method") or "POST")),
+                    json.dumps({"Content-Type": "application/json", "Accept": "application/json"}),
+                    json.dumps(request_template),
+                    response_path,
+                    request.request_budget,
+                    json.dumps(metadata),
+                )
+                await conn.execute("""
+                    INSERT INTO ai_target_credentials (
+                        ai_target_id, auth_kind, header_name, secret_value,
+                        secret_preview, metadata_json, rotated_at
+                    ) VALUES ($1, 'none', NULL, NULL, NULL, '{}'::jsonb, NOW())
+                """,
+                    target_id,
+                )
+
+            scan = await _queue_ai_target_scan(
+                str(target_id),
+                AITargetScanRequest(
+                    probe_pack=probe_pack,
+                    scan_profile=request.scan_profile,
+                    environment="development",
+                    ai_judge_enabled=False,
+                    semantic_judge_enabled=False,
+                ),
+            )
+            queued.append({
+                "scenario_id": scenario_id,
+                "name": scenario.get("name") or scenario_id,
+                "surface": surface,
+                "safe_fixture": scenario.get("safe_fixture") is True,
+                "expected_findings": expected,
+                "target_id": str(target_id),
+                "scan_id": scan["scan_id"],
+                "ui_url": scan["ui_url"],
+                "probe_pack": probe_pack,
+                "scan_profile": request.scan_profile,
+            })
+
+    return {
+        "run_id": run_id,
+        "honey_registry_url": f"{settings.get('demo_honey_public_url')}/api/ai-gate/scenarios",
+        "queued": queued,
+    }
+
+
 @app.get("/health")
 async def health():
     """Health check."""
@@ -2525,6 +2840,12 @@ async def update_ai_settings(request: AISettingsUpdate):
         updates["ai_verify_min_severity"] = updates["ai_escalation_min_severity"]
     if request.proof_required_for_smart is not None:
         updates["proof_required_for_smart"] = "true" if request.proof_required_for_smart else "false"
+    if request.demo_mode_enabled is not None:
+        updates["demo_mode_enabled"] = "true" if request.demo_mode_enabled else "false"
+    if request.demo_honey_public_url is not None:
+        updates["demo_honey_public_url"] = _normalize_demo_base_url(request.demo_honey_public_url)
+    if request.demo_honey_scanner_url is not None:
+        updates["demo_honey_scanner_url"] = _normalize_demo_base_url(request.demo_honey_scanner_url)
 
     if updates:
         r.hset(AI_SETTINGS_KEY, mapping=updates)
@@ -2556,6 +2877,9 @@ async def update_ai_settings(request: AISettingsUpdate):
             "VERIFICATION_MIN_SEVERITY": effective.get("verification_min_severity") or "medium",
             "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
             "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", False) else "false",
+            "AI_DEMO_MODE_ENABLED": "true" if effective.get("demo_mode_enabled", False) else "false",
+            "AI_DEMO_HONEY_PUBLIC_URL": effective.get("demo_honey_public_url") or None,
+            "AI_DEMO_HONEY_SCANNER_URL": effective.get("demo_honey_scanner_url") or None,
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
 
@@ -2693,19 +3017,30 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
 # ============================================================
 
 @app.get("/ai/targets")
-async def list_ai_targets(include_inactive: bool = False, limit: int = Query(100, le=500), offset: int = 0):
+async def list_ai_targets(
+    include_inactive: bool = False,
+    include_demo: bool = False,
+    limit: int = Query(100, le=500),
+    offset: int = 0,
+):
     """List saved AI Gate targets."""
     async with db_pool.acquire() as conn:
         query = "SELECT * FROM ai_targets"
         params: list[Any] = []
+        conditions: list[str] = []
         if not include_inactive:
-            query += " WHERE is_active = true"
+            conditions.append("is_active = true")
+        if not include_demo:
+            conditions.append(f"NOT {_ai_demo_target_sql_predicate()}")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at DESC LIMIT $1 OFFSET $2"
         params.extend([limit, offset])
         targets = await conn.fetch(query, *params)
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM ai_targets" + ("" if include_inactive else " WHERE is_active = true")
-        )
+        count_query = "SELECT COUNT(*) FROM ai_targets"
+        if conditions:
+            count_query += " WHERE " + " AND ".join(conditions)
+        total = await conn.fetchval(count_query)
         target_ids = [row["id"] for row in targets]
         credentials = []
         if target_ids:
@@ -2901,79 +3236,7 @@ async def delete_ai_target(target_id: str):
 @app.post("/ai/targets/{target_id}/scan")
 async def scan_ai_target(target_id: str, request: AITargetScanRequest):
     """Queue an AI Gate scan for a saved AI target."""
-    if request.probe_pack not in AI_PROBE_PACKS:
-        raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
-    if request.scan_profile not in AI_SCAN_PROFILES:
-        raise HTTPException(status_code=400, detail=f"scan_profile must be one of: {', '.join(sorted(AI_SCAN_PROFILES))}")
-    if request.environment not in AI_ENVIRONMENTS:
-        raise HTTPException(status_code=400, detail=f"environment must be one of: {', '.join(sorted(AI_ENVIRONMENTS))}")
-
-    r = get_redis()
-    job_id = str(uuid.uuid4())
-    scan_id = str(uuid.uuid4())
-
-    async with db_pool.acquire() as conn:
-        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
-        if not target_row:
-            raise HTTPException(status_code=404, detail="AI target not found")
-        if not target_row["is_active"]:
-            raise HTTPException(status_code=409, detail="AI target is inactive")
-        if target_row["production_mode"] and not request.confirm_production:
-            raise HTTPException(
-                status_code=409,
-                detail="This AI target is marked production. Re-submit with confirm_production=true.",
-            )
-        credential_row = await conn.fetchrow(
-            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
-            uuid.UUID(target_id),
-        )
-
-        target = row_to_dict(target_row)
-        for key in ("headers_template", "request_template", "metadata_json"):
-            target[key] = _decode_json_value(target.get(key)) or {}
-        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
-        worker_options, storage_options = _build_ai_worker_options(
-            target=target,
-            credential=credential,
-            request=request,
-        )
-        run_kind = storage_options["run_kind"]
-
-        await conn.execute("""
-            INSERT INTO scans (
-                id, target_id, ai_target_id, target_url, job_id, status,
-                options, scan_type, run_kind, subject_ref
-            ) VALUES ($1, NULL, $2, $3, $4, 'pending', $5, 'ai_gate', $6, $7)
-        """,
-            uuid.UUID(scan_id),
-            uuid.UUID(target_id),
-            target["endpoint_url"],
-            job_id,
-            json.dumps(storage_options),
-            run_kind,
-            f"ai_target:{target_id}",
-        )
-
-    job_data = {
-        "job_id": job_id,
-        "scan_id": scan_id,
-        "target": target["endpoint_url"],
-        "options": worker_options,
-        "submitted_at": datetime.utcnow().isoformat(),
-    }
-    r.rpush(QUEUE_NAME, json.dumps(job_data))
-    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
-
-    return {
-        "scan_id": scan_id,
-        "job_id": job_id,
-        "status": "queued",
-        "target": target["endpoint_url"],
-        "run_kind": run_kind,
-        "ai_target_id": target_id,
-        "probe_pack": request.probe_pack,
-        "scan_profile": request.scan_profile,
-    }
+    return await _queue_ai_target_scan(target_id, request)
 
 
 @app.get("/ai/scans/{scan_id}/transcript")

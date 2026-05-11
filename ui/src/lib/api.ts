@@ -276,6 +276,9 @@ export interface AISettings {
   verification_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_escalation_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   proof_required_for_smart: boolean
+  demo_mode_enabled: boolean
+  demo_honey_public_url: string
+  demo_honey_scanner_url: string
 }
 
 export interface AISettingsUpdate {
@@ -294,6 +297,9 @@ export interface AISettingsUpdate {
   verification_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_escalation_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   proof_required_for_smart?: boolean
+  demo_mode_enabled?: boolean
+  demo_honey_public_url?: string
+  demo_honey_scanner_url?: string
   persist_to_env?: boolean
 }
 
@@ -773,15 +779,48 @@ export async function testAISettings(data: {
 
 export async function getAITargets(params?: {
   includeInactive?: boolean
+  includeDemo?: boolean
   limit?: number
   offset?: number
 }): Promise<{ targets: AITarget[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params?.includeDemo) searchParams.set('include_demo', 'true')
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const res = await fetch(`${API_URL}/ai/targets?${searchParams}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI targets'))
+  return res.json()
+}
+
+export interface AIDemoRunResponse {
+  run_id: string
+  honey_registry_url: string
+  queued: Array<{
+    scenario_id: string
+    name: string
+    surface: string
+    safe_fixture: boolean
+    expected_findings: string[]
+    target_id: string
+    scan_id: string
+    ui_url: string
+    probe_pack: AIProbePack
+    scan_profile: AIScanProfile
+  }>
+}
+
+export async function runAIDemo(data?: {
+  scenario_ids?: string[]
+  scan_profile?: AIScanProfile
+  request_budget?: number
+}): Promise<AIDemoRunResponse> {
+  const res = await fetch(`${API_URL}/ai/demo/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data || {}),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue AI demo'))
   return res.json()
 }
 

@@ -40,6 +40,9 @@ export default function AISettingsPanel() {
   const [verificationMinSeverityInput, setVerificationMinSeverityInput] = useState<Severity>('medium')
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
   const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
+  const [demoModeEnabledInput, setDemoModeEnabledInput] = useState(false)
+  const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState('https://honey.shakerscan.com')
+  const [demoHoneyScannerURLInput, setDemoHoneyScannerURLInput] = useState('https://honey.shakerscan.com')
   const [settingsMode, setSettingsMode] = useState<'basic' | 'advanced'>('basic')
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
@@ -60,6 +63,9 @@ export default function AISettingsPanel() {
     setVerificationMinSeverityInput(settings.verification_min_severity || settings.auto_retest_min_severity || 'medium')
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
+    setDemoModeEnabledInput(Boolean(settings.demo_mode_enabled))
+    setDemoHoneyPublicURLInput(settings.demo_honey_public_url || 'https://honey.shakerscan.com')
+    setDemoHoneyScannerURLInput(settings.demo_honey_scanner_url || 'https://honey.shakerscan.com')
     setScanAPIKeyInput('')
     setClearScanAPIKey(false)
     setScanProbeMessage(null)
@@ -105,6 +111,9 @@ export default function AISettingsPanel() {
         verification_min_severity: verificationMinSeverityInput,
         ai_escalation_min_severity: aiEscalationMinSeverityInput,
         proof_required_for_smart: proofRequiredForSmartInput,
+        demo_mode_enabled: demoModeEnabledInput,
+        demo_honey_public_url: demoHoneyPublicURLInput,
+        demo_honey_scanner_url: demoHoneyScannerURLInput,
         persist_to_env: persistAIToEnv,
       }
 
@@ -233,8 +242,50 @@ export default function AISettingsPanel() {
           <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
             Smart proof filter: {aiSettings.proof_required_for_smart ? 'on' : 'off'}
           </div>
+          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+            Demo mode: {aiSettings.demo_mode_enabled ? 'enabled' : 'disabled'}
+          </div>
         </div>
       )}
+
+      <SectionCard
+        title="Demo & Calibration"
+        description="Controls whether Honey demo actions appear in AI Gate. Keep off for production-facing use."
+      >
+        <ToggleRow
+          label="Enable Honey AI demo controls"
+          description="Shows a demo run button on the AI Gate page and allows the demo API to queue hidden Honey targets."
+          hint="Demo targets are excluded from the normal AI target list by default."
+          checked={demoModeEnabledInput}
+          onChange={setDemoModeEnabledInput}
+        />
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field
+            label="Honey public URL"
+            hint="Browser-facing Honey URL shown in links and labels."
+          >
+            <input
+              type="url"
+              value={demoHoneyPublicURLInput}
+              onChange={(e) => setDemoHoneyPublicURLInput(e.target.value)}
+              className={INPUT_CLASS}
+              placeholder="https://honey.shakerscan.com"
+            />
+          </Field>
+          <Field
+            label="Honey scanner URL"
+            hint="URL that API/workers can reach. For local Honey from Docker, use http://host.docker.internal:18080."
+          >
+            <input
+              type="url"
+              value={demoHoneyScannerURLInput}
+              onChange={(e) => setDemoHoneyScannerURLInput(e.target.value)}
+              className={INPUT_CLASS}
+              placeholder="http://host.docker.internal:18080"
+            />
+          </Field>
+        </div>
+      </SectionCard>
 
       <div className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-gray-800 p-1">
         <button
