@@ -16,6 +16,37 @@ const INPUT_CLASS =
   'mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500'
 const CHECKBOX_CLASS =
   'h-4 w-4 rounded border-gray-700 bg-gray-800 text-blue-600 focus:ring-blue-500'
+const HONEY_HOSTED_URL = 'https://honey.shakerscan.com'
+const HONEY_LOCAL_PUBLIC_URL = 'http://localhost:18080'
+const HONEY_LOCAL_SCANNER_URL = 'http://host.docker.internal:18080'
+
+type DemoHoneyMode = 'hosted' | 'local' | 'custom'
+
+function normalizeUrlValue(value?: string): string {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function deriveDockerReachableUrl(value: string): string {
+  const trimmed = normalizeUrlValue(value)
+  try {
+    const url = new URL(trimmed)
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+      url.hostname = 'host.docker.internal'
+      return normalizeUrlValue(url.toString())
+    }
+  } catch {
+    return trimmed
+  }
+  return trimmed
+}
+
+function detectDemoHoneyMode(publicURL: string, scannerURL: string): DemoHoneyMode {
+  const publicValue = normalizeUrlValue(publicURL)
+  const scannerValue = normalizeUrlValue(scannerURL)
+  if (publicValue === HONEY_HOSTED_URL && scannerValue === HONEY_HOSTED_URL) return 'hosted'
+  if (publicValue === HONEY_LOCAL_PUBLIC_URL && scannerValue === HONEY_LOCAL_SCANNER_URL) return 'local'
+  return 'custom'
+}
 
 export default function AISettingsPanel() {
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
@@ -41,8 +72,10 @@ export default function AISettingsPanel() {
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
   const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
   const [demoModeEnabledInput, setDemoModeEnabledInput] = useState(false)
-  const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState('https://honey.shakerscan.com')
-  const [demoHoneyScannerURLInput, setDemoHoneyScannerURLInput] = useState('https://honey.shakerscan.com')
+  const [demoHoneyModeInput, setDemoHoneyModeInput] = useState<DemoHoneyMode>('hosted')
+  const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState(HONEY_HOSTED_URL)
+  const [demoHoneyScannerURLInput, setDemoHoneyScannerURLInput] = useState(HONEY_HOSTED_URL)
+  const [showDemoNetworking, setShowDemoNetworking] = useState(false)
   const [settingsMode, setSettingsMode] = useState<'basic' | 'advanced'>('basic')
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
   const [scanProbeMessage, setScanProbeMessage] = useState<string | null>(null)
@@ -64,8 +97,11 @@ export default function AISettingsPanel() {
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
     setDemoModeEnabledInput(Boolean(settings.demo_mode_enabled))
-    setDemoHoneyPublicURLInput(settings.demo_honey_public_url || 'https://honey.shakerscan.com')
-    setDemoHoneyScannerURLInput(settings.demo_honey_scanner_url || 'https://honey.shakerscan.com')
+    const publicURL = settings.demo_honey_public_url || HONEY_HOSTED_URL
+    const scannerURL = settings.demo_honey_scanner_url || HONEY_HOSTED_URL
+    setDemoHoneyPublicURLInput(publicURL)
+    setDemoHoneyScannerURLInput(scannerURL)
+    setDemoHoneyModeInput(detectDemoHoneyMode(publicURL, scannerURL))
     setScanAPIKeyInput('')
     setClearScanAPIKey(false)
     setScanProbeMessage(null)
@@ -192,6 +228,30 @@ export default function AISettingsPanel() {
     setAutoRetestMinSeverityInput(severity)
   }
 
+  const selectDemoHoneyMode = (mode: DemoHoneyMode) => {
+    setDemoHoneyModeInput(mode)
+    if (mode === 'hosted') {
+      setDemoHoneyPublicURLInput(HONEY_HOSTED_URL)
+      setDemoHoneyScannerURLInput(HONEY_HOSTED_URL)
+      setShowDemoNetworking(false)
+    } else if (mode === 'local') {
+      setDemoHoneyPublicURLInput(HONEY_LOCAL_PUBLIC_URL)
+      setDemoHoneyScannerURLInput(HONEY_LOCAL_SCANNER_URL)
+    } else {
+      setShowDemoNetworking(true)
+    }
+  }
+
+  const updateDemoPublicURL = (value: string) => {
+    setDemoHoneyPublicURLInput(value)
+    if (demoHoneyModeInput === 'local') {
+      setDemoHoneyScannerURLInput(deriveDockerReachableUrl(value))
+    } else {
+      setDemoHoneyModeInput('custom')
+      setShowDemoNetworking(true)
+    }
+  }
+
   if (loading && !aiSettings) {
     return (
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 text-sm text-gray-400">
@@ -242,48 +302,105 @@ export default function AISettingsPanel() {
           <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
             Smart proof filter: {aiSettings.proof_required_for_smart ? 'on' : 'off'}
           </div>
-          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
-            Demo mode: {aiSettings.demo_mode_enabled ? 'enabled' : 'disabled'}
-          </div>
         </div>
       )}
 
       <SectionCard
-        title="Demo & Calibration"
-        description="Controls whether Honey demo actions appear in AI Gate. Keep off for production-facing use."
+        title="Demo Lab"
+        description="Optional Honey calibration runner for demos and regression checks. Keep off on production-facing deployments."
       >
         <ToggleRow
-          label="Enable Honey AI demo controls"
-          description="Shows a demo run button on the AI Gate page and allows the demo API to queue hidden Honey targets."
-          hint="Demo targets are excluded from the normal AI target list by default."
+          label="Show Honey demo runner in AI Gate"
+          description="Adds a Run Demo button on the AI Gate page and allows ShakerScan to queue hidden Honey calibration targets."
+          hint="Demo targets are hidden from the normal AI target list unless Show demo targets is enabled."
           checked={demoModeEnabledInput}
           onChange={setDemoModeEnabledInput}
         />
-        <div className="grid gap-3 md:grid-cols-2">
+
+        <div className="space-y-3 rounded border border-gray-800 bg-gray-900/50 p-3">
+          <div>
+            <p className="text-xs font-medium text-gray-300">Honey source</p>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              Hosted uses the public Honey service. Local uses your dev Honey on port 18080 and rewrites scanner traffic for Docker.
+            </p>
+          </div>
+          <div className="inline-flex flex-wrap items-center gap-1 rounded border border-gray-700 bg-gray-950 p-1">
+            <button
+              type="button"
+              onClick={() => selectDemoHoneyMode('hosted')}
+              className={`px-2.5 py-1 text-xs rounded ${
+                demoHoneyModeInput === 'hosted' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
+              }`}
+              aria-pressed={demoHoneyModeInput === 'hosted'}
+            >
+              Hosted Honey
+            </button>
+            <button
+              type="button"
+              onClick={() => selectDemoHoneyMode('local')}
+              className={`px-2.5 py-1 text-xs rounded ${
+                demoHoneyModeInput === 'local' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
+              }`}
+              aria-pressed={demoHoneyModeInput === 'local'}
+            >
+              Local Honey
+            </button>
+            <button
+              type="button"
+              onClick={() => selectDemoHoneyMode('custom')}
+              className={`px-2.5 py-1 text-xs rounded ${
+                demoHoneyModeInput === 'custom' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'
+              }`}
+              aria-pressed={demoHoneyModeInput === 'custom'}
+            >
+              Custom
+            </button>
+          </div>
+
           <Field
-            label="Honey public URL"
-            hint="Browser-facing Honey URL shown in links and labels."
+            label={demoHoneyModeInput === 'local' ? 'Local Honey URL' : 'Honey URL'}
+            hint="Browser-facing URL used for labels and links."
           >
             <input
               type="url"
               value={demoHoneyPublicURLInput}
-              onChange={(e) => setDemoHoneyPublicURLInput(e.target.value)}
+              onChange={(e) => updateDemoPublicURL(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="https://honey.shakerscan.com"
+              placeholder={demoHoneyModeInput === 'local' ? HONEY_LOCAL_PUBLIC_URL : HONEY_HOSTED_URL}
             />
           </Field>
-          <Field
-            label="Honey scanner URL"
-            hint="URL that API/workers can reach. For local Honey from Docker, use http://host.docker.internal:18080."
+
+          {demoHoneyModeInput === 'local' && (
+            <p className="text-[11px] text-gray-500">
+              Docker scanner traffic will use <span className="font-mono text-gray-400">{demoHoneyScannerURLInput}</span>.
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setShowDemoNetworking(!showDemoNetworking)}
+            className="text-xs text-gray-400 hover:text-gray-200"
           >
-            <input
-              type="url"
-              value={demoHoneyScannerURLInput}
-              onChange={(e) => setDemoHoneyScannerURLInput(e.target.value)}
-              className={INPUT_CLASS}
-              placeholder="http://host.docker.internal:18080"
-            />
-          </Field>
+            {showDemoNetworking ? 'Hide networking details' : 'Show networking details'}
+          </button>
+
+          {showDemoNetworking && (
+            <Field
+              label="Scanner-reachable Honey URL"
+              hint="URL that API and worker containers can reach. Local Docker scans usually need host.docker.internal."
+            >
+              <input
+                type="url"
+                value={demoHoneyScannerURLInput}
+                onChange={(e) => {
+                  setDemoHoneyScannerURLInput(e.target.value)
+                  setDemoHoneyModeInput(detectDemoHoneyMode(demoHoneyPublicURLInput, e.target.value))
+                }}
+                className={INPUT_CLASS}
+                placeholder={HONEY_LOCAL_SCANNER_URL}
+              />
+            </Field>
+          )}
         </div>
       </SectionCard>
 
