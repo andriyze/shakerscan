@@ -45,6 +45,11 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 
+try:
+    from ai_demo_scenarios import get_ai_test_scenarios
+except ImportError:
+    from api.ai_demo_scenarios import get_ai_test_scenarios
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -2400,6 +2405,7 @@ async def root():
             "scans": "/scans",
             "targets": "/targets",
             "ai_targets": "/ai/targets",
+            "ai_test_scenarios": "/ai/test-scenarios",
             "model_intake": "/model-intake/scan",
             "findings": "/findings",
             "discovery": "/discovery",
@@ -2408,6 +2414,12 @@ async def root():
             "queue": "/queue/stats"
         }
     }
+
+
+@app.get("/ai/test-scenarios")
+async def list_ai_test_scenarios():
+    """Return scenario templates for AI Gate and model-intake workflows."""
+    return get_ai_test_scenarios()
 
 
 @app.get("/health")

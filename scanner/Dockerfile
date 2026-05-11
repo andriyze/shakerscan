@@ -122,6 +122,7 @@ COPY api/gungnir_worker.py /app/gungnir_worker.py
 COPY api/session_manager.py /app/session_manager.py
 COPY api/retest_contract.py /app/retest_contract.py
 COPY api/ai_verifier.py /app/ai_verifier.py
+COPY api/ai_demo_scenarios.py /app/ai_demo_scenarios.py
 COPY api/ai_gate_scan.py /app/ai_gate_scan.py
 COPY api/ai_gate /app/ai_gate
 

@@ -275,6 +275,14 @@ AI Gate evaluates probes with deterministic/regex detectors first. When an AI pr
 
 AI Gate also builds an AI control-evidence pack from target `metadata_json`: asset owner, risk tier, data classification, RAG ACL/ingestion/tenant-isolation controls, agent tool scopes, delegated identity, token audience validation, approval/dry-run/transaction limits, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to convert missing required controls into a finding.
 
+Use the shared scenario catalog for focused AI demo/prod-like workflows:
+
+```bash
+curl http://localhost:8080/ai/test-scenarios
+```
+
+The `secure-rag-agent` scenario includes RAG, agent trace, and MCP target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
+
 Target types:
 | Type | Description |
 |------|-------------|
@@ -354,6 +362,8 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executables, tampered checksums, and missing approval.
 
 ```bash
 # Queue a model intake scan

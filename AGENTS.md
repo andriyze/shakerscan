@@ -34,8 +34,8 @@ The scanner runs as Docker containers:
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
-- **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
-- **Model Intake (`/settings/model-intake`)**: queue model artifact checks with artifact URL, metadata URL/JSON, checksum, signature, model card, approval flags, timeout, and download cap.
+- **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
+- **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, signature, model card, approval flags, timeout, and download cap.
 
 ## Your Role
 
@@ -403,6 +403,14 @@ AI Gate evaluates probes with deterministic/regex detectors first. When an AI pr
 
 AI Gate also builds an AI control-evidence pack from target `metadata_json`: asset owner, risk tier, data classification, RAG ACL/ingestion/tenant-isolation controls, agent tool scopes, delegated identity, token audience validation, approval/dry-run/transaction limits, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to convert missing required controls into a finding.
 
+Use the shared scenario catalog for focused AI demo/prod-like workflows:
+
+```bash
+curl http://localhost:8080/ai/test-scenarios
+```
+
+The `secure-rag-agent` scenario includes RAG, agent trace, and MCP target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
+
 Target types:
 | Type | Description |
 |------|-------------|
@@ -482,6 +490,8 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executables, tampered checksums, and missing approval.
 
 ```bash
 # Queue a model intake scan

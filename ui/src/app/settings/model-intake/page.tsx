@@ -1,10 +1,17 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { FileJson, PackageCheck, Play, RefreshCw } from 'lucide-react'
-import { submitModelIntakeScan, type ModelIntakeScanRequest } from '@/lib/api'
+import { CheckCircle2, Clipboard, FileJson, PackageCheck, Play, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
+import {
+  getAITestScenarios,
+  submitModelIntakeScan,
+  type AITestReadinessControl,
+  type AITestScenario,
+  type ModelIntakePreset,
+  type ModelIntakeScanRequest,
+} from '@/lib/api'
 
 const inputClass =
   'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
@@ -26,6 +33,18 @@ function optionalText(value: string): string | undefined {
   return trimmed || undefined
 }
 
+function hasMetadataKey(metadata: Record<string, unknown> | undefined, keys: string[]) {
+  if (!metadata) return false
+  return keys.some((key) => {
+    const value = metadata[key]
+    if (value === undefined || value === null) return false
+    if (typeof value === 'string') return value.trim().length > 0
+    if (Array.isArray(value)) return value.length > 0
+    if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0
+    return Boolean(value)
+  })
+}
+
 export default function ModelIntakeSettingsPage() {
   const router = useRouter()
   const [artifactUrl, setArtifactUrl] = useState('')
@@ -44,6 +63,16 @@ export default function ModelIntakeSettingsPage() {
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [scenario, setScenario] = useState<AITestScenario | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    getAITestScenarios()
+      .then((payload) => {
+        setScenario(payload.scenarios.find((item) => item.id === 'model-intake-pipeline') || null)
+      })
+      .catch(() => setScenario(null))
+  }, [])
 
   const metadataPreview = useMemo(() => {
     try {
@@ -77,6 +106,33 @@ export default function ModelIntakeSettingsPage() {
     return payload
   }
 
+  function applyPreset(preset: ModelIntakePreset) {
+    setArtifactUrl(preset.artifact_url || '')
+    setName(preset.name || '')
+    setMetadataUrl(preset.metadata_url || '')
+    setMetadataJson(preset.metadata_json ? JSON.stringify(preset.metadata_json, null, 2) : '')
+    setExpectedSha256(preset.expected_sha256 || '')
+    setSignatureUrl(preset.signature_url || '')
+    setModelCardUrl(preset.model_card_url || '')
+    setDeploymentApproved(Boolean(preset.deployment_approved ?? preset.metadata_json?.deployment_approved))
+    setRequireDeploymentApproval(preset.require_deployment_approval ?? true)
+    setRequireSignature(preset.require_signature ?? true)
+    setRequireHash(preset.require_hash ?? true)
+    setRequireModelGovernance(preset.require_model_governance ?? true)
+    setMaxDownloadBytes(String(preset.max_download_bytes || 10000000))
+    setTimeoutSeconds(String(preset.timeout_seconds || 20))
+  }
+
+  async function copyPayload() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to copy payload')
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     setSubmitting(true)
@@ -90,6 +146,25 @@ export default function ModelIntakeSettingsPage() {
       setSubmitting(false)
     }
   }
+
+  const parsedMetadata = useMemo(() => {
+    try {
+      return parseOptionalJsonObject(metadataJson) || {}
+    } catch {
+      return undefined
+    }
+  }, [metadataJson])
+  const readinessMetadata: Record<string, unknown> = {
+    ...(parsedMetadata || {}),
+    artifact_url: artifactUrl.trim(),
+    expected_sha256: expectedSha256.trim() || (metadataUrl.trim() ? 'manifest' : ''),
+    signature_url: signatureUrl.trim() || (parsedMetadata?.signature_url as string | undefined),
+    model_card_url: modelCardUrl.trim() || (parsedMetadata?.model_card_url as string | undefined),
+    deployment_approved: deploymentApproved || parsedMetadata?.deployment_approved,
+  }
+  const readinessControls: AITestReadinessControl[] = scenario?.readiness_controls || []
+  const missingControls = readinessControls.filter((control) => !hasMetadataKey(readinessMetadata, control.keys))
+  const presentControls = readinessControls.length - missingControls.length
 
   return (
     <div className="space-y-6">
@@ -107,6 +182,66 @@ export default function ModelIntakeSettingsPage() {
       </div>
 
       {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
+
+      {scenario && (
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-white">
+                <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                <h2 className="text-sm font-semibold">{scenario.title}</h2>
+              </div>
+              <p className="mt-1 max-w-3xl text-sm text-gray-400">{scenario.summary}</p>
+            </div>
+            {scenario.honey_contract?.registry_url && (
+              <a href={scenario.honey_contract.registry_url} target="_blank" rel="noreferrer" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+                Honey registry
+              </a>
+            )}
+          </div>
+
+          <div className="mt-4 grid gap-3 xl:grid-cols-[1.35fr_0.65fr]">
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {(scenario.request_presets || []).map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  onClick={() => applyPreset(preset)}
+                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">{preset.name}</span>
+                    <Wand2 className="h-4 w-4 text-cyan-300" />
+                  </div>
+                  <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
+                    {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-gray-200">Current evidence</div>
+                <span className={`rounded px-2 py-1 text-xs ${missingControls.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
+                  {presentControls}/{readinessControls.length}
+                </span>
+              </div>
+              <div className="grid gap-1 sm:grid-cols-2">
+                {(missingControls.length ? missingControls : readinessControls.slice(0, 8)).slice(0, 8).map((control) => {
+                  const present = hasMetadataKey(readinessMetadata, control.keys)
+                  return (
+                    <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
+                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
+                      <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
@@ -206,10 +341,16 @@ export default function ModelIntakeSettingsPage() {
           </div>
         </div>
 
-        <button type="submit" disabled={submitting} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
-          {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-          Queue Model Intake Scan
-        </button>
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <button type="submit" disabled={submitting} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+            {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Queue Model Intake Scan
+          </button>
+          <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
+            <Clipboard className="h-4 w-4" />
+            {copied ? 'Copied' : 'Copy payload'}
+          </button>
+        </div>
       </form>
     </div>
   )

@@ -70,6 +70,76 @@ export interface ModelIntakeScanResponse {
   ui_url: string
 }
 
+export interface AITestReadinessControl {
+  id: string
+  label: string
+  applies_to?: 'all' | 'rag' | 'agent' | string
+  keys: string[]
+}
+
+export interface AITestTargetTemplate {
+  key: string
+  name: string
+  target_type: AITargetType
+  endpoint_url: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH'
+  headers_template: Record<string, unknown>
+  request_template: Record<string, unknown>
+  response_path?: string | null
+  streaming_mode: 'json' | 'sse'
+  rate_limit_rps?: number | null
+  token_budget?: number | null
+  request_budget?: number | null
+  metadata_json: Record<string, unknown>
+  recommended_scan?: {
+    probe_pack: AIProbePack
+    scan_profile: AIScanProfile
+    environment: AIEnvironment
+  }
+}
+
+export interface ModelIntakePreset {
+  key: string
+  name: string
+  artifact_url: string
+  metadata_url?: string
+  metadata_json?: Record<string, unknown>
+  expected_sha256?: string
+  signature_url?: string
+  model_card_url?: string
+  deployment_approved?: boolean
+  require_deployment_approval?: boolean
+  require_signature?: boolean
+  require_hash?: boolean
+  require_model_governance?: boolean
+  max_download_bytes?: number
+  timeout_seconds?: number
+  should_pass?: boolean
+  expected_findings?: string[]
+  expected_min_severity?: string
+}
+
+export interface AITestScenario {
+  id: 'secure-rag-agent' | 'model-intake-pipeline' | string
+  category: 'ai_gate' | 'model_intake' | string
+  title: string
+  summary: string
+  target_templates?: AITestTargetTemplate[]
+  request_presets?: ModelIntakePreset[]
+  readiness_controls: AITestReadinessControl[]
+  test_plan?: Array<Record<string, unknown>>
+  acceptance_signals?: string[]
+  honey_contract?: {
+    registry_url?: string
+    required_routes?: string[]
+  }
+}
+
+export interface AITestScenariosResponse {
+  schema_version: string
+  scenarios: AITestScenario[]
+}
+
 export interface Target {
   id: string
   url: string
@@ -436,6 +506,12 @@ export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promi
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to submit model intake scan'))
   }
+  return res.json()
+}
+
+export async function getAITestScenarios(): Promise<AITestScenariosResponse> {
+  const res = await fetch(`${API_URL}/ai/test-scenarios`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI test scenarios'))
   return res.json()
 }
 

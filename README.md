@@ -79,6 +79,7 @@ Open this repo in Claude Code, Codex, OpenCode, or another agent that can read r
 - **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
 - **[Honey AI Gate Prompt](docs/HONEY_AI_GATE_CONTROL_PROMPT.md)** - LLM prompt for adding AI Gate RAG/agent/MCP control-evidence scenarios to Honey.
 - **[Honey Model Intake Prompt](docs/HONEY_MODEL_INTAKE_PROMPT.md)** - LLM prompt for adding model-intake calibration scenarios to the Honey test app.
+- **[AI Test Workflows](docs/AI_TEST_WORKFLOWS.md)** - operator workflow for secure RAG/agent testing and model-intake approval checks.
 
 <video src="https://github.com/user-attachments/assets/ffdbd6e1-6e41-49dd-812e-ccabba5e2d6e" controls width="100%"></video>
 
@@ -279,6 +280,9 @@ curl http://localhost:8080/scans/{scan_id}
 curl "http://localhost:8080/findings?severity=critical&status=active"
 curl "http://localhost:8080/findings?source_type=ai&status=active"
 
+# List AI test workflow templates
+curl http://localhost:8080/ai/test-scenarios
+
 # AI Gate target + scan
 curl -X POST http://localhost:8080/ai/targets \
   -H "Content-Type: application/json" \
@@ -342,8 +346,8 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/date/domain, bulk cleanup, CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
-- **AI Gate (`/settings/ai-gate`)**: add AI targets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **Model Intake (`/settings/model-intake`)**: submit model artifact checks for provenance, unsafe serialization, signing, checksum, model card, and approval metadata
+- **AI Gate (`/settings/ai-gate`)**: add AI targets, use Secure RAG + Agent presets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
+- **Model Intake (`/settings/model-intake`)**: use model-intake presets and submit artifact checks for provenance, unsafe serialization, signing, checksum, model card, and approval metadata
 - **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
 
 ## Configuration

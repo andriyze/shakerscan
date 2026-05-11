@@ -20,6 +20,7 @@ You have access to a local DAST (Dynamic Application Security Testing) scanner r
 - **Interactive Testing**: Use `/session` APIs for manual browser-driven security validation
 - **AI Gate Testing**: Register AI targets and run probe packs against chat, RAG, agent trace, and MCP surfaces
 - **Model Intake**: Check model artifacts for unsafe serialization, provenance, signatures, checksums, model cards, and deployment approval
+- **AI Test Workflows**: Use `/ai/test-scenarios` for Secure RAG + Agent and Model Intake Pipeline templates, controls, and Honey calibration contracts
 
 ## Scan Types
 
@@ -263,6 +264,14 @@ AI Gate uses deterministic/regex detectors first. If AI settings have a configur
 
 AI Gate target `metadata_json` can carry control evidence: `asset_owner`, `risk_tier`, `data_classification`, RAG ACL/ingestion/isolation controls, agent tool scopes, token audience validation, approval/dry-run/transaction controls, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to create a finding when required controls are missing.
 
+For the secure RAG + agent workflow, get the shared templates first:
+
+```bash
+curl http://localhost:8080/ai/test-scenarios
+```
+
+Use the `secure-rag-agent` templates to create RAG, agent trace, and MCP targets with complete control metadata before queueing scans.
+
 Target types: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`.
 Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
 Scan profiles: `smoke`, `trace`, `standard`, `deep`.
@@ -310,6 +319,8 @@ After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do 
 Use Model Intake when the user wants to check a model artifact before deployment. The UI is at `http://localhost:3000/settings/model-intake`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
+
+For the model-intake pipeline workflow, use `/ai/test-scenarios` and the `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executable bundles, tampered checksums, and missing approval cases.
 
 ```bash
 curl -X POST http://localhost:8080/model-intake/scan \

@@ -3,12 +3,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
 import {
   createAITarget,
   deleteAITarget,
+  getAITestScenarios,
   getAITargets,
   scanAITarget,
+  type AITestReadinessControl,
+  type AITestScenario,
+  type AITestTargetTemplate,
   type AIAuthKind,
   type AIEnvironment,
   type AIProbePack,
@@ -131,6 +135,39 @@ function parseHeaderPairs(raw: string) {
     })
 }
 
+function hasMetadataKey(metadata: Record<string, unknown> | null | undefined, keys: string[]) {
+  if (!metadata) return false
+  return keys.some((key) => {
+    const value = metadata[key]
+    if (value === undefined || value === null) return false
+    if (typeof value === 'string') return value.trim().length > 0
+    if (Array.isArray(value)) return value.length > 0
+    if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0
+    return Boolean(value)
+  })
+}
+
+function applicableControls(targetType: AITargetType | string, controls: AITestReadinessControl[]) {
+  const isRag = targetType === 'rag'
+  const isAgent = targetType === 'agent_trace' || targetType === 'mcp_trace' || targetType === 'widget'
+  return controls.filter((control) => {
+    if (!control.applies_to || control.applies_to === 'all') return true
+    if (control.applies_to === 'rag') return isRag
+    if (control.applies_to === 'agent') return isAgent
+    return control.applies_to === targetType
+  })
+}
+
+function controlSummary(targetType: AITargetType | string, metadata: Record<string, unknown> | null | undefined, controls: AITestReadinessControl[]) {
+  const scopedControls = applicableControls(targetType, controls)
+  const missing = scopedControls.filter((control) => !hasMetadataKey(metadata, control.keys))
+  return {
+    present: scopedControls.length - missing.length,
+    required: scopedControls.length,
+    missing,
+  }
+}
+
 function defaultRunConfig(target: AITarget): RunConfig {
   const typeDefault = TARGET_TYPES.find((type) => type.value === target.target_type)
   return {
@@ -150,6 +187,8 @@ export default function AIGateSettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
+  const [scenario, setScenario] = useState<AITestScenario | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
 
   const [name, setName] = useState('')
   const [targetType, setTargetType] = useState<AITargetType>(initialType.value)
@@ -198,6 +237,16 @@ export default function AIGateSettingsPage() {
     loadTargets()
   }, [])
 
+  useEffect(() => {
+    getAITestScenarios()
+      .then((payload) => {
+        setScenario(payload.scenarios.find((item) => item.id === 'secure-rag-agent') || null)
+      })
+      .catch(() => {
+        setScenario(null)
+      })
+  }, [])
+
   function applyTargetType(nextType: AITargetType) {
     const definition = TARGET_TYPES.find((type) => type.value === nextType) || TARGET_TYPES[0]
     setTargetType(nextType)
@@ -225,6 +274,32 @@ export default function AIGateSettingsPage() {
     setControlMetadata('')
     setProductionMode(false)
     applyTargetType('api_chat')
+  }
+
+  function applyScenarioTemplate(template: AITestTargetTemplate) {
+    setName(template.name)
+    setTargetType(template.target_type)
+    setEndpointUrl(template.endpoint_url)
+    setMethod(template.method)
+    setResponsePath(template.response_path || '')
+    setStreamingMode(template.streaming_mode)
+    setHeadersTemplate(jsonText(template.headers_template || {}))
+    setRequestTemplate(jsonText(template.request_template || {}))
+    setRateLimitRps(template.rate_limit_rps ? String(template.rate_limit_rps) : '')
+    setRequestBudget(template.request_budget ? String(template.request_budget) : '')
+    setTokenBudget(template.token_budget ? String(template.token_budget) : '')
+    setControlMetadata(jsonText(template.metadata_json || {}))
+    setProductionMode(false)
+  }
+
+  async function copyCurrentPayload() {
+    try {
+      await navigator.clipboard.writeText(jsonText(buildPayload()))
+      setCopied('target-payload')
+      setTimeout(() => setCopied(null), 1500)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to copy payload')
+    }
   }
 
   function buildPayload(): AITargetPayload {
@@ -325,6 +400,16 @@ export default function AIGateSettingsPage() {
     }))
   }
 
+  let formMetadata: Record<string, unknown> = {}
+  try {
+    formMetadata = controlMetadata.trim() ? parseJsonObject('Control metadata', controlMetadata) : {}
+  } catch {
+    formMetadata = {}
+  }
+  const formControlSummary = scenario
+    ? controlSummary(targetType, formMetadata, scenario.readiness_controls || [])
+    : null
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -342,6 +427,66 @@ export default function AIGateSettingsPage() {
 
       {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
       {message && <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-400">{message}</div>}
+
+      {scenario && (
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-white">
+                <ShieldCheck className="h-4 w-4 text-emerald-300" />
+                <h2 className="text-sm font-semibold">{scenario.title}</h2>
+              </div>
+              <p className="mt-1 max-w-3xl text-sm text-gray-400">{scenario.summary}</p>
+            </div>
+            {scenario.honey_contract?.registry_url && (
+              <a href={scenario.honey_contract.registry_url} target="_blank" rel="noreferrer" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+                Honey registry
+              </a>
+            )}
+          </div>
+
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.9fr]">
+            <div className="grid gap-2 sm:grid-cols-3">
+              {(scenario.target_templates || []).map((template) => (
+                <button
+                  key={template.key}
+                  type="button"
+                  onClick={() => applyScenarioTemplate(template)}
+                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">{template.name}</span>
+                    <Wand2 className="h-4 w-4 text-blue-300" />
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500">{template.recommended_scan?.probe_pack || 'custom'} · {template.recommended_scan?.scan_profile || 'standard'}</div>
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-gray-200">Current metadata</div>
+                {formControlSummary && (
+                  <span className={`rounded px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
+                    {formControlSummary.present}/{formControlSummary.required}
+                  </span>
+                )}
+              </div>
+              <div className="grid gap-1 sm:grid-cols-2">
+                {(formControlSummary?.missing.length ? formControlSummary.missing : applicableControls(targetType, scenario.readiness_controls || []).slice(0, 6)).slice(0, 6).map((control) => {
+                  const present = hasMetadataKey(formMetadata, control.keys)
+                  return (
+                    <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
+                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
+                      <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
         <form onSubmit={handleCreate} className="space-y-4 rounded-lg border border-gray-800 bg-gray-900 p-4">
@@ -467,10 +612,16 @@ export default function AIGateSettingsPage() {
             Production target
           </label>
 
-          <button type="submit" disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
-            {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-            Save AI Target
-          </button>
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <button type="submit" disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+              {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Save AI Target
+            </button>
+            <button type="button" onClick={copyCurrentPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              <Clipboard className="h-4 w-4" />
+              {copied === 'target-payload' ? 'Copied' : 'Copy payload'}
+            </button>
+          </div>
         </form>
 
         <div className="space-y-3">
@@ -487,6 +638,9 @@ export default function AIGateSettingsPage() {
           ) : (
             targets.map((target) => {
               const config = runConfigs[target.id] || defaultRunConfig(target)
+              const targetControlSummary = scenario
+                ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
+                : null
               return (
                 <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -500,12 +654,27 @@ export default function AIGateSettingsPage() {
                       <div className="mt-1 text-xs text-gray-500">
                         Auth: {target.credential.auth_kind}
                         {target.credential.secret_configured ? ` (${target.credential.secret_preview || 'configured'})` : ''}
+                        {targetControlSummary && (
+                          <>
+                            {' '}· controls: <span className={targetControlSummary.missing.length ? 'text-yellow-300' : 'text-green-300'}>{targetControlSummary.present}/{targetControlSummary.required}</span>
+                          </>
+                        )}
                         {target.last_scan_id && (
                           <>
                             {' '}· <Link className="text-blue-400 hover:text-blue-300" href={`/scans/${target.last_scan_id}`}>last scan</Link>
                           </>
                         )}
                       </div>
+                      {targetControlSummary && targetControlSummary.missing.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {targetControlSummary.missing.slice(0, 4).map((control) => (
+                            <span key={control.id} className="rounded bg-yellow-900/30 px-2 py-0.5 text-xs text-yellow-200">{control.label}</span>
+                          ))}
+                          {targetControlSummary.missing.length > 4 && (
+                            <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">+{targetControlSummary.missing.length - 4}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <button onClick={() => handleDelete(target)} className="rounded-lg p-2 text-gray-500 hover:bg-gray-800 hover:text-red-400" title="Disable target">
                       <Trash2 className="h-4 w-4" />
