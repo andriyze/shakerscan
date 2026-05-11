@@ -3627,7 +3627,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
 
         # Get findings for this scan
         findings = await conn.fetch("""
-            SELECT id, title, severity, cvss_score, status, tool, url, last_verification_verdict
+            SELECT id, fingerprint, title, severity, cvss_score, status, tool, url, last_verification_verdict
             FROM findings WHERE scan_id = $1
             AND ($2::boolean = false OR last_verification_verdict = 'exploited')
             ORDER BY

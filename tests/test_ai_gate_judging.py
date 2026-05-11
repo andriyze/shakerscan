@@ -20,7 +20,7 @@ from ai_gate_scan import (  # noqa: E402
     _classify_response,
     _semantic_review_priority,
 )
-from ai_gate.targets.rest_json import extract_response_text  # noqa: E402
+from ai_gate.targets.rest_json import extract_calibration_metadata, extract_response_text  # noqa: E402
 
 
 def test_high_severity_deterministic_finding_is_semantic_candidate():
@@ -132,13 +132,21 @@ def test_rest_response_extraction_preserves_honey_oracle_context():
     })
 
     response_text = extract_response_text(raw_text, "application/json", "$.answer")
+    oracle_metadata = extract_calibration_metadata(raw_text, "application/json", "$.answer")
     findings = _classify_response(
         probe={"id": "rag.hidden-instruction", "family": "retrieval_leakage", "owasp": "LLM01:2025"},
         response_text=response_text,
-        transcript={"probe_id": "rag.hidden-instruction", "response_excerpt": response_text},
+        transcript={
+            "probe_id": "rag.hidden-instruction",
+            "response_excerpt": response_text,
+            "oracle_metadata": oracle_metadata,
+        },
     )
 
-    assert "oracle:" in response_text
+    assert "oracle:" not in response_text
+    assert oracle_metadata["oracle"]["expected_shakerscan_findings"] == [
+        "ai_gate:rag_hidden_document_instruction_leakage"
+    ]
     assert any(
         f["evidence"].get("expected_finding") == "ai_gate:rag_hidden_document_instruction_leakage"
         for f in findings
@@ -155,14 +163,45 @@ def test_rest_response_extraction_preserves_nested_mcp_oracle_context():
     })
 
     response_text = extract_response_text(raw_text, "application/json", "$.result")
+    oracle_metadata = extract_calibration_metadata(raw_text, "application/json", "$.result")
     findings = _classify_response(
         probe={"id": "mcp.scope-expansion", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text=response_text,
-        transcript={"probe_id": "mcp.scope-expansion", "response_excerpt": response_text},
+        transcript={
+            "probe_id": "mcp.scope-expansion",
+            "response_excerpt": response_text,
+            "oracle_metadata": oracle_metadata,
+        },
     )
 
-    assert "oracle:" in response_text
+    assert "oracle:" not in response_text
     assert any(f["evidence"].get("expected_finding") == "ai_gate:mcp_overbroad_scopes" for f in findings)
+
+
+def test_oracle_metadata_does_not_feed_marker_classifier():
+    raw_text = json.dumps({
+        "answer": "No privileged MCP token was accepted.",
+        "safe_fixture": True,
+        "oracle": {
+            "expected_shakerscan_findings": [],
+            "note": "audience: *",
+        },
+    })
+
+    response_text = extract_response_text(raw_text, "application/json", "$.answer")
+    oracle_metadata = extract_calibration_metadata(raw_text, "application/json", "$.answer")
+    findings = _classify_response(
+        probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text=response_text,
+        transcript={
+            "probe_id": "mcp.oauth-audience-confusion",
+            "response_excerpt": response_text,
+            "oracle_metadata": oracle_metadata,
+        },
+    )
+
+    assert "audience: *" not in response_text
+    assert findings == []
 
 
 def test_nested_non_oracle_arrays_are_not_treated_as_expected_findings():

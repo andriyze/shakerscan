@@ -1111,6 +1111,7 @@ def _jsonish_payload_candidates(response_text: str) -> list[dict[str, Any] | lis
 
     try:
         add_candidate(json.loads(stripped))
+        return candidates
     except json.JSONDecodeError:
         pass
 
@@ -1123,6 +1124,20 @@ def _jsonish_payload_candidates(response_text: str) -> list[dict[str, Any] | lis
             add_candidate(parsed, allow_list=False)
         except Exception:  # noqa: BLE001
             continue
+    return candidates
+
+
+def _transcript_oracle_payload_candidates(transcript: dict[str, Any]) -> list[dict[str, Any] | list[Any]]:
+    candidates: list[dict[str, Any] | list[Any]] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, (dict, list)):
+            candidates.append(value)
+
+    add(transcript.get("oracle_metadata"))
+    response_metadata = transcript.get("response_metadata")
+    if isinstance(response_metadata, dict):
+        add(response_metadata.get("oracle_metadata"))
     return candidates
 
 
@@ -2352,7 +2367,11 @@ def _classify_response(
     lowered = response_text.lower()
     probe_id = str(probe.get("id") or "")
     structured_expected: list[str] = []
-    for payload in _jsonish_payload_candidates(response_text):
+    payload_candidates = [
+        *_jsonish_payload_candidates(response_text),
+        *_transcript_oracle_payload_candidates(transcript),
+    ]
+    for payload in payload_candidates:
         structured_expected.extend(_extract_expected_findings_from_payload(payload))
     for expected_finding in list(dict.fromkeys(structured_expected)):
         oracle_finding = _build_oracle_finding(

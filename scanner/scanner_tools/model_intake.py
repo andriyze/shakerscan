@@ -113,6 +113,11 @@ def _intake_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
             "decision": "block",
             "decision_reason": "One or more critical/high model-intake findings require blocking deployment.",
         }
+    if not (severities - {"", "info", "low"}):
+        return {
+            "decision": "allow",
+            "decision_reason": "Only advisory low/info model-intake findings were detected.",
+        }
     return {
         "decision": "review",
         "decision_reason": "Model-intake findings require review before deployment approval.",

@@ -3,6 +3,7 @@ from .rest_json import (
     SseConversationTarget,
     build_headers,
     build_url,
+    extract_calibration_metadata,
     extract_response_text,
     replace_placeholders,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "SseConversationTarget",
     "build_headers",
     "build_url",
+    "extract_calibration_metadata",
     "extract_response_text",
     "replace_placeholders",
 ]

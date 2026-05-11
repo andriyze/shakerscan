@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+try:
+    from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+except ImportError:  # pragma: no cover - supports package-style local imports
+    from api.ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -117,11 +120,6 @@ SECURITY_CONTEXT_KEYS = (
     "performed",
     "policy",
     "warning",
-    "oracle",
-    "expected_shakerscan_findings",
-    "expected_findings",
-    "safe_fixture",
-    "scenario_id",
     "deleted_at",
     "hidden_instructions",
     "oauth_scopes",
@@ -149,6 +147,14 @@ SECURITY_CONTEXT_KEYS = (
     "runner_host",
     "auth_required",
     "rate_limit",
+)
+
+CALIBRATION_CONTEXT_KEYS = (
+    "oracle",
+    "expected_shakerscan_findings",
+    "expected_findings",
+    "safe_fixture",
+    "scenario_id",
 )
 
 
@@ -180,6 +186,33 @@ def _extract_security_context(payload: Any, response_path: str | None, response_
         return response_text
 
     return response_text + "\n\n" + "\n".join(supplements)
+
+
+def _extract_calibration_metadata(payload: Any, response_path: str | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    metadata: dict[str, Any] = {}
+    context_sources: list[dict[str, Any]] = [payload]
+    extracted_payload = _extract_path_value(payload, response_path)
+    if isinstance(extracted_payload, dict) and extracted_payload is not payload:
+        context_sources.append(extracted_payload)
+
+    for context_payload in context_sources:
+        for key in CALIBRATION_CONTEXT_KEYS:
+            if key in context_payload and key not in metadata:
+                metadata[key] = context_payload[key]
+    return metadata
+
+
+def extract_calibration_metadata(raw_text: str, content_type: str, response_path: str | None) -> dict[str, Any]:
+    if "json" not in content_type.lower():
+        return {}
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return {}
+    return _extract_calibration_metadata(payload, response_path)
 
 
 def extract_response_text(raw_text: str, content_type: str, response_path: str | None) -> str:
@@ -383,6 +416,9 @@ class ConversationExchange:
         }
         if self.response_metadata:
             transcript["response_metadata"] = self.response_metadata
+            oracle_metadata = self.response_metadata.get("oracle_metadata")
+            if isinstance(oracle_metadata, dict) and oracle_metadata:
+                transcript["oracle_metadata"] = oracle_metadata
         return transcript
 
 
@@ -935,6 +971,9 @@ class RestJsonConversationTarget:
                     "streaming_mode": self.streaming_mode,
                     "content_type": content_type,
                 }
+                oracle_metadata = extract_calibration_metadata(raw_text, content_type, self.response_path)
+                if oracle_metadata:
+                    response_metadata["oracle_metadata"] = oracle_metadata
                 if stream_event_count:
                     response_metadata["stream_event_count"] = stream_event_count
                 return ConversationExchange(

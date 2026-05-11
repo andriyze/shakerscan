@@ -61,6 +61,25 @@ def request_template_with_prompt(template: Any, surface: str) -> dict[str, Any]:
     return updated
 
 
+def queue_error_item(
+    *,
+    kind: str,
+    scenario_id: str,
+    safe: bool,
+    expected: list[str],
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "scenario_id": scenario_id,
+        "safe": safe,
+        "expected": expected,
+        "scan_id": None,
+        "ui_url": None,
+        "queue_error": str(error),
+    }
+
+
 def queue_ai_gate(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
     registry = request_json(f"{args.honey_local}/api/ai-gate/scenarios")
     surface_config = {
@@ -73,54 +92,65 @@ def queue_ai_gate(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]
         scenario_id = scenario["id"]
         if args.scenario and args.scenario != scenario_id:
             continue
-        surface = scenario.get("surface") or "rag"
-        target_type, response_path, probe_pack = surface_config.get(surface, surface_config["rag"])
-        metadata = copy.deepcopy(scenario.get("metadata_json") or {})
-        metadata.update({
-            "calibration_run": run_id,
-            "honey_scenario_id": scenario_id,
-            "expected_shakerscan_findings": scenario.get("expected_shakerscan_findings", []),
-            "safe_fixture": scenario.get("safe_fixture") is True,
-        })
-        target_response = request_json(
-            f"{args.api}/ai/targets",
-            method="POST",
-            payload={
-                "name": f"Local Honey calibration {scenario_id} {run_id}",
-                "target_type": target_type,
-                "endpoint_url": docker_url(scenario["target_url"], args.honey_docker, run_id, scenario_id),
-                "method": scenario.get("method") or "POST",
-                "headers_template": {"Content-Type": "application/json", "Accept": "application/json"},
-                "request_template": request_template_with_prompt(scenario.get("target_template"), surface),
-                "response_path": response_path,
-                "streaming_mode": "json",
-                "rate_limit_rps": 10,
-                "request_budget": args.ai_request_budget,
-                "token_budget": 4000,
-                "production_mode": False,
-                "metadata_json": metadata,
-            },
-        )
-        target = target_response["target"]
-        scan = request_json(
-            f"{args.api}/ai/targets/{target['id']}/scan",
-            method="POST",
-            payload={
-                "probe_pack": probe_pack,
-                "scan_profile": args.ai_profile,
-                "environment": "development",
-                "ai_judge_enabled": False,
-                "semantic_judge_enabled": False,
-            },
-        )
-        queued.append({
-            "kind": "ai_gate",
-            "scenario_id": scenario_id,
-            "safe": scenario.get("safe_fixture") is True,
-            "expected": scenario.get("expected_shakerscan_findings", []),
-            "scan_id": scan["scan_id"],
-            "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
-        })
+        expected = scenario.get("expected_shakerscan_findings", [])
+        safe = scenario.get("safe_fixture") is True
+        try:
+            surface = scenario.get("surface") or "rag"
+            target_type, response_path, probe_pack = surface_config.get(surface, surface_config["rag"])
+            metadata = copy.deepcopy(scenario.get("metadata_json") or {})
+            metadata.update({
+                "calibration_run": run_id,
+                "honey_scenario_id": scenario_id,
+                "expected_shakerscan_findings": expected,
+                "safe_fixture": safe,
+            })
+            target_response = request_json(
+                f"{args.api}/ai/targets",
+                method="POST",
+                payload={
+                    "name": f"Local Honey calibration {scenario_id} {run_id}",
+                    "target_type": target_type,
+                    "endpoint_url": docker_url(scenario["target_url"], args.honey_docker, run_id, scenario_id),
+                    "method": scenario.get("method") or "POST",
+                    "headers_template": {"Content-Type": "application/json", "Accept": "application/json"},
+                    "request_template": request_template_with_prompt(scenario.get("target_template"), surface),
+                    "response_path": response_path,
+                    "streaming_mode": "json",
+                    "rate_limit_rps": 10,
+                    "request_budget": args.ai_request_budget,
+                    "token_budget": 4000,
+                    "production_mode": False,
+                    "metadata_json": metadata,
+                },
+            )
+            target = target_response["target"]
+            scan = request_json(
+                f"{args.api}/ai/targets/{target['id']}/scan",
+                method="POST",
+                payload={
+                    "probe_pack": probe_pack,
+                    "scan_profile": args.ai_profile,
+                    "environment": "development",
+                    "ai_judge_enabled": False,
+                    "semantic_judge_enabled": False,
+                },
+            )
+            queued.append({
+                "kind": "ai_gate",
+                "scenario_id": scenario_id,
+                "safe": safe,
+                "expected": expected,
+                "scan_id": scan["scan_id"],
+                "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
+            })
+        except Exception as exc:  # noqa: BLE001
+            queued.append(queue_error_item(
+                kind="ai_gate",
+                scenario_id=scenario_id,
+                safe=safe,
+                expected=expected,
+                error=exc,
+            ))
     return queued
 
 
@@ -131,37 +161,48 @@ def queue_model_intake(args: argparse.Namespace, run_id: str) -> list[dict[str, 
         scenario_id = scenario["id"]
         if args.scenario and args.scenario != scenario_id:
             continue
-        artifact_url = scenario["artifact_url"]
-        metadata_url = scenario.get("metadata_url")
-        if artifact_url.startswith("https://honey.shakerscan.com"):
-            artifact_url = docker_url(artifact_url, args.honey_docker, run_id, scenario_id)
-        if isinstance(metadata_url, str) and metadata_url.startswith("https://honey.shakerscan.com"):
-            metadata_url = docker_url(metadata_url, args.honey_docker, run_id, scenario_id)
-        scan = request_json(
-            f"{args.api}/model-intake/scan",
-            method="POST",
-            payload={
-                "artifact_url": artifact_url,
-                "metadata_url": metadata_url,
-                "expected_sha256": scenario.get("expected_sha256"),
-                "max_download_bytes": 10_000_000,
-                "timeout_seconds": 20,
-            },
-        )
-        queued.append({
-            "kind": "model_intake",
-            "scenario_id": scenario_id,
-            "safe": scenario.get("should_pass") is True,
-            "expected": scenario.get("expected_shakerscan_findings", []),
-            "scan_id": scan["scan_id"],
-            "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
-        })
+        expected = scenario.get("expected_shakerscan_findings", [])
+        safe = scenario.get("should_pass") is True
+        try:
+            artifact_url = scenario["artifact_url"]
+            metadata_url = scenario.get("metadata_url")
+            if artifact_url.startswith("https://honey.shakerscan.com"):
+                artifact_url = docker_url(artifact_url, args.honey_docker, run_id, scenario_id)
+            if isinstance(metadata_url, str) and metadata_url.startswith("https://honey.shakerscan.com"):
+                metadata_url = docker_url(metadata_url, args.honey_docker, run_id, scenario_id)
+            scan = request_json(
+                f"{args.api}/model-intake/scan",
+                method="POST",
+                payload={
+                    "artifact_url": artifact_url,
+                    "metadata_url": metadata_url,
+                    "expected_sha256": scenario.get("expected_sha256"),
+                    "max_download_bytes": 10_000_000,
+                    "timeout_seconds": 20,
+                },
+            )
+            queued.append({
+                "kind": "model_intake",
+                "scenario_id": scenario_id,
+                "safe": safe,
+                "expected": expected,
+                "scan_id": scan["scan_id"],
+                "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
+            })
+        except Exception as exc:  # noqa: BLE001
+            queued.append(queue_error_item(
+                kind="model_intake",
+                scenario_id=scenario_id,
+                safe=safe,
+                expected=expected,
+                error=exc,
+            ))
     return queued
 
 
 def wait_for_scans(args: argparse.Namespace, queued: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deadline = time.time() + args.timeout
-    pending = {item["scan_id"] for item in queued}
+    pending = {item["scan_id"] for item in queued if item.get("scan_id")}
     details: dict[str, dict[str, Any]] = {}
     while pending and time.time() < deadline:
         for scan_id in list(pending):
@@ -200,6 +241,8 @@ def validate(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[di
         expected = set(item.get("expected") or [])
         detected = oracle_expected(result) if item["kind"] == "ai_gate" else raw_ids
         errors = []
+        if item.get("queue_error"):
+            errors.append(f"queue error: {item['queue_error']}")
         if detail.get("status") != "completed":
             errors.append(f"scan status is {detail.get('status')}")
         if item.get("safe") and raw_ids:

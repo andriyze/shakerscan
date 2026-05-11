@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import zipfile
 
-from scanner.scanner_tools.model_intake import run_model_intake_scan
+from scanner.scanner_tools.model_intake import _intake_decision, run_model_intake_scan
 
 
 def test_model_intake_detects_pickle_and_missing_controls(tmp_path):
@@ -61,6 +61,11 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
     assert result["result"]["grade"] == "A"
     assert result["result"]["decision"] == "allow"
+
+
+def test_model_intake_allows_low_and_info_advisories():
+    assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
+    assert _intake_decision([{"severity": "medium"}])["decision"] == "review"
 
 
 def test_model_intake_uses_artifact_url_extension_when_display_name_has_dots(tmp_path):
