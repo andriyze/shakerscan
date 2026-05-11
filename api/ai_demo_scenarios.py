@@ -9,7 +9,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from ai_control_requirements import AI_CONTROL_REQUIREMENTS
+try:
+    from ai_control_requirements import AI_CONTROL_REQUIREMENTS
+except ImportError:  # pragma: no cover - supports package-style local imports
+    from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 
 HONEY_BASE_URL = "https://honey.shakerscan.com"
@@ -435,9 +438,111 @@ AI_TEST_SCENARIOS: list[dict[str, Any]] = [
 ]
 
 
-def get_ai_test_scenarios() -> dict[str, Any]:
+def _generic_ai_gate_target_templates() -> list[dict[str, Any]]:
+    rag_metadata = deepcopy(RAG_METADATA)
+    rag_metadata["threat_model"] = "rag-threat-model-v1"
+
+    agent_metadata = deepcopy(AGENT_METADATA)
+    agent_metadata["threat_model"] = "agent-tool-abuse-threat-model-v1"
+
+    return [
+        {
+            "key": "rag",
+            "name": "RAG answer API",
+            "target_type": "rag",
+            "endpoint_url": "https://your-rag.example.com/api/rag/answer",
+            "method": "POST",
+            "headers_template": {"Content-Type": "application/json"},
+            "request_template": {
+                "message": "{{prompt}}",
+                "session_id": "{{session_id}}",
+                "tenant_id": "tenant-a",
+                "user_id": "user-a",
+            },
+            "response_path": "$.answer",
+            "streaming_mode": "json",
+            "rate_limit_rps": 2,
+            "request_budget": 12,
+            "token_budget": 8000,
+            "metadata_json": deepcopy(rag_metadata),
+            "recommended_scan": {
+                "probe_pack": "shaker-rag-lite",
+                "scan_profile": "standard",
+                "environment": "staging",
+            },
+        },
+        {
+            "key": "agent",
+            "name": "Agent trace API",
+            "target_type": "agent_trace",
+            "endpoint_url": "https://your-agent.example.com/api/agent/trace",
+            "method": "POST",
+            "headers_template": {"Content-Type": "application/json"},
+            "request_template": {
+                "message": "{{prompt}}",
+                "session_id": "{{session_id}}",
+                "tenant_id": "tenant-a",
+                "user_id": "user-a",
+            },
+            "response_path": "$",
+            "streaming_mode": "json",
+            "rate_limit_rps": 2,
+            "request_budget": 12,
+            "token_budget": 8000,
+            "metadata_json": deepcopy(agent_metadata),
+            "recommended_scan": {
+                "probe_pack": "shaker-agent-abuse",
+                "scan_profile": "standard",
+                "environment": "staging",
+            },
+        },
+        {
+            "key": "mcp",
+            "name": "MCP trace API",
+            "target_type": "mcp_trace",
+            "endpoint_url": "https://your-mcp.example.com/api/mcp/trace",
+            "method": "POST",
+            "headers_template": {"Content-Type": "application/json", "Accept": "application/json"},
+            "request_template": {
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "params": {"prompt": "{{prompt}}", "session_id": "{{session_id}}"},
+                "id": "{{session_id}}",
+            },
+            "response_path": "$.result",
+            "streaming_mode": "json",
+            "rate_limit_rps": 1,
+            "request_budget": 8,
+            "token_budget": 6000,
+            "metadata_json": deepcopy(agent_metadata),
+            "recommended_scan": {
+                "probe_pack": "shaker-mcp-security",
+                "scan_profile": "smoke",
+                "environment": "staging",
+            },
+        },
+    ]
+
+
+def _public_scenarios() -> list[dict[str, Any]]:
+    scenarios = deepcopy(AI_TEST_SCENARIOS)
+    for scenario in scenarios:
+        scenario.pop("honey_contract", None)
+        if scenario.get("id") == "secure-rag-agent":
+            scenario["target_templates"] = _generic_ai_gate_target_templates()
+            scenario["acceptance_signals"] = [
+                "AI Gate transcript includes adversarial prompts, responses, detector hits, and judge output.",
+                "Control evidence shows threat model, ACLs, tool scopes, logging, cloud design, and governance mapping.",
+                "Unsafe behaviors create evidence-first findings; scoped answers or refusals avoid false positives.",
+            ]
+        elif scenario.get("id") == "model-intake-pipeline":
+            scenario["request_presets"] = []
+    return scenarios
+
+
+def get_ai_test_scenarios(*, include_demo: bool = False) -> dict[str, Any]:
     """Return a defensive copy of the AI test scenario catalog."""
     return {
         "schema_version": "2026-05-11.ai-test-scenarios.v1",
-        "scenarios": deepcopy(AI_TEST_SCENARIOS),
+        "scenarios": deepcopy(AI_TEST_SCENARIOS) if include_demo else _public_scenarios(),
     }

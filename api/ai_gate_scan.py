@@ -36,7 +36,11 @@ from ai_gate.targets.rest_json import (
     replace_placeholders,
 )
 from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
-from ai_control_requirements import AI_CONTROL_REQUIREMENTS
+
+try:
+    from ai_control_requirements import AI_CONTROL_REQUIREMENTS
+except ImportError:  # pragma: no cover - supports package-style local imports
+    from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -1139,6 +1143,26 @@ def _transcript_oracle_payload_candidates(transcript: dict[str, Any]) -> list[di
     if isinstance(response_metadata, dict):
         add(response_metadata.get("oracle_metadata"))
     return candidates
+
+
+def _structured_oracle_enabled(transcript: dict[str, Any]) -> bool:
+    if not isinstance(transcript, dict):
+        return False
+    if transcript.get("calibration_mode") is True:
+        return True
+
+    response_metadata = transcript.get("response_metadata")
+    if isinstance(response_metadata, dict) and response_metadata.get("calibration_mode") is True:
+        return True
+
+    target_metadata = transcript.get("target_metadata")
+    if isinstance(target_metadata, dict):
+        return (
+            target_metadata.get("shakerscan_demo") is True
+            or target_metadata.get("oracle_calibration_enabled") is True
+            or bool(target_metadata.get("calibration_run"))
+        )
+    return False
 
 
 def _to_jsonish_payload(response_text: str) -> dict[str, Any] | list[Any] | None:
@@ -2367,21 +2391,22 @@ def _classify_response(
     lowered = response_text.lower()
     probe_id = str(probe.get("id") or "")
     structured_expected: list[str] = []
-    payload_candidates = [
-        *_jsonish_payload_candidates(response_text),
-        *_transcript_oracle_payload_candidates(transcript),
-    ]
-    for payload in payload_candidates:
-        structured_expected.extend(_extract_expected_findings_from_payload(payload))
-    for expected_finding in list(dict.fromkeys(structured_expected)):
-        oracle_finding = _build_oracle_finding(
-            probe=probe,
-            response_text=response_text,
-            transcript=transcript,
-            finding_id=expected_finding,
-        )
-        if oracle_finding is not None:
-            findings.append(oracle_finding)
+    if _structured_oracle_enabled(transcript):
+        payload_candidates = [
+            *_jsonish_payload_candidates(response_text),
+            *_transcript_oracle_payload_candidates(transcript),
+        ]
+        for payload in payload_candidates:
+            structured_expected.extend(_extract_expected_findings_from_payload(payload))
+        for expected_finding in list(dict.fromkeys(structured_expected)):
+            oracle_finding = _build_oracle_finding(
+                probe=probe,
+                response_text=response_text,
+                transcript=transcript,
+                finding_id=expected_finding,
+            )
+            if oracle_finding is not None:
+                findings.append(oracle_finding)
 
     secure_rag_scoped = _is_secure_rag_scoped_response(response_text)
     rag_source_excerpt = _looks_like_rag_source_excerpt(lowered)

@@ -256,7 +256,7 @@ export default function ModelIntakeSettingsPage() {
               value={artifactUrl}
               onChange={(e) => setArtifactUrl(e.target.value)}
               className={inputClass}
-              placeholder="https://honey.shakerscan.com/model-intake/artifacts/safe/model.safetensors"
+              placeholder="https://models.example.com/release/model.safetensors"
               required
             />
           </label>

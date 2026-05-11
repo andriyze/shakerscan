@@ -515,8 +515,11 @@ export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promi
   return res.json()
 }
 
-export async function getAITestScenarios(): Promise<AITestScenariosResponse> {
-  const res = await fetch(`${API_URL}/ai/test-scenarios`)
+export async function getAITestScenarios(params?: { includeDemo?: boolean }): Promise<AITestScenariosResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.includeDemo) searchParams.set('include_demo', 'true')
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/ai/test-scenarios${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI test scenarios'))
   return res.json()
 }

@@ -247,16 +247,18 @@ export default function AIGateSettingsPage() {
   }, [showDemoTargets])
 
   useEffect(() => {
-    getAISettings()
-      .then(setAISettings)
-      .catch(() => setAISettings(null))
-    getAITestScenarios()
-      .then((payload) => {
+    async function loadSettingsAndScenario() {
+      try {
+        const settings = await getAISettings()
+        setAISettings(settings)
+        const payload = await getAITestScenarios({ includeDemo: Boolean(settings.demo_mode_enabled) })
         setScenario(payload.scenarios.find((item) => item.id === 'secure-rag-agent') || null)
-      })
-      .catch(() => {
+      } catch {
+        setAISettings(null)
         setScenario(null)
-      })
+      }
+    }
+    loadSettingsAndScenario()
   }, [])
 
   function applyTargetType(nextType: AITargetType) {
@@ -720,15 +722,17 @@ export default function AIGateSettingsPage() {
               <p className="mt-1 text-xs text-gray-500">Saved AI surfaces ready for probe packs and deployment checks.</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <label className="inline-flex items-center gap-2 text-xs text-gray-400">
-                <input
-                  type="checkbox"
-                  checked={showDemoTargets}
-                  onChange={(event) => setShowDemoTargets(event.target.checked)}
-                  className="h-4 w-4 rounded border-gray-700 bg-gray-800"
-                />
-                Show demo targets
-              </label>
+              {aiSettings?.demo_mode_enabled && (
+                <label className="inline-flex items-center gap-2 text-xs text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={showDemoTargets}
+                    onChange={(event) => setShowDemoTargets(event.target.checked)}
+                    className="h-4 w-4 rounded border-gray-700 bg-gray-800"
+                  />
+                  Show calibration targets
+                </label>
+              )}
               <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
                 <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 Refresh
@@ -754,7 +758,15 @@ export default function AIGateSettingsPage() {
               const targetControlSummary = scenario
                 ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
                 : null
-              const isDemoTarget = Boolean(target.metadata_json?.shakerscan_demo) || target.name.startsWith('Honey demo') || target.name.startsWith('Local Honey calibration')
+              const targetUrl = target.endpoint_url.toLowerCase()
+              const targetName = target.name.toLowerCase()
+              const isDemoTarget = Boolean(target.metadata_json?.shakerscan_demo)
+                || Boolean(target.metadata_json?.calibration_run)
+                || targetName.startsWith('honey ')
+                || targetName.startsWith('local honey calibration')
+                || targetName.includes('calibration')
+                || targetUrl.includes('honey.shakerscan.com')
+                || targetUrl.includes('calibration_run=')
               return (
                 <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">

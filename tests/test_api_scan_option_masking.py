@@ -113,6 +113,11 @@ def test_ai_demo_target_detection_handles_new_and_legacy_targets():
         "endpoint_url": "http://host.docker.internal:18080/mcp/oauth/token",
         "metadata_json": {},
     })
+    assert api_module._is_ai_demo_target_row({
+        "name": "Honey MCP trace",
+        "endpoint_url": "https://honey.shakerscan.com/api/v1/mcp/trace",
+        "metadata_json": {},
+    })
     assert not api_module._is_ai_demo_target_row({
         "name": "Support bot staging",
         "endpoint_url": "https://example.com/api/chat",

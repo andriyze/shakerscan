@@ -158,6 +158,14 @@ CALIBRATION_CONTEXT_KEYS = (
 )
 
 
+def _metadata_allows_calibration(metadata: dict[str, Any]) -> bool:
+    return (
+        metadata.get("shakerscan_demo") is True
+        or metadata.get("oracle_calibration_enabled") is True
+        or bool(metadata.get("calibration_run"))
+    )
+
+
 def _extract_security_context(payload: Any, response_path: str | None, response_text: str) -> str:
     if not response_path or not isinstance(payload, dict) or not response_text.strip():
         return response_text
@@ -416,6 +424,8 @@ class ConversationExchange:
         }
         if self.response_metadata:
             transcript["response_metadata"] = self.response_metadata
+            if self.response_metadata.get("calibration_mode") is True:
+                transcript["calibration_mode"] = True
             oracle_metadata = self.response_metadata.get("oracle_metadata")
             if isinstance(oracle_metadata, dict) and oracle_metadata:
                 transcript["oracle_metadata"] = oracle_metadata
@@ -450,6 +460,7 @@ class RestJsonConversationTarget:
         if self.streaming_mode == "sse":
             self.headers.setdefault("Accept", "text/event-stream")
         metadata = as_dict(target.get("metadata_json"))
+        self.calibration_mode = _metadata_allows_calibration(metadata)
         self.setup_requests = self._read_lifecycle_requests(
             metadata,
             "setup_requests",
@@ -971,8 +982,14 @@ class RestJsonConversationTarget:
                     "streaming_mode": self.streaming_mode,
                     "content_type": content_type,
                 }
-                oracle_metadata = extract_calibration_metadata(raw_text, content_type, self.response_path)
-                if oracle_metadata:
+                if self.calibration_mode:
+                    response_metadata["calibration_mode"] = True
+                oracle_metadata = (
+                    extract_calibration_metadata(raw_text, content_type, self.response_path)
+                    if self.calibration_mode
+                    else {}
+                )
+                if oracle_metadata and self.calibration_mode:
                     response_metadata["oracle_metadata"] = oracle_metadata
                 if stream_event_count:
                     response_metadata["stream_event_count"] = stream_event_count

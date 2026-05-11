@@ -139,6 +139,7 @@ def test_rest_response_extraction_preserves_honey_oracle_context():
         transcript={
             "probe_id": "rag.hidden-instruction",
             "response_excerpt": response_text,
+            "calibration_mode": True,
             "oracle_metadata": oracle_metadata,
         },
     )
@@ -170,6 +171,7 @@ def test_rest_response_extraction_preserves_nested_mcp_oracle_context():
         transcript={
             "probe_id": "mcp.scope-expansion",
             "response_excerpt": response_text,
+            "calibration_mode": True,
             "oracle_metadata": oracle_metadata,
         },
     )
@@ -196,6 +198,7 @@ def test_oracle_metadata_does_not_feed_marker_classifier():
         transcript={
             "probe_id": "mcp.oauth-audience-confusion",
             "response_excerpt": response_text,
+            "calibration_mode": True,
             "oracle_metadata": oracle_metadata,
         },
     )
@@ -247,7 +250,17 @@ def test_unrecognized_structured_oracle_ids_are_ignored():
     findings = _classify_response(
         probe={"id": "agent.unknown-oracle", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text=json.dumps({"expected_shakerscan_findings": ["ai_gate:agent_new_unmapped_category"]}),
-        transcript={"probe_id": "agent.unknown-oracle", "response_excerpt": "unknown oracle"},
+        transcript={"probe_id": "agent.unknown-oracle", "response_excerpt": "unknown oracle", "calibration_mode": True},
+    )
+
+    assert findings == []
+
+
+def test_structured_oracle_is_ignored_without_calibration_mode():
+    findings = _classify_response(
+        probe={"id": "agent.approval-bypass", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text=json.dumps({"expected_shakerscan_findings": ["ai_gate:agent_approval_bypass"]}),
+        transcript={"probe_id": "agent.approval-bypass", "response_excerpt": "normal target response"},
     )
 
     assert findings == []
@@ -267,7 +280,7 @@ def test_oracle_expected_shakerscan_findings_are_upgraded_to_ai_gate_findings():
     findings = _classify_response(
         probe={"id": "agent.approval-bypass", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text='{"expected_shakerscan_findings":["ai_gate:agent_approval_bypass"]}',
-        transcript={"probe_id": "agent.approval-bypass", "response_excerpt": "ok"},
+        transcript={"probe_id": "agent.approval-bypass", "response_excerpt": "ok", "calibration_mode": True},
     )
 
     assert any(
@@ -281,7 +294,7 @@ def test_mcp_audience_confusion_oracle_marks_expected_structured_payload():
     findings = _classify_response(
         probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text='{"expected_findings":["mcp.oauth-audience-confusion"],"result":"ok"}',
-        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "ok"},
+        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "ok", "calibration_mode": True},
     )
 
     assert any(
@@ -313,7 +326,7 @@ def test_honey_ai_gate_expected_findings_are_all_mapped():
     findings = _classify_response(
         probe={"id": "ai-gate-honey-calibration", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text=json.dumps({"expected_shakerscan_findings": honey_expected_findings}),
-        transcript={"probe_id": "ai-gate-honey-calibration", "response_excerpt": "ok"},
+        transcript={"probe_id": "ai-gate-honey-calibration", "response_excerpt": "ok", "calibration_mode": True},
     )
 
     mapped = {f.get("evidence", {}).get("expected_finding") for f in findings}
@@ -334,7 +347,7 @@ def test_structured_expected_findings_can_be_nested_under_result():
     findings = _classify_response(
         probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
         response_text=json.dumps(payload),
-        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "nested"},
+        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "nested", "calibration_mode": True},
     )
 
     assert any(

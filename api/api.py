@@ -1693,7 +1693,9 @@ def _ai_demo_target_sql_predicate() -> str:
         COALESCE(metadata_json->>'shakerscan_demo', '') = 'true'
         OR COALESCE(metadata_json->>'calibration_run', '') <> ''
         OR name LIKE 'Local Honey calibration%'
+        OR LOWER(name) LIKE 'honey %'
         OR LOWER(name) LIKE '%calibration%'
+        OR LOWER(endpoint_url) LIKE '%honey.shakerscan.com%'
         OR endpoint_url LIKE '%calibration_run=%'
     )"""
 
@@ -1704,7 +1706,9 @@ def _is_ai_demo_target_row(row: dict[str, Any]) -> bool:
         metadata.get("shakerscan_demo") is True
         or bool(metadata.get("calibration_run"))
         or str(row.get("name") or "").startswith("Local Honey calibration")
+        or str(row.get("name") or "").lower().startswith("honey ")
         or "calibration" in str(row.get("name") or "").lower()
+        or "honey.shakerscan.com" in str(row.get("endpoint_url") or "").lower()
         or "calibration_run=" in str(row.get("endpoint_url") or "")
     )
 
@@ -2614,9 +2618,10 @@ async def root():
 
 
 @app.get("/ai/test-scenarios")
-async def list_ai_test_scenarios():
+async def list_ai_test_scenarios(include_demo: bool = Query(False)):
     """Return scenario templates for AI Gate and model-intake workflows."""
-    return get_ai_test_scenarios()
+    settings = _load_effective_ai_settings()
+    return get_ai_test_scenarios(include_demo=bool(include_demo and settings.get("demo_mode_enabled")))
 
 
 @app.post("/ai/demo/run")

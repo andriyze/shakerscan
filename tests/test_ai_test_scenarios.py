@@ -31,6 +31,18 @@ def test_ai_test_scenario_catalog_contains_required_workflows():
     assert "model-intake-pipeline" in scenario_ids
 
 
+def test_public_ai_test_scenarios_do_not_expose_honey_fixtures():
+    payload = get_ai_test_scenarios()
+    serialized = repr(payload)
+
+    assert "honey.shakerscan.com" not in serialized
+    assert "honey_contract" not in serialized
+    assert "Honey" not in serialized
+
+    model_scenario = next(item for item in payload["scenarios"] if item["id"] == "model-intake-pipeline")
+    assert model_scenario["request_presets"] == []
+
+
 def test_secure_rag_agent_templates_cover_control_metadata():
     payload = get_ai_test_scenarios()
     scenario = next(item for item in payload["scenarios"] if item["id"] == "secure-rag-agent")
@@ -65,7 +77,7 @@ def test_secure_rag_agent_catalog_uses_engine_control_requirements():
 
 
 def test_secure_rag_agent_contract_lists_canonical_honey_routes():
-    payload = get_ai_test_scenarios()
+    payload = get_ai_test_scenarios(include_demo=True)
     scenario = next(item for item in payload["scenarios"] if item["id"] == "secure-rag-agent")
     routes = set(scenario["honey_contract"]["required_routes"])
     template_urls = {template["endpoint_url"] for template in scenario["target_templates"]}
@@ -82,7 +94,7 @@ def test_secure_rag_agent_contract_lists_canonical_honey_routes():
 
 
 def test_model_intake_presets_are_honey_absolute_urls():
-    payload = get_ai_test_scenarios()
+    payload = get_ai_test_scenarios(include_demo=True)
     scenario = next(item for item in payload["scenarios"] if item["id"] == "model-intake-pipeline")
 
     assert scenario["request_presets"]
@@ -93,7 +105,7 @@ def test_model_intake_presets_are_honey_absolute_urls():
 
 
 def test_model_intake_contract_lists_lifecycle_routes():
-    payload = get_ai_test_scenarios()
+    payload = get_ai_test_scenarios(include_demo=True)
     scenario = next(item for item in payload["scenarios"] if item["id"] == "model-intake-pipeline")
     routes = set(scenario["honey_contract"]["required_routes"])
 
