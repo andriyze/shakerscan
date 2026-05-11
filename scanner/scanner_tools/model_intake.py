@@ -242,6 +242,8 @@ def _inspect_zip(data: bytes) -> dict[str, Any]:
 
 
 def _boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "approved"}
 
 

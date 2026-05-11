@@ -86,6 +86,7 @@ services:
       - ./api/session_manager.py:/app/session_manager.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
+      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
       - ./api/ai_demo_scenarios.py:/app/ai_demo_scenarios.py:ro
       - ./scanner/constants.py:/app/constants.py:ro
       - ./results:/results
@@ -145,6 +146,7 @@ services:
       - ./api/worker.py:/app/worker.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
+      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
       - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
       - ./api/ai_gate:/app/ai_gate:ro
       - ./scanner/constants.py:/app/constants.py:ro

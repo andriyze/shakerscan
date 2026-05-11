@@ -9,11 +9,13 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from ai_control_requirements import AI_CONTROL_REQUIREMENTS
+
 
 HONEY_BASE_URL = "https://honey.shakerscan.com"
 
 
-AI_GATE_CONTROLS: list[dict[str, Any]] = [
+DEMO_ONLY_AI_GATE_CONTROLS: list[dict[str, Any]] = [
     {
         "id": "threat_model",
         "label": "Threat model",
@@ -26,161 +28,21 @@ AI_GATE_CONTROLS: list[dict[str, Any]] = [
         "applies_to": "all",
         "keys": ["cloud_security_design", "network_security_design", "deployment_architecture"],
     },
-    {
-        "id": "ai.asset_owner",
-        "label": "Asset owner",
-        "applies_to": "all",
-        "keys": ["asset_owner", "service_owner", "system_owner"],
-    },
-    {
-        "id": "ai.risk_tier",
-        "label": "Risk tier",
-        "applies_to": "all",
-        "keys": ["risk_tier", "ai_risk_tier"],
-    },
-    {
-        "id": "ai.data_classification",
-        "label": "Data classification",
-        "applies_to": "all",
-        "keys": ["data_classification", "document_classification", "data_classes"],
-    },
-    {
-        "id": "ai.logging_incident_response",
-        "label": "Logging and incident response",
-        "applies_to": "all",
-        "keys": ["logging_policy", "audit_logs", "incident_response_plan", "ai_incident_response"],
-    },
-    {
-        "id": "ai.governance_mapping",
-        "label": "Governance/control mapping",
-        "applies_to": "all",
-        "keys": ["governance_mapping", "control_mapping", "compliance_mapping", "nist_ai_rmf_mapping"],
-    },
-    {
-        "id": "rag.document_classification",
-        "label": "RAG document classification",
-        "applies_to": "rag",
-        "keys": ["document_classification", "document_classification_policy", "classification_labels"],
-    },
-    {
-        "id": "rag.ingestion_controls",
-        "label": "RAG ingestion controls",
-        "applies_to": "rag",
-        "keys": ["ingestion_controls", "source_validation", "ingestion_sanitization", "document_source_allowlist"],
-    },
-    {
-        "id": "rag.retrieval_acl_matrix",
-        "label": "RAG retrieval ACL matrix",
-        "applies_to": "rag",
-        "keys": ["retrieval_acl_matrix", "acl_matrix", "per_user_document_acls"],
-    },
-    {
-        "id": "rag.metadata_filtering",
-        "label": "RAG metadata filtering",
-        "applies_to": "rag",
-        "keys": ["metadata_filtering", "retrieval_metadata_filters", "acl_metadata_filters"],
-    },
-    {
-        "id": "rag.vector_tenant_isolation",
-        "label": "Vector DB tenant isolation",
-        "applies_to": "rag",
-        "keys": ["vector_tenant_isolation", "tenant_isolation", "vector_namespace_isolation"],
-    },
-    {
-        "id": "rag.malicious_document_tests",
-        "label": "Malicious document tests",
-        "applies_to": "rag",
-        "keys": ["malicious_document_tests", "rag_redteam_tests", "corpus_poisoning_tests"],
-    },
-    {
-        "id": "rag.output_citations_retention",
-        "label": "RAG citations and retention policy",
-        "applies_to": "rag",
-        "keys": [
-            "source_citation_policy",
-            "retrieved_content_delimiting",
-            "no_training_on_private_docs",
-            "data_retention_policy",
-        ],
-    },
-    {
-        "id": "agent.tool_inventory",
-        "label": "Agent tool inventory",
-        "applies_to": "agent",
-        "keys": ["tool_inventory", "tools", "mcp_tools"],
-    },
-    {
-        "id": "agent.per_tool_scopes",
-        "label": "Per-tool scopes",
-        "applies_to": "agent",
-        "keys": ["per_tool_scopes", "tool_scopes", "mcp_scopes", "scope_minimization"],
-    },
-    {
-        "id": "agent.delegated_identity",
-        "label": "Delegated identity",
-        "applies_to": "agent",
-        "keys": ["delegated_identity"],
-    },
-    {
-        "id": "agent.token_audience_validation",
-        "label": "Token audience validation",
-        "applies_to": "agent",
-        "keys": ["token_audience_validation", "audience_binding"],
-    },
-    {
-        "id": "agent.no_token_passthrough",
-        "label": "No token passthrough",
-        "applies_to": "agent",
-        "keys": ["no_token_passthrough", "token_exchange_policy"],
-    },
-    {
-        "id": "agent.user_consent",
-        "label": "User consent",
-        "applies_to": "agent",
-        "keys": ["user_consent", "consent_policy"],
-    },
-    {
-        "id": "agent.write_action_approval",
-        "label": "Write/destructive action approval",
-        "applies_to": "agent",
-        "keys": ["write_action_approval", "destructive_action_approval", "human_approval_required"],
-    },
-    {
-        "id": "agent.dry_run_mode",
-        "label": "Dry-run mode",
-        "applies_to": "agent",
-        "keys": ["dry_run_mode", "dry_run_supported"],
-    },
-    {
-        "id": "agent.transaction_limits",
-        "label": "Transaction limits",
-        "applies_to": "agent",
-        "keys": ["transaction_limits", "tool_rate_limits", "spend_limits"],
-    },
-    {
-        "id": "agent.sandboxing",
-        "label": "Sandboxing",
-        "applies_to": "agent",
-        "keys": ["sandboxing", "local_execution_sandbox"],
-    },
-    {
-        "id": "agent.audit_logs",
-        "label": "Audit logs",
-        "applies_to": "agent",
-        "keys": ["audit_logs", "tool_audit_logs"],
-    },
-    {
-        "id": "agent.anomaly_detection",
-        "label": "Anomaly detection",
-        "applies_to": "agent",
-        "keys": ["anomaly_detection", "abuse_detection"],
-    },
-    {
-        "id": "agent.kill_switch",
-        "label": "Kill switch",
-        "applies_to": "agent",
-        "keys": ["kill_switch", "emergency_disable"],
-    },
+]
+
+
+def _catalog_control(control: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": control["id"],
+        "label": control["label"],
+        "applies_to": control.get("applies_to", "all"),
+        "keys": list(control.get("keys") or []),
+    }
+
+
+AI_GATE_CONTROLS: list[dict[str, Any]] = [
+    *DEMO_ONLY_AI_GATE_CONTROLS,
+    *[_catalog_control(control) for control in AI_CONTROL_REQUIREMENTS],
 ]
 
 

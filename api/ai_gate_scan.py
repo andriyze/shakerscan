@@ -36,6 +36,7 @@ from ai_gate.targets.rest_json import (
     replace_placeholders,
 )
 from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
+from ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -939,20 +940,6 @@ STRUCTURED_AI_GATE_FINDING_MAP: dict[str, tuple[str, str, str, str, str]] = {
         "LLM01:2025",
         "The response explicitly reported memory persistence without proper validation.",
     ),
-    "mcp_oauth_audience_confusion": (
-        "mcp_oauth_audience_confusion",
-        "high",
-        "MCP OAuth audience confusion reported by test oracle",
-        "LLM08:2025",
-        "The response explicitly reported incorrect MCP token audience validation.",
-    ),
-    "mcp.oauth-audience-confusion": (
-        "mcp_oauth_audience_confusion",
-        "high",
-        "MCP OAuth audience confusion reported by test oracle",
-        "LLM08:2025",
-        "The response explicitly reported incorrect MCP token audience validation.",
-    ),
     "ai_gate:mcp_oauth_audience_confusion": (
         "mcp_oauth_audience_confusion",
         "high",
@@ -1198,22 +1185,6 @@ def _build_oracle_finding(
         if normalized.startswith("ai_gate:"):
             normalized = normalized.split(":", 1)[1]
             mapping = STRUCTURED_AI_GATE_FINDING_MAP.get(normalized)
-        if mapping is None and normalized.startswith("agent"):
-            mapping = (
-                "ai_trace_approval_bypass",
-                "high",
-                "AI trace approval bypass reported by test oracle",
-                "LLM08:2025",
-                "The response explicitly reported an approval-bypass condition for agent workflows.",
-            )
-        elif mapping is None and normalized.startswith("mcp"):
-            mapping = (
-                "mcp_oauth_audience_confusion",
-                "high",
-                "MCP control issue reported by test oracle",
-                "LLM08:2025",
-                "The response explicitly reported a test-oracle MCP control concern.",
-            )
 
     if mapping is None:
         return None
@@ -1597,185 +1568,6 @@ def _target_requires_agent_controls(target_type: str, probe_pack: str) -> bool:
     return target_type in {"agent_trace", "mcp_trace", "ai_mcp", "widget"} or "agent" in normalized_pack or "mcp" in normalized_pack
 
 
-AI_CONTROL_REQUIREMENTS: tuple[dict[str, Any], ...] = (
-    {
-        "id": "ai.asset_owner",
-        "label": "AI asset owner",
-        "applies_to": "all",
-        "keys": ("asset_owner", "owner", "service_owner"),
-        "frameworks": {"nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.9", "csa_ai": "AIM-01"},
-    },
-    {
-        "id": "ai.risk_tier",
-        "label": "AI risk tier",
-        "applies_to": "all",
-        "keys": ("risk_tier", "ai_risk_tier"),
-        "frameworks": {"nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.8", "csa_ai": "AIM-02"},
-    },
-    {
-        "id": "ai.data_classification",
-        "label": "Data classification",
-        "applies_to": "all",
-        "keys": ("data_classification", "document_classification", "data_classes"),
-        "frameworks": {"nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.12", "csa_ai": "DSI-03"},
-    },
-    {
-        "id": "ai.logging_incident_response",
-        "label": "Logging and incident response",
-        "applies_to": "all",
-        "keys": ("logging_policy", "audit_logs", "incident_response_plan", "ai_incident_response"),
-        "frameworks": {"nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24", "csa_ai": "LOG-01"},
-    },
-    {
-        "id": "ai.governance_mapping",
-        "label": "Governance/control mapping",
-        "applies_to": "all",
-        "keys": ("governance_mapping", "control_mapping", "compliance_mapping", "nist_ai_rmf_mapping"),
-        "frameworks": {"nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.36", "csa_ai": "GRM-01"},
-    },
-    {
-        "id": "rag.document_classification",
-        "label": "RAG document classification",
-        "applies_to": "rag",
-        "keys": ("document_classification", "document_classification_policy", "classification_labels"),
-        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.12"},
-    },
-    {
-        "id": "rag.ingestion_controls",
-        "label": "RAG ingestion controls",
-        "applies_to": "rag",
-        "keys": ("ingestion_controls", "source_validation", "ingestion_sanitization", "document_source_allowlist"),
-        "frameworks": {"owasp_llm_agentic": "LLM01", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.28"},
-    },
-    {
-        "id": "rag.retrieval_acl_matrix",
-        "label": "RAG retrieval ACL matrix",
-        "applies_to": "rag",
-        "keys": ("retrieval_acl_matrix", "acl_matrix", "per_user_document_acls"),
-        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "GOVERN", "iso_27001_2022": "A.5.15"},
-    },
-    {
-        "id": "rag.metadata_filtering",
-        "label": "RAG metadata filtering",
-        "applies_to": "rag",
-        "keys": ("metadata_filtering", "retrieval_metadata_filters", "acl_metadata_filters"),
-        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.3"},
-    },
-    {
-        "id": "rag.vector_tenant_isolation",
-        "label": "Vector DB tenant isolation",
-        "applies_to": "rag",
-        "keys": ("vector_tenant_isolation", "tenant_isolation", "vector_namespace_isolation"),
-        "frameworks": {"owasp_llm_agentic": "LLM02", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.15"},
-    },
-    {
-        "id": "rag.malicious_document_tests",
-        "label": "Malicious document tests",
-        "applies_to": "rag",
-        "keys": ("malicious_document_tests", "rag_redteam_tests", "corpus_poisoning_tests"),
-        "frameworks": {"owasp_llm_agentic": "LLM01", "nist_ai_rmf": "MEASURE", "iso_27001_2022": "A.8.29"},
-    },
-    {
-        "id": "rag.output_citations_retention",
-        "label": "RAG citations and retention policy",
-        "applies_to": "rag",
-        "keys": ("source_citation_policy", "retrieved_content_delimiting", "no_training_on_private_docs", "data_retention_policy"),
-        "frameworks": {"owasp_llm_agentic": "LLM05", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.34"},
-    },
-    {
-        "id": "agent.tool_inventory",
-        "label": "Agent tool inventory",
-        "applies_to": "agent",
-        "keys": ("tool_inventory", "tools", "mcp_tools"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MAP", "iso_27001_2022": "A.5.9"},
-    },
-    {
-        "id": "agent.per_tool_scopes",
-        "label": "Per-tool scopes",
-        "applies_to": "agent",
-        "keys": ("per_tool_scopes", "tool_scopes", "mcp_scopes", "scope_minimization"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.15"},
-    },
-    {
-        "id": "agent.delegated_identity",
-        "label": "Delegated identity",
-        "applies_to": "agent",
-        "keys": ("delegated_identity",),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
-    },
-    {
-        "id": "agent.token_audience_validation",
-        "label": "Token audience validation",
-        "applies_to": "agent",
-        "keys": ("token_audience_validation", "audience_binding"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
-    },
-    {
-        "id": "agent.no_token_passthrough",
-        "label": "No token passthrough",
-        "applies_to": "agent",
-        "keys": ("no_token_passthrough", "token_exchange_policy"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.16"},
-    },
-    {
-        "id": "agent.user_consent",
-        "label": "User consent",
-        "applies_to": "agent",
-        "keys": ("user_consent", "consent_policy"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
-    },
-    {
-        "id": "agent.write_action_approval",
-        "label": "Write/destructive action approval",
-        "applies_to": "agent",
-        "keys": ("write_action_approval", "destructive_action_approval", "human_approval_required"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
-    },
-    {
-        "id": "agent.dry_run_mode",
-        "label": "Dry-run mode",
-        "applies_to": "agent",
-        "keys": ("dry_run_mode", "dry_run_supported"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
-    },
-    {
-        "id": "agent.transaction_limits",
-        "label": "Transaction limits",
-        "applies_to": "agent",
-        "keys": ("transaction_limits", "tool_rate_limits", "spend_limits"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
-    },
-    {
-        "id": "agent.sandboxing",
-        "label": "Sandboxing",
-        "applies_to": "agent",
-        "keys": ("sandboxing", "local_execution_sandbox"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.8.18"},
-    },
-    {
-        "id": "agent.audit_logs",
-        "label": "Audit logs",
-        "applies_to": "agent",
-        "keys": ("audit_logs", "tool_audit_logs"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
-    },
-    {
-        "id": "agent.anomaly_detection",
-        "label": "Anomaly detection",
-        "applies_to": "agent",
-        "keys": ("anomaly_detection", "abuse_detection"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
-    },
-    {
-        "id": "agent.kill_switch",
-        "label": "Kill switch",
-        "applies_to": "agent",
-        "keys": ("kill_switch", "emergency_disable"),
-        "frameworks": {"owasp_llm_agentic": "LLM08", "nist_ai_rmf": "MANAGE", "iso_27001_2022": "A.5.24"},
-    },
-)
-
-
 def _build_ai_control_evidence(
     *,
     target_type: str,
@@ -1845,20 +1637,34 @@ def _control_gap_findings(control_evidence: dict[str, Any], metadata_json: dict[
     missing = control_evidence.get("missing_required_controls") or []
     if not enforce or not missing:
         return []
-    severity = "high" if len(missing) >= 5 or control_evidence.get("risk_tier") == "high" else "medium"
+    risk_tier = str(control_evidence.get("risk_tier") or "").strip().lower()
+    missing_count = len(missing)
+    severity = (
+        "critical"
+        if risk_tier == "high" and missing_count >= 5
+        else "high"
+        if risk_tier == "high" or missing_count >= 5
+        else "medium"
+    )
     probe = {
         "id": "ai-controls.baseline",
         "family": "governance",
         "owasp": "LLM10:2025",
     }
-    expected_findings = [
-        item
-        for item in _extract_expected_findings_from_payload(metadata_json)
-        if _normalize_structured_finding_id(item) in {"ai_gate:control_baseline_gap", "control_baseline_gap"}
-    ]
+    raw_expected = metadata_json.get("expected_shakerscan_findings")
+    if isinstance(raw_expected, str):
+        raw_expected = [raw_expected]
+    expected_findings = []
+    if isinstance(raw_expected, list):
+        expected_findings = [
+            item
+            for item in (str(value).strip() for value in raw_expected)
+            if _normalize_structured_finding_id(item) in {"ai_gate:control_baseline_gap", "control_baseline_gap"}
+        ]
     evidence = {
         "judge_layer": "metadata_control_baseline",
-        "risk_tier": control_evidence.get("risk_tier"),
+        "risk_tier": risk_tier or control_evidence.get("risk_tier"),
+        "missing_control_count": missing_count,
         "missing_controls": [
             {"id": item.get("id"), "label": item.get("label"), "frameworks": item.get("frameworks")}
             for item in missing

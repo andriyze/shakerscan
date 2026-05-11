@@ -181,6 +181,10 @@ function renderFindingEvidence(finding: any) {
   return <p className="text-gray-300 text-sm mt-1 whitespace-pre-wrap break-words">{text}</p>
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
 export default function ReportView({ scan, shareControls, isAuthenticated, remediations = [], enableRemediationTracking = false }: Props) {
   const [remediationData, setRemediationData] = useState<RemediationData[]>(remediations)
   const scanData = scan.result || scan.results || {}
@@ -190,7 +194,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const http = scanData.http || {}
   const discovery = scanData.discovery || {}
   const server_versions = discovery.server_versions || {}
-  const rawFindings = scanData.findings || []
+  const rawFindings = Array.isArray(scanData.findings) ? scanData.findings : []
+  const persistedFindings = Array.isArray(scan.findings) ? scan.findings : []
+  const rawOnlyFindings = rawFindings.length > 0 && persistedFindings.length === 0
   const findings = sortBySeverity(rawFindings)
   const result = scanData.result || {}
   const triage = scanData.triage || {}
@@ -1885,7 +1891,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       {/* Findings */}
       {Array.isArray(findings) && findings.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Key Findings</h2>
+          <div className="mb-4">
+            <h2 className="text-2xl font-bold">{rawOnlyFindings ? 'Raw Scan Findings' : 'Key Findings'}</h2>
+            {rawOnlyFindings && (
+              <p className="mt-2 text-sm text-amber-200">
+                These findings are stored in this scan result. Persistent finding records may point to a newer duplicate scan because ShakerScan deduplicates repeated findings.
+              </p>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <span className="text-gray-500 text-xs mr-2">Filter:</span>
             {(['critical', 'high', 'medium', 'low', 'info'] as const).map(severity => {
@@ -1904,10 +1917,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {filteredFindings.slice(0, 50).map((finding: any, idx: number) => {
               const findingId = finding.id || `finding-${idx}`
               const remediation = remediationData.find(r => r.finding_id === findingId)
+              const canTrackFinding = isUuid(String(findingId))
               return (
                 <div key={idx}>
                   <FindingCard finding={finding} />
-                  {enableRemediationTracking && (
+                  {enableRemediationTracking && canTrackFinding && (
                     <div className="mt-2 ml-4 pl-4 border-l-2 border-gray-700">
                       <FindingActions
                         scanId={scan.id}

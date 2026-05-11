@@ -1,8 +1,12 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 
 _SCENARIO_MODULE_PATH = Path(__file__).resolve().parents[1] / "api" / "ai_demo_scenarios.py"
+_API_PATH = str(_SCENARIO_MODULE_PATH.parent)
+if _API_PATH not in sys.path:
+    sys.path.append(_API_PATH)
 _SCENARIO_SPEC = importlib.util.spec_from_file_location("ai_demo_scenarios", _SCENARIO_MODULE_PATH)
 assert _SCENARIO_SPEC and _SCENARIO_SPEC.loader
 _SCENARIO_MODULE = importlib.util.module_from_spec(_SCENARIO_SPEC)
@@ -47,6 +51,17 @@ def test_secure_rag_agent_templates_cover_control_metadata():
             and not _has_any_key(metadata, control["keys"])
         ]
         assert missing == []
+
+
+def test_secure_rag_agent_catalog_uses_engine_control_requirements():
+    payload = get_ai_test_scenarios()
+    scenario = next(item for item in payload["scenarios"] if item["id"] == "secure-rag-agent")
+    catalog_ids = {control["id"] for control in scenario["readiness_controls"]}
+    engine_ids = {control["id"] for control in _SCENARIO_MODULE.AI_CONTROL_REQUIREMENTS}
+
+    assert engine_ids.issubset(catalog_ids)
+    assert "threat_model" in catalog_ids
+    assert "cloud_security_design" in catalog_ids
 
 
 def test_secure_rag_agent_contract_lists_canonical_honey_routes():

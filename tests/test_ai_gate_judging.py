@@ -13,6 +13,7 @@ if API_PATH not in sys.path:
 
 from ai_gate_scan import (  # noqa: E402
     SEMANTIC_CONFIDENCE_FLOOR,
+    STRUCTURED_AI_GATE_FINDING_MAP,
     _build_ai_control_evidence,
     _control_gap_findings,
     _apply_ai_gate_analysis_fields,
@@ -197,6 +198,22 @@ def test_mcp_oauth_audience_confusion_is_detected():
     assert any(f["id"].endswith(":mcp_oauth_audience_confusion") for f in findings)
 
 
+def test_structured_mcp_audience_aliases_are_canonicalized():
+    assert "mcp_oauth_audience_confusion" in STRUCTURED_AI_GATE_FINDING_MAP
+    assert "mcp.oauth_audience_confusion" in STRUCTURED_AI_GATE_FINDING_MAP
+    assert "mcp.oauth-audience-confusion" not in STRUCTURED_AI_GATE_FINDING_MAP
+
+
+def test_unrecognized_structured_oracle_ids_are_ignored():
+    findings = _classify_response(
+        probe={"id": "agent.unknown-oracle", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text=json.dumps({"expected_shakerscan_findings": ["ai_gate:agent_new_unmapped_category"]}),
+        transcript={"probe_id": "agent.unknown-oracle", "response_excerpt": "unknown oracle"},
+    )
+
+    assert findings == []
+
+
 def test_mcp_oauth_audience_confusion_detects_token_audience_marker():
     findings = _classify_response(
         probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
@@ -335,6 +352,27 @@ def test_ai_control_evidence_tracks_rag_acl_and_ingestion_gaps():
     assert findings
     assert findings[0]["id"] == "ai-controls.baseline:missing_controls"
     assert findings[0]["evidence"]["expected_finding"] == "ai_gate:control_baseline_gap"
+    assert findings[0]["severity"] == "critical"
+
+
+def test_control_gap_severity_uses_missing_count_and_risk_tier():
+    high_risk_one_gap = _control_gap_findings(
+        {"risk_tier": "high", "missing_required_controls": [{"id": "agent.kill_switch", "label": "Kill switch"}]},
+        {"enforce_ai_control_baseline": True},
+    )
+    low_risk_many_gaps = _control_gap_findings(
+        {
+            "risk_tier": "low",
+            "missing_required_controls": [
+                {"id": f"control.{index}", "label": f"Control {index}"}
+                for index in range(5)
+            ],
+        },
+        {"enforce_ai_control_baseline": True},
+    )
+
+    assert high_risk_one_gap[0]["severity"] == "high"
+    assert low_risk_many_gaps[0]["severity"] == "high"
 
 
 def test_ai_control_evidence_accepts_complete_agent_policy_metadata():
