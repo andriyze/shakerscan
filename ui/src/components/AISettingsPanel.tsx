@@ -72,9 +72,9 @@ export default function AISettingsPanel() {
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
   const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
   const [demoModeEnabledInput, setDemoModeEnabledInput] = useState(false)
-  const [demoHoneyModeInput, setDemoHoneyModeInput] = useState<DemoHoneyMode>('hosted')
-  const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState(HONEY_HOSTED_URL)
-  const [demoHoneyScannerURLInput, setDemoHoneyScannerURLInput] = useState(HONEY_HOSTED_URL)
+  const [demoHoneyModeInput, setDemoHoneyModeInput] = useState<DemoHoneyMode>('custom')
+  const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState('')
+  const [demoHoneyScannerURLInput, setDemoHoneyScannerURLInput] = useState('')
   const [showDemoNetworking, setShowDemoNetworking] = useState(false)
   const [settingsMode, setSettingsMode] = useState<'basic' | 'advanced'>('basic')
   const [testingScope, setTestingScope] = useState<'scan' | 'verify' | null>(null)
@@ -97,8 +97,8 @@ export default function AISettingsPanel() {
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
     setDemoModeEnabledInput(Boolean(settings.demo_mode_enabled))
-    const publicURL = settings.demo_honey_public_url || HONEY_HOSTED_URL
-    const scannerURL = settings.demo_honey_scanner_url || HONEY_HOSTED_URL
+    const publicURL = settings.demo_honey_public_url || ''
+    const scannerURL = settings.demo_honey_scanner_url || ''
     setDemoHoneyPublicURLInput(publicURL)
     setDemoHoneyScannerURLInput(scannerURL)
     setDemoHoneyModeInput(detectDemoHoneyMode(publicURL, scannerURL))
@@ -372,7 +372,7 @@ export default function AISettingsPanel() {
 
           {demoHoneyModeInput === 'local' && (
             <p className="text-[11px] text-gray-500">
-              Docker scanner traffic will use <span className="font-mono text-gray-400">{demoHoneyScannerURLInput}</span>.
+              Docker scanner traffic will use <span className="font-mono text-gray-400">{demoHoneyScannerURLInput || HONEY_LOCAL_SCANNER_URL}</span>.
             </p>
           )}
 

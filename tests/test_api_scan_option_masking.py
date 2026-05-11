@@ -154,3 +154,12 @@ def test_sanitize_ai_settings_includes_demo_fields():
     assert settings["demo_mode_enabled"] is True
     assert settings["demo_honey_public_url"] == "https://honey.example"
     assert settings["demo_honey_scanner_url"] == "http://host.docker.internal:18080"
+
+
+def test_sanitize_ai_settings_leaves_demo_urls_empty_by_default():
+    settings = api_module._sanitize_ai_settings_response({})
+
+    assert settings["demo_mode_enabled"] is False
+    assert settings["demo_honey_public_url"] == ""
+    assert settings["demo_honey_scanner_url"] == ""
+    assert api_module._normalize_demo_base_url("") == ""

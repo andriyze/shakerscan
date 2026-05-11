@@ -233,10 +233,8 @@ def _default_ai_settings() -> dict[str, Any]:
             os.environ.get("AI_DEMO_MODE_ENABLED", "false"),
             default=False,
         ),
-        "demo_honey_public_url": os.environ.get("AI_DEMO_HONEY_PUBLIC_URL", "https://honey.shakerscan.com").strip()
-        or "https://honey.shakerscan.com",
-        "demo_honey_scanner_url": os.environ.get("AI_DEMO_HONEY_SCANNER_URL", "https://honey.shakerscan.com").strip()
-        or "https://honey.shakerscan.com",
+        "demo_honey_public_url": os.environ.get("AI_DEMO_HONEY_PUBLIC_URL", "").strip(),
+        "demo_honey_scanner_url": os.environ.get("AI_DEMO_HONEY_SCANNER_URL", "").strip(),
     }
 
 
@@ -356,15 +354,17 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "ai_escalation_min_severity": settings.get("ai_escalation_min_severity") or settings.get("ai_verify_min_severity") or "high",
         "proof_required_for_smart": bool(settings.get("proof_required_for_smart", False)),
         "demo_mode_enabled": bool(settings.get("demo_mode_enabled", False)),
-        "demo_honey_public_url": settings.get("demo_honey_public_url") or "https://honey.shakerscan.com",
-        "demo_honey_scanner_url": settings.get("demo_honey_scanner_url") or "https://honey.shakerscan.com",
+        "demo_honey_public_url": settings.get("demo_honey_public_url") or "",
+        "demo_honey_scanner_url": settings.get("demo_honey_scanner_url") or "",
     }
 
 
-def _normalize_demo_base_url(value: Any, *, default: str = "https://honey.shakerscan.com") -> str:
+def _normalize_demo_base_url(value: Any, *, default: str = "") -> str:
     raw = str(value or "").strip().rstrip("/")
     if not raw:
         raw = default.rstrip("/")
+    if not raw:
+        return ""
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Demo Honey URL must be an http(s) URL")
@@ -2633,7 +2633,12 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
     if len(scenario_ids) > 10:
         raise HTTPException(status_code=400, detail="Demo run is limited to 10 scenarios")
 
-    registry = await _fetch_honey_ai_gate_registry(str(settings.get("demo_honey_scanner_url") or ""))
+    scanner_base_url = str(settings.get("demo_honey_scanner_url") or "").strip()
+    if not scanner_base_url:
+        raise HTTPException(status_code=400, detail="Configure a Honey scanner URL before running the demo")
+
+    public_base_url = str(settings.get("demo_honey_public_url") or scanner_base_url).strip()
+    registry = await _fetch_honey_ai_gate_registry(scanner_base_url)
     scenarios = {
         str(scenario.get("id")): scenario
         for scenario in registry.get("scenarios", [])
@@ -2649,7 +2654,6 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
         "mcp": ("mcp_trace", "$.result", "shaker-mcp-security"),
     }
     run_id = f"demo-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    scanner_base_url = str(settings.get("demo_honey_scanner_url") or "")
     queued: list[dict[str, Any]] = []
 
     async with db_pool.acquire() as conn:
@@ -2732,7 +2736,7 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
 
     return {
         "run_id": run_id,
-        "honey_registry_url": f"{settings.get('demo_honey_public_url')}/api/ai-gate/scenarios",
+        "honey_registry_url": f"{public_base_url}/api/ai-gate/scenarios",
         "queued": queued,
     }
 
