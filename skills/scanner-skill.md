@@ -270,7 +270,7 @@ For the secure RAG + agent workflow, get the shared templates first:
 curl http://localhost:8080/ai/test-scenarios
 ```
 
-Use the `secure-rag-agent` templates to create RAG, agent trace, and MCP targets with complete control metadata before queueing scans.
+Use the `secure-rag-agent` templates to create the secure-demo query, RAG, agent trace, and MCP targets with complete control metadata before queueing scans.
 
 Target types: `api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`.
 Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
@@ -320,7 +320,7 @@ Use Model Intake when the user wants to check a model artifact before deployment
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
-For the model-intake pipeline workflow, use `/ai/test-scenarios` and the `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executable bundles, tampered checksums, and missing approval cases.
+For the model-intake pipeline workflow, use `/ai/test-scenarios` and the `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executable bundles, tampered checksums, and missing approval cases. The catalog also lists the Honey submit/status/scan/approve/deploy lifecycle endpoints.
 
 ```bash
 curl -X POST http://localhost:8080/model-intake/scan \

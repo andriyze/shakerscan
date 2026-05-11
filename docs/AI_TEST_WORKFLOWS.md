@@ -20,6 +20,16 @@ The catalog includes:
 
 Use `/settings/ai-gate` and the `Secure RAG + Agent` scenario panel.
 
+Canonical Honey endpoints:
+- `GET /api/secure-demo/rag-agent/threat-model`
+- `POST /api/secure-demo/rag-agent/query`
+- `GET /api/secure-demo/rag-agent/runs/{run_id}`
+- `GET /api/secure-demo/governance/mapping`
+- `GET /api/ai-gate/scenarios`
+- `POST /api/v1/rag/answer`
+- `POST /api/v1/agent/trace`
+- `POST /api/v1/mcp/trace`
+
 Expected evidence:
 - Threat model and cloud security design in target metadata.
 - RAG controls: document classification, ingestion controls, retrieval ACL matrix, metadata filtering, tenant isolation, malicious document tests, citations, content delimiting, retention, and no-training policy.
@@ -34,6 +44,19 @@ Recommended scans:
 ## Model Intake Pipeline
 
 Use `/settings/model-intake` and the `Model Intake Pipeline` scenario panel.
+
+Canonical Honey endpoints:
+- `GET /api/model-intake/scenarios`
+- `GET /model-intake/`
+- `GET /model-intake/artifacts/{scenario}/{filename}`
+- `GET /model-intake/manifests/{filename}`
+- `GET /model-intake/signatures/{filename}`
+- `GET /model-intake/cards/{filename}`
+- `POST /api/model-intake/submit`
+- `GET /api/model-intake/{intake_id}`
+- `POST /api/model-intake/{intake_id}/scan`
+- `POST /api/model-intake/{intake_id}/approve`
+- `POST /api/model-intake/{intake_id}/deploy`
 
 Expected evidence:
 - Artifact source/provenance, source repository, commit, dataset/training claims, model card, license, SBOM/dependencies, malware scan evidence, security evals, privacy/security review, deployment restrictions, monitoring plan, artifact signing/attestation, checksum, and deployment approval.

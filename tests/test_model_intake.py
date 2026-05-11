@@ -88,6 +88,19 @@ def test_model_intake_records_fetch_failures_as_findings(tmp_path):
     assert result["model_intake"]["artifact"]["fetch"]["error"].startswith("FileNotFoundError")
 
 
+def test_model_intake_reports_unsupported_artifact_scheme():
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://honey/unsafe-pickle",
+            {"timeout_seconds": 5},
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
+    assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
+
+
 def test_model_intake_flags_missing_governance_metadata(tmp_path):
     artifact = tmp_path / "model.onnx"
     artifact.write_bytes(b"onnx bytes")

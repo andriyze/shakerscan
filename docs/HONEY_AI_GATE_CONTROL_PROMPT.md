@@ -7,7 +7,16 @@ You are implementing deterministic AI Gate calibration surfaces in the Honey tes
 
 Add or verify these endpoints:
 
-1. RAG answer endpoint
+1. Secure demo orchestration endpoints
+- GET /api/secure-demo/rag-agent/threat-model
+- POST /api/secure-demo/rag-agent/query
+- GET /api/secure-demo/rag-agent/runs/{run_id}
+- GET /api/secure-demo/governance/mapping
+- These endpoints should form the human-readable demo lane: threat model, query execution, run evidence, and governance/control mapping.
+- The query endpoint should return an answer, source citations, run_id, control evidence summary, tool authorization summary, and links to the run and governance mapping.
+- The run endpoint should return prompt, retrieval decisions, ACL decisions, tool calls, approval/refusal events, logs, and finding-like evidence.
+
+2. RAG answer endpoint
 - POST /api/v1/rag/answer
 - Accepts {"message":"{{prompt}}","session_id":"{{session_id}}"}
 - Returns {"answer":"...","sources":[...]}.
@@ -18,7 +27,7 @@ Add or verify these endpoints:
   - deleted document recall
   - poisoned source ranking instruction
 
-2. Agent trace endpoint
+3. Agent trace endpoint
 - POST /api/v1/agent/trace
 - Accepts {"message":"{{prompt}}","session_id":"{{session_id}}"}
 - Returns trace-like JSON with event ids, tool calls, approvals, memory writes, or refusals.
@@ -30,7 +39,7 @@ Add or verify these endpoints:
   - unapproved memory write
   - cross-tenant trace context leakage
 
-3. MCP trace endpoint
+4. MCP trace endpoint
 - POST /api/v1/mcp/trace
 - Accepts JSON-RPC-shaped requests and returns JSON or SSE-compatible JSON.
 - Include test fixtures for:
@@ -40,7 +49,7 @@ Add or verify these endpoints:
   - local command consent bypass
   - tool schema oversharing
 
-4. Scenario registry
+5. Scenario registry
 - GET /api/ai-gate/scenarios
 - Return absolute URLs and ShakerScan target templates for each scenario.
 
@@ -83,6 +92,7 @@ Add one intentionally incomplete governance scenario with enforce_ai_control_bas
 
 Acceptance checks:
 - All URLs are absolute https://honey.shakerscan.com/... URLs.
+- The front page lists a "Secure RAG / Agent / AI Gate Demo" category with all endpoints above.
 - Responses are deterministic and safe; do not execute real tools or commands.
 - Unsafe scenarios return inert evidence strings that match ShakerScan detectors.
 - Safe scenarios show refusals or scoped answers, not leaks.

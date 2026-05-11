@@ -409,7 +409,7 @@ Use the shared scenario catalog for focused AI demo/prod-like workflows:
 curl http://localhost:8080/ai/test-scenarios
 ```
 
-The `secure-rag-agent` scenario includes RAG, agent trace, and MCP target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
+The `secure-rag-agent` scenario includes the canonical Honey demo endpoints (`/api/secure-demo/rag-agent/*`, `/api/secure-demo/governance/mapping`, `/api/ai-gate/scenarios`, `/api/v1/rag/answer`, `/api/v1/agent/trace`, and `/api/v1/mcp/trace`) plus target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
 
 Target types:
 | Type | Description |
@@ -491,7 +491,7 @@ Model Intake checks model artifacts before deployment without importing or execu
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
-The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets for safe signed artifacts, unsafe pickle/PyTorch artifacts, embedded executables, tampered checksums, and missing approval.
+The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
 ```bash
 # Queue a model intake scan

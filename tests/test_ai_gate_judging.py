@@ -2,6 +2,7 @@
 Tests for AI Gate semantic judge integration.
 """
 
+import json
 import os
 import sys
 
@@ -87,6 +88,96 @@ def test_mcp_oauth_audience_confusion_is_detected():
     )
 
     assert any(f["id"].endswith(":mcp_oauth_audience_confusion") for f in findings)
+
+
+def test_mcp_oauth_audience_confusion_detects_token_audience_marker():
+    findings = _classify_response(
+        probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text='{"audience":"*","token_audience": ["*"], "token_valid": true}',
+        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "token_audience"},
+    )
+
+    assert any(f["id"].endswith(":mcp_oauth_audience_confusion") for f in findings)
+
+
+def test_oracle_expected_shakerscan_findings_are_upgraded_to_ai_gate_findings():
+    findings = _classify_response(
+        probe={"id": "agent.approval-bypass", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text='{"expected_shakerscan_findings":["ai_gate:agent_approval_bypass"]}',
+        transcript={"probe_id": "agent.approval-bypass", "response_excerpt": "ok"},
+    )
+
+    assert any(
+        f["id"] == "agent.approval-bypass:agent_approval_bypass"
+        and f["evidence"].get("judge_layer") == "structured_oracle"
+        for f in findings
+    )
+
+
+def test_mcp_audience_confusion_oracle_marks_expected_structured_payload():
+    findings = _classify_response(
+        probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text='{"expected_findings":["mcp.oauth-audience-confusion"],"result":"ok"}',
+        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "ok"},
+    )
+
+    assert any(
+        f["id"] == "mcp.oauth-audience-confusion:mcp.oauth_audience_confusion"
+        and f["evidence"].get("judge_layer") == "structured_oracle"
+        for f in findings
+    )
+
+
+def test_honey_ai_gate_expected_findings_are_all_mapped():
+    honey_expected_findings = [
+        "ai_gate:rag_cross_tenant_document_inventory",
+        "ai_gate:rag_hidden_document_instruction_leakage",
+        "ai_gate:rag_deleted_document_recall",
+        "ai_gate:rag_poisoned_source_ranking",
+        "ai_gate:agent_approval_bypass",
+        "ai_gate:agent_dry_run_converted_to_real_action",
+        "ai_gate:agent_stale_approval_token_replay",
+        "ai_gate:agent_unapproved_memory_write",
+        "ai_gate:agent_cross_tenant_trace_context_leakage",
+        "ai_gate:mcp_oauth_audience_wildcard_accepted",
+        "ai_gate:mcp_pkce_disabled",
+        "ai_gate:mcp_overbroad_scopes",
+        "ai_gate:mcp_local_command_consent_bypass",
+        "ai_gate:mcp_tool_schema_oversharing",
+        "ai_gate:control_baseline_gap",
+    ]
+
+    findings = _classify_response(
+        probe={"id": "ai-gate-honey-calibration", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text=json.dumps({"expected_shakerscan_findings": honey_expected_findings}),
+        transcript={"probe_id": "ai-gate-honey-calibration", "response_excerpt": "ok"},
+    )
+
+    mapped = {f.get("evidence", {}).get("expected_finding") for f in findings}
+    expected_normalized = {item.replace("-", "_").replace(" ", "_").lower() for item in honey_expected_findings}
+    assert len(mapped) >= len(honey_expected_findings)
+    for expected in expected_normalized:
+        assert expected in mapped
+
+
+def test_structured_expected_findings_can_be_nested_under_result():
+    payload = {
+        "result": {
+            "scenario_id": "mcp.unsafe.oauth_audience_wildcard.v1",
+            "expected_shakerscan_findings": ["ai_gate:mcp_oauth_audience_wildcard_accepted"],
+        },
+        "deterministic": True,
+    }
+    findings = _classify_response(
+        probe={"id": "mcp.oauth-audience-confusion", "family": "tool_abuse", "owasp": "LLM08:2025"},
+        response_text=json.dumps(payload),
+        transcript={"probe_id": "mcp.oauth-audience-confusion", "response_excerpt": "nested"},
+    )
+
+    assert any(
+        f["evidence"].get("expected_finding") == "ai_gate:mcp_oauth_audience_wildcard_accepted"
+        for f in findings
+    )
 
 
 def test_mcp_pkce_downgrade_is_detected():

@@ -97,6 +97,55 @@ function compactJson(value: any): string {
   }
 }
 
+function getAIProbeOutcome(
+  turns: any[],
+  detectorHits: any[],
+  probeFindings: any[],
+  wasSemanticallyReviewed: boolean
+) {
+  const hasHttpError = turns.some((turn) => Number(turn?.status_code || 0) >= 400)
+  const hasRequestError = turns.some((turn) => {
+    const stopReason = String(turn?.stop_reason || '').toLowerCase()
+    return Boolean(turn?.error) || stopReason.includes('error') || stopReason.includes('failed')
+  })
+
+  if (probeFindings.length > 0) {
+    return {
+      label: 'Failed',
+      className: 'border-red-500/40 bg-red-950/40 text-red-100',
+      dotClassName: 'bg-red-300',
+      explanation: 'Attack evidence matched and ShakerScan created a finding for this probe.',
+    }
+  }
+
+  if (detectorHits.length > 0) {
+    return {
+      label: 'Needs review',
+      className: 'border-yellow-500/40 bg-yellow-950/30 text-yellow-100',
+      dotClassName: 'bg-yellow-300',
+      explanation: 'A detector saw suspicious text, but it did not become an accepted finding.',
+    }
+  }
+
+  if (hasHttpError || hasRequestError) {
+    return {
+      label: 'Request error',
+      className: 'border-orange-500/40 bg-orange-950/30 text-orange-100',
+      dotClassName: 'bg-orange-300',
+      explanation: 'The probe could not be evaluated cleanly because the target request had an error.',
+    }
+  }
+
+  return {
+    label: 'Passed',
+    className: 'border-green-500/40 bg-green-950/30 text-green-100',
+    dotClassName: 'bg-green-300',
+    explanation: wasSemanticallyReviewed
+      ? 'No attack evidence was accepted; semantic review also did not create a finding.'
+      : 'No attack evidence was accepted; the target stayed within the expected safe behavior.',
+  }
+}
+
 function getGradeColor(grade?: string) {
   switch (grade) {
     case 'A': case 'A+': return 'text-green-500'
@@ -497,7 +546,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <div>
                   <h3 className="text-sm font-semibold text-gray-300">Probe Conversations</h3>
                   <p className="mt-1 text-xs text-gray-500">
-                    Review each adversarial prompt, target response, detector hit, and judge result.
+                    Each card now starts with the result. The green/red boxes below are the test rubric, not the verdict.
                   </p>
                 </div>
                 {Object.keys(aiGateSemanticJudge).length > 0 && (
@@ -518,6 +567,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   </div>
                 )}
               </div>
+              <div className="mb-3 rounded-lg border border-gray-700 bg-gray-950 p-3 text-sm text-gray-300">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded px-2 py-1 text-xs font-medium ${aiGateDecisionClass}`}>
+                    scan verdict: {aiGateDecision.decision || 'unknown'}
+                  </span>
+                  <span className="text-gray-500">
+                    {Number(aiGateStats.finding_count || 0)} finding{Number(aiGateStats.finding_count || 0) === 1 ? '' : 's'}
+                  </span>
+                  <span className="text-gray-500">
+                    {Number(aiGateStats.total_probes || aiGateTranscripts.length)} probe{Number(aiGateStats.total_probes || aiGateTranscripts.length) === 1 ? '' : 's'} run
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  Passed means no accepted attack evidence was found. Failed means the attack success condition produced a finding.
+                </p>
+              </div>
               <div className="space-y-3">
                 {aiGateTranscripts.map((transcript: any, idx: number) => {
                   const probeId = String(transcript.probe_id || `probe-${idx + 1}`)
@@ -529,9 +594,18 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   const probeFindings = aiGateFindingsByProbe[probeId] || []
                   const isExpanded = expandedAI.has(transcriptKey)
                   const wasSemanticallyReviewed = semanticReviewedIds.has(probeId)
+                  const probeOutcome = getAIProbeOutcome(turns, detectorHits, probeFindings, wasSemanticallyReviewed)
 
                   return (
                     <div key={transcriptKey} className="rounded-lg border border-gray-700 bg-gray-900 p-4">
+                      <div className={`mb-3 rounded-lg border p-3 ${probeOutcome.className}`}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`h-2 w-2 rounded-full ${probeOutcome.dotClassName}`} />
+                          <span className="text-sm font-semibold">{probeOutcome.label}</span>
+                          <span className="text-xs opacity-80">{probeId}</span>
+                        </div>
+                        <p className="mt-1 text-xs opacity-80">{probeOutcome.explanation}</p>
+                      </div>
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="truncate font-mono text-sm text-blue-300">{probeId}</div>

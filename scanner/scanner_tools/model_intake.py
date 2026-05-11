@@ -263,6 +263,11 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         max_bytes=max_download_bytes,
         timeout_seconds=timeout_seconds,
     )
+
+    unsupported_scheme_error = bool(
+        artifact_meta.get("error")
+        and "unsupported artifact scheme" in str(artifact_meta.get("error", "")).lower()
+    )
     name = str(options.get("artifact_name") or _artifact_name(artifact_ref))
     ext = _artifact_ext(name)
     sha256 = hashlib.sha256(artifact_bytes).hexdigest() if artifact_bytes else None
@@ -287,6 +292,67 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     monitoring_plan = _metadata_value(metadata, "monitoring_plan", "monitoring_plan_url", "drift_monitoring", "incident_response_plan")
 
     if artifact_meta.get("error"):
+        if unsupported_scheme_error:
+            findings.append(_finding(
+                finding_id="unsupported_artifact_scheme",
+                title="Model artifact scheme is unsupported",
+                severity="medium",
+                description="The configured artifact URL uses a registry scheme not currently supported by the intake fetcher.",
+                artifact_ref=artifact_ref,
+                evidence={"artifact": name, "fetch": artifact_meta},
+                remediation="Use a supported artifact source (http/https) or extend model-intake fetch support for hf/oci registries.",
+            ))
+            return {
+                "schema_version": "2026-05-10.model-intake.v1",
+                "scan_mode": "model_intake",
+                "target": artifact_ref,
+                "model_intake": {
+                    "summary": {
+                        "artifact_name": name,
+                        "artifact_ref": artifact_ref,
+                        "source_kind": _source_kind(artifact_ref, metadata),
+                        "extension": ext,
+                        "sha256": sha256,
+                        "format_posture": "unknown_or_unclassified_format",
+                        "provenance_present": False,
+                        "signature_present": False,
+                        "expected_hash_present": bool(expected_sha256),
+                        "deployment_approved": deployment_approved,
+                        "license_present": bool(license_ref),
+                        "sbom_present": bool(sbom_ref),
+                        "malware_scan_present": bool(malware_scan_ref),
+                        "eval_evidence_present": bool(eval_ref),
+                        "deployment_restrictions_present": bool(deployment_restrictions),
+                        "monitoring_plan_present": bool(monitoring_plan),
+                        "findings_count": len(findings),
+                    },
+                    "artifact": {
+                        "name": name,
+                        "extension": ext,
+                        "fetch": artifact_meta,
+                        "archive": zip_info,
+                    },
+                    "metadata": metadata,
+                    "checks": {
+                        "provenance": False,
+                        "unsafe_serialization": None,
+                        "artifact_signing": False,
+                        "checksum": False,
+                        "approval": deployment_approved if require_approval else None,
+                        "license_review": False if require_governance else None,
+                        "sbom_dependencies": False if require_governance else None,
+                        "malware_scan": False if require_governance else None,
+                        "security_evals": False if require_governance else None,
+                        "deployment_restrictions": False if require_governance else None,
+                        "monitoring_plan": False if require_governance else None,
+                    },
+                },
+                "findings": findings,
+                "result": {
+                    "score": max(0, 100 - _severity_score("medium")),
+                    "grade": _grade(max(0, 100 - _severity_score("medium"))),
+                },
+            }
         findings.append(_finding(
             finding_id="artifact_fetch_failed",
             title="Model artifact could not be fetched for intake",
