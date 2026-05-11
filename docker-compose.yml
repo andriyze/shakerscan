@@ -87,6 +87,7 @@ services:
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
       - ./api/ai_demo_scenarios.py:/app/ai_demo_scenarios.py:ro
+      - ./scanner/constants.py:/app/constants.py:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
@@ -146,6 +147,7 @@ services:
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
       - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
       - ./api/ai_gate:/app/ai_gate:ro
+      - ./scanner/constants.py:/app/constants.py:ro
       - ./scanner/scanner.py:/app/scanner.py:ro
       - ./scanner/scanner_tools:/app/scanner_tools:ro
       - ./results:/results

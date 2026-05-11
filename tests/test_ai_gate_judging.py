@@ -7,7 +7,9 @@ import os
 import sys
 
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
+API_PATH = os.path.join(os.path.dirname(__file__), "..", "api")
+if API_PATH not in sys.path:
+    sys.path.append(API_PATH)
 
 from ai_gate_scan import (  # noqa: E402
     SEMANTIC_CONFIDENCE_FLOOR,
@@ -78,6 +80,43 @@ def test_semantic_noncompliance_populates_false_positive_ai_analysis():
     assert "did not confirm" in enriched["ai_rationale"]
     assert enriched["severity"] == "info"
     assert enriched["evidence"]["ai_gate_pre_ai_judge_severity"] == "high"
+
+
+def test_deterministic_ai_gate_finding_populates_true_positive_analysis():
+    finding = {
+        "title": "MCP issued overbroad scopes",
+        "severity": "high",
+        "confidence": 0.98,
+        "remediation": "Bind MCP scopes to verified clients.",
+        "verified": True,
+        "evidence": {
+            "judge_layer": "regex_classifier",
+            "matched_markers": ["mcp_scope_expansion"],
+        },
+    }
+
+    enriched = _apply_ai_gate_analysis_fields([finding])[0]
+
+    assert enriched["ai_verdict"] == "true_positive"
+    assert enriched["ai_confidence"] == 0.98
+    assert enriched["ai_classification_source"] == "regex_classifier"
+    assert "Deterministic AI Gate classifier" in enriched["ai_rationale"]
+    assert enriched["ai_recommendations"][0] == "Bind MCP scopes to verified clients."
+
+
+def test_low_confidence_deterministic_ai_gate_finding_needs_review():
+    finding = {
+        "title": "Possible weak signal",
+        "severity": "medium",
+        "confidence": 0.55,
+        "evidence": {"judge_layer": "regex_classifier"},
+    }
+
+    enriched = _apply_ai_gate_analysis_fields([finding])[0]
+
+    assert enriched["ai_verdict"] == "needs_review"
+    assert enriched["ai_confidence"] == 0.55
+    assert enriched["ai_classification_source"] == "regex_classifier"
 
 
 def test_mcp_oauth_audience_confusion_is_detected():

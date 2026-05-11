@@ -1,4 +1,13 @@
-from api.ai_demo_scenarios import get_ai_test_scenarios
+import importlib.util
+from pathlib import Path
+
+
+_SCENARIO_MODULE_PATH = Path(__file__).resolve().parents[1] / "api" / "ai_demo_scenarios.py"
+_SCENARIO_SPEC = importlib.util.spec_from_file_location("ai_demo_scenarios", _SCENARIO_MODULE_PATH)
+assert _SCENARIO_SPEC and _SCENARIO_SPEC.loader
+_SCENARIO_MODULE = importlib.util.module_from_spec(_SCENARIO_SPEC)
+_SCENARIO_SPEC.loader.exec_module(_SCENARIO_MODULE)
+get_ai_test_scenarios = _SCENARIO_MODULE.get_ai_test_scenarios
 
 
 def _has_any_key(metadata: dict, keys: list[str]) -> bool:
