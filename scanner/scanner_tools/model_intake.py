@@ -101,6 +101,24 @@ def _finding(
     }
 
 
+def _intake_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    if not findings:
+        return {
+            "decision": "allow",
+            "decision_reason": "No model-intake findings were detected.",
+        }
+    severities = {str(finding.get("severity") or "").lower() for finding in findings}
+    if severities & {"critical", "high"}:
+        return {
+            "decision": "block",
+            "decision_reason": "One or more critical/high model-intake findings require blocking deployment.",
+        }
+    return {
+        "decision": "review",
+        "decision_reason": "Model-intake findings require review before deployment approval.",
+    }
+
+
 def _grade(score: int) -> str:
     if score >= 90:
         return "A"
@@ -268,8 +286,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         artifact_meta.get("error")
         and "unsupported artifact scheme" in str(artifact_meta.get("error", "")).lower()
     )
-    name = str(options.get("artifact_name") or _artifact_name(artifact_ref))
-    ext = _artifact_ext(name)
+    artifact_filename = _artifact_name(artifact_ref)
+    name = str(options.get("artifact_name") or artifact_filename)
+    ext = _artifact_ext(artifact_filename) or _artifact_ext(name)
     sha256 = hashlib.sha256(artifact_bytes).hexdigest() if artifact_bytes else None
     zip_info = _inspect_zip(artifact_bytes) if artifact_bytes[:4] == b"PK\x03\x04" else {"is_zip": False, "entries": []}
 
@@ -296,7 +315,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             findings.append(_finding(
                 finding_id="unsupported_artifact_scheme",
                 title="Model artifact scheme is unsupported",
-                severity="medium",
+                severity="high",
                 description="The configured artifact URL uses a registry scheme not currently supported by the intake fetcher.",
                 artifact_ref=artifact_ref,
                 evidence={"artifact": name, "fetch": artifact_meta},
@@ -349,8 +368,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 },
                 "findings": findings,
                 "result": {
-                    "score": max(0, 100 - _severity_score("medium")),
-                    "grade": _grade(max(0, 100 - _severity_score("medium"))),
+                    "score": max(0, 100 - _severity_score("high")),
+                    "grade": _grade(max(0, 100 - _severity_score("high"))),
+                    **_intake_decision(findings),
                 },
             }
         findings.append(_finding(
@@ -586,6 +606,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "result": {
             "score": score,
             "grade": _grade(score),
+            **_intake_decision(findings),
         },
     }
 

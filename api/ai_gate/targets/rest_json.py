@@ -117,6 +117,11 @@ SECURITY_CONTEXT_KEYS = (
     "performed",
     "policy",
     "warning",
+    "oracle",
+    "expected_shakerscan_findings",
+    "expected_findings",
+    "safe_fixture",
+    "scenario_id",
     "deleted_at",
     "hidden_instructions",
     "oauth_scopes",
@@ -152,13 +157,24 @@ def _extract_security_context(payload: Any, response_path: str | None, response_
         return response_text
 
     supplements: list[str] = []
-    for key in SECURITY_CONTEXT_KEYS:
-        if key not in payload:
-            continue
-        extra_text = _coerce_response_text(payload[key], None).strip()
-        if not extra_text:
-            continue
-        supplements.append(f"{key}: {extra_text}")
+    seen: set[tuple[str, str]] = set()
+    context_sources: list[dict[str, Any]] = [payload]
+    extracted_payload = _extract_path_value(payload, response_path)
+    if isinstance(extracted_payload, dict) and extracted_payload is not payload:
+        context_sources.append(extracted_payload)
+
+    for context_payload in context_sources:
+        for key in SECURITY_CONTEXT_KEYS:
+            if key not in context_payload:
+                continue
+            extra_text = _coerce_response_text(context_payload[key], None).strip()
+            if not extra_text:
+                continue
+            fingerprint = (key, extra_text)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            supplements.append(f"{key}: {extra_text}")
 
     if not supplements:
         return response_text

@@ -1103,31 +1103,45 @@ STRUCTURED_AI_GATE_FINDING_MAP: dict[str, tuple[str, str, str, str, str]] = {
 }
 
 
-def _to_jsonish_payload(response_text: str) -> dict[str, Any] | list[Any] | None:
+def _jsonish_payload_candidates(response_text: str) -> list[dict[str, Any] | list[Any]]:
     stripped = response_text.strip()
     if not stripped:
-        return None
+        return []
+    candidates: list[dict[str, Any] | list[Any]] = []
+    seen: set[str] = set()
+
+    def add_candidate(value: Any, *, allow_list: bool = True) -> None:
+        if not isinstance(value, dict) and not (allow_list and isinstance(value, list)):
+            return
+        try:
+            fingerprint = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+        except TypeError:
+            fingerprint = str(value)
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        candidates.append(value)
+
     try:
-        return json.loads(stripped)
+        add_candidate(json.loads(stripped))
     except json.JSONDecodeError:
         pass
 
     decoder = json.JSONDecoder()
-    first_curly = stripped.find("{")
-    if first_curly >= 0:
+    for index, char in enumerate(stripped):
+        if char not in "{[":
+            continue
         try:
-            parsed, _ = decoder.raw_decode(stripped[first_curly:])
-            return parsed
+            parsed, _ = decoder.raw_decode(stripped[index:])
+            add_candidate(parsed, allow_list=False)
         except Exception:  # noqa: BLE001
-            pass
-    first_bracket = stripped.find("[")
-    if first_bracket >= 0:
-        try:
-            parsed, _ = decoder.raw_decode(stripped[first_bracket:])
-            return parsed
-        except Exception:  # noqa: BLE001
-            pass
-    return None
+            continue
+    return candidates
+
+
+def _to_jsonish_payload(response_text: str) -> dict[str, Any] | list[Any] | None:
+    candidates = _jsonish_payload_candidates(response_text)
+    return candidates[0] if candidates else None
 
 
 def _extract_expected_findings_from_payload(payload: Any) -> list[str]:
@@ -1837,6 +1851,23 @@ def _control_gap_findings(control_evidence: dict[str, Any], metadata_json: dict[
         "family": "governance",
         "owasp": "LLM10:2025",
     }
+    expected_findings = [
+        item
+        for item in _extract_expected_findings_from_payload(metadata_json)
+        if _normalize_structured_finding_id(item) in {"ai_gate:control_baseline_gap", "control_baseline_gap"}
+    ]
+    evidence = {
+        "judge_layer": "metadata_control_baseline",
+        "risk_tier": control_evidence.get("risk_tier"),
+        "missing_controls": [
+            {"id": item.get("id"), "label": item.get("label"), "frameworks": item.get("frameworks")}
+            for item in missing
+        ],
+    }
+    if expected_findings:
+        evidence["matched_markers"] = ["metadata_json.expected_shakerscan_findings"]
+        evidence["expected_finding"] = expected_findings[0]
+        evidence["oracle_expected_finding"] = expected_findings[0]
     return [
         _build_finding(
             probe=probe,
@@ -1845,14 +1876,7 @@ def _control_gap_findings(control_evidence: dict[str, Any], metadata_json: dict[
             description="Required AI security program controls were missing from target metadata, limiting auditability and deployment readiness.",
             remediation="Document the missing controls in AI target metadata and require them before production deployment.",
             owasp="LLM10:2025",
-            evidence={
-                "judge_layer": "metadata_control_baseline",
-                "risk_tier": control_evidence.get("risk_tier"),
-                "missing_controls": [
-                    {"id": item.get("id"), "label": item.get("label"), "frameworks": item.get("frameworks")}
-                    for item in missing
-                ],
-            },
+            evidence=evidence,
             source_suffix="missing_controls",
         )
     ]
@@ -2521,18 +2545,18 @@ def _classify_response(
     findings: list[dict[str, Any]] = []
     lowered = response_text.lower()
     probe_id = str(probe.get("id") or "")
-    payload = _to_jsonish_payload(response_text)
-    if payload is not None:
-        structured_expected = _extract_expected_findings_from_payload(payload)
-        for expected_finding in structured_expected:
-            oracle_finding = _build_oracle_finding(
-                probe=probe,
-                response_text=response_text,
-                transcript=transcript,
-                finding_id=expected_finding,
-            )
-            if oracle_finding is not None:
-                findings.append(oracle_finding)
+    structured_expected: list[str] = []
+    for payload in _jsonish_payload_candidates(response_text):
+        structured_expected.extend(_extract_expected_findings_from_payload(payload))
+    for expected_finding in list(dict.fromkeys(structured_expected)):
+        oracle_finding = _build_oracle_finding(
+            probe=probe,
+            response_text=response_text,
+            transcript=transcript,
+            finding_id=expected_finding,
+        )
+        if oracle_finding is not None:
+            findings.append(oracle_finding)
 
     secure_rag_scoped = _is_secure_rag_scoped_response(response_text)
     rag_source_excerpt = _looks_like_rag_source_excerpt(lowered)

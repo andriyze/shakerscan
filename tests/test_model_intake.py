@@ -60,6 +60,38 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["findings"] == []
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
     assert result["result"]["grade"] == "A"
+    assert result["result"]["decision"] == "allow"
+
+
+def test_model_intake_uses_artifact_url_extension_when_display_name_has_dots(tmp_path):
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(b"safe tensor bytes")
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "artifact_name": "model-intake.safe.safetensors.v1 local calibration",
+                "expected_sha256": expected_sha,
+                "signature_url": "https://example.test/model.safetensors.sig",
+                "model_card_url": "https://example.test/model-card",
+                "deployment_approved": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    assert result["model_intake"]["summary"]["extension"] == ".safetensors"
+    assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
 
 
 def test_model_intake_detects_pickle_and_executable_inside_archive(tmp_path):
@@ -98,6 +130,9 @@ def test_model_intake_reports_unsupported_artifact_scheme():
 
     finding_ids = {finding["id"] for finding in result["findings"]}
     assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
+    assert result["findings"][0]["severity"] == "high"
+    assert result["result"]["grade"] == "B"
+    assert result["result"]["decision"] == "block"
     assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
 
 
