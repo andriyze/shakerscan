@@ -85,7 +85,7 @@ INTERNAL_URL_PATTERN = re.compile(
     r"https?://[A-Za-z0-9.-]+\.(?:internal|corp|local|lan)(?:[/:][^\s\"']*)?",
     re.IGNORECASE,
 )
-TENANT_ID_PATTERN = re.compile(r"\btenant-[a-z0-9][a-z0-9-]*\b")
+TENANT_ID_PATTERN = re.compile(r"(?<![a-z0-9_-])tenant-[a-z0-9][a-z0-9-]*(?![a-z0-9-])")
 
 PII_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "US Social Security Number"),
