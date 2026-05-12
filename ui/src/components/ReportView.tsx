@@ -373,6 +373,28 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     URL.revokeObjectURL(url)
   }
 
+  const handleDownloadAIRedTeamReport = async (format: 'json' | 'markdown') => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+    const res = await fetch(`${apiUrl}/scans/${scan.id}/ai-redteam-report?format=${format}`)
+    if (!res.ok) {
+      console.error('Failed to download AI red-team report')
+      return
+    }
+    const text = format === 'json'
+      ? JSON.stringify(await res.json(), null, 2)
+      : await res.text()
+    const extension = format === 'json' ? 'json' : 'md'
+    const blob = new Blob([text], { type: format === 'json' ? 'application/json' : 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `shakerscan-ai-redteam-${scan.id}.${extension}`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
@@ -405,6 +427,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <div className="flex items-center gap-2 no-print">
               {shareControls}
               <ExportPDFButton />
+              {isAuthenticated && (isAIScan || isModelIntakeScan) && (
+                <>
+                  <button onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10">
+                    AI Report MD
+                  </button>
+                  <button onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10">
+                    AI Report JSON
+                  </button>
+                </>
+              )}
               {isAuthenticated && (
                 <button onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10">
                   Download JSON

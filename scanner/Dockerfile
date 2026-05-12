@@ -124,6 +124,7 @@ COPY api/retest_contract.py /app/retest_contract.py
 COPY api/ai_verifier.py /app/ai_verifier.py
 COPY api/ai_control_requirements.py /app/ai_control_requirements.py
 COPY api/ai_demo_scenarios.py /app/ai_demo_scenarios.py
+COPY api/ai_redteam_artifacts.py /app/ai_redteam_artifacts.py
 COPY api/ai_gate_scan.py /app/ai_gate_scan.py
 COPY api/ai_gate /app/ai_gate
 

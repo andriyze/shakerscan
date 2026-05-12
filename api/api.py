@@ -53,6 +53,23 @@ try:
 except ImportError:
     from api.ai_demo_scenarios import get_ai_test_scenarios
 
+try:
+    from ai_redteam_artifacts import (
+        build_ai_learning_guide,
+        build_ai_redteam_report,
+        build_ai_test_case_catalog,
+        build_ai_test_case_export,
+        render_ai_redteam_markdown,
+    )
+except ImportError:
+    from api.ai_redteam_artifacts import (
+        build_ai_learning_guide,
+        build_ai_redteam_report,
+        build_ai_test_case_catalog,
+        build_ai_test_case_export,
+        render_ai_redteam_markdown,
+    )
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -2607,6 +2624,8 @@ async def root():
             "targets": "/targets",
             "ai_targets": "/ai/targets",
             "ai_test_scenarios": "/ai/test-scenarios",
+            "ai_learning_guide": "/ai/learning-guide",
+            "ai_test_cases": "/ai/test-cases",
             "model_intake": "/model-intake/scan",
             "findings": "/findings",
             "discovery": "/discovery",
@@ -2622,6 +2641,39 @@ async def list_ai_test_scenarios(include_demo: bool = Query(False)):
     """Return scenario templates for AI Gate and model-intake workflows."""
     settings = _load_effective_ai_settings()
     return get_ai_test_scenarios(include_demo=bool(include_demo and settings.get("demo_mode_enabled")))
+
+
+@app.get("/ai/learning-guide")
+async def get_ai_learning_guide():
+    """Return a ShakerScan-oriented AI red-team learning and capstone map."""
+    return build_ai_learning_guide()
+
+
+@app.get("/ai/test-cases")
+async def list_ai_test_cases(pack: Optional[str] = Query(None)):
+    """Return AI Gate probe/test-case metadata for eval planning and review."""
+    return build_ai_test_case_catalog(pack=pack)
+
+
+@app.get("/ai/test-cases/export")
+async def export_ai_test_cases(
+    format: str = Query("json", pattern="^(json|promptfoo|pyrit|garak)$"),
+    pack: Optional[str] = Query(None),
+):
+    """Export AI Gate probes into common red-team/eval seed formats."""
+    try:
+        payload, media_type, extension = build_ai_test_case_export(format, pack=pack)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"shakerscan-ai-test-cases.{extension}"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if isinstance(payload, (dict, list)):
+        return Response(
+            content=json.dumps(payload, indent=2),
+            media_type=media_type,
+            headers=headers,
+        )
+    return Response(content=payload, media_type=media_type, headers=headers)
 
 
 @app.post("/ai/demo/run")
@@ -3656,6 +3708,65 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
     return result
+
+
+@app.get("/scans/{scan_id}/ai-redteam-report")
+async def get_ai_redteam_report(
+    scan_id: str,
+    format: str = Query("json", pattern="^(json|markdown)$"),
+):
+    """Export an AI red-team evidence pack for AI Gate or Model Intake scans."""
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow("""
+            SELECT s.*,
+                   COALESCE(t.name, ait.name) as target_name,
+                   ait.target_type as ai_target_type,
+                   ait.metadata_json as ai_target_metadata
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
+            WHERE s.id = $1
+        """, uuid.UUID(scan_id))
+
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        findings = await conn.fetch("""
+            SELECT id, fingerprint, title, description, severity, cvss_score, status,
+                   tool, cwe, cwe_name, owasp, url, evidence, ai_verdict,
+                   ai_confidence, ai_rationale, ai_recommendations,
+                   ai_classification_source, notes, last_verification_verdict,
+                   last_verification_confidence, last_verified_at, source,
+                   first_seen_at, last_seen_at
+            FROM findings
+            WHERE scan_id = $1
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4
+                    ELSE 5
+                END
+        """, uuid.UUID(scan_id))
+
+    scan_payload = row_to_dict(scan)
+    scan_payload["result"] = _decode_json_value(scan_payload.get("result"))
+    scan_payload["options"] = _sanitize_scan_options(scan_payload.get("options"))
+    scan_payload["ai_target_metadata"] = _decode_json_value(scan_payload.get("ai_target_metadata"))
+    scan_payload["findings"] = [row_to_dict(item) for item in findings]
+
+    report = build_ai_redteam_report(
+        scan_payload,
+        target_metadata=scan_payload.get("ai_target_metadata"),
+    )
+    if format == "markdown":
+        return Response(
+            content=render_ai_redteam_markdown(report),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="shakerscan-ai-redteam-{scan_id}.md"'},
+        )
+    return report
 
 
 @app.get("/scans/{scan_id}/result")

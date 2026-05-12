@@ -10,6 +10,23 @@ The API exposes a shared catalog for the UI and coding agents:
 curl http://localhost:8080/ai/test-scenarios
 ```
 
+Generic AI red-team learning and eval artifacts are also available without enabling demo mode:
+
+```bash
+curl http://localhost:8080/ai/learning-guide
+curl http://localhost:8080/ai/test-cases
+curl "http://localhost:8080/ai/test-cases/export?format=promptfoo"
+curl "http://localhost:8080/ai/test-cases/export?format=pyrit"
+curl "http://localhost:8080/ai/test-cases/export?format=garak"
+```
+
+Completed AI Gate and Model Intake scans can be exported as evidence packs:
+
+```bash
+curl http://localhost:8080/scans/{scan_id}/ai-redteam-report
+curl "http://localhost:8080/scans/{scan_id}/ai-redteam-report?format=markdown"
+```
+
 The catalog includes:
 - Secure RAG + agent target templates for RAG, agent trace, and MCP trace endpoints.
 - Required control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud design, and governance mapping.

@@ -17,6 +17,8 @@ interface Finding {
   evidence?: string | object
   ai_verdict?: string
   ai_confidence?: number
+  ai_rationale?: string
+  ai_recommendations?: string[] | Record<string, unknown> | null
 }
 
 interface FindingCardProps {
@@ -363,6 +365,30 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               <pre className="text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap">
                 {JSON.stringify(finding.evidence, null, 2)}
               </pre>
+            </div>
+          )}
+
+          {(finding.ai_rationale || finding.ai_recommendations) && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-gray-400 mb-2">AI Analysis</h4>
+              {finding.ai_rationale && (
+                <p className="text-sm text-gray-300 whitespace-pre-wrap">{finding.ai_rationale}</p>
+              )}
+              {Array.isArray(finding.ai_recommendations) && finding.ai_recommendations.length > 0 && (
+                <ul className="mt-2 space-y-1 text-sm text-gray-300">
+                  {finding.ai_recommendations.map((item, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-gray-500">{i + 1}.</span>
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {finding.ai_recommendations && !Array.isArray(finding.ai_recommendations) && (
+                <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap">
+                  {JSON.stringify(finding.ai_recommendations, null, 2)}
+                </pre>
+              )}
             </div>
           )}
 

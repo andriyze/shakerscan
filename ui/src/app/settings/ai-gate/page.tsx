@@ -26,6 +26,16 @@ import {
   type AITargetType,
 } from '@/lib/api'
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+
+const REDTEAM_RESOURCE_LINKS = [
+  { label: 'Learning map', href: `${API_URL}/ai/learning-guide` },
+  { label: 'Test cases', href: `${API_URL}/ai/test-cases` },
+  { label: 'promptfoo export', href: `${API_URL}/ai/test-cases/export?format=promptfoo` },
+  { label: 'PyRIT export', href: `${API_URL}/ai/test-cases/export?format=pyrit` },
+  { label: 'garak seed', href: `${API_URL}/ai/test-cases/export?format=garak` },
+]
+
 const TARGET_TYPES: Array<{ value: AITargetType; label: string; probePack: AIProbePack; responsePath: string; template: Record<string, unknown> }> = [
   {
     value: 'api_chat',
@@ -514,6 +524,33 @@ export default function AIGateSettingsPage() {
           )}
         </section>
       )}
+
+      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-white">
+              <Clipboard className="h-4 w-4 text-blue-300" />
+              <h2 className="text-sm font-semibold">AI Red-Team Resources</h2>
+            </div>
+            <p className="mt-1 max-w-3xl text-sm text-gray-400">
+              Generic probe catalogs, learning checkpoints, and eval seed exports for AI security practice.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {REDTEAM_RESOURCE_LINKS.map((item) => (
+              <a
+                key={item.label}
+                href={item.href}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                {item.label}
+              </a>
+            ))}
+          </div>
+        </div>
+      </section>
 
       {shouldShowCreate && scenario && (
         <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
