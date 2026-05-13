@@ -1,12 +1,8 @@
----
-description: Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps
-argument-hint: [optional-scope]
-model: haiku
----
-
 # Review Skills
 
-Review the ShakerScan skill system with the `skills-reviewer` agent.
+Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps.
+
+**Usage**: `/review-skills [optional-scope]`
 
 ## Instructions
 

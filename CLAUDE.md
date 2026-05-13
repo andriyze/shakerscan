@@ -1081,6 +1081,16 @@ curl -s "http://localhost:8080/findings?target_url=https://example.com&status=ac
 
 **Saving Findings:** All discoveries can be persisted with `POST /session/{id}/findings` and will appear in the UI with `source: "ai_session"`.
 
+## Pre-Scan Helpers
+
+Two slash commands turn ShakerScan evidence into seeds for smart scans, and a third audits the skill surface itself:
+
+- `/js-analyze <target_url|scan_id|js_path>` — analyze JS bundles, frontend routes, and browser-captured APIs to produce a `custom_endpoints` block ready for `/scans`. Backed by `skills/js-analyze/SKILL.md` and the `js-analysis-agent` subagent.
+- `/content-discovery <target_url|scan_id>` — build a high-signal route and file discovery plan (`custom_list` for ffuf-style fuzzers plus `custom_endpoints` for smart scans). Backed by `skills/content-discovery/SKILL.md` and the `content-discovery-agent` subagent.
+- `/review-skills [scope]` — audit the local skill/command/agent surface for prompt bugs, broken references, and weak output contracts. Backed by `skills/review-skills/SKILL.md` and the `skills-reviewer` subagent.
+
+Typical pre-scan flow: run `/js-analyze` to surface API candidates from JS, optionally pipe its output into `/content-discovery` to expand with route/file seeds, then submit the combined `custom_endpoints` to `/scan-smart`.
+
 ## CLI Shortcuts
 
 Users can also use the CLI directly:

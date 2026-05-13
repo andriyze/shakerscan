@@ -33,7 +33,7 @@ Look for:
 
 ## Mandatory Checklist
 
-Maintain this checklist in markdown while you work. You cannot move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
+Maintain this checklist in markdown while you work. Do not move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
 
 - [ ] Enumerate all in-scope skill, command, and agent files
 - [ ] Read every in-scope skill file

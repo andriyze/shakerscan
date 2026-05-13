@@ -15,7 +15,7 @@ This is a persistence instruction, not permission to fabricate findings. Keep wo
 
 ## Long-Task Checklist Rule
 
-For long scans, investigations, retest work, or multi-step workflows, maintain a markdown checklist and keep it updated as the task progresses. You cannot move on to the final answer until every checklist item is `[x]` or `[n/a]` with a short reason.
+For long scans, investigations, retest work, or multi-step workflows, maintain a markdown checklist and keep it updated as the task progresses. Do not move on to the final answer until every checklist item is `[x]` or `[n/a]` with a short reason.
 
 ## Capabilities
 

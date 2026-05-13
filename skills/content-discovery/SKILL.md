@@ -15,7 +15,7 @@ This is a persistence instruction, not permission to overstate risk. Keep search
 
 ## Mandatory Checklist
 
-Maintain this checklist in markdown while you work. You cannot move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
+Maintain this checklist in markdown while you work. Do not move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
 
 - [ ] Load existing ShakerScan scan context or explicitly note it is unavailable
 - [ ] Load JS-analysis output if available, or mark it unavailable
@@ -87,4 +87,4 @@ Always return:
 - Separate routes from files. A path list mixed with JS, CSS, and API URLs is hard to use.
 - Do not label a path “vulnerable” only because it exists.
 - Prefer short, deduplicated, high-signal output over huge generic dumps.
-- You cannot move on until the checklist is complete.
+- Do not move on until the checklist is complete.

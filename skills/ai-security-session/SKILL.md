@@ -16,7 +16,7 @@ This is a persistence instruction, not permission to invent a bug. Keep testing 
 
 ## Mandatory Checklist
 
-Maintain this checklist in markdown while you work. You cannot move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
+Maintain this checklist in markdown while you work. Do not move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
 
 - [ ] Check scanner health
 - [ ] Bootstrap from an existing scan or explicitly note that none exists

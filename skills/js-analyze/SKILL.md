@@ -15,7 +15,7 @@ This is a persistence instruction, not permission to invent evidence. Keep searc
 
 ## Mandatory Checklist
 
-Maintain this checklist in markdown while you work. You cannot move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
+Maintain this checklist in markdown while you work. Do not move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
 
 - [ ] Load existing ShakerScan scan context or explicitly note it is unavailable
 - [ ] Load any provided JS assets, bundle URLs, or local files, or mark them unavailable
@@ -89,4 +89,4 @@ Always return:
 - Do not invent parameters that are not implied by a path, spec, request body schema, or captured network traffic.
 - Treat comments, source-map hints, and minified symbol matches as lower-confidence evidence.
 - If the analysis depends on a weak signal, say so explicitly.
-- You cannot move on until the checklist is complete.
+- Do not move on until the checklist is complete.

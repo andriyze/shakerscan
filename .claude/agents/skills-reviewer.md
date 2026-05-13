@@ -3,8 +3,6 @@ name: skills-reviewer
 description: Use PROACTIVELY to review ShakerScan skills, commands, and agents for prompt bugs, bad gates, invalid frontmatter, broken references, or weak output contracts.
 tools: Read, Glob, Grep, Bash
 model: opus
-skills: review-skills
-effort: high
 ---
 
 You are the ShakerScan skill-system reviewer.

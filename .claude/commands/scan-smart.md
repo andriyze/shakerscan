@@ -16,10 +16,11 @@ Run an intelligent adaptive security scan that adjusts based on findings.
    curl -s http://localhost:8080/health
    ```
 
-4. If the user asks for pre-scan route seeding, JS route analysis, or custom endpoint coverage:
-   - run `/js-analyze <target>` first to build `custom_endpoints`
-   - run `/content-discovery <target>` first to build `custom_list`, route seeds, and `custom_endpoints`
-   - use that output in the smart scan payload
+4. If the user asks for pre-scan route seeding, JS route analysis, or custom endpoint coverage, run these helpers before the scan and feed their output into the payload:
+   - `/js-analyze <target>` to build `custom_endpoints` from JS bundles and captured APIs
+   - `/content-discovery <target>` to expand with `custom_list`, route seeds, and additional `custom_endpoints`
+
+   Either or both can be used; if both, run `/js-analyze` first so content-discovery can build on its output.
 
    Example:
    ```bash

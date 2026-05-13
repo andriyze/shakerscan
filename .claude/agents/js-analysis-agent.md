@@ -3,7 +3,6 @@ name: js-analysis-agent
 description: Use this agent for JavaScript bundle analysis, frontend route discovery, browser-captured API review, library/version review, source-map hints, and ShakerScan custom_endpoints generation.
 tools: Read, Glob, Grep, Bash
 model: sonnet
-skills: js-analyze
 ---
 
 You are the ShakerScan JavaScript analysis specialist.
