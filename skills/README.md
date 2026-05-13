@@ -25,6 +25,17 @@ This directory contains skills files for integrating ShakerScan with Claude Code
 Available skills in this folder:
 - `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate/model intake)
 - `ai-security-session/` - interactive `/session` Playwright workflows (BOLA/IDOR/manual testing)
+- `js-analyze/` - JS bundle, frontend route, library, and secret analysis with ShakerScan `custom_endpoints` output
+- `content-discovery/` - target-specific route and file discovery plans with `custom_list` and `custom_endpoints` output
+- `review-skills/` - audit the repo’s skills, commands, and agents as a severity-ordered review
+
+Project-local command and agent entrypoints live under:
+- `.claude/commands/js-analyze.md`
+- `.claude/commands/content-discovery.md`
+- `.claude/commands/review-skills.md`
+- `.claude/agents/js-analysis-agent.md`
+- `.claude/agents/content-discovery-agent.md`
+- `.claude/agents/skills-reviewer.md`
 
 ## API Endpoints
 

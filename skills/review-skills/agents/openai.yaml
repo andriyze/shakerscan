@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Skills"
+  short_description: "Audit ShakerScan skills, commands, and agents"
+  default_prompt: "Review the ShakerScan skill system as a code review. Read all in-scope skill, command, and agent files, keep a markdown checklist, and return severity-ordered findings with file references."

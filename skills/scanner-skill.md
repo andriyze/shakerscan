@@ -7,6 +7,16 @@ description: DAST security scanner. USE WHEN scan, security, vulnerability, XSS,
 
 You have access to a local DAST (Dynamic Application Security Testing) scanner running at `http://localhost:8080`.
 
+## Operating Stance
+
+Assume the target likely contains at least one meaningful security weakness, misconfiguration, exposed artifact, or missed attack path, and it is your job to find it.
+
+This is a persistence instruction, not permission to fabricate findings. Keep working until the relevant checklist is complete. If no verified or evidence-backed issue is found after the checklist is complete, say that clearly and return the strongest leads or coverage gaps instead.
+
+## Long-Task Checklist Rule
+
+For long scans, investigations, retest work, or multi-step workflows, maintain a markdown checklist and keep it updated as the task progresses. You cannot move on to the final answer until every checklist item is `[x]` or `[n/a]` with a short reason.
+
 ## Capabilities
 
 - **Security Scanning**: Scan websites for vulnerabilities (XSS, SQLi, misconfigurations, etc.)
@@ -98,6 +108,11 @@ curl -X POST http://localhost:8080/scans \
 | `verified_findings_only` | Keep only findings with exploit verification evidence in final output |
 | `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
 | `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
+
+**Pre-scan surface mapping helpers:**
+
+- Use `skills/js-analyze/` or the project command `/js-analyze <target>` to turn completed scan results or supplied JS bundles into `custom_endpoints`.
+- Use `skills/content-discovery/` or the project command `/content-discovery <target>` to build a high-signal `custom_list` plus `custom_endpoints` for smart scan seeding.
 
 **Performance/Safety Limits:**
 

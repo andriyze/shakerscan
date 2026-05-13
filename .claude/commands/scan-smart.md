@@ -16,14 +16,35 @@ Run an intelligent adaptive security scan that adjusts based on findings.
    curl -s http://localhost:8080/health
    ```
 
-4. Submit **smart** scan:
+4. If the user asks for pre-scan route seeding, JS route analysis, or custom endpoint coverage:
+   - run `/js-analyze <target>` first to build `custom_endpoints`
+   - run `/content-discovery <target>` first to build `custom_list`, route seeds, and `custom_endpoints`
+   - use that output in the smart scan payload
+
+   Example:
+   ```bash
+   curl -X POST http://localhost:8080/scans \
+     -H "Content-Type: application/json" \
+     -d '{
+       "target": "https://example.com",
+       "options": {
+         "scan_type": "smart",
+         "custom_endpoints": [
+           "GET /api/users?id=1",
+           "POST /graphql json:{\"query\":\"query Health { health }\"}"
+         ]
+       }
+     }'
+   ```
+
+5. Submit **smart** scan:
    ```bash
    curl -X POST http://localhost:8080/scans \
      -H "Content-Type: application/json" \
      -d '{"target": "$ARGUMENTS", "options": {"scan_type": "smart"}}'
    ```
 
-5. Report scan ID and UI link, then STOP:
+6. Report scan ID and UI link, then STOP:
    ```
    Smart scan submitted: {scan_id}
    View progress: http://localhost:3000/scans/{scan_id}

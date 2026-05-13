@@ -1,0 +1,4 @@
+interface:
+  display_name: "JS Analyze"
+  short_description: "Map frontend routes, APIs, libraries, and JS secrets"
+  default_prompt: "Analyze ShakerScan scan results or supplied JS assets for routes, APIs, libraries, and secrets. Return a concise report plus a ShakerScan custom_endpoints block."

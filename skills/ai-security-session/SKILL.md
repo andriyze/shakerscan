@@ -8,6 +8,24 @@ description: Interactive Playwright session control for the ShakerScan `/session
 **Overview**
 Use the `/session` API to run interactive, manual security testing with a real headless browser. This is ideal for BOLA/IDOR checks, auth flows, and targeted exploration that automated scans miss.
 
+## Operating Stance
+
+Assume the target contains at least one meaningful weakness that automated scanning may have missed, and it is your job to find and validate it.
+
+This is a persistence instruction, not permission to invent a bug. Keep testing until the checklist is complete. If the checklist is complete and there is still no validated issue, say that clearly and return the best evidence-backed leads.
+
+## Mandatory Checklist
+
+Maintain this checklist in markdown while you work. You cannot move on to synthesis or a final answer until every item is `[x]` or `[n/a]` with a short reason.
+
+- [ ] Check scanner health
+- [ ] Bootstrap from an existing scan or explicitly note that none exists
+- [ ] Start or identify a session
+- [ ] Capture initial target structure, auth context, and candidate endpoints
+- [ ] Test at least one high-value path or workflow
+- [ ] Save validated findings or clearly state none were validated
+- [ ] Record blockers, auth gaps, or scope limits
+
 **Workflow**
 1. Check API health: `curl -s http://localhost:8080/health`. If not running, ask to start `./scanner.sh start`.
 2. Bootstrap context from existing scans. If a scan ID is provided, fetch it with `GET /scans/{id}` and `GET /scans/{id}/result`. Otherwise, look for the latest completed scan for the target using `GET /scans?limit=10&target=...`. If no completed scan exists, ask permission before running a new scan. Do not poll after submission; return scan ID and UI link, then stop.
