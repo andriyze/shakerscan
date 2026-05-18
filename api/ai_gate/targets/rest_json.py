@@ -10,8 +10,13 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 try:
     from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
-except ImportError:  # pragma: no cover - supports package-style local imports
+except ModuleNotFoundError as exc:  # pragma: no cover - supports package-style local imports
+    if exc.name not in {"ai_gate", "ai_gate.budget"}:
+        raise
     from api.ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+
+
+CALIBRATION_METADATA_ERROR_KEY = "calibration_metadata_error"
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -215,11 +220,11 @@ def _extract_calibration_metadata(payload: Any, response_path: str | None) -> di
 
 def extract_calibration_metadata(raw_text: str, content_type: str, response_path: str | None) -> dict[str, Any]:
     if "json" not in content_type.lower():
-        return {}
+        return {CALIBRATION_METADATA_ERROR_KEY: f"Expected JSON calibration response, got {content_type or 'unknown content type'}"}
     try:
         payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        return {CALIBRATION_METADATA_ERROR_KEY: f"JSONDecodeError: {exc}"}
     return _extract_calibration_metadata(payload, response_path)
 
 
@@ -989,6 +994,11 @@ class RestJsonConversationTarget:
                     if self.calibration_mode
                     else {}
                 )
+                calibration_metadata_error = None
+                if oracle_metadata:
+                    calibration_metadata_error = oracle_metadata.pop(CALIBRATION_METADATA_ERROR_KEY, None)
+                if calibration_metadata_error and self.calibration_mode:
+                    response_metadata["calibration_metadata_error"] = calibration_metadata_error
                 if oracle_metadata and self.calibration_mode:
                     response_metadata["oracle_metadata"] = oracle_metadata
                 if stream_event_count:

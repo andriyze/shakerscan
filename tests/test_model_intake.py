@@ -134,11 +134,64 @@ def test_model_intake_reports_unsupported_artifact_scheme():
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
-    assert result["findings"][0]["severity"] == "high"
-    assert result["result"]["grade"] == "B"
+    assert "model_intake:unsupported_artifact_scheme" in finding_ids
+    assert "model_intake:missing_license_review" in finding_ids
+    assert "model_intake:missing_sbom_or_dependencies" in finding_ids
+    assert any(finding["severity"] == "high" for finding in result["findings"])
     assert result["result"]["decision"] == "block"
     assert result["model_intake"]["summary"]["format_posture"] == "unknown_or_unclassified_format"
+
+
+def test_model_intake_runs_metadata_governance_for_unsupported_registry_refs():
+    result = asyncio.run(
+        run_model_intake_scan(
+            "oci://honey.local/models/safe:latest",
+            {
+                "expected_sha256": "abc",
+                "signature_url": "https://example.test/model.sig",
+                "model_card_url": "https://example.test/model-card",
+                "deployment_approved": True,
+                "require_deployment_approval": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
+    assert result["model_intake"]["checks"]["license_review"] is True
+    assert result["model_intake"]["checks"]["sbom_dependencies"] is True
+
+
+def test_model_intake_reports_metadata_fetch_failure_without_fake_missing_governance(tmp_path):
+    artifact = tmp_path / "model.onnx"
+    metadata = tmp_path / "metadata.json"
+    artifact.write_bytes(b"onnx bytes")
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "metadata_url": str(metadata),
+                "require_deployment_approval": True,
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:metadata_fetch_failed" in finding_ids
+    assert "model_intake:missing_license_review" not in finding_ids
+    assert "model_intake:missing_sbom_or_dependencies" not in finding_ids
+    assert result["model_intake"]["checks"]["license_review"] is None
+    assert result["model_intake"]["summary"]["metadata_fetch_failed"] is True
 
 
 def test_model_intake_flags_missing_governance_metadata(tmp_path):

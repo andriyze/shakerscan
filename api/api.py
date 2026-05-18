@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -30,7 +31,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name != "constants":
+        raise
     from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget
 
 from retest_contract import (
@@ -50,7 +53,9 @@ from retest_contract import (
 
 try:
     from ai_demo_scenarios import get_ai_test_scenarios
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name != "ai_demo_scenarios":
+        raise
     from api.ai_demo_scenarios import get_ai_test_scenarios
 
 try:
@@ -61,7 +66,9 @@ try:
         build_ai_test_case_export,
         render_ai_redteam_markdown,
     )
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name != "ai_redteam_artifacts":
+        raise
     from api.ai_redteam_artifacts import (
         build_ai_learning_guide,
         build_ai_redteam_report,
@@ -85,6 +92,7 @@ STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
+logger = logging.getLogger(__name__)
 
 # Maximum allowed duration per scan type (minutes) - safety net
 MAX_SCAN_DURATION = {
@@ -335,12 +343,12 @@ def _load_effective_ai_settings() -> dict[str, Any]:
             overrides.get("demo_mode_enabled"), default=settings["demo_mode_enabled"]
         )
     if "demo_honey_public_url" in overrides:
-        settings["demo_honey_public_url"] = _normalize_demo_base_url(
+        settings["demo_honey_public_url"] = _coerce_demo_base_url(
             overrides.get("demo_honey_public_url"),
             default=settings["demo_honey_public_url"],
         )
     if "demo_honey_scanner_url" in overrides:
-        settings["demo_honey_scanner_url"] = _normalize_demo_base_url(
+        settings["demo_honey_scanner_url"] = _coerce_demo_base_url(
             overrides.get("demo_honey_scanner_url"),
             default=settings["demo_honey_scanner_url"],
         )
@@ -377,6 +385,10 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_demo_base_url(value: Any, *, default: str = "") -> str:
+    return _validate_demo_base_url(value, default=default)
+
+
+def _validate_demo_base_url(value: Any, *, default: str = "") -> str:
     raw = str(value or "").strip().rstrip("/")
     if not raw:
         raw = default.rstrip("/")
@@ -386,6 +398,13 @@ def _normalize_demo_base_url(value: Any, *, default: str = "") -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="Demo Honey URL must be an http(s) URL")
     return raw
+
+
+def _coerce_demo_base_url(value: Any, *, default: str = "") -> str:
+    try:
+        return _validate_demo_base_url(value, default=default)
+    except HTTPException:
+        return ""
 
 
 def _normalize_env_value(value: str) -> str:
@@ -1708,26 +1727,14 @@ def _ai_target_run_kind(target_type: str) -> str:
 def _ai_demo_target_sql_predicate() -> str:
     return """(
         COALESCE(metadata_json->>'shakerscan_demo', '') = 'true'
-        OR COALESCE(metadata_json->>'calibration_run', '') <> ''
-        OR name LIKE 'Local Honey calibration%'
-        OR LOWER(name) LIKE 'honey %'
-        OR LOWER(name) LIKE '%calibration%'
-        OR LOWER(endpoint_url) LIKE '%honey.shakerscan.com%'
-        OR endpoint_url LIKE '%calibration_run=%'
+        OR (metadata_json ? 'calibration_run' AND COALESCE(metadata_json->>'calibration_run', '') <> '')
     )"""
 
 
 def _is_ai_demo_target_row(row: dict[str, Any]) -> bool:
     metadata = _decode_json_value(row.get("metadata_json")) or {}
-    return (
-        metadata.get("shakerscan_demo") is True
-        or bool(metadata.get("calibration_run"))
-        or str(row.get("name") or "").startswith("Local Honey calibration")
-        or str(row.get("name") or "").lower().startswith("honey ")
-        or "calibration" in str(row.get("name") or "").lower()
-        or "honey.shakerscan.com" in str(row.get("endpoint_url") or "").lower()
-        or "calibration_run=" in str(row.get("endpoint_url") or "")
-    )
+    demo_flag = metadata.get("shakerscan_demo")
+    return demo_flag is True or str(demo_flag).strip().lower() == "true" or bool(metadata.get("calibration_run"))
 
 
 def _demo_target_url(url: str, scanner_base_url: str, run_id: str, scenario_id: str) -> str:
@@ -1766,8 +1773,10 @@ def _fetch_json_url(url: str, *, timeout: int = 15) -> dict[str, Any]:
             return json.loads(body) if body else {}
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        logger.warning("Honey registry fetch failed with HTTP %s for %s", exc.code, url)
         raise HTTPException(status_code=502, detail=f"Honey registry returned HTTP {exc.code}: {body[:200]}") from exc
-    except Exception as exc:
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError, UnicodeDecodeError) as exc:
+        logger.warning("Honey registry fetch failed for %s", url, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Unable to read Honey registry: {exc}") from exc
 
 
@@ -2652,7 +2661,10 @@ async def get_ai_learning_guide():
 @app.get("/ai/test-cases")
 async def list_ai_test_cases(pack: Optional[str] = Query(None)):
     """Return AI Gate probe/test-case metadata for eval planning and review."""
-    return build_ai_test_case_catalog(pack=pack)
+    try:
+        return build_ai_test_case_catalog(pack=pack)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/ai/test-cases/export")
@@ -2712,89 +2724,119 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
     }
     run_id = f"demo-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     queued: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
 
     async with db_pool.acquire() as conn:
         for scenario_id in scenario_ids:
+            target_id: Any = None
             scenario = scenarios[scenario_id]
-            surface = str(scenario.get("surface") or "rag")
-            target_type, response_path, probe_pack = surface_config.get(surface, surface_config["rag"])
-            metadata = copy.deepcopy(scenario.get("metadata_json") or {})
-            expected = scenario.get("expected_shakerscan_findings") or []
-            metadata.update({
-                "shakerscan_demo": True,
-                "demo_run_id": run_id,
-                "calibration_run": run_id,
-                "honey_scenario_id": scenario_id,
-                "expected_shakerscan_findings": expected,
-                "safe_fixture": scenario.get("safe_fixture") is True,
-            })
-            endpoint_url = _demo_target_url(
-                str(scenario.get("target_url") or ""),
-                scanner_base_url,
-                run_id,
-                scenario_id,
-            )
-            request_template = _normalize_ai_request_template(
-                _demo_request_template_with_prompt(scenario.get("target_template"), surface),
-                method=str(scenario.get("method") or "POST"),
-                target_type=target_type,
-            )
-
-            async with conn.transaction():
-                target_id = await conn.fetchval("""
-                    INSERT INTO ai_targets (
-                        name, target_type, endpoint_url, method, headers_template,
-                        request_template, response_path, streaming_mode, rate_limit_rps,
-                        token_budget, request_budget, production_mode, metadata_json, is_active
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', 10, 4000, $8, false, $9, true)
-                    RETURNING id
-                """,
-                    f"Honey demo {scenario_id}",
-                    target_type,
-                    endpoint_url,
-                    _normalize_ai_method(str(scenario.get("method") or "POST")),
-                    json.dumps({"Content-Type": "application/json", "Accept": "application/json"}),
-                    json.dumps(request_template),
-                    response_path,
-                    request.request_budget,
-                    json.dumps(metadata),
+            try:
+                surface = str(scenario.get("surface") or "rag")
+                target_type, response_path, probe_pack = surface_config.get(surface, surface_config["rag"])
+                metadata = copy.deepcopy(scenario.get("metadata_json") or {})
+                expected = scenario.get("expected_shakerscan_findings") or []
+                metadata.update({
+                    "shakerscan_demo": True,
+                    "demo_run_id": run_id,
+                    "calibration_run": run_id,
+                    "honey_scenario_id": scenario_id,
+                    "expected_shakerscan_findings": expected,
+                    "safe_fixture": scenario.get("safe_fixture") is True,
+                })
+                endpoint_url = _demo_target_url(
+                    str(scenario.get("target_url") or ""),
+                    scanner_base_url,
+                    run_id,
+                    scenario_id,
                 )
-                await conn.execute("""
-                    INSERT INTO ai_target_credentials (
-                        ai_target_id, auth_kind, header_name, secret_value,
-                        secret_preview, metadata_json, rotated_at
-                    ) VALUES ($1, 'none', NULL, NULL, NULL, '{}'::jsonb, NOW())
-                """,
-                    target_id,
+                request_template = _normalize_ai_request_template(
+                    _demo_request_template_with_prompt(scenario.get("target_template"), surface),
+                    method=str(scenario.get("method") or "POST"),
+                    target_type=target_type,
                 )
 
-            scan = await _queue_ai_target_scan(
-                str(target_id),
-                AITargetScanRequest(
-                    probe_pack=probe_pack,
-                    scan_profile=request.scan_profile,
-                    environment="development",
-                    ai_judge_enabled=False,
-                    semantic_judge_enabled=False,
-                ),
-            )
-            queued.append({
-                "scenario_id": scenario_id,
-                "name": scenario.get("name") or scenario_id,
-                "surface": surface,
-                "safe_fixture": scenario.get("safe_fixture") is True,
-                "expected_findings": expected,
-                "target_id": str(target_id),
-                "scan_id": scan["scan_id"],
-                "ui_url": scan["ui_url"],
-                "probe_pack": probe_pack,
-                "scan_profile": request.scan_profile,
-            })
+                async with conn.transaction():
+                    target_id = await conn.fetchval("""
+                        INSERT INTO ai_targets (
+                            name, target_type, endpoint_url, method, headers_template,
+                            request_template, response_path, streaming_mode, rate_limit_rps,
+                            token_budget, request_budget, production_mode, metadata_json, is_active
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', 10, 4000, $8, false, $9, true)
+                        RETURNING id
+                    """,
+                        f"Honey demo {scenario_id}",
+                        target_type,
+                        endpoint_url,
+                        _normalize_ai_method(str(scenario.get("method") or "POST")),
+                        json.dumps({"Content-Type": "application/json", "Accept": "application/json"}),
+                        json.dumps(request_template),
+                        response_path,
+                        request.request_budget,
+                        json.dumps(metadata),
+                    )
+                    await conn.execute("""
+                        INSERT INTO ai_target_credentials (
+                            ai_target_id, auth_kind, header_name, secret_value,
+                            secret_preview, metadata_json, rotated_at
+                        ) VALUES ($1, 'none', NULL, NULL, NULL, '{}'::jsonb, NOW())
+                    """,
+                        target_id,
+                    )
+
+                scan = await _queue_ai_target_scan(
+                    str(target_id),
+                    AITargetScanRequest(
+                        probe_pack=probe_pack,
+                        scan_profile=request.scan_profile,
+                        environment="development",
+                        ai_judge_enabled=False,
+                        semantic_judge_enabled=False,
+                    ),
+                )
+                queued.append({
+                    "scenario_id": scenario_id,
+                    "name": scenario.get("name") or scenario_id,
+                    "surface": surface,
+                    "safe_fixture": scenario.get("safe_fixture") is True,
+                    "expected_findings": expected,
+                    "target_id": str(target_id),
+                    "scan_id": scan["scan_id"],
+                    "ui_url": scan["ui_url"],
+                    "probe_pack": probe_pack,
+                    "scan_profile": request.scan_profile,
+                })
+            except Exception as exc:
+                logger.warning("Honey demo scenario %s failed to queue", scenario_id, exc_info=True)
+                if target_id:
+                    reason = f"Honey demo queue failed: {type(exc).__name__}: {exc}"
+                    await conn.execute(
+                        "UPDATE ai_targets SET is_active = false, updated_at = NOW() WHERE id = $1",
+                        target_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE scans
+                        SET status = 'failed',
+                            error_message = $2,
+                            completed_at = COALESCE(completed_at, NOW()),
+                            updated_at = NOW()
+                        WHERE ai_target_id = $1 AND status = 'pending'
+                        """,
+                        target_id,
+                        reason[:1000],
+                    )
+                failed.append({
+                    "scenario_id": scenario_id,
+                    "name": scenario.get("name") or scenario_id,
+                    "target_id": str(target_id) if target_id else None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     return {
         "run_id": run_id,
         "honey_registry_url": f"{public_base_url}/api/ai-gate/scenarios",
         "queued": queued,
+        "failed": failed,
     }
 
 
@@ -2847,6 +2889,8 @@ async def update_ai_settings(request: AISettingsUpdate):
 
     updates: dict[str, str] = {}
     deletes: list[str] = []
+    clear_demo_honey_public_url = False
+    clear_demo_honey_scanner_url = False
 
     for field in string_fields:
         value = getattr(request, field)
@@ -2904,9 +2948,19 @@ async def update_ai_settings(request: AISettingsUpdate):
     if request.demo_mode_enabled is not None:
         updates["demo_mode_enabled"] = "true" if request.demo_mode_enabled else "false"
     if request.demo_honey_public_url is not None:
-        updates["demo_honey_public_url"] = _normalize_demo_base_url(request.demo_honey_public_url)
+        normalized = _validate_demo_base_url(request.demo_honey_public_url)
+        if normalized:
+            updates["demo_honey_public_url"] = normalized
+        else:
+            clear_demo_honey_public_url = True
+            deletes.append("demo_honey_public_url")
     if request.demo_honey_scanner_url is not None:
-        updates["demo_honey_scanner_url"] = _normalize_demo_base_url(request.demo_honey_scanner_url)
+        normalized = _validate_demo_base_url(request.demo_honey_scanner_url)
+        if normalized:
+            updates["demo_honey_scanner_url"] = normalized
+        else:
+            clear_demo_honey_scanner_url = True
+            deletes.append("demo_honey_scanner_url")
 
     if updates:
         r.hset(AI_SETTINGS_KEY, mapping=updates)
@@ -2939,8 +2993,8 @@ async def update_ai_settings(request: AISettingsUpdate):
             "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
             "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", False) else "false",
             "AI_DEMO_MODE_ENABLED": "true" if effective.get("demo_mode_enabled", False) else "false",
-            "AI_DEMO_HONEY_PUBLIC_URL": effective.get("demo_honey_public_url") or None,
-            "AI_DEMO_HONEY_SCANNER_URL": effective.get("demo_honey_scanner_url") or None,
+            "AI_DEMO_HONEY_PUBLIC_URL": None if clear_demo_honey_public_url else effective.get("demo_honey_public_url") or None,
+            "AI_DEMO_HONEY_SCANNER_URL": None if clear_demo_honey_scanner_url else effective.get("demo_honey_scanner_url") or None,
         }
         persisted_to_env, persist_message = _persist_env_updates(LOCAL_ENV_FILE, env_updates)
 

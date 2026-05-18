@@ -556,7 +556,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           )}
 
-          {aiGateControlEvidence?.summary && (
+          {aiGateControlEvidence?.summary && Number(aiGateControlEvidence.summary.required || 0) > 0 && (
             <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>

@@ -811,6 +811,12 @@ export interface AIDemoRunResponse {
     probe_pack: AIProbePack
     scan_profile: AIScanProfile
   }>
+  failed?: Array<{
+    scenario_id: string
+    name?: string
+    target_id?: string | null
+    error: string
+  }>
 }
 
 export async function runAIDemo(data?: {

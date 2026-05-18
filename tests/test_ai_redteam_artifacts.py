@@ -1,5 +1,6 @@
 import os
 import sys
+import pytest
 
 
 API_PATH = os.path.join(os.path.dirname(__file__), "..", "api")
@@ -46,6 +47,11 @@ def test_test_case_catalog_and_exports_are_generic():
     assert '"prompt"' in garak
     assert media_type.startswith("application/x-ndjson")
     assert extension == "jsonl"
+
+
+def test_test_case_catalog_rejects_unknown_pack():
+    with pytest.raises(ValueError, match="unknown pack"):
+        build_ai_test_case_catalog(pack="not-a-pack")
 
 
 def test_ai_redteam_report_includes_validation_and_calibration_summary():

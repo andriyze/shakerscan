@@ -39,7 +39,9 @@ from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
 
 try:
     from ai_control_requirements import AI_CONTROL_REQUIREMENTS
-except ImportError:  # pragma: no cover - supports package-style local imports
+except ModuleNotFoundError as exc:  # pragma: no cover - supports package-style local imports
+    if exc.name != "ai_control_requirements":
+        raise
     from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
 logger = logging.getLogger(__name__)
@@ -85,7 +87,7 @@ INTERNAL_URL_PATTERN = re.compile(
     r"https?://[A-Za-z0-9.-]+\.(?:internal|corp|local|lan)(?:[/:][^\s\"']*)?",
     re.IGNORECASE,
 )
-TENANT_ID_PATTERN = re.compile(r"(?<![a-z0-9_-])tenant-[a-z0-9][a-z0-9-]*(?![a-z0-9-])")
+TENANT_ID_PATTERN = re.compile(r"(?<![a-z0-9_-])tenant-[a-z0-9][a-z0-9-]*(?![a-z0-9-])", re.IGNORECASE)
 
 PII_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "US Social Security Number"),
@@ -1126,7 +1128,7 @@ def _jsonish_payload_candidates(response_text: str) -> list[dict[str, Any] | lis
         try:
             parsed, _ = decoder.raw_decode(stripped[index:])
             add_candidate(parsed, allow_list=False)
-        except Exception:  # noqa: BLE001
+        except json.JSONDecodeError:
             continue
     return candidates
 
@@ -4767,6 +4769,14 @@ def _apply_deterministic_ai_gate_analysis(finding: dict[str, Any], evidence: dic
         "Review the full AI Gate probe transcript before accepting or waiving this finding.",
     )
     finding["ai_classification_source"] = source
+    if evidence.get("ai_judging_unavailable") is True:
+        finding["ai_judging_unavailable"] = True
+        finding["ai_classification_source"] = f"{source}_semantic_judge_unavailable"
+        error = str(evidence.get("semantic_judge_error") or "").strip()
+        suffix = " Semantic judge was enabled but failed before reviewing this finding."
+        if error:
+            suffix += f" Error: {error[:300]}"
+        finding["ai_rationale"] = (finding["ai_rationale"] + suffix)[:1000]
 
 
 def _apply_ai_gate_analysis_fields(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5151,6 +5161,8 @@ def _semantic_judge_execution_summary(
     max_calls: int,
     reviewed_probe_ids: list[str],
     findings: list[dict[str, Any]],
+    status: str | None = None,
+    error: str | None = None,
 ) -> dict[str, Any]:
     semantic_results: list[dict[str, Any]] = []
     semantic_created = 0
@@ -5171,7 +5183,21 @@ def _semantic_judge_execution_summary(
         if isinstance(semantic_result.get("severity_calibration"), dict):
             calibrated += 1
 
-    return {
+    resolved_status = status
+    if resolved_status is None:
+        if not enabled:
+            resolved_status = "disabled"
+        elif not provider_configured:
+            resolved_status = "not_configured"
+        elif max_calls <= 0:
+            resolved_status = "budget_exhausted"
+        elif reviewed_probe_ids:
+            resolved_status = "completed"
+        else:
+            resolved_status = "not_run"
+
+    summary = {
+        "status": resolved_status,
         "enabled": enabled,
         "provider_configured": provider_configured,
         "max_calls": max_calls,
@@ -5183,6 +5209,9 @@ def _semantic_judge_execution_summary(
         "augmented_finding_count": semantic_augmented,
         "calibrated_result_count": calibrated,
     }
+    if error:
+        summary["error"] = error[:1000]
+    return summary
 
 
 async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None) -> dict[str, Any]:
@@ -5391,6 +5420,8 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     execution_plan["limits"]["max_semantic_judge_calls"] = max_semantic_judge_calls
     judge_enabled = metadata_json.get("ai_judge_enabled") is True
     semantic_reviewed: list[str] = []
+    semantic_judge_status: str | None = None
+    semantic_judge_error: str | None = None
     if semantic_judge_config and semantic_judge_enabled and max_semantic_judge_calls > 0:
         try:
             findings, semantic_reviewed = await _semantic_judge_probe_transcripts(
@@ -5402,7 +5433,20 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
                 family_priority=target_family_focus.families,
             )
             execution_plan["semantic_reviewed"] = semantic_reviewed
+            semantic_judge_status = "completed"
         except Exception as exc:
+            semantic_judge_status = "errored"
+            semantic_judge_error = f"{type(exc).__name__}: {exc}"
+            execution_plan["semantic_judge"] = {
+                "status": semantic_judge_status,
+                "error": semantic_judge_error[:1000],
+            }
+            for finding in findings:
+                evidence = finding.get("evidence")
+                if isinstance(evidence, dict):
+                    evidence["ai_judging_unavailable"] = True
+                    evidence["semantic_judge_error"] = semantic_judge_error[:1000]
+                finding["ai_judging_unavailable"] = True
             logger.warning("Semantic judge batch failed, using original findings: %s", exc)
 
     findings.extend(_control_gap_findings(control_evidence, metadata_json))
@@ -5413,6 +5457,8 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
         max_calls=max_semantic_judge_calls,
         reviewed_probe_ids=semantic_reviewed,
         findings=findings,
+        status=semantic_judge_status,
+        error=semantic_judge_error,
     )
 
     judge_config = _get_judge_config(options) if judge_enabled else None

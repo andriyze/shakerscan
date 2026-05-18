@@ -144,6 +144,7 @@ def queue_ai_gate(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]
                 "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
             })
         except Exception as exc:  # noqa: BLE001
+            print(f"ai_gate queue error for {scenario_id}: {exc}", file=sys.stderr)
             queued.append(queue_error_item(
                 kind="ai_gate",
                 scenario_id=scenario_id,
@@ -190,6 +191,7 @@ def queue_model_intake(args: argparse.Namespace, run_id: str) -> list[dict[str, 
                 "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
             })
         except Exception as exc:  # noqa: BLE001
+            print(f"model_intake queue error for {scenario_id}: {exc}", file=sys.stderr)
             queued.append(queue_error_item(
                 kind="model_intake",
                 scenario_id=scenario_id,
@@ -289,7 +291,7 @@ def main() -> int:
 
     if not args.wait:
         print(json.dumps({"run_id": run_id, "queued": queued}, indent=2))
-        return 0
+        return 1 if any(item.get("queue_error") for item in queued) else 0
 
     completed = wait_for_scans(args, queued)
     passed, failed = validate(completed)

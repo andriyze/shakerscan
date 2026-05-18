@@ -23,7 +23,15 @@ const HONEY_LOCAL_SCANNER_URL = 'http://host.docker.internal:18080'
 type DemoHoneyMode = 'hosted' | 'local' | 'custom'
 
 function normalizeUrlValue(value?: string): string {
-  return String(value || '').trim().replace(/\/+$/, '')
+  const raw = String(value || '').trim().replace(/\/+$/, '')
+  try {
+    const url = new URL(raw)
+    url.protocol = url.protocol.toLowerCase()
+    url.hostname = url.hostname.toLowerCase()
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return raw
+  }
 }
 
 function deriveDockerReachableUrl(value: string): string {

@@ -14,6 +14,7 @@ if API_PATH not in sys.path:
 from ai_gate_scan import (  # noqa: E402
     SEMANTIC_CONFIDENCE_FLOOR,
     STRUCTURED_AI_GATE_FINDING_MAP,
+    TENANT_ID_PATTERN,
     _build_ai_control_evidence,
     _control_gap_findings,
     _apply_ai_gate_analysis_fields,
@@ -121,6 +122,25 @@ def test_low_confidence_deterministic_ai_gate_finding_needs_review():
     assert enriched["ai_classification_source"] == "regex_classifier"
 
 
+def test_deterministic_ai_gate_finding_marks_semantic_judge_unavailable():
+    finding = {
+        "title": "Approval bypass",
+        "severity": "high",
+        "confidence": 0.95,
+        "evidence": {
+            "judge_layer": "regex_classifier",
+            "ai_judging_unavailable": True,
+            "semantic_judge_error": "TimeoutError: judge timed out",
+        },
+    }
+
+    enriched = _apply_ai_gate_analysis_fields([finding])[0]
+
+    assert enriched["ai_judging_unavailable"] is True
+    assert enriched["ai_classification_source"] == "regex_classifier_semantic_judge_unavailable"
+    assert "Semantic judge was enabled but failed" in enriched["ai_rationale"]
+
+
 def test_rest_response_extraction_preserves_honey_oracle_context():
     raw_text = json.dumps({
         "answer": "Hidden document instruction leaked.",
@@ -207,6 +227,13 @@ def test_oracle_metadata_does_not_feed_marker_classifier():
     assert findings == []
 
 
+def test_calibration_metadata_parse_error_is_exposed():
+    oracle_metadata = extract_calibration_metadata("{not json", "application/json", "$.answer")
+
+    assert "calibration_metadata_error" in oracle_metadata
+    assert "JSONDecodeError" in oracle_metadata["calibration_metadata_error"]
+
+
 def test_nested_non_oracle_arrays_are_not_treated_as_expected_findings():
     raw_text = json.dumps({
         "jsonrpc": "2.0",
@@ -245,6 +272,11 @@ def test_rag_safe_source_id_suffix_is_not_cross_tenant_trace_context():
     )
 
     assert findings == []
+
+
+def test_tenant_id_pattern_accepts_case_variants_without_embedded_id_matches():
+    assert TENANT_ID_PATTERN.fullmatch("Tenant-ACME")
+    assert not TENANT_ID_PATTERN.search("doc-tenant-001-onboarding")
 
 
 def test_mcp_oauth_audience_confusion_is_detected():

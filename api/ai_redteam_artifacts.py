@@ -7,7 +7,9 @@ from typing import Any
 
 try:
     from ai_gate.probe_registry import PROBE_PACK_DEFINITIONS
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"ai_gate", "ai_gate.probe_registry"}:
+        raise
     from api.ai_gate.probe_registry import PROBE_PACK_DEFINITIONS
 
 
@@ -508,7 +510,9 @@ def build_ai_test_case_catalog(pack: str | None = None) -> dict[str, Any]:
     packs = []
     selected_packs = PROBE_PACK_DEFINITIONS
     if pack:
-        selected_packs = {pack: PROBE_PACK_DEFINITIONS[pack]} if pack in PROBE_PACK_DEFINITIONS else {}
+        if pack not in PROBE_PACK_DEFINITIONS:
+            raise ValueError(f"unknown pack '{pack}'")
+        selected_packs = {pack: PROBE_PACK_DEFINITIONS[pack]}
     for pack_id, probes in selected_packs.items():
         packs.append({
             "id": pack_id,
@@ -542,11 +546,7 @@ def build_ai_test_case_catalog(pack: str | None = None) -> dict[str, Any]:
 
 def _yaml_scalar(value: Any, indent: int = 0) -> str:
     text = "" if value is None else str(value)
-    if "\n" in text or len(text) > 80 or ":" in text:
-        padding = " " * indent
-        body = "\n".join(f"{padding}{line}" for line in text.splitlines())
-        return f"|-\n{body}"
-    return json.dumps(text)
+    return json.dumps(text, ensure_ascii=False)
 
 
 def _promptfoo_export(pack: str | None) -> str:

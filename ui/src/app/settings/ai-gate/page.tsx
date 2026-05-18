@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
@@ -232,7 +232,7 @@ export default function AIGateSettingsPage() {
     [targetType, initialType]
   )
 
-  async function loadTargets() {
+  const loadTargets = useCallback(async () => {
     setLoading(true)
     try {
       const payload = await getAITargets({ includeInactive: false, includeDemo: showDemoTargets })
@@ -250,11 +250,11 @@ export default function AIGateSettingsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [showDemoTargets])
 
   useEffect(() => {
     loadTargets()
-  }, [showDemoTargets])
+  }, [loadTargets])
 
   useEffect(() => {
     async function loadSettingsAndScenario() {
@@ -427,7 +427,12 @@ export default function AIGateSettingsPage() {
     try {
       const result = await runAIDemo({ scan_profile: 'smoke', request_budget: 1 })
       setDemoResult(result)
-      setMessage(`Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}.`)
+      const failedCount = result.failed?.length || 0
+      setMessage(
+        failedCount
+          ? `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}; ${failedCount} scenario${failedCount === 1 ? '' : 's'} failed to queue.`
+          : `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}.`
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to queue Honey demo')
     } finally {
@@ -507,19 +512,30 @@ export default function AIGateSettingsPage() {
             </button>
           </div>
           {demoResult && (
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              {demoResult.queued.map((item) => (
-                <Link
-                  key={item.scan_id}
-                  href={`/scans/${item.scan_id}`}
-                  className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
-                >
-                  <div className="font-medium">{item.name}</div>
-                  <div className="mt-1 text-xs text-emerald-100/60">
-                    {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
-                  </div>
-                </Link>
-              ))}
+            <div className="mt-3 space-y-2">
+              <div className="grid gap-2 md:grid-cols-2">
+                {demoResult.queued.map((item) => (
+                  <Link
+                    key={item.scan_id}
+                    href={`/scans/${item.scan_id}`}
+                    className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
+                  >
+                    <div className="font-medium">{item.name}</div>
+                    <div className="mt-1 text-xs text-emerald-100/60">
+                      {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
+                    </div>
+                  </Link>
+                ))}
+              </div>
+              {(demoResult.failed?.length || 0) > 0 && (
+                <div className="rounded border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-200">
+                  {demoResult.failed?.map((item) => (
+                    <div key={item.scenario_id} className="break-words">
+                      {item.scenario_id}: {item.error}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -795,15 +811,10 @@ export default function AIGateSettingsPage() {
               const targetControlSummary = scenario
                 ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
                 : null
-              const targetUrl = target.endpoint_url.toLowerCase()
-              const targetName = target.name.toLowerCase()
-              const isDemoTarget = Boolean(target.metadata_json?.shakerscan_demo)
+              const demoFlag = target.metadata_json?.shakerscan_demo
+              const isDemoTarget = demoFlag === true
+                || String(demoFlag || '').toLowerCase() === 'true'
                 || Boolean(target.metadata_json?.calibration_run)
-                || targetName.startsWith('honey ')
-                || targetName.startsWith('local honey calibration')
-                || targetName.includes('calibration')
-                || targetUrl.includes('honey.shakerscan.com')
-                || targetUrl.includes('calibration_run=')
               return (
                 <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">

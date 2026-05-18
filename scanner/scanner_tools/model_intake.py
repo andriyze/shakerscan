@@ -192,13 +192,29 @@ async def _fetch_artifact(ref: str, max_bytes: int, timeout_seconds: int) -> tup
     }
 
 
-async def _fetch_json(url: str, timeout_seconds: int, max_bytes: int = 262_144) -> dict[str, Any]:
-    data, _meta = await _fetch_artifact(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+async def _fetch_json(url: str, timeout_seconds: int, max_bytes: int = 262_144) -> tuple[dict[str, Any], dict[str, Any]]:
+    data, meta = await _fetch_artifact(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+    fetch_meta = {**meta, "url": url}
+    if fetch_meta.get("error"):
+        return {}, fetch_meta
+    if not data:
+        fetch_meta["error"] = "Empty metadata response"
+        return {}, fetch_meta
     try:
-        parsed = json.loads(data.decode("utf-8"))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+        decoded = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fetch_meta["error"] = f"UnicodeDecodeError: {exc}"
+        return {}, fetch_meta
+    try:
+        parsed = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        fetch_meta["error"] = f"JSONDecodeError: {exc}"
+        return {}, fetch_meta
+    if not isinstance(parsed, dict):
+        fetch_meta["error"] = f"Metadata JSON root must be an object, got {type(parsed).__name__}"
+        return {}, fetch_meta
+    fetch_meta["parsed"] = True
+    return parsed, fetch_meta
 
 
 def _looks_like_pickle(data: bytes) -> bool:
@@ -274,13 +290,15 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
 async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run model artifact intake checks without executing model code."""
     options = raw_options or {}
-    metadata = options.get("metadata_json") if isinstance(options.get("metadata_json"), dict) else {}
+    inline_metadata = options.get("metadata_json") if isinstance(options.get("metadata_json"), dict) else {}
+    metadata = dict(inline_metadata)
     metadata_url = options.get("metadata_url")
+    metadata_fetch_meta: dict[str, Any] = {}
     timeout_seconds = int(options.get("timeout_seconds") or 20)
     max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
 
     if metadata_url:
-        remote_metadata = await _fetch_json(str(metadata_url), timeout_seconds=timeout_seconds)
+        remote_metadata, metadata_fetch_meta = await _fetch_json(str(metadata_url), timeout_seconds=timeout_seconds)
         metadata = {**remote_metadata, **metadata}
 
     artifact_bytes, artifact_meta = await _fetch_artifact(
@@ -316,6 +334,18 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     eval_ref = _metadata_value(metadata, "eval_report_url", "security_evals", "red_team_report", "eval_results")
     deployment_restrictions = _metadata_value(metadata, "deployment_restrictions", "allowed_environments", "use_restrictions")
     monitoring_plan = _metadata_value(metadata, "monitoring_plan", "monitoring_plan_url", "drift_monitoring", "incident_response_plan")
+    metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
+
+    if metadata_fetch_meta.get("error"):
+        findings.append(_finding(
+            finding_id="metadata_fetch_failed",
+            title="Model intake metadata could not be fetched",
+            severity="high",
+            description="The model intake metadata URL could not be read or parsed, so metadata-backed governance checks are indeterminate.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_url": str(metadata_url), "metadata_fetch": metadata_fetch_meta},
+            remediation="Make the metadata URL reachable and return a JSON object, or provide equivalent metadata_json directly in the intake request.",
+        ))
 
     if artifact_meta.get("error"):
         if unsupported_scheme_error:
@@ -328,67 +358,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 evidence={"artifact": name, "fetch": artifact_meta},
                 remediation="Use a supported artifact source (http/https) or extend model-intake fetch support for hf/oci registries.",
             ))
-            return {
-                "schema_version": "2026-05-10.model-intake.v1",
-                "scan_mode": "model_intake",
-                "target": artifact_ref,
-                "model_intake": {
-                    "summary": {
-                        "artifact_name": name,
-                        "artifact_ref": artifact_ref,
-                        "source_kind": _source_kind(artifact_ref, metadata),
-                        "extension": ext,
-                        "sha256": sha256,
-                        "format_posture": "unknown_or_unclassified_format",
-                        "provenance_present": False,
-                        "signature_present": False,
-                        "expected_hash_present": bool(expected_sha256),
-                        "deployment_approved": deployment_approved,
-                        "license_present": bool(license_ref),
-                        "sbom_present": bool(sbom_ref),
-                        "malware_scan_present": bool(malware_scan_ref),
-                        "eval_evidence_present": bool(eval_ref),
-                        "deployment_restrictions_present": bool(deployment_restrictions),
-                        "monitoring_plan_present": bool(monitoring_plan),
-                        "findings_count": len(findings),
-                    },
-                    "artifact": {
-                        "name": name,
-                        "extension": ext,
-                        "fetch": artifact_meta,
-                        "archive": zip_info,
-                    },
-                    "metadata": metadata,
-                    "checks": {
-                        "provenance": False,
-                        "unsafe_serialization": None,
-                        "artifact_signing": False,
-                        "checksum": False,
-                        "approval": deployment_approved if require_approval else None,
-                        "license_review": False if require_governance else None,
-                        "sbom_dependencies": False if require_governance else None,
-                        "malware_scan": False if require_governance else None,
-                        "security_evals": False if require_governance else None,
-                        "deployment_restrictions": False if require_governance else None,
-                        "monitoring_plan": False if require_governance else None,
-                    },
-                },
-                "findings": findings,
-                "result": {
-                    "score": max(0, 100 - _severity_score("high")),
-                    "grade": _grade(max(0, 100 - _severity_score("high"))),
-                    **_intake_decision(findings),
-                },
-            }
-        findings.append(_finding(
-            finding_id="artifact_fetch_failed",
-            title="Model artifact could not be fetched for intake",
-            severity="high",
-            description="The model artifact could not be downloaded or read, so provenance and serialization checks could not complete.",
-            artifact_ref=artifact_ref,
-            evidence={"artifact": name, "fetch": artifact_meta},
-            remediation="Make the model artifact reachable to the intake worker or provide an internal registry reference with access credentials.",
-        ))
+        else:
+            findings.append(_finding(
+                finding_id="artifact_fetch_failed",
+                title="Model artifact could not be fetched for intake",
+                severity="high",
+                description="The model artifact could not be downloaded or read, so provenance and serialization checks could not complete.",
+                artifact_ref=artifact_ref,
+                evidence={"artifact": name, "fetch": artifact_meta},
+                remediation="Make the model artifact reachable to the intake worker or provide an internal registry reference with access credentials.",
+            ))
 
     if expected_sha256 and sha256 and str(expected_sha256).lower() != sha256.lower():
         findings.append(_finding(
@@ -400,7 +379,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             evidence={"artifact": name, "expected_sha256": expected_sha256, "observed_sha256": sha256},
             remediation="Block deployment, verify the source registry, and re-publish the artifact with a trusted checksum.",
         ))
-    elif require_hash and not expected_sha256:
+    elif require_hash and not expected_sha256 and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_checksum",
             title="Model artifact missing expected checksum",
@@ -411,7 +390,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require SHA-256 or stronger digest pinning in model intake metadata before deployment approval.",
         ))
 
-    if require_signature and not (signature_url or signed_by):
+    if require_signature and not (signature_url or signed_by) and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_signature",
             title="Model artifact missing signature or attestation",
@@ -455,7 +434,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Block deployment pending malware analysis and require a clean re-packaged artifact.",
         ))
 
-    if not provenance_ref:
+    if not provenance_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_provenance",
             title="Model artifact missing provenance metadata",
@@ -466,7 +445,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require source repository, commit hash, training data reference, build workflow, and attestation URL before deployment approval.",
         ))
 
-    if not model_card:
+    if not model_card and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_model_card",
             title="Model artifact missing model card or risk documentation",
@@ -477,7 +456,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require model card metadata describing intended use, limitations, safety tests, license, and deployment constraints.",
         ))
 
-    if require_approval and not deployment_approved:
+    if require_approval and not deployment_approved and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_deployment_approval",
             title="Model deployment approval missing",
@@ -488,7 +467,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Route the artifact through approval before deployment and record approver, timestamp, and policy version.",
         ))
 
-    if require_governance and not license_ref:
+    if require_governance and not license_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_license_review",
             title="Model license review missing",
@@ -499,7 +478,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Record model license, usage constraints, and legal/security review status before deployment.",
         ))
 
-    if require_governance and not sbom_ref:
+    if require_governance and not sbom_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_sbom_or_dependencies",
             title="Model dependency/SBOM evidence missing",
@@ -510,7 +489,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Attach SBOM or dependency inventory for model package code, adapters, tokenizers, and serving dependencies.",
         ))
 
-    if require_governance and not malware_scan_ref:
+    if require_governance and not malware_scan_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_malware_scan",
             title="Model malware scan evidence missing",
@@ -521,7 +500,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require static malware/YARA scanning and record scan result, engine, and timestamp before approval.",
         ))
 
-    if require_governance and not eval_ref:
+    if require_governance and not eval_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_eval_evidence",
             title="Model security evaluation evidence missing",
@@ -532,7 +511,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Attach safety/security eval results, red-team coverage, and deployment-specific acceptance criteria.",
         ))
 
-    if require_governance and not deployment_restrictions:
+    if require_governance and not deployment_restrictions and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_deployment_restrictions",
             title="Model deployment restrictions missing",
@@ -543,7 +522,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Record approved environments, data-use restrictions, prohibited use cases, and rollback constraints.",
         ))
 
-    if require_governance and not monitoring_plan:
+    if require_governance and not monitoring_plan and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_monitoring_plan",
             title="Model monitoring plan missing",
@@ -579,6 +558,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "eval_evidence_present": bool(eval_ref),
         "deployment_restrictions_present": bool(deployment_restrictions),
         "monitoring_plan_present": bool(monitoring_plan),
+        "metadata_fetch_failed": bool(metadata_fetch_meta.get("error")),
         "findings_count": len(findings),
     }
 
@@ -595,18 +575,19 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "archive": zip_info,
             },
             "metadata": metadata,
+            "metadata_fetch": metadata_fetch_meta if metadata_url else None,
             "checks": {
-                "provenance": bool(provenance_ref),
+                "provenance": None if metadata_unavailable else bool(provenance_ref),
                 "unsafe_serialization": not any(f["id"].endswith("unsafe_serialization") for f in findings),
-                "artifact_signing": bool(signature_url or signed_by),
-                "checksum": bool(expected_sha256 and sha256 and str(expected_sha256).lower() == sha256.lower()),
-                "approval": deployment_approved if require_approval else None,
-                "license_review": bool(license_ref) if require_governance else None,
-                "sbom_dependencies": bool(sbom_ref) if require_governance else None,
-                "malware_scan": bool(malware_scan_ref) if require_governance else None,
-                "security_evals": bool(eval_ref) if require_governance else None,
-                "deployment_restrictions": bool(deployment_restrictions) if require_governance else None,
-                "monitoring_plan": bool(monitoring_plan) if require_governance else None,
+                "artifact_signing": None if metadata_unavailable else bool(signature_url or signed_by),
+                "checksum": bool(expected_sha256 and sha256 and str(expected_sha256).lower() == sha256.lower()) if not metadata_unavailable else None,
+                "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
+                "license_review": (None if metadata_unavailable else bool(license_ref)) if require_governance else None,
+                "sbom_dependencies": (None if metadata_unavailable else bool(sbom_ref)) if require_governance else None,
+                "malware_scan": (None if metadata_unavailable else bool(malware_scan_ref)) if require_governance else None,
+                "security_evals": (None if metadata_unavailable else bool(eval_ref)) if require_governance else None,
+                "deployment_restrictions": (None if metadata_unavailable else bool(deployment_restrictions)) if require_governance else None,
+                "monitoring_plan": (None if metadata_unavailable else bool(monitoring_plan)) if require_governance else None,
             },
         },
         "findings": findings,

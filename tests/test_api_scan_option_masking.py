@@ -97,7 +97,7 @@ def test_sanitize_scan_options_decodes_json_string():
     assert sanitized["auth_header"] == "***"
 
 
-def test_ai_demo_target_detection_handles_new_and_legacy_targets():
+def test_ai_demo_target_detection_uses_structured_metadata_only():
     assert api_module._is_ai_demo_target_row({
         "name": "Honey demo mcp.unsafe.oauth_audience_wildcard.v1",
         "endpoint_url": "https://honey.example/api/v1/mcp/trace",
@@ -106,20 +106,15 @@ def test_ai_demo_target_detection_handles_new_and_legacy_targets():
     assert api_module._is_ai_demo_target_row({
         "name": "Local Honey calibration mcp.safe.oauth_audience_pkce_rejection.v1 local-honey-1",
         "endpoint_url": "http://host.docker.internal:18080/api/v1/mcp/trace?calibration_run=local-honey-1",
-        "metadata_json": {},
+        "metadata_json": {"calibration_run": "local-honey-1"},
     })
-    assert api_module._is_ai_demo_target_row({
-        "name": "Local MCP OAuth calibration",
-        "endpoint_url": "http://host.docker.internal:18080/mcp/oauth/token",
-        "metadata_json": {},
-    })
-    assert api_module._is_ai_demo_target_row({
-        "name": "Honey MCP trace",
-        "endpoint_url": "https://honey.shakerscan.com/api/v1/mcp/trace",
+    assert not api_module._is_ai_demo_target_row({
+        "name": "Honey Production",
+        "endpoint_url": "https://example.com/api/chat",
         "metadata_json": {},
     })
     assert not api_module._is_ai_demo_target_row({
-        "name": "Support bot staging",
+        "name": "Calibration audit",
         "endpoint_url": "https://example.com/api/chat",
         "metadata_json": {},
     })
