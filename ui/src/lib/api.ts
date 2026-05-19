@@ -193,6 +193,9 @@ export interface Finding {
   ai_rationale?: string
   ai_recommendations?: string[] | Record<string, unknown> | null
   ai_classification_source?: 'provider' | 'heuristic_fallback' | 'heuristic_only' | string
+  analyst_verdict?: 'needs_review' | 'true_positive' | 'false_positive' | 'duplicate' | 'accepted_risk' | 'retest_needed' | string
+  analyst_verdict_at?: string
+  analyst_verdict_notes?: string
   notes?: string
   first_seen_at: string
   last_seen_at: string
@@ -593,7 +596,7 @@ export async function scanTarget(targetId: string, options: Record<string, boole
 export async function getFindings(params?: {
   severity?: string
   status?: string
-  source_type?: 'dast' | 'ai'
+  source_type?: 'dast' | 'ai' | 'model_intake'
   limit?: number
   offset?: number
   root_domain?: string
@@ -687,14 +690,20 @@ export async function getFindingRetests(id: string, limit: number = 20): Promise
   return res.json()
 }
 
-export async function updateFinding(id: string, status: string, notes?: string, scanId?: string) {
+export async function updateFinding(
+  id: string,
+  status: string,
+  notes?: string,
+  scanId?: string,
+  analystVerdict?: string
+) {
   const url = scanId
     ? `${API_URL}/findings/${id}?scan_id=${scanId}`
     : `${API_URL}/findings/${id}`
   const res = await fetch(url, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status, notes })
+    body: JSON.stringify({ status, notes, analyst_verdict: analystVerdict })
   })
   if (!res.ok) throw new Error('Failed to update finding')
   return res.json()
@@ -859,6 +868,41 @@ export async function updateAITarget(
 export async function deleteAITarget(id: string): Promise<{ status: string; target_id: string }> {
   const res = await fetch(`${API_URL}/ai/targets/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target'))
+  return res.json()
+}
+
+export interface AITargetConnectivityResult {
+  target_id: string
+  target_name?: string
+  target_type?: string
+  ok: boolean
+  supported?: boolean
+  stage?: string
+  error?: string
+  status_code?: number
+  latency_ms?: number
+  content_type?: string
+  response_path?: string | null
+  response_path_ok?: boolean
+  request?: {
+    method?: string
+    url?: string
+    headers?: Record<string, string>
+    body?: unknown
+  }
+  response?: {
+    excerpt?: string
+    extracted_text?: string
+  }
+}
+
+export async function testAITargetConnectivity(id: string, prompt?: string): Promise<AITargetConnectivityResult> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(prompt ? { prompt } : {}),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to test AI target'))
   return res.json()
 }
 

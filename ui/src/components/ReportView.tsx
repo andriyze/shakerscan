@@ -291,6 +291,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const aiGateSeverityCounts = aiGateDecision?.severity_counts || {}
   const aiGateTranscripts = Array.isArray(ai_gate?.transcripts) ? ai_gate.transcripts : []
   const aiGateErrors = Array.isArray(ai_gate?.errors) ? ai_gate.errors : []
+  const aiGateCoverage = asRecord(ai_gate?.coverage_matrix)
+  const aiGateCoverageSummary = asRecord(aiGateCoverage.summary)
+  const aiGateEvidenceManifest = asRecord(ai_gate?.evidence_manifest)
+  const aiGateEvidenceHashes = asRecord(aiGateEvidenceManifest.evidence_hashes)
+  const aiGateProbeCatalog = asRecord(aiGateEvidenceManifest.probe_catalog)
   const aiGateDecisionText = String(aiGateDecision?.decision || '').toLowerCase()
   const aiGateExecutionPlan = asRecord(ai_gate?.execution_plan)
   const aiGateSemanticJudge = asRecord(aiGateExecutionPlan.semantic_judge)
@@ -578,6 +583,49 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {aiGateCoverage?.schema_version && (
+            <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-300">Coverage Matrix</h3>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {aiGateCoverageSummary.executed ?? 0} executed / {aiGateCoverageSummary.planned ?? 0} planned probes
+                  </p>
+                </div>
+                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">
+                  skipped {aiGateCoverageSummary.skipped ?? 0}
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {Object.entries(asRecord(aiGateCoverage.by_family)).slice(0, 8).map(([family, stats]) => {
+                  const familyStats = asRecord(stats)
+                  return (
+                    <div key={family} className="rounded border border-gray-800 bg-black/20 p-2">
+                      <div className="truncate text-xs font-medium text-gray-200">{family}</div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {familyStats.executed ?? 0}/{familyStats.planned ?? 0} run · {familyStats.with_findings ?? 0} findings
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {aiGateEvidenceManifest?.schema_version && (
+            <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
+              <h3 className="text-sm font-semibold text-gray-300">Evidence Manifest</h3>
+              <div className="mt-3 grid gap-2 text-xs text-gray-400 md:grid-cols-2">
+                <div className="break-all">target: <span className="text-gray-200">{String(aiGateEvidenceManifest.target_snapshot_hash || 'n/a')}</span></div>
+                <div className="break-all">planned probes: <span className="text-gray-200">{String(aiGateProbeCatalog.planned_hash || 'n/a')}</span></div>
+                <div className="break-all">executed probes: <span className="text-gray-200">{String(aiGateProbeCatalog.executed_hash || 'n/a')}</span></div>
+                <div className="break-all">transcripts: <span className="text-gray-200">{String(aiGateEvidenceHashes.transcripts_hash || 'n/a')}</span></div>
+                <div className="break-all">findings: <span className="text-gray-200">{String(aiGateEvidenceHashes.findings_hash || 'n/a')}</span></div>
+                <div className="break-all">controls: <span className="text-gray-200">{String(aiGateEvidenceHashes.control_evidence_hash || 'n/a')}</span></div>
               </div>
             </div>
           )}

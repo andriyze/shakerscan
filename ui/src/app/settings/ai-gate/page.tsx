@@ -12,7 +12,9 @@ import {
   getAITargets,
   runAIDemo,
   scanAITarget,
+  testAITargetConnectivity,
   type AIDemoRunResponse,
+  type AITargetConnectivityResult,
   type AISettings,
   type AITestReadinessControl,
   type AITestScenario,
@@ -217,6 +219,8 @@ export default function AIGateSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [scanning, setScanning] = useState<string | null>(null)
+  const [testingTarget, setTestingTarget] = useState<string | null>(null)
+  const [connectivityResults, setConnectivityResults] = useState<Record<string, AITargetConnectivityResult>>({})
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
@@ -434,6 +438,22 @@ export default function AIGateSettingsPage() {
       setError(err instanceof Error ? err.message : 'Failed to queue AI Gate scan')
     } finally {
       setScanning(null)
+    }
+  }
+
+  async function handleConnectivityTest(target: AITarget) {
+    if (testingTarget) return
+    setTestingTarget(target.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await testAITargetConnectivity(target.id)
+      setConnectivityResults((prev) => ({ ...prev, [target.id]: result }))
+      setMessage(result.ok ? `${target.name} connectivity passed.` : `${target.name} connectivity needs attention.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to test AI target')
+    } finally {
+      setTestingTarget(null)
     }
   }
 
@@ -809,7 +829,7 @@ export default function AIGateSettingsPage() {
                     </button>
                   </div>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-[1fr_0.8fr_0.8fr_auto]">
+                  <div className="mt-4 grid gap-3 md:grid-cols-[1fr_0.8fr_0.8fr_auto_auto]">
                     <label className="grid gap-1 text-xs text-gray-500">
                       Probe pack
                       <select value={config.probe_pack} onChange={(e) => updateRunConfig(target.id, { probe_pack: e.target.value as AIProbePack })} className={inputClass}>
@@ -828,11 +848,37 @@ export default function AIGateSettingsPage() {
                         {ENVIRONMENTS.map((env) => <option key={env.value} value={env.value}>{env.label}</option>)}
                       </select>
                     </label>
+                    <button onClick={() => handleConnectivityTest(target)} disabled={testingTarget === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-300 hover:bg-gray-800 disabled:opacity-50">
+                      {testingTarget === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                      Test
+                    </button>
                     <button onClick={() => handleRun(target)} disabled={scanning === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
                       {scanning === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       Run
                     </button>
                   </div>
+                  {connectivityResults[target.id] && (
+                    <div className={`mt-3 rounded-lg border p-3 text-xs ${
+                      connectivityResults[target.id].ok
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
+                        : 'border-yellow-500/20 bg-yellow-500/10 text-yellow-100'
+                    }`}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{connectivityResults[target.id].ok ? 'Connectivity passed' : 'Connectivity issue'}</span>
+                        {connectivityResults[target.id].status_code && <span>HTTP {connectivityResults[target.id].status_code}</span>}
+                        {connectivityResults[target.id].latency_ms !== undefined && <span>{connectivityResults[target.id].latency_ms} ms</span>}
+                        {connectivityResults[target.id].stage && <span>stage: {connectivityResults[target.id].stage}</span>}
+                      </div>
+                      {connectivityResults[target.id].error && (
+                        <p className="mt-2 break-words text-yellow-100">{connectivityResults[target.id].error}</p>
+                      )}
+                      {connectivityResults[target.id].response?.extracted_text && (
+                        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded bg-gray-950/50 p-2 text-gray-200">
+                          {connectivityResults[target.id].response?.extracted_text}
+                        </pre>
+                      )}
+                    </div>
+                  )}
                 </div>
               )
             })

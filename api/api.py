@@ -77,6 +77,25 @@ except ModuleNotFoundError as exc:
         render_ai_redteam_markdown,
     )
 
+try:
+    from ai_gate.targets.rest_json import (
+        append_query_params as ai_append_query_params,
+        build_headers as ai_build_headers,
+        build_url as ai_build_url,
+        extract_response_text as ai_extract_response_text,
+        replace_placeholders as ai_replace_placeholders,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"ai_gate", "ai_gate.targets", "ai_gate.targets.rest_json"}:
+        raise
+    from api.ai_gate.targets.rest_json import (
+        append_query_params as ai_append_query_params,
+        build_headers as ai_build_headers,
+        build_url as ai_build_url,
+        extract_response_text as ai_extract_response_text,
+        replace_placeholders as ai_replace_placeholders,
+    )
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -1363,6 +1382,11 @@ class AITargetScanRequest(BaseModel):
     semantic_judge_enabled: Optional[bool] = None
 
 
+class AITargetConnectivityTestRequest(BaseModel):
+    prompt: str = "ShakerScan connectivity check. Reply with a short safe response."
+    timeout_seconds: int = Field(default=15, ge=1, le=60)
+
+
 class AIDemoRunRequest(BaseModel):
     scenario_ids: Optional[list[str]] = None
     scan_profile: str = Field(default="smoke", pattern="^(smoke|trace|standard|deep)$")
@@ -1384,6 +1408,10 @@ class TargetUpdate(BaseModel):
 class FindingUpdate(BaseModel):
     status: str  # active, resolved, false_positive, accepted_risk
     notes: Optional[str] = None
+    analyst_verdict: Optional[str] = Field(
+        default=None,
+        pattern="^(needs_review|true_positive|false_positive|duplicate|accepted_risk|retest_needed)$",
+    )
 
 
 class FindingRetestRequest(BaseModel):
@@ -2627,6 +2655,97 @@ def _build_ai_worker_options(
     return worker_options, storage_options
 
 
+def _mask_ai_headers_for_preview(headers: dict[str, str]) -> dict[str, str]:
+    masked: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized = key.lower()
+        if normalized in {"authorization", "cookie", "x-api-key"} or "token" in normalized or "secret" in normalized:
+            masked[key] = "***"
+        else:
+            masked[key] = value
+    return masked
+
+
+def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, timeout_seconds: int) -> dict[str, Any]:
+    method = str(target.get("method") or "POST").upper()
+    if target.get("target_type") == "widget":
+        return {
+            "ok": False,
+            "supported": False,
+            "stage": "configuration",
+            "error": "Widget connectivity requires a browser session and is validated during widget scans.",
+        }
+
+    replacements = {
+        "prompt": prompt,
+        "probe_id": "connectivity.preflight",
+        "session_id": f"connectivity-{uuid.uuid4().hex[:12]}",
+    }
+    headers = ai_build_headers(target)
+    headers.setdefault("User-Agent", "ShakerScan AI Gate connectivity check")
+    endpoint_url = ai_build_url(str(target.get("endpoint_url") or ""), target)
+    body = ai_replace_placeholders(target.get("request_template") or {}, replacements)
+    request_url = ai_append_query_params(endpoint_url, body) if method == "GET" else endpoint_url
+    data = None
+    if method != "GET":
+        data = json.dumps(body).encode("utf-8")
+        headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(request_url, data=data, headers=headers, method=method)
+    started = datetime.utcnow()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - user-configured local scanner target
+            raw_bytes = response.read(100_000)
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
+            content_type = response.headers.get("Content-Type", "")
+            response_text = ai_extract_response_text(raw_text, content_type, target.get("response_path"))
+            status_code = int(response.status)
+    except urllib.error.HTTPError as exc:
+        raw_bytes = exc.read(100_000)
+        raw_text = raw_bytes.decode("utf-8", errors="replace")
+        content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
+        response_text = ai_extract_response_text(raw_text, content_type, target.get("response_path"))
+        status_code = int(exc.code)
+    except Exception as exc:  # noqa: BLE001 - surface precise connectivity errors to the operator
+        elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
+        return {
+            "ok": False,
+            "supported": True,
+            "stage": "request",
+            "error": str(exc),
+            "request": {
+                "method": method,
+                "url": request_url,
+                "headers": _mask_ai_headers_for_preview(headers),
+                "body": body if method != "GET" else None,
+            },
+            "latency_ms": elapsed_ms,
+        }
+
+    elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
+    response_path_ok = bool(str(response_text or "").strip())
+    ok = 200 <= status_code < 400 and response_path_ok
+    return {
+        "ok": ok,
+        "supported": True,
+        "stage": "response_path" if not response_path_ok else "complete",
+        "status_code": status_code,
+        "latency_ms": elapsed_ms,
+        "content_type": content_type,
+        "response_path": target.get("response_path"),
+        "response_path_ok": response_path_ok,
+        "request": {
+            "method": method,
+            "url": request_url,
+            "headers": _mask_ai_headers_for_preview(headers),
+            "body": body if method != "GET" else None,
+        },
+        "response": {
+            "excerpt": raw_text[:2000],
+            "extracted_text": str(response_text or "")[:2000],
+        },
+    }
+
+
 # ============================================================
 # HEALTH & INFO
 # ============================================================
@@ -3362,6 +3481,37 @@ async def delete_ai_target(target_id: str):
 async def scan_ai_target(target_id: str, request: AITargetScanRequest):
     """Queue an AI Gate scan for a saved AI target."""
     return await _queue_ai_target_scan(target_id, request)
+
+
+@app.post("/ai/targets/{target_id}/test")
+async def test_ai_target_connectivity(target_id: str, request: AITargetConnectivityTestRequest):
+    """Send one sanitized preflight request to validate AI target wiring before a scan."""
+    async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+
+    target = row_to_dict(target_row)
+    for key in ("headers_template", "request_template", "metadata_json"):
+        target[key] = _decode_json_value(target.get(key)) or {}
+    target["credential"] = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+
+    result = await asyncio.to_thread(
+        _run_ai_target_connectivity_probe,
+        target,
+        prompt=request.prompt,
+        timeout_seconds=request.timeout_seconds,
+    )
+    return {
+        "target_id": target_id,
+        "target_name": target.get("name"),
+        "target_type": target.get("target_type"),
+        **result,
+    }
 
 
 @app.get("/ai/scans/{scan_id}/transcript")
@@ -4337,7 +4487,7 @@ async def mark_retest_enqueue_failed(
 async def list_findings(
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, regex="^(dast|ai)$"),
+    source_type: Optional[str] = Query(None, regex="^(dast|ai|model_intake)$"),
     target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
@@ -4396,9 +4546,12 @@ async def list_findings(
         if source_type == "ai":
             query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
             count_query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
+        elif source_type == "model_intake":
+            query += " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
+            count_query += " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
         elif source_type == "dast":
-            query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session') AND f.ai_target_id IS NULL"
-            count_query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session') AND f.ai_target_id IS NULL"
+            query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake') AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
+            count_query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake') AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
@@ -4962,10 +5115,15 @@ async def update_finding(
             finding_uuid = uuid.UUID(finding_id)
             result = await conn.fetchrow("""
                 UPDATE findings
-                SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
-                WHERE id = $3
+                SET status = $1,
+                    notes = COALESCE($2, notes),
+                    analyst_verdict = COALESCE($3, analyst_verdict),
+                    analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                    analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                    updated_at = NOW()
+                WHERE id = $4
                 RETURNING id
-            """, request.status, request.notes, finding_uuid)
+            """, request.status, request.notes, request.analyst_verdict, finding_uuid)
             if result:
                 updated_id = result['id']
         except ValueError:
@@ -4976,20 +5134,30 @@ async def update_finding(
             if scan_uuid:
                 result = await conn.fetchrow("""
                     UPDATE findings
-                    SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
-                    WHERE fingerprint = $3 AND scan_id = $4
+                    SET status = $1,
+                        notes = COALESCE($2, notes),
+                        analyst_verdict = COALESCE($3, analyst_verdict),
+                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                        updated_at = NOW()
+                    WHERE fingerprint = $4 AND scan_id = $5
                     RETURNING id
-                """, request.status, request.notes, finding_id, scan_uuid)
+                """, request.status, request.notes, request.analyst_verdict, finding_id, scan_uuid)
             else:
                 result = await conn.fetchrow("""
                     UPDATE findings
-                    SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
+                    SET status = $1,
+                        notes = COALESCE($2, notes),
+                        analyst_verdict = COALESCE($3, analyst_verdict),
+                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                        updated_at = NOW()
                     WHERE id = (
-                        SELECT id FROM findings WHERE fingerprint = $3
+                        SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
                     RETURNING id
-                """, request.status, request.notes, finding_id)
+                """, request.status, request.notes, request.analyst_verdict, finding_id)
             if result:
                 updated_id = result['id']
 
@@ -4999,27 +5167,37 @@ async def update_finding(
             if scan_uuid:
                 result = await conn.fetchrow("""
                     UPDATE findings
-                    SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
-                    WHERE fingerprint = $3 AND scan_id = $4
+                    SET status = $1,
+                        notes = COALESCE($2, notes),
+                        analyst_verdict = COALESCE($3, analyst_verdict),
+                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                        updated_at = NOW()
+                    WHERE fingerprint = $4 AND scan_id = $5
                     RETURNING id
-                """, request.status, request.notes, suffix, scan_uuid)
+                """, request.status, request.notes, request.analyst_verdict, suffix, scan_uuid)
             else:
                 result = await conn.fetchrow("""
                     UPDATE findings
-                    SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
+                    SET status = $1,
+                        notes = COALESCE($2, notes),
+                        analyst_verdict = COALESCE($3, analyst_verdict),
+                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                        updated_at = NOW()
                     WHERE id = (
-                        SELECT id FROM findings WHERE fingerprint = $3
+                        SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
                     RETURNING id
-                """, request.status, request.notes, suffix)
+                """, request.status, request.notes, request.analyst_verdict, suffix)
             if result:
                 updated_id = result['id']
 
         if not updated_id:
             raise HTTPException(status_code=404, detail="Finding not found")
 
-    return {'id': str(updated_id), 'status': request.status}
+    return {'id': str(updated_id), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
 
 
 @app.delete("/findings/{finding_id:path}")

@@ -783,6 +783,8 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
             ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
             ai_classification_source = finding.get('ai_classification_source')
+            finding_tool = finding.get('tool')
+            finding_source = finding.get('source') or ('model_intake' if finding_tool == 'model_intake' else None)
 
             existing = await conn.fetchrow("""
                 SELECT id, status, resurfaced_count
@@ -813,8 +815,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_rationale = $15,
                             ai_recommendations = $16,
                             ai_classification_source = $17,
+                            source = COALESCE($18, source),
                             updated_at = NOW()
-                        WHERE id = $18
+                        WHERE id = $19
                     """,
                         existing['resurfaced_count'] + 1,
                         scan_uuid,
@@ -822,7 +825,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         finding.get('description'),
                         finding.get('severity', 'info'),
                         finding.get('cvss_score'),
-                        finding.get('tool'),
+                        finding_tool,
                         finding.get('cwe'),
                         finding.get('cwe_name'),
                         finding.get('owasp'),
@@ -833,6 +836,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         finding.get('ai_rationale'),
                         ai_recommendations_json,
                         ai_classification_source,
+                        finding_source,
                         existing['id'],
                     )
                 else:
@@ -855,15 +859,16 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_rationale = $14,
                             ai_recommendations = $15,
                             ai_classification_source = $16,
+                            source = COALESCE($17, source),
                             updated_at = NOW()
-                        WHERE id = $17
+                        WHERE id = $18
                     """,
                         scan_uuid,
                         finding.get('title'),
                         finding.get('description'),
                         finding.get('severity', 'info'),
                         finding.get('cvss_score'),
-                        finding.get('tool'),
+                        finding_tool,
                         finding.get('cwe'),
                         finding.get('cwe_name'),
                         finding.get('owasp'),
@@ -874,6 +879,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         finding.get('ai_rationale'),
                         ai_recommendations_json,
                         ai_classification_source,
+                        finding_source,
                         existing['id'],
                     )
                 saved += 1
@@ -882,8 +888,8 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     INSERT INTO findings (
                         scan_id, target_id, fingerprint, title, description,
                         severity, cvss_score, tool, cwe, cwe_name, owasp,
-                        url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                        url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source, source
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                     RETURNING id
                 """,
                     scan_uuid,
@@ -893,7 +899,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     finding.get('description'),
                     finding.get('severity', 'info'),
                     finding.get('cvss_score'),
-                    finding.get('tool'),
+                    finding_tool,
                     finding.get('cwe'),
                     finding.get('cwe_name'),
                     finding.get('owasp'),
@@ -904,6 +910,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     finding.get('ai_rationale'),
                     ai_recommendations_json,
                     ai_classification_source,
+                    finding_source,
                 )
                 if result:
                     saved += 1

@@ -41,18 +41,23 @@ const VERIFICATION_VERDICTS = [
 const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
-  { value: 'ai', label: 'AI' }
+  { value: 'ai', label: 'AI' },
+  { value: 'model_intake', label: 'Model Intake' }
 ] as const
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' {
+function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+  if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
+    return 'Model Intake'
+  }
   if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
     return 'AI'
   }
   return 'DAST'
 }
 
-function getSourceTypeClass(type: 'AI' | 'DAST'): string {
+function getSourceTypeClass(type: 'AI' | 'DAST' | 'Model Intake'): string {
   if (type === 'AI') return 'bg-purple-500/20 text-purple-300'
+  if (type === 'Model Intake') return 'bg-cyan-500/20 text-cyan-300'
   return 'bg-blue-500/20 text-blue-300'
 }
 
@@ -136,7 +141,7 @@ function FindingsContent() {
       const data = await getFindings({
         severity: severityFilter || undefined,
         status: statusFilter || undefined,
-        source_type: sourceTypeFilter ? (sourceTypeFilter as 'dast' | 'ai') : undefined,
+        source_type: sourceTypeFilter ? (sourceTypeFilter as 'dast' | 'ai' | 'model_intake') : undefined,
         root_domain: domainFilter || undefined,
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,

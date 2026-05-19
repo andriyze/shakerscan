@@ -394,6 +394,39 @@ def _summarize_control_evidence(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summarize_ai_coverage(result: dict[str, Any]) -> dict[str, Any]:
+    ai_gate = _as_dict(result.get("ai_gate"))
+    coverage = _as_dict(ai_gate.get("coverage_matrix"))
+    if not coverage:
+        return {"available": False}
+    return {
+        "available": True,
+        "schema_version": coverage.get("schema_version"),
+        "summary": _as_dict(coverage.get("summary")),
+        "by_family": _as_dict(coverage.get("by_family")),
+        "skipped": _as_list(coverage.get("skipped")),
+        "unsupported": _as_list(coverage.get("unsupported")),
+    }
+
+
+def _summarize_evidence_manifest(result: dict[str, Any]) -> dict[str, Any]:
+    ai_gate = _as_dict(result.get("ai_gate"))
+    manifest = _as_dict(ai_gate.get("evidence_manifest"))
+    if not manifest:
+        return {"available": False}
+    return {
+        "available": True,
+        "schema_version": manifest.get("schema_version"),
+        "target_snapshot_hash": manifest.get("target_snapshot_hash"),
+        "probe_catalog": _as_dict(manifest.get("probe_catalog")),
+        "detectors": _as_dict(manifest.get("detectors")),
+        "judging": _as_dict(manifest.get("judging")),
+        "evidence_hashes": _as_dict(manifest.get("evidence_hashes")),
+        "budget": _as_dict(manifest.get("budget")),
+        "sanitization": _as_dict(manifest.get("sanitization")),
+    }
+
+
 def _summarize_model_intake(result: dict[str, Any]) -> dict[str, Any]:
     model_intake = _as_dict(result.get("model_intake"))
     if not model_intake:
@@ -665,6 +698,8 @@ def build_ai_redteam_report(scan: dict[str, Any], target_metadata: dict[str, Any
         "severity_counts": _severity_counts(findings_for_report),
         "calibration_summary": _build_calibration_summary(scan, findings_for_report, metadata),
         "control_evidence": _summarize_control_evidence(result),
+        "coverage_matrix": _summarize_ai_coverage(result),
+        "evidence_manifest": _summarize_evidence_manifest(result),
         "model_intake": _summarize_model_intake(result),
         "capstone_checklist": list(CAPSTONE_CHECKLIST),
         "evidence_items": _build_evidence_items(findings_for_report, persisted_findings),
@@ -700,6 +735,8 @@ def render_ai_redteam_markdown(report: dict[str, Any]) -> str:
     counts = _as_dict(report.get("severity_counts"))
     calibration = _as_dict(report.get("calibration_summary"))
     controls = _as_dict(report.get("control_evidence"))
+    coverage = _as_dict(report.get("coverage_matrix"))
+    manifest = _as_dict(report.get("evidence_manifest"))
     model_intake = _as_dict(report.get("model_intake"))
     evidence_items = _as_list(report.get("evidence_items"))
 
@@ -758,6 +795,44 @@ def render_ai_redteam_markdown(report: dict[str, Any]) -> str:
                 lines.append(f"- `{control.get('id')}`: {control.get('label')}")
     else:
         lines.append("No AI control evidence pack was present in this scan result.")
+
+    if coverage.get("available"):
+        summary = _as_dict(coverage.get("summary"))
+        lines.extend([
+            "",
+            "## Coverage Matrix",
+            *_md_table([
+                ("Planned probes", summary.get("planned")),
+                ("Executed probes", summary.get("executed")),
+                ("Transcripts", summary.get("with_transcripts")),
+                ("Findings with probe evidence", summary.get("with_findings")),
+                ("Skipped", summary.get("skipped")),
+                ("Errors", summary.get("errors")),
+                ("Stopped by rate limit", summary.get("stopped_by_rate_limit")),
+            ]),
+        ])
+        skipped = _as_list(coverage.get("skipped"))
+        if skipped:
+            lines.extend(["", "Skipped probes:"])
+            for item in skipped[:20]:
+                lines.append(f"- `{item.get('probe_id')}` ({item.get('family')}): {item.get('reason')}")
+
+    if manifest.get("available"):
+        catalog = _as_dict(manifest.get("probe_catalog"))
+        hashes = _as_dict(manifest.get("evidence_hashes"))
+        lines.extend([
+            "",
+            "## Evidence Manifest",
+            *_md_table([
+                ("Schema", manifest.get("schema_version")),
+                ("Target snapshot", manifest.get("target_snapshot_hash")),
+                ("Planned catalog hash", catalog.get("planned_hash")),
+                ("Executed catalog hash", catalog.get("executed_hash")),
+                ("Transcripts hash", hashes.get("transcripts_hash")),
+                ("Findings hash", hashes.get("findings_hash")),
+                ("Control evidence hash", hashes.get("control_evidence_hash")),
+            ]),
+        ])
 
     if model_intake.get("available"):
         lines.extend([

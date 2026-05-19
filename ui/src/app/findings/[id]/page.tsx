@@ -33,7 +33,10 @@ function StatusBadge({ status }: { status: Finding['status'] }) {
   )
 }
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' {
+function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+  if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
+    return 'Model Intake'
+  }
   if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
     return 'AI'
   }
@@ -42,9 +45,10 @@ function getFindingSourceType(finding: Finding): 'AI' | 'DAST' {
 
 function SourceTypeBadge({ finding }: { finding: Finding }) {
   const type = getFindingSourceType(finding)
-  const styles: Record<'AI' | 'DAST', string> = {
+  const styles: Record<'AI' | 'DAST' | 'Model Intake', string> = {
     AI: 'bg-purple-500/20 text-purple-300',
-    DAST: 'bg-blue-500/20 text-blue-300'
+    DAST: 'bg-blue-500/20 text-blue-300',
+    'Model Intake': 'bg-cyan-500/20 text-cyan-300'
   }
 
   return (
@@ -71,6 +75,14 @@ function InfoItem({ label, children }: { label: string; children: React.ReactNod
     </div>
   )
 }
+
+const ANALYST_VERDICTS = [
+  { value: 'true_positive', label: 'True positive', status: 'active' },
+  { value: 'false_positive', label: 'False positive', status: 'false_positive' },
+  { value: 'duplicate', label: 'Duplicate', status: 'false_positive' },
+  { value: 'accepted_risk', label: 'Accepted risk', status: 'accepted_risk' },
+  { value: 'retest_needed', label: 'Retest needed', status: 'active' },
+] as const
 
 function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   if (!rawEvidence) return null
@@ -175,6 +187,19 @@ function FindingDetailContent() {
       await fetchFinding()
     } catch (err) {
       console.error('Failed to update finding:', err)
+    } finally {
+      setStatusUpdating(false)
+    }
+  }
+
+  async function handleAnalystVerdict(verdict: typeof ANALYST_VERDICTS[number]) {
+    if (!finding || statusUpdating) return
+    try {
+      setStatusUpdating(true)
+      await updateFinding(finding.id, verdict.status, finding.notes, finding.scan_id, verdict.value)
+      await fetchFinding()
+    } catch (err) {
+      console.error('Failed to update analyst verdict:', err)
     } finally {
       setStatusUpdating(false)
     }
@@ -343,6 +368,36 @@ function FindingDetailContent() {
                     {status.replace('_', ' ')}
                   </button>
                 ))}
+              </div>
+
+              <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium text-gray-300">Analyst validation</p>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {finding.analyst_verdict
+                        ? `${finding.analyst_verdict.replaceAll('_', ' ')}${finding.analyst_verdict_at ? ` on ${formatDate(finding.analyst_verdict_at)}` : ''}`
+                        : 'No analyst verdict recorded'}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {ANALYST_VERDICTS.map((verdict) => (
+                    <button
+                      key={verdict.value}
+                      type="button"
+                      onClick={() => handleAnalystVerdict(verdict)}
+                      disabled={finding.analyst_verdict === verdict.value || statusUpdating}
+                      className={`rounded px-2.5 py-1 text-xs font-medium ${
+                        finding.analyst_verdict === verdict.value
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-50'
+                      }`}
+                    >
+                      {verdict.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 

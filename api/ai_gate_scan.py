@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -3883,6 +3884,204 @@ def _pick_top_findings(findings: list[dict[str, Any]], limit: int = 10) -> list[
     return top
 
 
+def _stable_hash(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _probe_manifest(probe: Probe) -> dict[str, Any]:
+    return {
+        "id": probe.id,
+        "family": probe.family,
+        "title": probe.title,
+        "technique": probe.technique,
+        "minimum_profile": probe.minimum_profile,
+        "severity_if_success": probe.severity_if_success,
+        "owasp": probe.owasp,
+        "source_name": probe.source_name,
+        "source_reference": probe.source_reference,
+        "safe_for_production": probe.safe_for_production,
+    }
+
+
+def _redact_secret_like_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if any(marker in normalized for marker in ("secret", "token", "key", "authorization", "cookie", "password")):
+                redacted[key] = "***" if item not in (None, "", [], {}) else item
+            else:
+                redacted[key] = _redact_secret_like_values(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_secret_like_values(item) for item in value]
+    return value
+
+
+def _target_snapshot_for_manifest(target: dict[str, Any]) -> dict[str, Any]:
+    credential = target.get("credential") if isinstance(target.get("credential"), dict) else {}
+    return {
+        "id": target.get("id"),
+        "name": target.get("name"),
+        "target_type": target.get("target_type"),
+        "endpoint_url": target.get("endpoint_url"),
+        "method": target.get("method"),
+        "response_path": target.get("response_path"),
+        "streaming_mode": target.get("streaming_mode"),
+        "request_budget": target.get("request_budget"),
+        "token_budget": target.get("token_budget"),
+        "rate_limit_rps": target.get("rate_limit_rps"),
+        "production_mode": target.get("production_mode"),
+        "headers_template": _redact_secret_like_values(target.get("headers_template") or {}),
+        "request_template": _redact_secret_like_values(target.get("request_template") or {}),
+        "metadata_json": _redact_secret_like_values(target.get("metadata_json") or {}),
+        "credential": {
+            "auth_kind": credential.get("auth_kind") or "none",
+            "header_name": credential.get("header_name"),
+            "secret_configured": bool(credential.get("secret")),
+            "metadata_json": _redact_secret_like_values(credential.get("metadata_json") or {}),
+        },
+    }
+
+
+def _build_coverage_matrix(
+    *,
+    planned_probes: tuple[Probe, ...],
+    executed_probes: list[Probe],
+    transcripts: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    max_requests: int,
+    stopped_by_rate_limit: bool,
+) -> dict[str, Any]:
+    executed_ids = [probe.id for probe in executed_probes]
+    transcript_ids = {str(item.get("probe_id")) for item in transcripts if item.get("probe_id")}
+    finding_probe_ids = {
+        str(evidence.get("probe_id"))
+        for finding in findings
+        for evidence in [finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}]
+        if evidence.get("probe_id")
+    }
+    error_probe_ids = {
+        str(item.get("probe_id"))
+        for item in errors
+        if isinstance(item, dict) and item.get("probe_id")
+    }
+    by_family: dict[str, dict[str, int]] = {}
+    for probe in planned_probes:
+        bucket = by_family.setdefault(
+            probe.family,
+            {"planned": 0, "executed": 0, "with_transcript": 0, "with_findings": 0, "errors": 0},
+        )
+        bucket["planned"] += 1
+        if probe.id in executed_ids:
+            bucket["executed"] += 1
+        if probe.id in transcript_ids:
+            bucket["with_transcript"] += 1
+        if probe.id in finding_probe_ids:
+            bucket["with_findings"] += 1
+        if probe.id in error_probe_ids:
+            bucket["errors"] += 1
+
+    skipped: list[dict[str, str]] = []
+    for probe in planned_probes:
+        if probe.id in executed_ids:
+            continue
+        reason = "adaptive_not_selected"
+        if stopped_by_rate_limit:
+            reason = "rate_limit"
+        elif len(executed_ids) >= max_requests:
+            reason = "request_budget"
+        skipped.append({"probe_id": probe.id, "family": probe.family, "reason": reason})
+
+    return {
+        "schema_version": "2026-05-19.ai-coverage-matrix.v1",
+        "summary": {
+            "planned": len(planned_probes),
+            "executed": len(executed_ids),
+            "with_transcripts": len(transcript_ids),
+            "with_findings": len(finding_probe_ids),
+            "errors": len(errors),
+            "skipped": len(skipped),
+            "request_budget": max_requests,
+            "stopped_by_rate_limit": stopped_by_rate_limit,
+        },
+        "by_family": by_family,
+        "skipped": skipped,
+        "unsupported": [],
+    }
+
+
+def _build_evidence_manifest(
+    *,
+    target: dict[str, Any],
+    options: dict[str, Any],
+    planned_probes: tuple[Probe, ...],
+    executed_probes: list[Probe],
+    transcripts: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    control_evidence: dict[str, Any],
+    execution_plan: dict[str, Any],
+    coverage_matrix: dict[str, Any],
+    token_budget: TokenBudget,
+    judge_config: dict[str, str] | None,
+    semantic_judge_config: dict[str, str] | None,
+) -> dict[str, Any]:
+    target_snapshot = _target_snapshot_for_manifest(target)
+    planned_manifest = [_probe_manifest(probe) for probe in planned_probes]
+    executed_manifest = [_probe_manifest(probe) for probe in executed_probes]
+    return {
+        "schema_version": "2026-05-19.ai-evidence-manifest.v1",
+        "target_snapshot_hash": _stable_hash(target_snapshot),
+        "target_snapshot": target_snapshot,
+        "probe_catalog": {
+            "probe_pack": options.get("ai_probe_pack"),
+            "scan_profile": options.get("ai_scan_profile"),
+            "planned_count": len(planned_manifest),
+            "executed_count": len(executed_manifest),
+            "planned_hash": _stable_hash(planned_manifest),
+            "executed_hash": _stable_hash(executed_manifest),
+        },
+        "detectors": {
+            "version": "ai_gate_detectors.2026-05-19",
+            "control_catalog_hash": _stable_hash(AI_CONTROL_REQUIREMENTS),
+        },
+        "planner": {
+            "execution_plan_hash": _stable_hash(execution_plan),
+            "execution_plan": execution_plan,
+        },
+        "judging": {
+            "semantic": {
+                "enabled": bool(execution_plan.get("semantic_judge", {}).get("enabled")),
+                "provider_configured": semantic_judge_config is not None,
+                "model": (semantic_judge_config or {}).get("model"),
+                "rubric_version": "semantic_judge.2026-05-19",
+                "prompt_hash": _stable_hash(SEMANTIC_JUDGE_SYSTEM_PROMPT),
+            },
+            "rubric": {
+                "enabled": bool(judge_config),
+                "provider_configured": judge_config is not None,
+                "model": (judge_config or {}).get("model"),
+                "rubric_version": "rubric_judge.2026-05-19",
+                "prompt_hash": _stable_hash(RUBRIC_JUDGE_SYSTEM_PROMPT),
+            },
+        },
+        "evidence_hashes": {
+            "transcripts_hash": _stable_hash(transcripts),
+            "findings_hash": _stable_hash(findings),
+            "control_evidence_hash": _stable_hash(control_evidence),
+            "coverage_matrix_hash": _stable_hash(coverage_matrix),
+        },
+        "budget": token_budget.to_dict(),
+        "sanitization": {
+            "credentials_masked_in_manifest": True,
+            "headers_and_metadata_redacted_by_key": True,
+        },
+    }
+
+
 def _score_result(findings: list[dict[str, Any]]) -> tuple[int, str]:
     score = 100
     for finding in findings:
@@ -5486,6 +5685,29 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             widget_summary = target_adapter.describe_widget_summary(transcripts)
         except Exception as exc:
             logger.warning("Widget summary generation failed, continuing without widget summary: %s", exc)
+    coverage_matrix = _build_coverage_matrix(
+        planned_probes=probes,
+        executed_probes=executed_probes,
+        transcripts=transcripts,
+        findings=findings,
+        errors=errors,
+        max_requests=max_requests,
+        stopped_by_rate_limit=stopped_by_rate_limit,
+    )
+    evidence_manifest = _build_evidence_manifest(
+        target=target,
+        options=options,
+        planned_probes=probes,
+        executed_probes=executed_probes,
+        transcripts=transcripts,
+        findings=findings,
+        control_evidence=control_evidence,
+        execution_plan=execution_plan,
+        coverage_matrix=coverage_matrix,
+        token_budget=token_budget,
+        judge_config=judge_config,
+        semantic_judge_config=semantic_judge_config,
+    )
 
     return {
         "result": {
@@ -5503,6 +5725,8 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             "control_evidence": control_evidence,
             "errors": errors,
             "execution_plan": execution_plan,
+            "coverage_matrix": coverage_matrix,
+            "evidence_manifest": evidence_manifest,
             "widget_summary": widget_summary,
             "usage": {**token_budget.to_dict(), "stopped_by_rate_limit": stopped_by_rate_limit},
             "decision": {

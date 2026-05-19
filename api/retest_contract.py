@@ -435,7 +435,10 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS ai_classification_source TEXT,
-                ADD COLUMN IF NOT EXISTS ai_target_id UUID
+                ADD COLUMN IF NOT EXISTS ai_target_id UUID,
+                ADD COLUMN IF NOT EXISTS analyst_verdict TEXT,
+                ADD COLUMN IF NOT EXISTS analyst_verdict_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS analyst_verdict_notes TEXT
             """)
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
