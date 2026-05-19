@@ -7,13 +7,18 @@ import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash
 import {
   createAITarget,
   deleteAITarget,
+  getAIInventory,
   getAISettings,
   getAITestScenarios,
   getAITargets,
   runAIDemo,
   scanAITarget,
   testAITargetConnectivity,
+  testMCPReadiness,
   type AIDemoRunResponse,
+  type AIInventory,
+  type AIInventoryCandidate,
+  type AIMCPLiveReadinessResult,
   type AITargetConnectivityResult,
   type AISettings,
   type AITestReadinessControl,
@@ -220,11 +225,14 @@ export default function AIGateSettingsPage() {
   const [saving, setSaving] = useState(false)
   const [scanning, setScanning] = useState<string | null>(null)
   const [testingTarget, setTestingTarget] = useState<string | null>(null)
+  const [testingMCP, setTestingMCP] = useState<string | null>(null)
   const [connectivityResults, setConnectivityResults] = useState<Record<string, AITargetConnectivityResult>>({})
+  const [mcpReadinessResults, setMCPReadinessResults] = useState<Record<string, AIMCPLiveReadinessResult>>({})
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
+  const [inventory, setInventory] = useState<AIInventory | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [showAddTarget, setShowAddTarget] = useState(false)
@@ -275,9 +283,21 @@ export default function AIGateSettingsPage() {
     }
   }, [showDemoTargets])
 
+  const loadInventory = useCallback(async () => {
+    try {
+      setInventory(await getAIInventory())
+    } catch {
+      setInventory(null)
+    }
+  }, [])
+
   useEffect(() => {
     loadTargets()
   }, [loadTargets])
+
+  useEffect(() => {
+    loadInventory()
+  }, [loadInventory])
 
   useEffect(() => {
     async function loadSettingsAndScenario() {
@@ -402,6 +422,7 @@ export default function AIGateSettingsPage() {
       resetForm()
       setShowAddTarget(false)
       await loadTargets()
+      await loadInventory()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save AI target')
     } finally {
@@ -416,6 +437,7 @@ export default function AIGateSettingsPage() {
       await deleteAITarget(target.id)
       setMessage(`${target.name} disabled.`)
       await loadTargets()
+      await loadInventory()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to disable AI target')
     }
@@ -455,6 +477,45 @@ export default function AIGateSettingsPage() {
     } finally {
       setTestingTarget(null)
     }
+  }
+
+  async function handleMCPReadiness(target: AITarget) {
+    if (testingMCP) return
+    setTestingMCP(target.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await testMCPReadiness(target.id)
+      setMCPReadinessResults((prev) => ({ ...prev, [target.id]: result }))
+      const warnings = result.summary?.warnings ?? 0
+      setMessage(warnings === 0 ? `${target.name} MCP readiness passed.` : `${target.name} has ${warnings} MCP readiness warning${warnings === 1 ? '' : 's'}.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to test MCP readiness')
+    } finally {
+      setTestingMCP(null)
+    }
+  }
+
+  function applyInventoryCandidate(candidate: AIInventoryCandidate) {
+    const payload = candidate.suggested_target
+    setName(payload.name || `Discovered ${candidate.target_type}`)
+    setTargetType(payload.target_type)
+    setEndpointUrl(payload.endpoint_url)
+    setMethod(payload.method)
+    setResponsePath(payload.response_path || '')
+    setStreamingMode(payload.streaming_mode)
+    setHeadersTemplate(jsonText(payload.headers_template || {}))
+    setRequestTemplate(jsonText(payload.request_template || {}))
+    setRateLimitRps(payload.rate_limit_rps ? String(payload.rate_limit_rps) : '2')
+    setRequestBudget(payload.request_budget ? String(payload.request_budget) : '5')
+    setTokenBudget(payload.token_budget ? String(payload.token_budget) : '')
+    setControlMetadata(jsonText(payload.metadata_json || {}))
+    setAuthKind('none')
+    setHeaderName('')
+    setSecret('')
+    setProductionMode(false)
+    setShowAddTarget(true)
+    setMessage(`Loaded discovered ${candidate.target_type} candidate into the form.`)
   }
 
   async function handleRunDemo() {
@@ -499,6 +560,10 @@ export default function AIGateSettingsPage() {
     () => targets.filter((target) => showDemoTargets || !isCalibrationLikeTarget(target, true)),
     [targets, showDemoTargets]
   )
+  const inventoryCandidates = useMemo(
+    () => (inventory?.candidates || []).slice(0, 5),
+    [inventory]
+  )
   const hiddenCalibrationCount = targets.length - visibleTargets.length
   const shouldShowCreate = showAddTarget || (!loading && visibleTargets.length === 0)
 
@@ -539,6 +604,50 @@ export default function AIGateSettingsPage() {
             </Link>
           </div>
         </div>
+      )}
+
+      {inventory && (
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-white">
+                <Bot className="h-4 w-4 text-purple-300" />
+                <h2 className="text-sm font-semibold">AI Inventory</h2>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-400">
+                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.asset_count} assets</span>
+                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} candidates</span>
+                <span className="rounded bg-gray-950 px-2 py-1">blast radius {inventory.summary.highest_blast_radius_score}</span>
+                {inventory.summary.coverage_gaps.slice(0, 3).map((gap) => (
+                  <span key={gap} className="rounded bg-yellow-500/10 px-2 py-1 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
+                ))}
+              </div>
+            </div>
+            <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </button>
+          </div>
+          {inventoryCandidates.length > 0 && (
+            <div className="mt-4 grid gap-2 lg:grid-cols-2">
+              {inventoryCandidates.map((candidate) => (
+                <button
+                  key={candidate.candidate_id}
+                  type="button"
+                  onClick={() => applyInventoryCandidate(candidate)}
+                  className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-white">{candidate.method} {candidate.endpoint_url}</span>
+                    <span className="rounded bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
+                    <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{Math.round(candidate.confidence * 100)}%</span>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
       )}
 
       {shouldShowCreate && (
@@ -829,7 +938,7 @@ export default function AIGateSettingsPage() {
                     </button>
                   </div>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-[1fr_0.8fr_0.8fr_auto_auto]">
+                  <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-[1fr_0.8fr_0.8fr_auto_auto_auto]">
                     <label className="grid gap-1 text-xs text-gray-500">
                       Probe pack
                       <select value={config.probe_pack} onChange={(e) => updateRunConfig(target.id, { probe_pack: e.target.value as AIProbePack })} className={inputClass}>
@@ -852,6 +961,12 @@ export default function AIGateSettingsPage() {
                       {testingTarget === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                       Test
                     </button>
+                    {target.target_type === 'mcp_trace' && (
+                      <button onClick={() => handleMCPReadiness(target)} disabled={testingMCP === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/30 px-4 py-2 text-sm font-medium text-purple-100 hover:bg-purple-500/10 disabled:opacity-50">
+                        {testingMCP === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+                        MCP
+                      </button>
+                    )}
                     <button onClick={() => handleRun(target)} disabled={scanning === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
                       {scanning === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       Run
@@ -877,6 +992,28 @@ export default function AIGateSettingsPage() {
                           {connectivityResults[target.id].response?.extracted_text}
                         </pre>
                       )}
+                    </div>
+                  )}
+                  {mcpReadinessResults[target.id] && (
+                    <div className={`mt-3 rounded-lg border p-3 text-xs ${
+                      mcpReadinessResults[target.id].ok
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
+                        : 'border-purple-500/20 bg-purple-500/10 text-purple-100'
+                    }`}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{mcpReadinessResults[target.id].ok ? 'MCP readiness passed' : 'MCP readiness warnings'}</span>
+                        {mcpReadinessResults[target.id].summary && (
+                          <span>{mcpReadinessResults[target.id].summary?.passed}/{mcpReadinessResults[target.id].summary?.checks} checks</span>
+                        )}
+                      </div>
+                      <div className="mt-2 grid gap-1 sm:grid-cols-2">
+                        {(mcpReadinessResults[target.id].checks || []).slice(0, 8).map((check) => (
+                          <div key={check.id} className="flex min-w-0 items-center gap-2">
+                            <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${check.status === 'pass' ? 'text-emerald-300' : 'text-yellow-300'}`} />
+                            <span className="truncate text-gray-200">{check.label}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

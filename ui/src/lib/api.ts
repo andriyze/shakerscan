@@ -906,6 +906,94 @@ export async function testAITargetConnectivity(id: string, prompt?: string): Pro
   return res.json()
 }
 
+export interface AIMCPLiveReadinessResult {
+  target_id: string
+  target_name?: string
+  target_type?: string
+  ok: boolean
+  supported?: boolean
+  stage?: string
+  error?: string
+  summary?: {
+    checks: number
+    passed: number
+    warnings: number
+  }
+  checks?: Array<{
+    id: string
+    label: string
+    status: 'pass' | 'warn' | string
+    evidence?: string
+  }>
+}
+
+export async function testMCPReadiness(id: string): Promise<AIMCPLiveReadinessResult> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/mcp/live-readiness`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to test MCP readiness'))
+  return res.json()
+}
+
+export interface AIInventoryCandidate {
+  candidate_id: string
+  source: string
+  scan_id?: string
+  target_url?: string
+  target_type: AITargetType
+  endpoint_url: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | string
+  confidence: number
+  evidence: string[]
+  suggested_target: AITargetPayload
+}
+
+export interface AIInventoryAsset {
+  id: string
+  kind: 'saved_ai_target' | 'model_artifact' | string
+  name?: string | null
+  target_type: AITargetType | 'model_artifact' | string
+  endpoint_url?: string | null
+  method?: string | null
+  owner?: string | null
+  risk_tier?: string | null
+  data_classification?: string | null
+  production_mode?: boolean
+  last_scanned_at?: string | null
+  tools?: unknown[]
+  scopes?: unknown[]
+  blast_radius?: {
+    score?: number
+    tier?: string
+    factors?: string[]
+    missing_runtime_controls?: string[]
+    active_findings?: number
+  }
+}
+
+export interface AIInventory {
+  generated_at: string
+  assets: AIInventoryAsset[]
+  candidates: AIInventoryCandidate[]
+  summary: {
+    asset_count: number
+    saved_ai_targets: number
+    model_artifacts: number
+    candidate_count: number
+    by_type: Record<string, number>
+    highest_blast_radius_score: number
+    coverage_gaps: string[]
+  }
+}
+
+export async function getAIInventory(): Promise<AIInventory> {
+  const res = await fetch(`${API_URL}/ai/inventory`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI inventory'))
+  return res.json()
+}
+
 export async function scanAITarget(
   id: string,
   data: {

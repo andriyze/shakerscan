@@ -96,6 +96,21 @@ except ModuleNotFoundError as exc:
         replace_placeholders as ai_replace_placeholders,
     )
 
+try:
+    from ai_assurance import (
+        build_agent_blast_radius,
+        build_ai_inventory,
+        run_mcp_live_readiness_probe,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "ai_assurance":
+        raise
+    from api.ai_assurance import (
+        build_agent_blast_radius,
+        build_ai_inventory,
+        run_mcp_live_readiness_probe,
+    )
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -1387,6 +1402,10 @@ class AITargetConnectivityTestRequest(BaseModel):
     timeout_seconds: int = Field(default=15, ge=1, le=60)
 
 
+class AIMCPLiveReadinessRequest(BaseModel):
+    timeout_seconds: int = Field(default=8, ge=1, le=30)
+
+
 class AIDemoRunRequest(BaseModel):
     scenario_ids: Optional[list[str]] = None
     scan_profile: str = Field(default="smoke", pattern="^(smoke|trace|standard|deep)$")
@@ -2190,6 +2209,11 @@ def _build_exposure_graph(
     ai_target_by_id: dict[str, dict[str, Any]] = {}
     scan_subject_by_id: dict[str, str] = {}
     endpoint_node_by_path: dict[tuple[str | None, str | None], list[str]] = {}
+    findings_by_ai_target: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        ai_target_id = str(finding.get("ai_target_id") or "")
+        if ai_target_id:
+            findings_by_ai_target.setdefault(ai_target_id, []).append(finding)
 
     for target in targets:
         target_id = str(target.get("id"))
@@ -2225,6 +2249,7 @@ def _build_exposure_graph(
         ai_node_by_id[ai_id] = node_id
         ai_target_by_id[ai_id] = ai_target
         root_domain = extract_root_domain(ai_target.get("endpoint_url") or "")
+        blast_radius = build_agent_blast_radius(ai_target, findings_by_ai_target.get(ai_id, []))
         add_node(_graph_node(
             node_id,
             "ai_target",
@@ -2239,6 +2264,9 @@ def _build_exposure_graph(
                 "method": ai_target.get("method"),
                 "production_mode": bool(ai_target.get("production_mode")),
                 "last_scanned_at": ai_target.get("last_scanned_at"),
+                "blast_radius": blast_radius,
+                "blast_radius_score": blast_radius.get("score"),
+                "blast_radius_tier": blast_radius.get("tier"),
             },
         ))
         domain_id = add_domain(root_domain)
@@ -2761,6 +2789,7 @@ async def root():
             "scans": "/scans",
             "targets": "/targets",
             "ai_targets": "/ai/targets",
+            "ai_inventory": "/ai/inventory",
             "ai_test_scenarios": "/ai/test-scenarios",
             "ai_learning_guide": "/ai/learning-guide",
             "ai_test_cases": "/ai/test-cases",
@@ -3260,6 +3289,86 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
 # AI GATE TARGETS
 # ============================================================
 
+@app.get("/ai/inventory")
+async def get_ai_inventory(
+    root_domain: Optional[str] = None,
+    include_inactive: bool = False,
+    include_resolved: bool = False,
+    limit_scans: int = Query(150, ge=1, le=300),
+):
+    """Return AI assets, discovered AI-surface candidates, and blast-radius summaries."""
+    async with db_pool.acquire() as conn:
+        targets_query = """
+            SELECT
+                id, url, name, root_domain, is_active, discovery_source,
+                last_score, last_grade, last_scanned_at, total_scans,
+                active_findings_count, created_at, updated_at
+            FROM targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR root_domain = $2::text)
+            ORDER BY updated_at DESC
+            LIMIT 500
+        """
+        targets = [row_to_dict(row) for row in await conn.fetch(targets_query, include_inactive, root_domain)]
+
+        ai_query = """
+            SELECT
+                id, name, target_type, endpoint_url, method, streaming_mode,
+                production_mode, rate_limit_rps, token_budget, request_budget,
+                last_scanned_at, last_scan_id, metadata_json, is_active,
+                created_at, updated_at
+            FROM ai_targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY production_mode DESC, updated_at DESC
+            LIMIT 500
+        """
+        ai_targets = [row_to_dict(row) for row in await conn.fetch(ai_query, include_inactive, root_domain)]
+
+        scans_query = """
+            SELECT
+                s.id, s.target_id, s.ai_target_id, s.target_url, s.status,
+                s.scan_type, s.run_kind, s.result, s.created_at, s.completed_at,
+                t.root_domain
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
+            WHERE s.result IS NOT NULL
+              AND (
+                $1::text IS NULL
+                OR t.root_domain = $1::text
+                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%'
+              )
+            ORDER BY s.created_at DESC
+            LIMIT $2
+        """
+        scans = [row_to_dict(row) for row in await conn.fetch(scans_query, root_domain, limit_scans)]
+
+        findings_query = """
+            SELECT
+                f.id, f.ai_target_id, f.scan_id, f.title, f.severity, f.status,
+                f.source, f.tool, f.last_seen_at, ait.endpoint_url as ai_target_url
+            FROM findings f
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            WHERE f.ai_target_id IS NOT NULL
+              AND ($1::boolean = true OR f.status = 'active')
+              AND ($2::text IS NULL OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY f.last_seen_at DESC NULLS LAST
+            LIMIT 500
+        """
+        findings = [
+            row_to_dict(row)
+            for row in await conn.fetch(findings_query, include_resolved, root_domain)
+        ]
+
+    return build_ai_inventory(
+        targets=targets,
+        ai_targets=ai_targets,
+        scans=scans,
+        findings=findings,
+    )
+
+
 @app.get("/ai/targets")
 async def list_ai_targets(
     include_inactive: bool = False,
@@ -3511,6 +3620,62 @@ async def test_ai_target_connectivity(target_id: str, request: AITargetConnectiv
         "target_name": target.get("name"),
         "target_type": target.get("target_type"),
         **result,
+    }
+
+
+@app.post("/ai/targets/{target_id}/mcp/live-readiness")
+async def test_ai_target_mcp_live_readiness(target_id: str, request: AIMCPLiveReadinessRequest):
+    """Run safe live MCP/OAuth metadata readiness checks for an MCP target."""
+    async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+
+    target = row_to_dict(target_row)
+    for key in ("headers_template", "request_template", "metadata_json"):
+        target[key] = _decode_json_value(target.get(key)) or {}
+
+    result = await asyncio.to_thread(
+        run_mcp_live_readiness_probe,
+        target,
+        timeout_seconds=request.timeout_seconds,
+    )
+    return {
+        "target_id": target_id,
+        "target_name": target.get("name"),
+        "target_type": target.get("target_type"),
+        **result,
+    }
+
+
+@app.get("/ai/targets/{target_id}/runtime-risk")
+async def get_ai_target_runtime_risk(target_id: str):
+    """Return blast-radius risk for one AI target from metadata and active findings."""
+    async with db_pool.acquire() as conn:
+        target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        findings = [
+            row_to_dict(row)
+            for row in await conn.fetch(
+                """
+                SELECT id, ai_target_id, status, severity, title, source, tool, last_seen_at
+                FROM findings
+                WHERE ai_target_id = $1 AND status = 'active'
+                ORDER BY last_seen_at DESC NULLS LAST
+                LIMIT 100
+                """,
+                uuid.UUID(target_id),
+            )
+        ]
+
+    target = row_to_dict(target_row)
+    target["metadata_json"] = _decode_json_value(target.get("metadata_json")) or {}
+    return {
+        "target_id": target_id,
+        "target_name": target.get("name"),
+        "target_type": target.get("target_type"),
+        "blast_radius": build_agent_blast_radius(target, findings),
     }
 
 
