@@ -666,6 +666,46 @@ GRC_EVIDENCE_FRAMEWORKS = {
             },
         },
     },
+    "eu_ai_act": {
+        "name": "EU AI Act Readiness",
+        "controls": {
+            "ARTICLE-12": {
+                "title": "Logging and traceability",
+                "checks": ["ai_security", "model_governance", "audit_trail"],
+                "keywords": ["logging", "monitoring", "aibom", "intake", "provenance"],
+            },
+            "ARTICLE-15": {
+                "title": "Accuracy, robustness, and cybersecurity",
+                "checks": ["ai_security", "ai_supply_chain", "model_governance", "malware_detection"],
+                "keywords": ["model intake", "unsafe serialization", "signature", "malware", "security eval"],
+            },
+            "GPAI-SAFETY": {
+                "title": "GPAI safety and security documentation",
+                "checks": ["ai_security", "model_governance", "aibom", "provenance"],
+                "keywords": ["model card", "aibom", "provenance", "training data", "evaluation"],
+            },
+        },
+    },
+    "iso_42001": {
+        "name": "ISO/IEC 42001 AI Management System",
+        "controls": {
+            "AIMS-RISK": {
+                "title": "AI risk assessment and treatment",
+                "checks": ["ai_security", "model_governance"],
+                "keywords": ["risk", "approval", "deployment restrictions", "monitoring plan"],
+            },
+            "AIMS-DATA": {
+                "title": "Data and model lifecycle governance",
+                "checks": ["ai_supply_chain", "provenance", "aibom"],
+                "keywords": ["training data", "dataset", "provenance", "aibom"],
+            },
+            "AIMS-SUPPLY": {
+                "title": "AI supply-chain controls",
+                "checks": ["ai_supply_chain", "vendor_risk", "malware_detection"],
+                "keywords": ["sbom", "signature", "license", "registry", "malware"],
+            },
+        },
+    },
     "iso_27001_2022": {
         "name": "ISO/IEC 27001:2022",
         "controls": {
@@ -771,6 +811,12 @@ def _map_finding_to_check_types(finding: dict[str, Any]) -> set[str]:
         "cloud": ["cloud_security", "configuration"],
         "k8s": ["kubernetes", "container_security"],
         "docker": ["container_security", "configuration"],
+        "model_intake": ["ai_supply_chain", "model_governance", "aibom", "provenance"],
+        "aibom": ["ai_supply_chain", "aibom", "model_governance"],
+        "sbom": ["ai_supply_chain", "vendor_risk"],
+        "signature": ["ai_supply_chain", "provenance"],
+        "provenance": ["ai_supply_chain", "provenance"],
+        "malware": ["malware_detection", "ai_supply_chain"],
         "secret": ["secret_exposure", "hardcoded_secrets"],
         "api": ["api_security", "authorization"],
         "version": ["version_disclosure", "information_disclosure"],
@@ -940,6 +986,8 @@ def _control_evidence_requirements(control_id: str, control: dict[str, Any]) -> 
     requirements = ["finding title", "severity", "affected URL or asset", "remediation guidance"]
     if control_id.startswith("LLM") or "ai" in " ".join(control.get("checks", [])).lower():
         requirements.extend(["probe transcript", "detector verdict", "AI judge rationale when configured"])
+    if any(check in control.get("checks", []) for check in ("ai_supply_chain", "model_governance", "aibom", "provenance")):
+        requirements.extend(["AIBOM/SBOM", "model card", "provenance or attestation", "signature verification status", "license review"])
     if any(check in control.get("checks", []) for check in ("authorization", "access_control", "idor", "authentication")):
         requirements.extend(["authenticated request/response", "role or token context"])
     if any(check in control.get("checks", []) for check in ("xss", "sqli", "injection", "ssrf")):

@@ -284,6 +284,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const modelIntakeSummary = model_intake?.summary || null
   const modelIntakeArtifact = model_intake?.artifact || null
   const modelIntakeChecks = model_intake?.checks || null
+  const modelIntakeAibom = model_intake?.aibom || null
+  const modelIntakeSupplyChain = model_intake?.supply_chain || null
   const ai_gate = scanData.ai_gate || null
   const aiGateControlEvidence = ai_gate?.control_evidence || null
   const aiGateDecision = ai_gate?.decision || {}
@@ -905,6 +907,32 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
             ))}
           </div>
+
+          {(modelIntakeAibom || modelIntakeSupplyChain) && (
+            <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-3">
+              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-xs text-gray-400">AIBOM completeness</div>
+                <div className="mt-1 text-lg font-semibold text-cyan-300">
+                  {modelIntakeAibom?.completeness?.score !== undefined ? `${Math.round(Number(modelIntakeAibom.completeness.score) * 100)}%` : 'generated'}
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  {(modelIntakeAibom?.components || []).length || 0} component{((modelIntakeAibom?.components || []).length || 0) === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-xs text-gray-400">Signature verification</div>
+                <div className="mt-1 text-sm font-semibold text-white">
+                  {modelIntakeSupplyChain?.signature?.status || modelIntakeSummary?.signature_verification_status || 'unknown'}
+                </div>
+              </div>
+              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div className="text-xs text-gray-400">License policy</div>
+                <div className="mt-1 text-sm font-semibold text-white">
+                  {modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
+                </div>
+              </div>
+            </div>
+          )}
 
           {modelIntakeSummary?.sha256 && (
             <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">

@@ -23,6 +23,7 @@ const COMPLETE_METADATA_EXAMPLE = {
   commit_sha: '0123456789abcdef',
   training_data_ref: 'internal-approved-dataset:v1',
   signed_by: 'sigstore',
+  sigstore_verified: true,
   license: 'apache-2.0',
   sbom: { components: [{ name: 'transformers', version: '4.x' }] },
   malware_scan_result: { status: 'clean', scanned_at: '2026-05-19T00:00:00Z' },
@@ -78,6 +79,7 @@ export default function ModelIntakeSettingsPage() {
   const [deploymentApproved, setDeploymentApproved] = useState(false)
   const [requireDeploymentApproval, setRequireDeploymentApproval] = useState(true)
   const [requireSignature, setRequireSignature] = useState(true)
+  const [requireSignatureVerification, setRequireSignatureVerification] = useState(false)
   const [requireHash, setRequireHash] = useState(true)
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
@@ -116,6 +118,7 @@ export default function ModelIntakeSettingsPage() {
       deployment_approved: deploymentApproved,
       require_deployment_approval: requireDeploymentApproval,
       require_signature: requireSignature,
+      require_signature_verification: requireSignatureVerification,
       require_hash: requireHash,
       require_model_governance: requireModelGovernance,
       max_download_bytes: Number(maxDownloadBytes || 10000000),
@@ -138,6 +141,7 @@ export default function ModelIntakeSettingsPage() {
     setDeploymentApproved(Boolean(preset.deployment_approved ?? preset.metadata_json?.deployment_approved))
     setRequireDeploymentApproval(preset.require_deployment_approval ?? true)
     setRequireSignature(preset.require_signature ?? true)
+    setRequireSignatureVerification(preset.require_signature_verification ?? false)
     setRequireHash(preset.require_hash ?? true)
     setRequireModelGovernance(preset.require_model_governance ?? true)
     setMaxDownloadBytes(String(preset.max_download_bytes || 10000000))
@@ -311,6 +315,10 @@ export default function ModelIntakeSettingsPage() {
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
               Require signature or attestation
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              Require signature verification
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />

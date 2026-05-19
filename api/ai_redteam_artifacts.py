@@ -432,6 +432,8 @@ def _summarize_model_intake(result: dict[str, Any]) -> dict[str, Any]:
     if not model_intake:
         return {"available": False}
     checks = _as_dict(model_intake.get("checks"))
+    aibom = _as_dict(model_intake.get("aibom"))
+    supply_chain = _as_dict(model_intake.get("supply_chain"))
     failed_checks = [
         key
         for key, item in checks.items()
@@ -442,6 +444,9 @@ def _summarize_model_intake(result: dict[str, Any]) -> dict[str, Any]:
         "summary": _as_dict(model_intake.get("summary")),
         "artifact": _as_dict(model_intake.get("artifact")),
         "decision": model_intake.get("decision") or _as_dict(model_intake.get("summary")).get("decision"),
+        "aibom_completeness": _as_dict(aibom.get("completeness")).get("score") if aibom else None,
+        "signature_status": _as_dict(supply_chain.get("signature")).get("status") if supply_chain else None,
+        "license_policy": _as_dict(supply_chain.get("license_policy")).get("status") if supply_chain else None,
         "failed_checks": failed_checks,
     }
 
@@ -840,6 +845,9 @@ def render_ai_redteam_markdown(report: dict[str, Any]) -> str:
             "## Model Intake",
             *_md_table([
                 ("Decision", model_intake.get("decision")),
+                ("AIBOM completeness", model_intake.get("aibom_completeness")),
+                ("Signature status", model_intake.get("signature_status")),
+                ("License policy", model_intake.get("license_policy")),
                 ("Failed checks", ", ".join(model_intake.get("failed_checks") or []) or "none"),
             ]),
         ])

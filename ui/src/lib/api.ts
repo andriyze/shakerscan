@@ -54,6 +54,7 @@ export interface ModelIntakeScanRequest {
   deployment_approved?: boolean
   require_deployment_approval?: boolean
   require_signature?: boolean
+  require_signature_verification?: boolean
   require_hash?: boolean
   require_model_governance?: boolean
   max_download_bytes?: number
@@ -110,6 +111,7 @@ export interface ModelIntakePreset {
   deployment_approved?: boolean
   require_deployment_approval?: boolean
   require_signature?: boolean
+  require_signature_verification?: boolean
   require_hash?: boolean
   require_model_governance?: boolean
   max_download_bytes?: number

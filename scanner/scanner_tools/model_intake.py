@@ -54,6 +54,37 @@ EXECUTABLE_EXTENSIONS = {
 PICKLE_MAGIC_PREFIXES = (b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05")
 PICKLE_OPCODE_MARKERS = (b"__reduce__", b"GLOBAL", b"cposix\nsystem", b"cos\nsystem", b"subprocess", b"eval", b"exec")
 
+SUSPICIOUS_LOADER_MARKERS = {
+    b"os.system": "python_os_system",
+    b"subprocess": "python_subprocess",
+    b"eval(": "python_eval",
+    b"exec(": "python_exec",
+    b"pickle.loads": "pickle_loads",
+    b"/bin/sh": "shell_spawn",
+    b"powershell": "powershell",
+    b"curl http": "network_downloader",
+    b"wget http": "network_downloader",
+    b"base64.b64decode": "encoded_payload",
+}
+
+PERMISSIVE_LICENSES = {
+    "apache-2.0",
+    "apache 2.0",
+    "mit",
+    "bsd-2-clause",
+    "bsd-3-clause",
+    "isc",
+}
+
+RESTRICTIVE_LICENSE_HINTS = (
+    "non-commercial",
+    "noncommercial",
+    "research only",
+    "no redistribution",
+    "restricted",
+    "unknown",
+)
+
 
 def _artifact_name(ref: str) -> str:
     parsed = urllib.parse.urlparse(ref)
@@ -283,8 +314,246 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         return "huggingface"
     if ref.startswith("oci://") or _metadata_value(metadata, "oci_ref", "image_ref"):
         return "oci"
+    if ref.startswith(("s3://", "gs://", "gcs://", "azure://")):
+        return urllib.parse.urlparse(ref).scheme
+    if "blob.core.windows.net" in ref:
+        return "azure_blob"
     parsed = urllib.parse.urlparse(ref)
     return parsed.scheme or "local"
+
+
+def _registry_reference(ref: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(ref)
+    source_kind = _source_kind(ref, metadata)
+    reference = {
+        "kind": source_kind,
+        "ref": ref,
+        "registry": None,
+        "repository": None,
+        "path": parsed.path or None,
+        "revision": metadata.get("revision") or metadata.get("model_revision") or parsed.query or None,
+        "digest": metadata.get("digest") or metadata.get("image_digest") or None,
+    }
+
+    if source_kind == "huggingface":
+        if ref.startswith("hf://"):
+            parts = [part for part in parsed.path.split("/") if part]
+            repository = f"{parsed.netloc}/{parts[0]}" if parsed.netloc and parts else parsed.netloc or None
+            reference.update({"registry": "huggingface", "repository": repository, "path": "/".join(parts[1:]) or None})
+        elif "huggingface.co" in ref:
+            parts = [part for part in parsed.path.split("/") if part]
+            repository = "/".join(parts[:2]) if len(parts) >= 2 else None
+            revision = reference["revision"]
+            if len(parts) >= 4 and parts[2] in {"blob", "resolve"}:
+                revision = parts[3]
+            reference.update({"registry": parsed.netloc, "repository": repository, "revision": revision})
+    elif source_kind == "oci":
+        image_ref = ref.removeprefix("oci://")
+        digest = reference["digest"]
+        if "@" in image_ref:
+            image_ref, digest = image_ref.split("@", 1)
+        registry, _, repository = image_ref.partition("/")
+        reference.update({"registry": registry or None, "repository": repository or image_ref, "digest": digest})
+    elif source_kind in {"s3", "gs", "gcs", "azure"}:
+        reference.update({"registry": parsed.netloc or None, "repository": parsed.netloc or None, "path": parsed.path.lstrip("/") or None})
+    elif source_kind == "azure_blob":
+        parts = [part for part in parsed.path.split("/") if part]
+        reference.update({"registry": parsed.netloc, "repository": parts[0] if parts else None, "path": "/".join(parts[1:]) or None})
+    elif parsed.netloc:
+        reference.update({"registry": parsed.netloc, "repository": parsed.path.strip("/") or None})
+
+    return reference
+
+
+def _signature_verification_status(metadata: dict[str, Any], signature_url: Any, signed_by: Any) -> dict[str, Any]:
+    verified_keys = (
+        "signature_verified",
+        "sigstore_verified",
+        "cosign_verified",
+        "attestation_verified",
+        "provenance_verified",
+    )
+    verified = any(_boolish(metadata.get(key)) for key in verified_keys)
+    present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
+    if verified:
+        status = "verified"
+    elif present:
+        status = "present_unverified"
+    else:
+        status = "missing"
+    return {
+        "status": status,
+        "verified": verified,
+        "present": present,
+        "signature_url": signature_url,
+        "signed_by": signed_by,
+        "verification_evidence": {
+            key: metadata.get(key)
+            for key in verified_keys
+            if metadata.get(key) not in (None, "", [], {})
+        },
+    }
+
+
+def _license_policy(license_ref: Any) -> dict[str, Any]:
+    license_text = str(license_ref or "").strip()
+    normalized = license_text.lower()
+    if not normalized:
+        status = "missing"
+    elif normalized in PERMISSIVE_LICENSES:
+        status = "permissive"
+    elif any(hint in normalized for hint in RESTRICTIVE_LICENSE_HINTS):
+        status = "restricted"
+    else:
+        status = "review_required"
+    return {
+        "license": license_ref,
+        "status": status,
+        "review_required": status in {"missing", "restricted", "review_required"},
+    }
+
+
+def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> list[dict[str, str]]:
+    sample = data[:1_000_000].lower()
+    hits = [
+        {"marker": label, "source": "artifact_bytes"}
+        for marker, label in SUSPICIOUS_LOADER_MARKERS.items()
+        if marker.lower() in sample
+    ]
+    for entry in (zip_info.get("entries") or []):
+        lowered = str(entry).lower()
+        if any(name in lowered for name in ("postinstall", "setup.py", "requirements.txt", "install.sh", "download")):
+            hits.append({"marker": "loader_or_install_file", "source": lowered})
+    deduped: dict[tuple[str, str], dict[str, str]] = {}
+    for hit in hits:
+        deduped[(hit["marker"], hit["source"])] = hit
+    return list(deduped.values())[:25]
+
+
+def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) -> dict[str, Any]:
+    inspection: dict[str, Any] = {
+        "artifact_name": name,
+        "extension": ext,
+        "format": ext.lstrip(".") or "unknown",
+        "lower_code_execution_risk": ext in SAFER_MODEL_EXTENSIONS,
+    }
+    if ext == ".safetensors":
+        header = {"present": False, "valid_json": False}
+        if len(data) >= 8:
+            header_len = int.from_bytes(data[:8], "little", signed=False)
+            header["length"] = header_len
+            if 0 < header_len <= 1_048_576 and len(data) >= 8 + header_len:
+                try:
+                    parsed = json.loads(data[8:8 + header_len].decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        header["present"] = True
+                        header["valid_json"] = True
+                        header["tensor_count"] = len([key for key in parsed.keys() if key != "__metadata__"])
+                        header["metadata_keys"] = sorted((parsed.get("__metadata__") or {}).keys())[:25] if isinstance(parsed.get("__metadata__"), dict) else []
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    header["valid_json"] = False
+        inspection["safetensors_header"] = header
+    elif ext == ".onnx":
+        sample = data[:1_000_000].lower()
+        inspection["onnx"] = {
+            "external_data_hint": b"external_data" in sample or b"location" in sample,
+            "custom_operator_hint": any(marker in sample for marker in (b"ai.onnx.contrib", b"com.microsoft", b"customop")),
+        }
+    elif ext == ".gguf":
+        inspection["gguf"] = {
+            "magic_present": data.startswith(b"GGUF"),
+            "version": int.from_bytes(data[4:8], "little", signed=False) if data.startswith(b"GGUF") and len(data) >= 8 else None,
+        }
+
+    if zip_info.get("is_zip"):
+        entries = [str(entry) for entry in (zip_info.get("entries") or [])]
+        inspection["archive_components"] = {
+            "tokenizer_files": [entry for entry in entries if Path(entry).name in {"tokenizer.json", "vocab.json", "merges.txt"}][:20],
+            "adapter_files": [entry for entry in entries if "adapter" in entry.lower()][:20],
+            "config_files": [entry for entry in entries if Path(entry).name in {"config.json", "generation_config.json"}][:20],
+        }
+    return inspection
+
+
+def _component_list(value: Any, component_type: str) -> list[dict[str, Any]]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, dict) and isinstance(value.get("components"), list):
+        return _component_list(value.get("components"), component_type)
+    raw_items = value if isinstance(value, list) else [value]
+    components: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("ref") or item.get("url") or item.get("purl") or component_type
+            components.append({"type": component_type, "name": str(name), **item})
+        elif item:
+            components.append({"type": component_type, "name": str(item), "ref": str(item)})
+    return components
+
+
+def _generate_aibom(
+    *,
+    artifact_ref: str,
+    name: str,
+    ext: str,
+    sha256: str | None,
+    metadata: dict[str, Any],
+    registry: dict[str, Any],
+    license_ref: Any,
+    signature_status: dict[str, Any],
+    format_inspection: dict[str, Any],
+) -> dict[str, Any]:
+    components: list[dict[str, Any]] = [
+        {
+            "type": "model_artifact",
+            "name": name,
+            "ref": artifact_ref,
+            "format": ext,
+            "hashes": [{"alg": "SHA-256", "content": sha256}] if sha256 else [],
+            "licenses": [license_ref] if license_ref else [],
+            "registry": registry,
+        }
+    ]
+    components.extend(_component_list(_metadata_value(metadata, "base_model", "base_models", "foundation_model"), "base_model"))
+    components.extend(_component_list(_metadata_value(metadata, "adapters", "adapter_refs", "lora_adapters"), "adapter"))
+    components.extend(_component_list(_metadata_value(metadata, "tokenizer", "tokenizer_ref", "tokenizer_sha256"), "tokenizer"))
+    components.extend(_component_list(_metadata_value(metadata, "training_data_ref", "training_datasets", "datasets", "dataset_refs"), "dataset"))
+    components.extend(_component_list(_metadata_value(metadata, "dependencies", "package_dependencies", "runtime_dependencies"), "dependency"))
+    sbom = _metadata_value(metadata, "sbom", "sbom_url")
+    if isinstance(sbom, dict):
+        components.extend(_component_list(sbom.get("components"), "dependency"))
+
+    fields = {
+        "artifact": True,
+        "hash": bool(sha256),
+        "license": bool(license_ref),
+        "provenance": bool(_metadata_value(metadata, "source_repo", "source_repository", "commit_sha", "attestation_url", "provenance_url")),
+        "base_model": any(component.get("type") == "base_model" for component in components),
+        "tokenizer": any(component.get("type") == "tokenizer" for component in components),
+        "datasets": any(component.get("type") == "dataset" for component in components),
+        "dependencies": any(component.get("type") == "dependency" for component in components),
+        "signature_verification": signature_status.get("verified") is True,
+    }
+    score = round(sum(1 for present in fields.values() if present) / len(fields), 3)
+    return {
+        "bom_format": "ShakerScan AIBOM",
+        "schema_version": "2026-05-19.aibom.v1",
+        "serial_number": f"urn:shakerscan:aibom:{hashlib.sha256(artifact_ref.encode()).hexdigest()[:24]}",
+        "components": components,
+        "provenance": {
+            "source_repo": _metadata_value(metadata, "source_repo", "source_repository"),
+            "commit_sha": metadata.get("commit_sha"),
+            "training_data_ref": _metadata_value(metadata, "training_data_ref", "datasets", "dataset_refs"),
+            "attestation_url": _metadata_value(metadata, "attestation_url", "provenance_url"),
+            "signature": signature_status,
+        },
+        "format_inspection": format_inspection,
+        "completeness": {
+            "score": score,
+            "fields": fields,
+            "missing": [key for key, present in fields.items() if not present],
+        },
+    }
 
 
 async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -335,6 +604,23 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     deployment_restrictions = _metadata_value(metadata, "deployment_restrictions", "allowed_environments", "use_restrictions")
     monitoring_plan = _metadata_value(metadata, "monitoring_plan", "monitoring_plan_url", "drift_monitoring", "incident_response_plan")
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
+    require_signature_verification = _boolish(options.get("require_signature_verification"))
+    registry_reference = _registry_reference(artifact_ref, metadata)
+    signature_status = _signature_verification_status(metadata, signature_url, signed_by)
+    license_policy = _license_policy(license_ref)
+    format_inspection = _inspect_format(name, ext, artifact_bytes, zip_info)
+    suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
+    aibom = _generate_aibom(
+        artifact_ref=artifact_ref,
+        name=name,
+        ext=ext,
+        sha256=sha256,
+        metadata=metadata,
+        registry=registry_reference,
+        license_ref=license_ref,
+        signature_status=signature_status,
+        format_inspection=format_inspection,
+    )
 
     if metadata_fetch_meta.get("error"):
         findings.append(_finding(
@@ -356,7 +642,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 description="The configured artifact URL uses a registry scheme not currently supported by the intake fetcher.",
                 artifact_ref=artifact_ref,
                 evidence={"artifact": name, "fetch": artifact_meta},
-                remediation="Use a supported artifact source (http/https) or extend model-intake fetch support for hf/oci registries.",
+                remediation="Use a fetchable artifact source or configure a registry fetcher for Hugging Face, OCI, S3/GCS/Azure Blob, or the internal model gateway.",
             ))
         else:
             findings.append(_finding(
@@ -401,6 +687,21 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require Sigstore, registry signing, or an equivalent signed attestation for deployable model artifacts.",
         ))
 
+    if (
+        require_signature_verification
+        and signature_status["status"] == "present_unverified"
+        and not metadata_unavailable
+    ):
+        findings.append(_finding(
+            finding_id="signature_not_verified",
+            title="Model artifact signature is present but not verified",
+            severity="medium",
+            description="The artifact has signature or attestation metadata, but the intake metadata does not record successful verification.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "signature": signature_status},
+            remediation="Verify the signature or attestation with Sigstore/cosign or the registry verifier and record verification status in model intake metadata.",
+        ))
+
     risky_ext = ext in RISKY_EXTENSIONS
     pickle_like = _looks_like_pickle(artifact_bytes)
     zip_pickle_entries = zip_info.get("pickle_entries") or []
@@ -432,6 +733,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "executable_entries": executable_entries},
             remediation="Block deployment pending malware analysis and require a clean re-packaged artifact.",
+        ))
+
+    if suspicious_loader_markers:
+        findings.append(_finding(
+            finding_id="suspicious_loader_markers",
+            title="Model artifact contains suspicious loader markers",
+            severity="high" if any(hit["marker"] in {"shell_spawn", "network_downloader", "powershell"} for hit in suspicious_loader_markers) else "medium",
+            description="The artifact contains strings or files associated with dynamic loading, shell execution, or network download behavior.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "markers": suspicious_loader_markers},
+            remediation="Review the artifact in an isolated malware sandbox, remove loader scripts, and require clean YARA/AV results before deployment.",
         ))
 
     if not provenance_ref and not metadata_unavailable:
@@ -476,6 +788,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
             remediation="Record model license, usage constraints, and legal/security review status before deployment.",
+        ))
+
+    if require_governance and license_policy["status"] == "restricted" and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="restricted_license_policy",
+            title="Model license requires deployment review",
+            severity="medium",
+            description="The supplied model license metadata contains restricted-use language that requires explicit approval before deployment.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "license_policy": license_policy},
+            remediation="Confirm the intended deployment is allowed by the model license and record legal/security approval in intake metadata.",
         ))
 
     if require_governance and not sbom_ref and not metadata_unavailable:
@@ -545,11 +868,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "artifact_name": name,
         "artifact_ref": artifact_ref,
         "source_kind": _source_kind(artifact_ref, metadata),
+        "registry": registry_reference,
         "extension": ext,
         "sha256": sha256,
         "format_posture": format_posture,
+        "signature_verification_status": signature_status["status"],
+        "license_policy_status": license_policy["status"],
+        "aibom_generated": True,
+        "aibom_completeness": aibom["completeness"]["score"],
         "provenance_present": bool(provenance_ref),
         "signature_present": bool(signature_url or signed_by),
+        "signature_verified": signature_status["verified"],
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -576,11 +905,23 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             },
             "metadata": metadata,
             "metadata_fetch": metadata_fetch_meta if metadata_url else None,
+            "aibom": aibom,
+            "supply_chain": {
+                "registry": registry_reference,
+                "signature": signature_status,
+                "license_policy": license_policy,
+                "suspicious_loader_markers": suspicious_loader_markers,
+                "format_inspection": format_inspection,
+            },
             "checks": {
                 "provenance": None if metadata_unavailable else bool(provenance_ref),
                 "unsafe_serialization": not any(f["id"].endswith("unsafe_serialization") for f in findings),
                 "artifact_signing": None if metadata_unavailable else bool(signature_url or signed_by),
+                "signature_verification": None if not require_signature_verification or metadata_unavailable else signature_status["verified"],
                 "checksum": bool(expected_sha256 and sha256 and str(expected_sha256).lower() == sha256.lower()) if not metadata_unavailable else None,
+                "aibom": True,
+                "format_specific_inspection": True,
+                "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] in {"permissive", "review_required"},
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
                 "license_review": (None if metadata_unavailable else bool(license_ref)) if require_governance else None,
                 "sbom_dependencies": (None if metadata_unavailable else bool(sbom_ref)) if require_governance else None,

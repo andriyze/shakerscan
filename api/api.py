@@ -1310,6 +1310,7 @@ class ModelIntakeScanRequest(BaseModel):
     deployment_approved: bool = False
     require_deployment_approval: bool = True
     require_signature: bool = True
+    require_signature_verification: bool = False
     require_hash: bool = True
     require_model_governance: bool = True
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
@@ -3216,8 +3217,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     if not artifact_ref:
         raise HTTPException(status_code=400, detail="artifact_url is required")
     parsed = urllib.parse.urlparse(artifact_ref)
-    if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci"}:
-        raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, or oci://")
+    if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci", "s3", "gs", "gcs", "azure"}:
+        raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, oci://, s3://, gs://, gcs://, or azure://")
 
     r = get_redis()
     job_id = str(uuid.uuid4())
@@ -3234,6 +3235,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "deployment_approved": request.deployment_approved,
         "require_deployment_approval": request.require_deployment_approval,
         "require_signature": request.require_signature,
+        "require_signature_verification": request.require_signature_verification,
         "require_hash": request.require_hash,
         "require_model_governance": request.require_model_governance,
         "max_download_bytes": request.max_download_bytes,

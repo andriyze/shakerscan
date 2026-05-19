@@ -35,6 +35,19 @@ def test_grc_evidence_matrix_maps_api_ai_iso_and_sla_controls():
                 "proof": "MCP server accepted token with wrong audience.",
             },
         },
+        {
+            "id": "f-model-intake",
+            "title": "Model artifact signature is present but not verified",
+            "severity": "medium",
+            "tool": "model_intake",
+            "source_type": "model_intake",
+            "url": "hf://example/model",
+            "evidence": {
+                "aibom": {"components": [{"type": "model_artifact", "name": "model.safetensors"}]},
+                "signature": {"status": "present_unverified"},
+                "license_policy": {"status": "review_required"},
+            },
+        },
     ]
 
     matrix = generate_grc_evidence_matrix(findings, {"target": "https://example.test", "scan_id": "scan-1"})
@@ -42,6 +55,8 @@ def test_grc_evidence_matrix_maps_api_ai_iso_and_sla_controls():
     assert matrix["frameworks"]["owasp_api_security"]["controls"]["API1"]["count"] == 1
     assert matrix["frameworks"]["owasp_llm_agentic"]["controls"]["LLM08"]["count"] == 1
     assert matrix["frameworks"]["nist_ai_rmf"]["controls"]["MANAGE"]["count"] == 1
+    assert matrix["frameworks"]["eu_ai_act"]["controls"]["ARTICLE-15"]["count"] == 1
+    assert matrix["frameworks"]["iso_42001"]["controls"]["AIMS-SUPPLY"]["count"] == 1
     assert matrix["frameworks"]["iso_27001_2022"]["controls"]["A.5.15"]["count"] == 2
     assert matrix["frameworks"]["internal_sla"]["controls"]["SLA-CRITICAL"]["sla_hours"] == 24
     assert matrix["frameworks"]["internal_sla"]["controls"]["SLA-CRITICAL"]["count"] == 1
