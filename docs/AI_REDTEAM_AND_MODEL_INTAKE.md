@@ -1,448 +1,822 @@
-# AI Red-Teaming and Model Intake — Engineering Reference
+# AI Red-Teaming and Model Intake - Engineering Onboarding
 
-A working guide to the two AI-security products inside ShakerScan: **AI Gate** (live red-teaming of AI surfaces) and **Model Intake** (static checks on model artifacts before deployment).
+This is the onboarding reference for the AI-security parts of ShakerScan:
 
-The audience is a new engineer joining the project. It explains what each feature does, how it does it (file by file), and where it falls short today. Read top-to-bottom on day one, use as a reference after.
+- **AI Gate**: red-team style testing for AI application surfaces such as chat APIs, RAG endpoints, agent traces, MCP traces, and browser widgets.
+- **Model Intake**: static model artifact and governance checks before a model is approved for deployment.
 
----
+The goal of this document is to help a new engineer understand what exists, how users are expected to use it, how the implementation fits together, and where the current system still falls short.
 
-## 1. Big picture
-
-ShakerScan has three product areas in the sidebar:
-
-1. **DAST** — classic web scanner (covered by `CLAUDE.md`, not in scope here).
-2. **AI Gate** — at `/settings/ai-gate`. Saves *AI targets* (chat APIs, RAG endpoints, agent traces, MCP servers, browser widgets), then runs *probe packs* against them and stores findings. Optionally has Claude judge the transcripts.
-3. **Model Intake** — at `/settings/model-intake`. Takes a model artifact URL + metadata, downloads it, inspects it without loading or running any model code, and emits findings (provenance, signature, unsafe serialization, license, SBOM, etc.).
-
-These two products share the same plumbing as DAST scans: a `scans` row in PostgreSQL, a Redis job, a worker that calls the right scan function, and the same `findings` table. They are distinguished by `options.run_kind`:
-
-| `run_kind` values | Routed to | File |
-|------|-----------|------|
-| `ai_api`, `ai_rag`, `ai_trace`, `ai_mcp`, `ai_widget` | `run_ai_target_scan` | `api/ai_gate_scan.py:5217` |
-| `model_intake` | `run_model_intake_scan` | `scanner/scanner_tools/model_intake.py:290` |
-
-The routing happens in `api/worker.py:263–283`.
+ShakerScan is still a generic DAST and AI security tool. Honey is only a demo/lab companion. Normal users should be able to scan their own AI targets and model artifacts without knowing Honey exists.
 
 ---
 
-## 2. End-to-end request flow
+## 1. Product Map
 
-Example: user clicks **Run** on a saved AI target.
+ShakerScan has three major product areas:
 
-```
-[ UI ]  ui/src/app/settings/ai-gate/page.tsx
-        POST /ai/targets/{target_id}/scan
-            ↓
-[ API ] api/api.py — /ai/targets/{target_id}/scan handler (line 3351)
-        → _queue_ai_target_scan() (lines 1788–1858)
-            • Creates a `scans` row with run_kind = ai_api|ai_rag|ai_trace|ai_mcp|ai_widget
-            • Stores probe_pack, scan_profile, environment, full target snapshot in options JSONB
-            • Pushes a job into Redis with the scan_id
-            ↓
-[ Redis ] (queue)
-            ↓
-[ Worker ] api/worker.py:276 — dispatches AI_GATE_RUN_KINDS
-        → ai_gate_scan.run_ai_target_scan(target_url, options)  ← api/ai_gate_scan.py:5217
-            • Builds the target adapter (REST JSON / SSE / Playwright widget)
-            • Plans the probe pack via ai_gate.planner.plan_probe_pack()
-            • Runs probes through ConversationRunner (ai_gate/runner.py)
-            • Applies detectors (regex + text + structured oracle + semantic)
-            • If AI judging is enabled, calls Claude to verdict each finding
-            • Returns a result dict: { schema_version, scan_mode, target, ai_gate: {...}, findings: [...], result: {score, grade, ...} }
-            ↓
-[ Worker ] persists findings into `findings` table (worker.py:941+)
-            ↓
-[ DB ]  findings rows have source='ai_gate', ai_target_id=<uuid>,
-        ai_verdict, ai_confidence, ai_rationale, ai_recommendations, tool=<probe family>
-            ↓
-[ UI ] /scans/{scan_id} page (DAST result viewer) shows the findings;
-       /findings?source_type=ai filters AI-product findings.
-```
+1. **DAST**: classic web application and API scanning.
+2. **AI Gate**: live testing of AI application behavior and AI control evidence.
+3. **Model Intake**: model artifact and model supply-chain review.
 
-Model Intake follows the same shape, with `run_kind=model_intake` → `run_model_intake_scan(artifact_ref, options)`.
+AI Gate and Model Intake reuse the same core scan plumbing as DAST:
+
+- A row is created in `scans`.
+- A Redis job is queued.
+- A worker dispatches the scan by `options.run_kind`.
+- Results and findings are persisted.
+- The regular scan detail and findings UI render the output.
+
+Important `run_kind` values:
+
+| Run kind | Product | Engine |
+|---|---|---|
+| `ai_api` | AI Gate chat/API target | `run_ai_target_scan` |
+| `ai_rag` | AI Gate RAG target | `run_ai_target_scan` |
+| `ai_trace` | AI Gate agent trace target | `run_ai_target_scan` |
+| `ai_mcp` | AI Gate MCP trace target | `run_ai_target_scan` |
+| `ai_widget` | AI Gate browser widget target | `run_ai_target_scan` |
+| `model_intake` | Model Intake artifact check | `run_model_intake_scan` |
+
+Core files:
+
+| Area | Files |
+|---|---|
+| AI Gate API and orchestration | `api/api.py`, `api/ai_gate_scan.py`, `api/worker.py` |
+| AI Gate probes and planning | `api/ai_gate/probe_registry.py`, `api/ai_gate/planner.py`, `api/ai_gate/adaptive.py` |
+| AI Gate target adapters | `api/ai_gate/targets/rest_json.py`, `api/ai_gate/targets/widget_playwright.py` |
+| AI Gate runner | `api/ai_gate/runner.py` |
+| AI controls | `api/ai_control_requirements.py` |
+| AI learning/export/report artifacts | `api/ai_redteam_artifacts.py` |
+| Scenario templates | `api/ai_demo_scenarios.py` |
+| Model Intake engine | `scanner/scanner_tools/model_intake.py` |
+| AI Gate UI | `ui/src/app/settings/ai-gate/page.tsx` |
+| Model Intake UI | `ui/src/app/settings/model-intake/page.tsx` |
+| Shared report UI | `ui/src/components/ReportView.tsx` |
+| AI settings UI | `ui/src/components/AISettingsPanel.tsx` |
 
 ---
 
-## 3. AI Gate
+## 2. What Users Can Do Today
 
-### 3.1 What "AI target" means
+This section is the feature inventory. If a user asks "what AI functionality does ShakerScan already have?", start here.
 
-An AI target is a saved record describing how to talk to one AI surface. Five types are supported, all defined as `SUPPORTED_AI_TARGET_TYPES` (`api_chat`, `rag`, `agent_trace`, `mcp_trace`, `widget`).
+### Feature 1: Create AI Gate targets
 
-| `target_type` | What it models | Adapter class | Adapter file |
-|---|---|---|---|
-| `api_chat` | A chat or completion JSON endpoint (e.g., `POST /api/chat`) | `RestJsonConversationTarget` | `api/ai_gate/targets/rest_json.py` |
-| `rag` | A RAG answer endpoint (returns text + citations) | `RestJsonConversationTarget` | same |
-| `agent_trace` | A trace / replay endpoint that returns multi-step agent runs | `RestJsonConversationTarget` | same |
-| `mcp_trace` | An MCP HTTP/SSE endpoint (JSON-RPC 2.0 over Server-Sent Events) | `SseConversationTarget` (when `streaming_mode=sse`) | `ai_gate_scan.py` |
-| `widget` | A browser widget; we drive a real browser via Playwright | `WidgetPlaywrightConversationTarget` | `api/ai_gate/targets/widget_playwright.py` |
+Users can save AI targets from `/settings/ai-gate` or through `POST /ai/targets`.
 
-**How the adapter is chosen** (`ai_gate_scan.py:5255-5260`):
-```python
-if target_type == "widget":           target_adapter = WidgetPlaywrightConversationTarget(...)
-elif target.get("streaming_mode") == "sse":  target_adapter = SseConversationTarget(...)
-else:                                  target_adapter = RestJsonConversationTarget(...)
-```
+Supported target types:
 
-Saved target fields (a flat dict that becomes a row in `ai_targets`):
+| Target type | What it represents |
+|---|---|
+| `api_chat` | Chat/completion style JSON endpoint |
+| `rag` | RAG answer endpoint with retrieved documents, citations, or document context |
+| `agent_trace` | Agent trace/replay API that returns tool calls, approvals, actions, or memory events |
+| `mcp_trace` | MCP-compatible trace or HTTP/SSE endpoint |
+| `widget` | Browser-based AI widget driven through Playwright |
+
+Example user flow:
+
+1. Open `/settings/ai-gate`.
+2. Add a target named `Support RAG`.
+3. Set target type to `rag`.
+4. Set endpoint URL to `https://staging.example.com/api/rag/answer`.
+5. Set request template to include `{{prompt}}`.
+6. Set response path to the answer field, for example `$.answer`.
+7. Save and run `shaker-rag-lite`.
+
+Critical limitation: ShakerScan does not automatically discover AI endpoints. The user must describe the target API accurately.
+
+### Feature 2: Model target requests, responses, auth, and safety limits
+
+An AI target stores enough information for the scanner to send probes safely and repeatedly.
+
+Important target fields:
 
 | Field | Purpose |
 |---|---|
-| `name`, `target_type`, `endpoint_url`, `method` | Identity |
+| `name` | Human-readable target name |
+| `target_type` | Chat, RAG, agent trace, MCP trace, or widget |
+| `endpoint_url` | URL the scanner calls |
+| `method` | HTTP method |
 | `headers_template` | Headers sent with each probe |
-| `request_template` | Body template; **must contain `{{prompt}}`** for non-GET targets — that's how probes inject their attack string |
-| `response_path` | JSONPath to extract the assistant reply (e.g. `$.answer`) |
+| `request_template` | JSON/body template; usually contains `{{prompt}}` |
+| `response_path` | JSONPath-like field for assistant output |
 | `streaming_mode` | `json` or `sse` |
-| `rate_limit_rps` | Outbound throttle |
-| `request_budget` | Hard cap on probes per scan (`max_requests` is `min(budget, len(probes))`) |
-| `token_budget` | Token cap (enforced by `TokenBudget` class) |
-| `production_mode` | When true, scan submissions need `confirm_production: true` |
-| `metadata_json` | Free-form dict of controls + adaptive overrides (see §3.7 and §3.4) |
-| `credential` | Stored separately as a credential reference; UI shows a redacted preview |
+| `rate_limit_rps` | Outbound request throttle |
+| `request_budget` | Max probe requests |
+| `token_budget` | Approximate token budget |
+| `production_mode` | Requires explicit production confirmation |
+| `metadata_json` | Controls, scan hints, custom probes, and governance evidence |
+| `credential` | Auth configuration stored separately from the target body |
 
-Templating: variables `{{prompt}}` and `{{session_id}}` are substituted on every request by `replace_placeholders()` in `rest_json.py:26`.
+Supported auth styles include bearer token, API-key header, custom header, basic auth, cookie, multi-header auth, and query parameter auth.
 
-Authentication kinds supported by the UI: `none`, `bearer`, `api_key_header`, `custom_header`, `basic_auth`, `cookie`, `multi_header`, `query_param`. After save, secrets are stored encrypted and never returned to the UI — only a substring preview.
+Critical limitation: wrong templates, response paths, or auth values usually fail at scan time. A dedicated "test connectivity" target action would improve this.
 
-### 3.2 Probe packs
+### Feature 3: Run AI probe packs
 
-A *probe* is one attack template. A *pack* is a tuple of probes shipped together. Packs are defined in `api/ai_gate/probe_registry.py:1212`:
-
-```python
-PROBE_PACK_DEFINITIONS = {
-    "shaker-ai-smoke":     SMOKE_PROBE_DEFINITIONS,
-    "shaker-owasp-llm":    OWASP_LLM_PROBE_DEFINITIONS,
-    "shaker-agent-abuse":  AGENT_TOOL_ABUSE_PROBE_DEFINITIONS,
-    "shaker-mcp-security": MCP_SECURITY_PROBE_DEFINITIONS,
-    "shaker-rag-lite":     RAG_LITE_PROBE_DEFINITIONS,
-}
-```
+AI Gate ships with multiple probe packs.
 
 | Pack | Focus | Typical use |
 |---|---|---|
-| `shaker-ai-smoke` | ~8 broad probes: system prompt leak, sensitive disclosure, direct injection, refusal consistency, encoding bypass, hallucinated authority, format violation, unbounded output | Quick "is this thing safe at all" check |
-| `shaker-owasp-llm` | OWASP LLM Top 10 — also pulls from corpora (libertas, encoding variants, arcanum evasions/techniques, promptfoo jailbreaks) | Comprehensive LLM risk sweep |
-| `shaker-agent-abuse` | Tool abuse, approval bypass, delegated identity abuse, token leakage, write-action escalation | Agents that call tools |
-| `shaker-mcp-security` | Untrusted MCP, oversharing, schema disclosure, OAuth audience confusion, PKCE downgrade, server rebinding | MCP servers |
-| `shaker-rag-lite` | Metadata leakage, document poisoning, index-job injection, deleted-doc recall | RAG endpoints |
-
-Each `Probe` is a frozen dataclass (`api/ai_gate/models.py`):
-
-```python
-@dataclass(frozen=True)
-class Probe:
-    id: str                       # stable identifier
-    family: str                   # used by adaptive planner to balance coverage
-    title: str
-    prompt: str                   # default single-turn prompt
-    owasp: str | None             # e.g. "LLM01:2025"
-    minimum_profile: str = "smoke"   # smoke | trace | standard | deep
-    technique: str | None         # encoding, future_reframe, authority_escalation, ...
-    source_name / source_reference
-    tactics: tuple[str, ...]
-    expected_safe_behavior: str | None
-    expected_attack_success: str | None
-    severity_if_success: str | None
-    turns: tuple[ProbeTurnTemplate, ...]   # multi-turn conversation
-    max_turns: int = 1
-    requires_state: bool
-    requires_fresh_session: bool
-    safe_for_production: bool = True
-```
-
-### 3.3 Scan profiles
-
-Profiles control depth, not which pack runs. Defined in `api/ai_gate/planner.py:13`:
-
-```python
-_VALID_SCAN_PROFILES = ("smoke", "trace", "standard", "deep")
-_PROFILE_RANK        = {"smoke": 0, "trace": 1, "standard": 1, "deep": 2}
-_PROFILE_TURN_CAP    = {"smoke": 1, "trace": 1, "standard": 3, "deep": 8}
-```
-
-What each profile does:
-
-| Profile | Turn cap | Probes included | Adaptive? |
-|---|---|---|---|
-| `smoke` | 1 | All probes whose `minimum_profile` ≤ smoke | No |
-| `trace` | 1 | All probes whose `minimum_profile` ≤ standard | No |
-| `standard` | 3 | All probes whose `minimum_profile` ≤ standard | **Yes** |
-| `deep` | 8 | All probes (incl. `minimum_profile=deep`) | **Yes** |
-
-A probe is *included* if its `minimum_profile` rank ≤ scan rank (see `_probe_supported_in_profile` in `planner.py:36`). A probe's per-conversation turn limit is capped to `min(probe.max_turns, profile_turn_cap)`.
-
-`smoke` and `trace` rank the same — they differ only by which feature uses them (trace is intended for replay/conversation-aware probes in agent/MCP contexts).
-
-### 3.4 Adaptive planner (standard / deep only)
-
-The adaptive planner runs probes in three phases: **recon → exploit → confirm**. Code lives in `api/ai_gate/adaptive.py`.
-
-```
-RECON     — initial probes per family; classify each response as success / partial / refusal
-EXPLOIT   — for families that showed signal, pick stronger probes (e.g., refusal-breaker techniques)
-CONFIRM   — re-run successes to reduce false positives; capped attempts
-```
-
-Key constants (`adaptive.py:42-50`):
-
-```python
-DEFAULT_MAX_FAMILY_BUDGET = {"standard": 4, "deep": 6}
-DEFAULT_MAX_SUCCESS_CONFIRMATION_ATTEMPTS = {"standard": 1, "deep": 2}
-```
-
-Overrides come from the target's `metadata_json`:
-
-| Metadata key | Range | Effect |
-|---|---|---|
-| `adaptive_max_family_budget` | 1–12 | Cap probes per family |
-| `adaptive_max_success_confirmation_attempts` | 0–6 | Confirmation re-runs |
-| `adaptive_family_priorities` (or `*_priority`, `target_family_*`) | list/CSV | Force family order |
-| `max_turns_per_conversation` | 1–8 | Override turn cap |
+| `shaker-ai-smoke` | Broad quick probes | Fast sanity check |
+| `shaker-owasp-llm` | OWASP LLM-style prompt, leakage, and output risks | General LLM app assessment |
+| `shaker-rag-lite` | RAG leakage, poisoned content, citation, and retrieval-boundary checks | Internal document assistant |
+| `shaker-agent-abuse` | Tool abuse, approval bypass, delegated identity, unsafe action patterns | Agents that call APIs/tools |
+| `shaker-mcp-security` | MCP/OAuth/scope/tool/resource boundary checks | MCP servers and connector flows |
 
-Family focus is also auto-derived from target URL/name. For example, a RAG target with `/query` in the URL gets ordered `cross_tenant_retrieval → retrieval_leakage → citation_integrity → prompt_injection → data_exfiltration` (`adaptive.py:resolve_target_family_focus`).
+Supported scan profiles:
 
-Refusal detection uses a fixed list of phrases (`adaptive.py:REFUSAL_MARKERS`: "i can't", "i cannot", "i'm sorry, but", "not permitted to disclose", etc.). If recon shows refusal, exploit probes are picked from a fixed set of techniques (`REFUSAL_BREAKER_TACTICS`: encoding, future_reframe, anti_refusal_language, policy_override, dataset_generation_cover, dual_response_format, refusal_probe, authority_escalation, persona_hijack, format_lock).
+| Profile | Intended depth |
+|---|---|
+| `smoke` | Fast single-turn coverage |
+| `trace` | Trace-oriented single-turn coverage |
+| `standard` | Multi-turn/adaptive coverage |
+| `deep` | Broader multi-turn/adaptive coverage |
 
-### 3.5 Detection pipeline
+Example user flow:
 
-A single probe response goes through layered detectors in `api/ai_gate_scan.py`:
+1. Create a RAG target.
+2. Select `shaker-rag-lite`.
+3. Use `smoke` for a quick check or `standard` for better coverage.
+4. Queue the scan.
+5. Open `/scans/{scan_id}` when complete.
 
-1. **Regex markers** (~lines 71–462) — token leakage (AWS secret keys, GitHub tokens, JWTs), PII (SSN, credit card, email, phone), DB URLs, internal hosts, tenant IDs.
-2. **Text markers** (case-insensitive substring) — e.g., `"system prompt"`, `"hidden instructions"`, `"i was told"`.
-3. **Structured oracle** — when a probe response body itself contains an `expected_finding` payload (used by the Honey demo and the calibration scenarios), the scanner trusts it as a structured signal.
-4. **Semantic detectors** — heuristics that suppress likely false positives, e.g., RAG response with proper document delimiting, secure-rag scoping checks, single-tenant inventory checks.
-5. **AI judging** (Claude) — optional, see §3.6.
+Critical limitation: these packs are useful and growing, but they are not a complete replacement for dedicated red-team frameworks such as PyRIT, garak, promptfoo, Giskard, or Inspect AI.
 
-A finding produced by detectors looks roughly like:
+### Feature 4: RAG security testing
 
-```python
-{
-  "id": "ai_gate:prompt_injection:system_prompt_leak",
-  "title": "...",
-  "severity": "high",         # critical | high | medium | low | info
-  "category": "prompt_injection",
-  "family": "prompt_injection",
-  "tool": "ai_gate",          # used as `tool` column in findings table
-  "evidence": {
-      "probe_id": "...", "matched_markers": [...], "pii_hits": [...],
-      "expected_finding": "...", "judge_layer": "deterministic_classifier", ...
-  },
-  "remediation": "..." | [...]
-}
-```
+AI Gate includes probes and detectors for RAG-specific failure modes.
 
-### 3.6 AI judging (Claude as a judge)
+Implemented RAG themes:
 
-Two judging layers feed the analysis fields, in this order of preference (`ai_gate_scan.py:4782` `_apply_ai_gate_analysis_fields`):
+- Cross-tenant retrieval leakage
+- Document inventory disclosure
+- Hidden document instruction leakage
+- Revoked/deleted document recall
+- Poisoned document influence
+- Citation/source behavior
+- Retrieval boundary issues
+- Tenant isolation markers
 
-1. **Semantic judge** (`evidence.semantic_result`) — Claude reviewed the transcript and returned `{complied: bool, confidence: float, success_type: str, evidence: str}`.
-2. **Rubric judge** (`evidence.rubric_result`) — Claude scored against a rubric (`rubric_severity`, `rubric_confidence`).
-3. **Deterministic fallback** (`_apply_deterministic_ai_gate_analysis`, line 4739) — used when neither semantic nor rubric ran.
+Example user flow:
 
-Mapping to verdicts:
+1. Build a dummy corpus with public, confidential, revoked, and malicious documents.
+2. Create a RAG target that queries that corpus.
+3. Run `shaker-rag-lite`.
+4. Review whether the target leaked cross-user or revoked content.
 
-| Layer | Rule | `ai_verdict` |
-|---|---|---|
-| Semantic | `complied=true` and `confidence ≥ SEMANTIC_CONFIDENCE_FLOOR` | `true_positive` |
-| Semantic | `complied=false` and `confidence ≥ floor` | `false_positive` |
-| Semantic | else | `needs_review` |
-| Rubric | confidence/severity-driven (similar shape) | t_p / f_p / needs_review |
-| Deterministic | `confidence ≥ 0.8` AND severity ∈ {critical, high, medium} | `true_positive`; otherwise `needs_review` |
+Critical limitation: AI Gate observes API behavior. It does not directly inspect the vector database or prove ACL implementation quality unless that behavior is visible through the target response or supplied control metadata.
 
-**Important side effect** (line 4823): when the semantic judge calls a finding a false positive with confidence ≥ `SEMANTIC_FALSE_POSITIVE_DOWNGRADE_FLOOR`, the finding's severity is **rewritten to `info`** and confidence is clamped to ≤ 0.4. The original severity is preserved in `evidence.ai_gate_pre_ai_judge_severity`, and `evidence.ai_gate_ai_judge_downgraded=true`. This is how high-confidence FPs are suppressed before the AI Gate score / deploy decision.
+### Feature 5: Agent and tool security testing
 
-If judging is enabled but the Claude call fails, the finding keeps the deterministic verdict and gets `ai_judging_unavailable=true` plus a rationale suffix explaining the failure (line 4772–4779).
+AI Gate includes agent/tool abuse probes.
 
-The output fields written to each finding:
+Implemented themes:
 
-- `ai_verdict` — `true_positive` | `false_positive` | `needs_review`
-- `ai_confidence` — 0.0–1.0, rounded to 2 decimals
-- `ai_rationale` — string, ≤ 1000 chars
-- `ai_recommendations` — list of strings (≤ 5; deduped)
-- `ai_classification_source` — `semantic_judge` | `rubric_judge` | `deterministic_classifier` | `..._semantic_judge_unavailable`
+- Approval bypass
+- Dangerous tool execution
+- Dry-run becoming real action
+- Stale approval replay
+- Unapproved memory write
+- Overbroad tool scope indicators
+- Cross-tenant trace leakage
+- Tool metadata injection
+- Remote agent trust issues
+- Missing audit/approval patterns
 
-Judge is gated by `target.metadata_json.ai_judge_enabled` (line 5421). It uses the AI provider configured in `/settings/ai` (`ai_url`, `ai_model`); `ai_model_fallback` is **stored but not currently wired** to any retry path.
+Example user flow:
 
-### 3.7 Control evidence baseline
+1. Create an `agent_trace` target backed by an agent trace replay endpoint.
+2. Run `shaker-agent-abuse`.
+3. Inspect whether the trace shows unsafe tool calls or missing approvals.
 
-ShakerScan can act as a checklist for AI controls in addition to running probes. Required controls are declared in `api/ai_control_requirements.py` (26 entries) — each maps to one or more keys the scanner will look for inside `target.metadata_json`. Examples:
+Critical limitation: the current implementation is strongest when the target exposes structured trace behavior. It does not yet deeply parse every possible agent framework trace format.
 
-| Control id | applies_to | Looks for keys | Framework refs |
-|---|---|---|---|
-| `ai.asset_owner` | all | asset_owner, owner, service_owner | NIST AI RMF GOVERN, ISO 27001 A.5.9 |
-| `ai.risk_tier` | all | risk_tier, ai_risk_tier | NIST AI RMF MAP |
-| `ai.data_classification` | all | data_classification, document_classification, data_classes | ISO 27001 A.5.12 |
-| `rag.retrieval_acl_matrix` | rag | retrieval_acl_matrix, acl_matrix, per_user_document_acls | OWASP LLM02 |
-| `rag.vector_tenant_isolation` | rag | vector_tenant_isolation, tenant_isolation, vector_namespace_isolation | OWASP LLM02 |
-| `agent.tool_inventory` | agent | tool_inventory, tools, mcp_tools | OWASP LLM08 |
-| `agent.write_action_approval` | agent | write_action_approval, destructive_action_approval, human_approval_required | OWASP LLM08 |
-| `agent.kill_switch` | agent | kill_switch, emergency_disable | OWASP LLM08 |
+### Feature 6: MCP and connector testing
 
-Full list at `api/ai_control_requirements.py:8-184` — 5 "all", 8 "rag", 13 "agent" controls.
+AI Gate includes MCP-focused probes.
 
-Behavior: at scan time `_build_ai_control_evidence()` (called at `ai_gate_scan.py:5237`) reads the relevant subset for the target type, records which controls are present vs missing, and attaches a control-evidence pack to the result. If `metadata_json.enforce_ai_control_baseline=true`, missing required controls are converted into findings.
+Implemented themes:
 
-Framework mappings (`nist_ai_rmf`, `iso_27001_2022`, `csa_ai`, `owasp_llm_agentic`) are **stored and surfaced in the UI but not validated** — no logic checks whether a claimed mapping is real.
+- OAuth audience confusion
+- Wildcard audience issues
+- PKCE downgrade indicators
+- Overbroad scopes
+- Scope expansion
+- Tool/resource oversharing
+- Tool schema disclosure
+- Shadow server rebinding
+- Local command consent bypass
+- Resource disclosure
 
-### 3.8 Honey AI Demo ("Run Demo" button)
+Example user flow:
 
-`POST /ai/demo/run` (`api/api.py:2691-2833`) provisions ephemeral RAG / agent / MCP targets from the **Honey scanner registry** at `${DEMO_HONEY_SCANNER_URL}/api/scenarios`, queues a scan for each, and returns scan IDs + a per-scenario error summary. "Honey" is a separate ShakerScan-friendly demo app maintained by the project.
+1. Create an `mcp_trace` target.
+2. Run `shaker-mcp-security`.
+3. Review findings for token audience, scope, consent, and resource exposure issues.
 
-Demo target metadata is overlaid with:
-- `shakerscan_demo=true` (hides from normal target list)
-- `calibration_run=true` (marks calibration-only scans)
-- `honey_scenario_id=<scenario>` (links back to source)
-- `expected_shakerscan_findings=[...]` (used as the structured oracle in §3.5)
+Critical limitation: MCP is changing quickly. Probe coverage and expected controls need to be reviewed regularly.
 
-Max 10 scenarios per run. Failure reasons are returned alongside successes — there is no retry. The Honey URL is a single endpoint; there is no fallback or offline mode.
+### Feature 7: Deterministic AI classification
 
-`Show calibration targets` toggle in the UI lets you see/use existing demo targets.
+AI Gate does not rely only on an LLM judge. The scanner has deterministic detectors for known markers and structured evidence.
 
-### 3.9 Scenario templates
+Implemented detector sources:
 
-`GET /ai/test-scenarios` (`api/api.py:2648`) returns templates that pre-populate the Add Target form. The catalog lives in `api/ai_demo_scenarios.py`:
+- Regex markers for secrets, tokens, PII, internal URLs, tenant IDs, and unsafe output patterns.
+- Text markers for prompt leakage, policy leakage, system instruction disclosure, and role confusion.
+- Structured signals from target responses.
+- Heuristics that reduce obvious false positives.
 
-- `secure-rag-agent` — three target templates (RAG, agent, MCP) all pointing at canonical Honey endpoints (`/api/secure-demo/rag-agent/*`, `/api/v1/rag/answer`, `/api/v1/agent/trace`, `/api/v1/mcp/trace`, plus `/api/secure-demo/governance/mapping`). Pre-filled with a secure baseline `metadata_json` so the control evidence pack is fully populated.
-- `model-intake-pipeline` — Honey routes for the model intake workflow (registry, index, artifact / manifest / signature / card reads, submit, status, scan, approve, deploy).
+Example user flow:
 
-Each template surfaces a control-readiness count ("20/20 controls present, 0 missing"). The UI shows highlighted missing controls in red.
+1. Run an AI Gate scan with no AI provider configured.
+2. ShakerScan still produces findings from deterministic evidence.
+3. The UI shows `ai_verdict`, confidence, rationale, and recommendations using deterministic fallback analysis.
 
-### 3.10 Red-team artifacts ("Learning map", "Test cases", exports)
+Critical limitation: deterministic markers are explainable and repeatable, but they can still miss nuanced failures or flag ambiguous text. Important findings still need manual validation.
 
-Implemented in `api/ai_redteam_artifacts.py` (805 lines):
+### Feature 8: Semantic and rubric judging
 
-| Button (UI) | Endpoint | Builder fn | Output |
-|---|---|---|---|
-| Learning map | `GET /ai/learning-guide` | `build_ai_learning_guide()` | JSON: learning checkpoints |
-| Test cases | `GET /ai/test-cases?pack=...` | `build_ai_test_case_catalog()` | JSON: probe catalog by pack |
-| promptfoo export | `GET /ai/test-cases/export?format=promptfoo` | `_promptfoo_export()` | YAML — promptfoo test cases + assertions |
-| PyRIT export | `GET /ai/test-cases/export?format=pyrit` | `_pyrit_export()` | JSON — PyRIT objectives + conversation starters |
-| garak seed | `GET /ai/test-cases/export?format=garak` | `_garak_export()` | YAML — GARAK detector seed |
+When an AI provider is configured in `/settings`, AI Gate can ask a configured model to review transcripts and findings.
 
-Same module also builds the **AI red-team report** per scan (`build_ai_redteam_report` / `render_ai_redteam_markdown` lines 639–697) including severity counts, calibration summary, control summary, and evidence excerpts.
+There are two provider-backed review paths:
 
-The catalog is sourced from `PROBE_PACK_DEFINITIONS` at query time — exports are **not snapshotted per scan**, so an export today may not match what ran yesterday.
+- **Semantic judge**: reviews probe transcripts and determines whether the target complied with the attack objective.
+- **Rubric judge**: scores findings against a severity/confidence rubric when explicitly enabled.
 
-### 3.11 Custom probes / corpus loader
+The output fields are stored on findings:
 
-Users can inject inline probes via `metadata_json.custom_probes` (a list). Validated and merged into the pack by `api/ai_gate/corpus_loader.py:222` (`load_inline_probe_entries_with_diagnostics`). Conflicts with base-pack IDs are skipped and reported via `ProbePackPlan.validation_errors` (`planner.py:107`).
+- `ai_verdict`
+- `ai_confidence`
+- `ai_rationale`
+- `ai_recommendations`
+- `ai_classification_source`
 
-Shipped corpora (read from disk at startup) — `api/ai_gate/corpora/`:
+If provider judging fails, ShakerScan keeps deterministic analysis and marks findings with `ai_judging_unavailable`.
 
-- `arcanum_evasions.json`
-- `arcanum_techniques.json`
-- `encoding_variants.json`
-- `libertas_openai_adapted.json`
-- `promptfoo_jailbreaks.json`
+Critical limitation: provider-backed judging is advisory. It costs money, adds latency, and can be wrong. It should improve triage, not replace human review.
 
-These are hardcoded; there is no API to register new corpus files dynamically.
+### Feature 9: AI control evidence baseline
 
-### 3.12 Conversation runner
+AI Gate can build a control evidence pack from target metadata.
 
-`api/ai_gate/runner.py` (515 lines, class `ConversationRunner`) is the loop that walks probes through the target adapter:
+The shared control catalog currently includes 25 controls:
 
-```
-for probe in probes:
-    for turn in probe.turns[: max_turns_per_conversation]:
-        request = adapter.send(turn.message, session_state)
-        if request.is_refusal:
-            evaluate refusal-handling policy
-        record transcript
-    pass full transcript to analyze_probe() and classify_response()
-    if findings → append; if not → continue
-```
+- 5 controls that apply to all AI targets.
+- 7 RAG controls.
+- 13 agent/MCP/tool controls.
 
-It tracks the running `TokenBudget`, applies `per_request_delay` from `rate_limit_rps`, summarises detector hits (`_summarize_detector_hits`), and merges widget-specific evidence (`_merge_widget_evidence`).
+Examples:
 
-Transcripts are persisted into the result JSON under `result.ai_gate.transcripts` and exposed by `GET /ai/scans/{scan_id}/transcript` (`api/api.py:3357`).
+- Asset owner
+- Risk tier
+- Data classification
+- Model provider
+- Prompt version
+- Logging and retention
+- Retrieval ACL matrix
+- Vector tenant isolation
+- Retrieved-content delimiters
+- Source citations
+- Tool inventory
+- Tool scopes
+- Delegated identity
+- Token audience validation
+- Approval for write/destructive actions
+- Dry-run mode
+- Transaction limits
+- Sandboxing
+- Audit logs
+- Anomaly detection
+- Kill switch
 
-### 3.13 Widget driver (Playwright)
+If `metadata_json.enforce_ai_control_baseline` is true, missing controls become findings.
 
-`api/ai_gate/targets/widget_playwright.py` drives a real browser for `target_type=widget`. Key bits:
+Critical limitation: this validates that evidence was supplied, not that the control is truly effective. It is a design-review and governance aid, not proof of implementation.
 
-- `_parse_widget_manifest()` — describes the page, selectors, and hashed manifest
-- `_normalize_browser_safety_policy()` — limits navigation scope, cookie scope, allowed origins
-- `WidgetConversationExchange` / `WidgetPlaywrightConversationTarget` — the actual adapter
+### Feature 10: AI deployment decision
 
-There is also a *preview* mode: `POST /scans` (or the AI Gate scan handler) with `run_kind=ai_widget_preview` will navigate to the widget once and return a screenshot/extract, used for confirming selector picks before running real probes (`ai_gate_scan.py:5225-5232`).
+AI Gate computes a deployment-style decision based on findings and context.
 
-UI support for widgets is intentionally limited (CLAUDE.md notes: API-supported, UI support may be limited).
+Possible decisions:
+
+- `allow`
+- `needs_approval`
+- `block`
+
+Example user flow:
+
+1. Run a scan against a staging RAG endpoint.
+2. A critical cross-tenant leakage finding is detected.
+3. The scan result shows a blocking decision.
+
+Critical limitation: the decision is advisory inside ShakerScan. There is no external CI/CD enforcement gate unless the user integrates the API into their own pipeline.
+
+### Feature 11: AI evidence, transcripts, and reporting
+
+Completed AI Gate scans expose evidence in the scan detail page.
+
+Implemented evidence includes:
+
+- Probe IDs
+- Probe family and technique
+- Prompt text
+- Response excerpts
+- HTTP status
+- Detector hits
+- Turn count
+- Expected safe behavior
+- Expected attack success
+- Linked findings
+- Semantic judge summary when present
+- Control evidence summary
+
+AI red-team report export is available through:
+
+- `/scans/{scan_id}/ai-redteam-report?format=json`
+- `/scans/{scan_id}/ai-redteam-report?format=markdown`
+
+Critical limitation: reports are useful drafts and evidence packages. They still need a human reviewer before being used as professional assessment deliverables.
+
+### Feature 12: Learning guide, test-case catalog, and external exports
+
+ShakerScan exposes AI red-team learning and test artifacts.
+
+Endpoints:
+
+- `GET /ai/learning-guide`
+- `GET /ai/test-cases`
+- `GET /ai/test-cases/export?format=json`
+- `GET /ai/test-cases/export?format=promptfoo`
+- `GET /ai/test-cases/export?format=pyrit`
+- `GET /ai/test-cases/export?format=garak`
+
+Export formats:
+
+- JSON
+- promptfoo YAML
+- PyRIT-style JSON
+- garak-style JSONL/NDJSON
+
+Critical limitation: exports are generated from the current probe catalog. They are not snapshotted to the exact scan that ran in the past.
+
+### Feature 13: Custom probes and corpora
+
+AI Gate can load additional inline probes from target metadata.
+
+Users can supply `metadata_json.custom_probes` to add custom test cases for a target. The planner validates them and skips conflicts with built-in probe IDs.
+
+Built-in corpus files live under `api/ai_gate/corpora/`.
+
+Critical limitation: there is no admin UI or API for uploading new corpus files dynamically.
+
+### Feature 14: Widget scanning
+
+AI Gate has a Playwright-backed widget target adapter.
+
+This supports browser-driven interaction with AI widgets where API-only testing is not enough.
+
+Critical limitation: widget scanning is less mature than REST/trace targets. Treat it as API-supported with limited UI workflow.
+
+### Feature 15: Model Intake artifact scanning
+
+Model Intake inspects model artifacts without importing or executing model code.
+
+Implemented artifact checks include:
+
+- HTTP/HTTPS/local artifact fetch
+- Download size limit
+- Timeout handling
+- SHA256 calculation
+- Expected hash comparison
+- Unsafe extension detection
+- Pickle/joblib/PyTorch-style serialization risk markers
+- Executable file extension detection
+- ZIP/archive inspection
+- Risky files inside archives
+- Metadata URL fetch
+- Inline metadata merge
+
+Example user flow:
+
+1. Open `/settings/model-intake`.
+2. Submit a `.safetensors` artifact URL.
+3. Provide expected SHA256 and metadata.
+4. Queue the scan.
+5. Review the Model Intake section in `/scans/{scan_id}`.
+
+Critical limitation: Model Intake is static. It does not execute the model, sandbox inference, or prove runtime safety.
+
+### Feature 16: Model supply-chain governance checks
+
+Model Intake checks whether governance and supply-chain evidence is present.
+
+Implemented evidence categories:
+
+- Provenance
+- Source repository
+- Commit or version reference
+- Training data reference
+- Attestation URL
+- Model card
+- License evidence
+- SBOM/dependency evidence
+- Signature/signer evidence
+- Malware scan evidence
+- Security eval or red-team evidence
+- Deployment restrictions
+- Deployment approval
+- Monitoring plan
+
+Critical limitation: several checks are evidence-presence checks. ShakerScan does not yet cryptographically verify every signature, generate SBOMs, or run a real malware/YARA engine.
+
+### Feature 17: Model Intake decisions
+
+Model Intake returns a deploy decision:
+
+- `allow`
+- `review`
+- `block`
+
+Typical behavior:
+
+- Unsafe serialization or hash mismatch blocks.
+- Missing medium-severity governance evidence usually requires review.
+- Low/info-only issues can allow with advisory context.
+
+Critical limitation: unsupported registries such as Hugging Face, OCI, or S3 are not natively resolved yet. The scanner can flag unsupported schemes and still evaluate metadata, but it cannot fully inspect the remote artifact.
+
+### Feature 18: Findings and exposure graph integration
+
+AI findings are stored in the normal findings system.
+
+Current behavior:
+
+- AI Gate findings use AI source classification and can be filtered with `source_type=ai`.
+- AI session findings also appear under `source_type=ai`.
+- Model Intake findings currently appear under the DAST/non-AI side because there is not yet a separate Model Intake product filter.
+- The exposure graph includes AI targets, MCP tools, model artifacts, scans, and findings when that data is present.
+
+Critical limitation: AI Gate findings are not retested through the normal DAST retest flow. Rerun the AI Gate target instead.
 
 ---
 
-## 4. Model Intake
+## 3. AI Gate End-to-End Flow
 
-A different shape of product: no live target, no probes — it inspects a file. UI at `/settings/model-intake`. The whole engine fits in one file: `scanner/scanner_tools/model_intake.py` (602 lines).
+When a user clicks **Run** on an AI target:
 
-### 4.1 Inputs
+```text
+UI
+  POST /ai/targets/{target_id}/scan
+    |
+API
+  Loads the saved target
+  Validates production confirmation when needed
+  Creates a scans row
+  Stores the target snapshot and scan options
+  Pushes a Redis job
+    |
+Worker
+  Reads options.run_kind
+  Dispatches to run_ai_target_scan
+    |
+AI Gate engine
+  Builds the target adapter
+  Plans the probe pack
+  Runs probes through ConversationRunner
+  Applies deterministic detectors
+  Optionally runs semantic/rubric judging
+  Builds control evidence
+  Computes decision, score, and grade
+    |
+Worker persistence
+  Stores result JSON
+  Persists findings
+    |
+UI
+  /scans/{scan_id} shows AI Gate result
+  /findings?source_type=ai filters AI findings
+```
 
-`POST /model-intake/scan` body fields (`api/api.py:3054`):
+The target snapshot is important. A scan should be understandable later even if the saved target is edited or deleted.
 
-| Field | Meaning |
-|---|---|
-| `artifact_url` | HTTP(S) or local path to the model file |
-| `metadata_url` | Optional JSON metadata document (merged with inline `metadata_json`; inline wins) |
-| `metadata_json` | Inline metadata object |
-| `expected_sha256` | Pinned digest |
-| `signature_url` | Sigstore / detached signature URL |
-| `model_card_url` | Markdown / HTML model card |
-| `deployment_approved` | Bool — has someone approved deploy? |
-| `require_signature`, `require_hash`, `require_deployment_approval`, `require_model_governance` | Policy switches (defaults: hash=true, signature=true, governance=true; approval defaults off) |
-| `timeout_seconds`, `max_download_bytes` | Fetch limits (default 20s / 10 MB) |
+---
 
-Supported artifact schemes today: **http**, **https**, and local paths. HF / OCI registry URLs raise an `unsupported_artifact_scheme` finding (a placeholder for a real implementation).
+## 4. AI Target Adapters
 
-### 4.2 What it inspects
+AI Gate talks to targets through adapters.
 
-The single function `run_model_intake_scan()` (line 290) does the following, in order:
-
-1. **Fetch metadata** (`_fetch_json`) and merge with inline metadata (`metadata={**remote, **inline}` — inline overrides remote).
-2. **Fetch artifact** (`_fetch_artifact`): reads bytes, applies `max_download_bytes` cap.
-3. **Identify file**: `name`, `extension`, SHA-256.
-4. **ZIP introspection** if header is `PK\x03\x04`: `_inspect_zip()` returns lists of zip entries by category (serialized-object entries, risky entries, executable entries) — matched against `RISKY_EXTENSIONS`, `EXECUTABLE_EXTENSIONS`.
-5. **Serialization sniff** (`_looks_like_pickle`): checks for known unsafe-serialization magic prefixes and opcode markers such as `__reduce__`, `cposix\nsystem`, `subprocess`, `eval`, `exec`. (No model code is loaded or executed; only raw bytes are pattern-matched.)
-6. **Run policy checks** (each one emits a finding when it trips):
-
-| Finding ID | Severity | When |
+| Adapter | Used for | Notes |
 |---|---|---|
-| `metadata_fetch_failed` | high | `metadata_url` set but fetch errored / non-JSON |
-| `unsupported_artifact_scheme` | high | Unknown URL scheme (hf://, oci://, etc.) |
-| `artifact_fetch_failed` | high | HTTP error, timeout, oversize, etc. |
-| `sha256_mismatch` | critical | observed SHA-256 ≠ `expected_sha256` |
-| `missing_checksum` | medium | `require_hash` and no pinned SHA |
-| `missing_signature` | medium | `require_signature` and no signer/signature URL |
-| `unsafe_serialization` | critical/high | risky extension OR unsafe-serialization header OR matching entries in ZIP |
-| `embedded_executable` | high | ZIP entries with `.exe`/`.dll`/`.sh`/etc. |
-| `missing_provenance` | medium | No source repo, commit, training-data ref, or attestation |
-| `missing_model_card` | low | No `model_card_url` / equivalent metadata |
-| `missing_deployment_approval` | high | `require_deployment_approval` and `deployment_approved` is falsy |
-| `missing_license_review` | medium | `require_model_governance` and no `license`/`license_url` |
-| `missing_sbom_or_dependencies` | medium | `require_model_governance` and no SBOM/deps |
-| `missing_malware_scan` | medium | `require_model_governance` and no AV/YARA scan evidence |
-| `missing_eval_evidence` | medium | `require_model_governance` and no safety eval / red-team report |
-| `missing_deployment_restrictions` | low | `require_model_governance` and no allowed-env list |
-| `missing_monitoring_plan` | low | `require_model_governance` and no monitoring plan |
+| `RestJsonConversationTarget` | Chat, RAG, agent trace APIs | Main adapter for JSON APIs |
+| `SseConversationTarget` | SSE-style MCP or streaming targets | Used when streaming mode is SSE |
+| `WidgetPlaywrightConversationTarget` | Browser widgets | Uses Playwright and widget manifest/safety policy |
 
-Recognized extensions:
+For REST JSON targets, the request template must place probe text somewhere the target will process. Most targets use `{{prompt}}`.
 
-```
-RISKY_EXTENSIONS         = .pkl .pickle .joblib .pt .pth .ckpt .bin .mar
-SAFER_MODEL_EXTENSIONS   = .safetensors .onnx .tflite .gguf
-EXECUTABLE_EXTENSIONS    = .exe .dll .so .dylib .sh .bash .ps1 .bat .cmd
+Common examples:
+
+```json
+{
+  "message": "{{prompt}}",
+  "session_id": "{{session_id}}"
+}
 ```
 
-### 4.3 Scoring & decision
-
-```python
-severity_score = {"critical": 30, "high": 20, "medium": 10, "low": 3, "info": 0}
-score = max(0, 100 - sum(severity_score[f.severity] for f in findings))
-grade = _grade(score)            # A/B/C/D/F
-result.deploy_decision = _intake_decision(findings)   # block | allow | review (heuristic)
+```json
+{
+  "question": "{{prompt}}",
+  "user_id": "alice",
+  "tenant_id": "tenant-a"
+}
 ```
 
-`format_posture` is one of `safer_static_format`, `unsafe_executable_serialization`, `unknown_or_unclassified_format`. Used in the result summary for the UI.
+The response path tells ShakerScan where to find the assistant text:
 
-The result JSON shape (line 565 onwards):
+- `$.answer`
+- `$.message.content`
+- `$.choices[0].message.content`
+- `$.result.output`
+
+---
+
+## 5. Probe Packs, Profiles, and Adaptive Planning
+
+A **probe** is one test case. A **pack** is a named group of probes. A **profile** controls scan depth.
+
+Probe definitions include:
+
+- Stable ID
+- Family
+- Title
+- Prompt
+- OWASP/MITRE-style reference where available
+- Minimum profile
+- Technique
+- Expected safe behavior
+- Expected attack success
+- Severity if successful
+- Optional multi-turn templates
+- Production safety flag
+
+For `standard` and `deep` profiles, AI Gate can use adaptive planning:
+
+```text
+recon -> exploit -> confirm
+```
+
+The planner tries initial probes, prioritizes families with signal, and confirms successes within request and token limits.
+
+Target metadata can influence planning:
+
+- `adaptive_max_family_budget`
+- `adaptive_max_success_confirmation_attempts`
+- `adaptive_family_priorities`
+- `max_turns_per_conversation`
+
+Critical engineering note: adaptive planning improves coverage efficiency, but it also makes scan behavior less obvious than a fixed probe list. The execution plan in the result should be checked when debugging missing probes.
+
+---
+
+## 6. Detection and AI Analysis
+
+AI Gate finding generation is layered.
+
+Detection layers:
+
+1. **Regex and marker detectors** find secrets, PII, prompt leaks, internal references, unsafe output, tool-abuse markers, RAG leakage markers, and MCP indicators.
+2. **Structured response signals** allow machine-readable target responses to become findings.
+3. **Heuristic suppressors** reduce some obvious false positives.
+4. **Semantic judge** optionally reviews transcripts with the configured AI provider.
+5. **Rubric judge** optionally reviews findings against a severity rubric.
+6. **Deterministic AI analysis** fills verdict/rationale fields when provider-backed judging is unavailable.
+
+A typical AI Gate finding contains:
+
+```json
+{
+  "id": "ai_gate:example:finding",
+  "title": "Example AI Gate finding",
+  "severity": "high",
+  "category": "prompt_injection",
+  "family": "prompt_injection",
+  "tool": "ai_gate",
+  "evidence": {
+    "probe_id": "example-probe",
+    "matched_markers": [],
+    "detector_hits": []
+  },
+  "ai_verdict": "needs_review",
+  "ai_confidence": 0.72,
+  "ai_rationale": "Short explanation",
+  "ai_recommendations": []
+}
+```
+
+Important behavior:
+
+- Semantic judge false-positive downgrades preserve the original severity in evidence.
+- Provider errors are visible through `ai_judging_unavailable`.
+- Deterministic analysis is still produced when no provider is configured.
+
+Critical engineering note: never assume `ai_verdict=true_positive` is proof. It is a triage signal attached to evidence.
+
+---
+
+## 7. Control Evidence Baseline
+
+The AI control baseline is implemented in `api/ai_control_requirements.py`.
+
+The scanner reads target `metadata_json` and checks whether required evidence keys are present for the target type.
+
+Examples:
+
+```json
+{
+  "asset_owner": "security",
+  "risk_tier": "high",
+  "data_classification": "restricted",
+  "retrieval_acl_matrix": "per-user-doc-acl",
+  "vector_tenant_isolation": "tenant-namespaces",
+  "tool_inventory": ["read_ticket", "create_ticket"],
+  "write_action_approval": true,
+  "audit_logs": "siem-ai-agent-events",
+  "kill_switch": "agent-disable-runbook",
+  "enforce_ai_control_baseline": true
+}
+```
+
+The result includes:
+
+- Required controls
+- Present controls
+- Missing controls
+- Evidence values
+- Framework mappings
+- Summary counts
+
+If `enforce_ai_control_baseline` is true, missing required controls are converted into findings.
+
+Critical engineering note: framework mappings are display/evidence metadata. The scanner does not independently prove that a claimed NIST/ISO/OWASP mapping is correct.
+
+---
+
+## 8. Honey Demo Lab
+
+Honey is a separate intentionally vulnerable demo/lab service used by the project for demos and regression learning.
+
+For product clarity:
+
+- Honey is not required for normal ShakerScan use.
+- Demo mode is intended to be off by default.
+- Demo URLs are intended to be empty by default.
+- The AI Gate "Run Demo" control appears only when demo mode is enabled.
+- Demo targets are tagged and hidden from the normal target list unless the user chooses to show them.
+
+Settings live in `/settings` under **Calibration Lab**.
+
+There are two Honey URLs:
+
+| Setting | Purpose |
+|---|---|
+| Honey public URL | URL shown to the user/browser |
+| Honey scanner URL | URL Docker workers can reach |
+
+For a locally hosted Honey on the host machine, the browser might use:
+
+```text
+http://localhost:18080
+```
+
+The scanner container may need:
+
+```text
+http://host.docker.internal:18080
+```
+
+Critical engineering note: avoid making Honey concepts visible in normal AI Gate flows. ShakerScan should feel like a generic AI security scanner, not a demo-only tool.
+
+---
+
+## 9. Model Intake End-to-End Flow
+
+When a user queues a Model Intake scan:
+
+```text
+UI
+  POST /model-intake/scan
+    |
+API
+  Validates request
+  Creates scans row with run_kind=model_intake
+  Pushes Redis job
+    |
+Worker
+  Dispatches to run_model_intake_scan
+    |
+Model Intake engine
+  Fetches metadata if provided
+  Merges inline metadata
+  Fetches artifact when supported
+  Calculates hash
+  Inspects extension and archive entries
+  Sniffs unsafe serialization markers
+  Checks governance evidence
+  Computes score, grade, and decision
+    |
+UI
+  /scans/{scan_id} shows Model Intake result
+```
+
+Model Intake is intentionally non-executing. It should never import or load model code just to inspect an artifact.
+
+---
+
+## 10. Model Intake Inputs
+
+`POST /model-intake/scan` accepts:
+
+| Field | Purpose |
+|---|---|
+| `artifact_url` | Artifact reference to inspect |
+| `metadata_url` | Optional JSON metadata document |
+| `metadata_json` | Inline metadata; overrides remote metadata |
+| `expected_sha256` | Pinned expected digest |
+| `signature_url` | Detached signature or signature evidence URL |
+| `model_card_url` | Model card URL |
+| `deployment_approved` | Whether deployment has been approved |
+| `require_signature` | Require signature/signer evidence |
+| `require_hash` | Require expected hash |
+| `require_deployment_approval` | Require approval evidence |
+| `require_model_governance` | Require governance evidence |
+| `timeout_seconds` | Fetch timeout |
+| `max_download_bytes` | Artifact download cap |
+
+Supported artifact fetches today:
+
+- `http`
+- `https`
+- local paths in allowed environments
+
+Unsupported registry-like schemes are reported as findings rather than silently ignored.
+
+---
+
+## 11. Model Intake Checks
+
+Artifact and format checks:
+
+- Fetch failure
+- Oversized download
+- SHA256 mismatch
+- Missing checksum
+- Missing signature/signer evidence
+- Unsafe serialization extension
+- Pickle-like magic bytes or opcode markers
+- Executable files inside archives
+- Risky serialized objects inside archives
+- Unknown/unclassified format
+
+Governance checks:
+
+- Missing provenance
+- Missing model card
+- Missing deployment approval
+- Missing license review
+- Missing SBOM/dependency evidence
+- Missing malware scan evidence
+- Missing security evaluation evidence
+- Missing deployment restrictions
+- Missing monitoring plan
+
+Recognized risky extensions include:
+
+```text
+.pkl .pickle .joblib .pt .pth .ckpt .bin .mar
+```
+
+Safer static formats include:
+
+```text
+.safetensors .onnx .tflite .gguf
+```
+
+Executable extensions include:
+
+```text
+.exe .dll .so .dylib .sh .bash .ps1 .bat .cmd
+```
+
+Critical engineering note: "safer static format" does not mean "safe model." It only means the file format is less prone to arbitrary code execution than pickle-like serialization.
+
+---
+
+## 12. Model Intake Result Shape
+
+The result contains:
 
 ```json
 {
@@ -450,148 +824,194 @@ The result JSON shape (line 565 onwards):
   "scan_mode": "model_intake",
   "target": "<artifact_ref>",
   "model_intake": {
-    "summary":  { ...top-level booleans + sha256... },
-    "artifact": { "name", "extension", "fetch", "archive" },
-    "metadata": { ... },
-    "metadata_fetch": { ... } | null,
-    "checks":   { provenance, unsafe_serialization, artifact_signing,
-                  checksum, approval, license_review, sbom_dependencies,
-                  malware_scan, security_evals, deployment_restrictions,
-                  monitoring_plan }   // each is true | false | null (null = indeterminate)
+    "summary": {},
+    "artifact": {},
+    "metadata": {},
+    "metadata_fetch": {},
+    "checks": {}
   },
-  "findings": [...],
-  "result":   { "score": ..., "grade": ..., "decision": ... }
+  "findings": [],
+  "result": {
+    "score": 100,
+    "grade": "A",
+    "decision": {
+      "decision": "allow",
+      "decision_reason": "..."
+    }
+  }
 }
 ```
 
-Findings end up in the regular `findings` table with `tool=model_intake`. They are surfaced under `source_type=dast` today — there's no separate "Model Intake" source filter.
+The decision can be:
+
+- `allow`
+- `review`
+- `block`
+
+Critical engineering note: Model Intake findings currently use `tool=model_intake` but do not have a separate top-level product filter in the findings UI. They are not AI Gate findings.
 
 ---
 
-## 5. Findings & database
+## 13. Findings, Reports, and Exposure Graph
 
-Findings table columns relevant to AI products (`db/init.sql` lines ~143–200):
+AI-related output appears in several product areas:
 
-| Column | Type | Notes |
-|---|---|---|
-| `source` | TEXT | `scan` / `ai_gate` / `ai_session` / `manual` |
-| `tool` | TEXT | for AI Gate: probe family or `ai_gate`; for intake: `model_intake` |
-| `ai_target_id` | UUID | FK to `ai_targets` for AI Gate findings |
-| `ai_verdict` | TEXT | `true_positive` / `false_positive` / `needs_review` |
-| `ai_confidence` | NUMERIC(3,2) | 0.00–1.00 |
-| `ai_rationale` | TEXT | ≤ 1000 chars |
-| `ai_recommendations` | JSONB | array |
+| Area | Behavior |
+|---|---|
+| Scan detail | Shows AI Gate or Model Intake sections when present |
+| Findings list | `source_type=ai` filters AI Gate and AI session findings |
+| Finding detail | Shows AI verdict, confidence, rationale, and recommendations when present |
+| AI red-team report | Exports scan evidence as JSON or Markdown |
+| Exposure graph | Shows AI targets, MCP tools, model artifacts, scans, and findings when available |
 
-Query filters in `/findings`:
-- `source_type=ai` ⇒ includes `source IN ('ai_gate', 'ai_session')`
-- `source_type=dast` ⇒ everything else (including Model Intake — see gap #5 below)
+Important distinction:
 
----
-
-## 6. API quick reference
-
-All endpoints below live in `api/api.py`. Bodies are JSON.
-
-### AI Gate
-
-| Method/Path | Purpose | Line |
-|---|---|---|
-| `GET /ai/targets` | List targets (`include_inactive`, `include_demo`, paged) | 3134 |
-| `POST /ai/targets` | Create target | 3176 |
-| `PATCH /ai/targets/{id}` | Update fields (exists; no UI yet) | 3243 |
-| `DELETE /ai/targets/{id}` | Soft delete | 3337 |
-| `POST /ai/targets/{id}/scan` | Queue a scan | 3351 |
-| `GET /ai/scans/{scan_id}/transcript` | Return probe transcripts | 3357 |
-| `GET /ai/test-scenarios` | Scenario catalog (templates + controls) | 2648 |
-| `GET /ai/learning-guide` | Learning checkpoints | 2670 |
-| `GET /ai/test-cases` | Probe catalog by pack | 2680 |
-| `GET /ai/test-cases/export?format=...` | promptfoo / pyrit / garak | 2685 |
-| `POST /ai/demo/run` | Honey demo orchestration | 2691 |
-
-### Model Intake
-
-| Method/Path | Purpose | Line |
-|---|---|---|
-| `POST /model-intake/scan` | Queue intake scan | 3054 |
-
-### Settings
-
-| Method/Path | Purpose | Line |
-|---|---|---|
-| `GET /settings/ai` | Read AI provider config | 2867 |
-| `PUT /settings/ai` | Update | 2874 |
+- **AI Gate findings** are behavioral AI security findings.
+- **Model Intake findings** are model supply-chain and artifact review findings.
+- **AI session findings** come from interactive/manual AI-assisted testing.
 
 ---
 
-## 7. UI tour
+## 14. API Quick Reference
 
-Everything lives in one big component: **`ui/src/app/settings/ai-gate/page.tsx` (881 lines)**.
+AI Gate:
 
-| Region | Lines | What it does |
-|---|---|---|
-| Honey Demo panel | 489–542 | "Run Demo" button, gated by `demo_mode_enabled`; lists queued scan IDs + per-scenario failures |
-| Red-Team Resources bar | 544–569 | Static links to `/ai/learning-guide`, `/ai/test-cases`, three exports |
-| Scenario Template Gallery | 571–629 | Renders `secure-rag-agent` templates; "Apply" populates Add Target form; shows control-readiness count |
-| Targets list + Add Target panel | 631–878 | Card per saved target with type pill, control summary, last-scan link, and inline (probe pack, scan profile, environment, Run) controls |
-| Settings button (top right) | — | Links to `/settings/ai` for AI provider config |
+| Method/path | Purpose |
+|---|---|
+| `GET /ai/targets` | List AI targets |
+| `POST /ai/targets` | Create AI target |
+| `PATCH /ai/targets/{target_id}` | Update AI target |
+| `DELETE /ai/targets/{target_id}` | Soft-delete AI target |
+| `POST /ai/targets/{target_id}/scan` | Queue AI Gate scan |
+| `GET /ai/scans/{scan_id}/transcript` | Return probe transcripts |
+| `GET /ai/test-scenarios` | Return target/scenario templates |
+| `GET /ai/learning-guide` | Return AI learning guide data |
+| `GET /ai/test-cases` | Return probe/test-case catalog |
+| `GET /ai/test-cases/export` | Export test cases |
 
-The AI provider config form is a separate component: `ui/src/components/AISettingsPanel.tsx`.
+Model Intake:
 
-`/settings/model-intake/` is the matching page for Model Intake. Findings (for both AI Gate and Model Intake) are viewed on the regular `/scans/{id}` and `/findings` pages.
+| Method/path | Purpose |
+|---|---|
+| `POST /model-intake/scan` | Queue Model Intake scan |
 
----
+Reports:
 
-## 8. Known gaps and limitations
+| Method/path | Purpose |
+|---|---|
+| `GET /scans/{scan_id}/ai-redteam-report?format=json` | Export AI report JSON |
+| `GET /scans/{scan_id}/ai-redteam-report?format=markdown` | Export AI report Markdown |
 
-A junior dev picking up this code should know these — they're easy starter projects:
+Settings:
 
-1. **No target editing in UI.** PATCH endpoint exists (`api.py:3243`), no form binds to it. Delete-and-recreate is the workaround.
-2. **No embedded transcript viewer.** `GET /ai/scans/{id}/transcript` works, but nothing in the UI shows it; users hit curl.
-3. **No filter by `ai_verdict` in the findings UI.** The DB column exists; just unsurfaced.
-4. **Model Intake findings show under `source_type=dast`.** A separate "model intake" source/product filter would be cleaner.
-5. **`ai_confidence` is `NUMERIC(3,2)`.** Fits 0.00–1.00 exactly, but `1.00` is the upper edge — a code path that emits e.g. `1.05` would error at insert time. Verify the clamp covers all writers.
-6. **Single Claude model for judging.** Settings has `ai_model_fallback`, but no code reads it. If the primary judge model fails, finding gets `ai_judging_unavailable=true` and falls back to deterministic.
-7. **Control framework mappings stored but not validated.** `nist_ai_rmf`, `iso_27001_2022`, `csa_ai`, `owasp_llm_agentic` keys in `ai_control_requirements.py` are display-only.
-8. **Corpora hardcoded.** 5 JSON files under `api/ai_gate/corpora/`. To add a corpus, edit code and redeploy; no admin UI.
-9. **Demo Honey registry is a single URL** (`DEMO_HONEY_SCANNER_URL`). No fallback, no offline demo.
-10. **HF/OCI registry support is a stub.** Model Intake emits `unsupported_artifact_scheme` instead of resolving these.
-11. **`metadata_json` is a raw JSON textarea.** No per-control picker, no validator, no help bubbles. Easy to typo a control key and silently miss the baseline check.
-12. **No "test connectivity" button** before saving a target. First scan is the first time you find out auth / endpoint / template is wrong.
-13. **Exports aren't snapshotted.** Re-exporting after a probe-registry change yields different artifacts than the scan you exported them for.
-14. **MCP/agent audit-log evidence is marker-matched, not parsed.** Real structured trace ingestion would lift the agent-abuse pack significantly.
-15. **No deploy-gate enforcement.** Control evidence + verdicts are advisory; nothing in the API blocks deployment based on them.
-16. **No bulk operations on targets.** No clone, no enable/disable, no export/import.
-17. **`run_ai_target_scan` is 5500+ lines in one file.** It mixes detectors, AI judging, scoring, control evidence, and orchestration. Splitting into a package would help onboarding.
-18. **AI judging adds latency and external API cost** without per-scan budget visibility in the UI.
+| Method/path | Purpose |
+|---|---|
+| `GET /settings/ai` | Read effective AI settings |
+| `PUT /settings/ai` | Update AI settings |
+| `POST /settings/ai/test` | Test AI provider settings |
 
----
+Demo lab:
 
-## 9. Glossary
-
-- **Probe** — one attack template (id, prompt, family, expected behavior). Frozen dataclass in `ai_gate/models.py`.
-- **Pack** — named tuple of probes (e.g. `shaker-owasp-llm`). Defined in `probe_registry.py`.
-- **Family** — taxonomy bucket on a probe (e.g. `prompt_injection`, `tool_abuse`, `retrieval_leakage`). Used by the adaptive planner to balance coverage.
-- **Profile** — scan depth: `smoke` / `trace` / `standard` / `deep`. Controls turn cap and which probes are included.
-- **Adaptive scan** — `standard` or `deep` profile; recon → exploit → confirm phases.
-- **Refusal marker / refusal-breaker** — fixed phrases / techniques used to detect and bypass model refusals.
-- **Semantic judge** — Claude reviewing a transcript and returning `complied`, `confidence`, `success_type`.
-- **Rubric judge** — Claude scoring against a rubric; second-tier judge.
-- **Control evidence pack** — derived from `metadata_json`; shows which baseline controls are claimed for this target.
-- **Honey** — sibling demo app providing canonical RAG/agent/MCP/model-intake endpoints with safe oracle payloads.
-- **Calibration target** — demo or fixture target used to validate detection accuracy; hidden by default.
-- **Structured oracle** — when a probe response body contains an `expected_finding` payload that the scanner treats as ground truth (used by Honey).
+| Method/path | Purpose |
+|---|---|
+| `POST /ai/demo/run` | Queue demo AI scenarios when demo mode is enabled |
 
 ---
 
-## 10. Where to look first when fixing something
+## 15. UI Tour
+
+Primary pages:
+
+| Page | Purpose |
+|---|---|
+| `/settings` | AI provider settings and Calibration Lab settings |
+| `/settings/ai-gate` | Create AI targets, apply templates, queue AI Gate scans |
+| `/settings/model-intake` | Queue Model Intake scans |
+| `/scans/{scan_id}` | Review AI Gate or Model Intake result |
+| `/findings` | Filter and triage findings |
+| `/exposure` | Explore attack-surface graph including AI entities |
+
+AI Gate page:
+
+- Shows red-team resource links.
+- Shows scenario templates.
+- Lets users create targets.
+- Lets users queue scans with selected pack/profile/environment.
+- Shows saved targets and last scan links.
+- Shows demo controls only when demo mode is enabled.
+
+Model Intake page:
+
+- Provides artifact and metadata inputs.
+- Supports presets.
+- Queues a model-intake scan.
+- Sends the user to the regular scan detail page for results.
+
+Scan detail:
+
+- Shows AI Gate summary when the result contains AI Gate data.
+- Shows transcripts and detector hits.
+- Shows semantic judge summary when present.
+- Shows AI control evidence when present.
+- Shows Model Intake artifact/check summaries when present.
+
+---
+
+## 16. Known Gaps and Good Starter Projects
+
+These are the highest-value improvement areas.
+
+1. **Native registry support**: Model Intake should resolve Hugging Face, OCI, and S3 references instead of only flagging unsupported schemes.
+2. **Cryptographic verification**: signature/signer evidence exists, but full model signing/provenance verification is not complete.
+3. **Real malware scanning**: Model Intake records malware scan evidence but does not run a full AV/YARA engine itself.
+4. **Model SBOM generation**: SBOM evidence is checked, not generated.
+5. **Model Intake source filter**: findings should eventually have a first-class Model Intake product filter instead of appearing under the non-AI/DAST side.
+6. **AI target connectivity test**: users need a test button before the first scan.
+7. **Better metadata editor**: `metadata_json` is too easy to typo; a control picker/validator would reduce false missing-control findings.
+8. **Structured agent/MCP trace ingestion**: current checks benefit from markers, but richer parsers would improve precision.
+9. **Widget maturity**: browser widget testing needs more UI support and more reliable selector setup.
+10. **Automatic AI endpoint discovery**: users currently describe AI targets manually.
+11. **Export snapshotting**: test-case exports are generated from the current catalog, not the exact scan-time catalog.
+12. **Provider-backed judging budgets**: UI should make semantic judge cost/latency limits more visible.
+13. **External deploy gate integration**: ShakerScan computes decisions, but users need CI/CD integration to enforce them.
+14. **Engine modularity**: `api/ai_gate_scan.py` carries too many responsibilities and should be split over time.
+15. **Manual validation workflow**: UI can do more to help reviewers mark AI findings as validated, false positive, accepted risk, or retest-needed.
+
+---
+
+## 17. Troubleshooting Map
 
 | Symptom | Start here |
 |---|---|
-| Probes not running for a target | `ai_gate_scan.py:run_ai_target_scan` → `plan_probe_pack` → `ConversationRunner.run_probe_pack` |
-| Wrong verdict on a finding | `_apply_ai_gate_analysis_fields` (line 4782) and `_apply_deterministic_ai_gate_analysis` (line 4739) |
-| AI judging not being called | `metadata_json.ai_judge_enabled` (line 5421), provider config in `/settings/ai`, look for `ai_judging_unavailable` in evidence |
-| Missing controls not flagged | `_build_ai_control_evidence` at `ai_gate_scan.py:5237`; `metadata_json.enforce_ai_control_baseline` |
-| Demo scan didn't queue | `POST /ai/demo/run` (`api.py:2691`), check `DEMO_HONEY_SCANNER_URL` env var and Honey reachability |
-| Custom probe rejected | `corpus_loader.py:load_inline_probe_entries_with_diagnostics`; check `ProbePackPlan.validation_errors` in scan result |
-| Model Intake fetch failed | `_fetch_artifact` (line 175), `_fetch_json` (line 195); error surfaces as `artifact_fetch_failed` or `metadata_fetch_failed` |
-| Worker not picking up an AI job | `api/worker.py:51` (`AI_GATE_RUN_KINDS`) and the `run_kind` set on the scan row |
+| AI target does not queue | `api/api.py`, AI target scan handler |
+| Worker does not run AI job | `api/worker.py`, `AI_GATE_RUN_KINDS` |
+| Probes do not appear in result | `api/ai_gate/planner.py`, `api/ai_gate/adaptive.py` |
+| Target request is malformed | `api/ai_gate/targets/rest_json.py` |
+| Wrong detector output | `api/ai_gate_scan.py` detector/classifier functions |
+| Semantic judging missing | AI settings, target metadata, judge config, execution plan |
+| Missing controls not flagged | `api/ai_control_requirements.py`, control evidence builder |
+| Custom probe rejected | `api/ai_gate/corpus_loader.py`, planner validation errors |
+| Widget scan fails | `api/ai_gate/targets/widget_playwright.py` |
+| Model artifact fetch fails | `scanner/scanner_tools/model_intake.py` fetch helpers |
+| Model governance finding seems wrong | Model metadata merge and governance check logic |
+| UI result missing AI section | `ui/src/components/ReportView.tsx` |
+
+---
+
+## 18. Glossary
+
+- **AI Gate**: ShakerScan product for testing AI application behavior.
+- **Model Intake**: ShakerScan product for static model artifact and supply-chain review.
+- **AI target**: Saved configuration describing how to call an AI surface.
+- **Probe**: One AI red-team test case.
+- **Pack**: Named group of probes.
+- **Profile**: Scan depth level.
+- **Family**: Probe category used for planning and reporting.
+- **Adaptive scan**: Scan that uses recon, exploit, and confirmation phases.
+- **Transcript**: Captured prompt/response evidence from a probe.
+- **Semantic judge**: Configured AI provider reviewing transcripts.
+- **Rubric judge**: Configured AI provider scoring findings against a rubric.
+- **Deterministic classifier**: Non-LLM detector/analysis logic.
+- **Control evidence pack**: Metadata-derived evidence for AI security controls.
+- **Honey**: Optional demo/lab companion service.
+- **Deployment decision**: Advisory AI Gate or Model Intake result of allow, review/needs approval, or block.
