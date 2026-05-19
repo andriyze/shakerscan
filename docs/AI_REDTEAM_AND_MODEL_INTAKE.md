@@ -43,6 +43,7 @@ Core files:
 | Area | Files |
 |---|---|
 | AI Gate API and orchestration | `api/api.py`, `api/ai_gate_scan.py`, `api/worker.py` |
+| AI assurance inventory and MCP readiness | `api/ai_assurance.py` |
 | AI Gate probes and planning | `api/ai_gate/probe_registry.py`, `api/ai_gate/planner.py`, `api/ai_gate/adaptive.py` |
 | AI Gate target adapters | `api/ai_gate/targets/rest_json.py`, `api/ai_gate/targets/widget_playwright.py` |
 | AI Gate runner | `api/ai_gate/runner.py` |
@@ -61,7 +62,7 @@ Core files:
 
 This section is the feature inventory. If a user asks "what AI functionality does ShakerScan already have?", start here.
 
-### Feature 1: Create AI Gate targets
+### Feature 1: Create AI Gate targets and inventory candidates
 
 Users can save AI targets from `/settings/ai-gate` or through `POST /ai/targets`.
 
@@ -85,7 +86,9 @@ Example user flow:
 6. Set response path to the answer field, for example `$.answer`.
 7. Save and run `shaker-rag-lite`.
 
-Critical limitation: ShakerScan does not automatically discover AI endpoints. The user must describe the target API accurately.
+ShakerScan also builds an AI inventory from saved targets, model-intake artifacts, recent DAST scans, OpenAPI endpoints, browser-captured API calls, and URL evidence in scan results. The AI Gate page shows high-confidence candidates from `/ai/inventory`; selecting one fills the target form with a safe default template.
+
+Current limitation: discovery is heuristic and candidate-based. Users still approve, configure auth, and save the AI target before scanning it.
 
 ### Feature 2: Model target requests, responses, auth, and safety limits
 
@@ -112,7 +115,9 @@ Important target fields:
 
 Supported auth styles include bearer token, API-key header, custom header, basic auth, cookie, multi-header auth, and query parameter auth.
 
-Critical limitation: wrong templates, response paths, or auth values usually fail at scan time. A dedicated "test connectivity" target action would improve this.
+The target list includes a **Test** action backed by `POST /ai/targets/{target_id}/test`. It sends one sanitized preflight request, validates the response path, masks auth headers in the preview, and returns HTTP status, latency, request preview, and extracted response text.
+
+Current limitation: widget targets still require a browser scan for full validation; the preflight endpoint covers REST/JSON/SSE target wiring.
 
 ### Feature 3: Run AI probe packs
 
@@ -217,11 +222,22 @@ Example user flow:
 2. Run `shaker-mcp-security`.
 3. Review findings for token audience, scope, consent, and resource exposure issues.
 
-Critical limitation: MCP is changing quickly. Probe coverage and expected controls need to be reviewed regularly.
+MCP targets also expose a safe live-readiness check through `POST /ai/targets/{target_id}/mcp/live-readiness`. This performs metadata/readiness checks without invoking destructive tools:
 
-### Feature 7: Deterministic AI classification
+- OAuth protected-resource metadata discovery.
+- Authorization-server discovery.
+- Token audience validation attestation.
+- PKCE S256 evidence.
+- Token passthrough prevention attestation.
+- Scope minimization evidence.
+- Session isolation attestation.
+- SSRF/egress policy evidence.
 
-AI Gate does not rely only on an LLM judge. The scanner has deterministic detectors for known markers and structured evidence.
+Current limitation: the live-readiness check is metadata and declared-control oriented. Full live tool invocation and consent-flow fuzzing should stay scoped to staging/sandbox environments.
+
+### Feature 7: Deterministic evidence detection and triage
+
+AI Gate does not rely only on an LLM judge. The scanner has deterministic evidence detectors and triage logic for known markers and structured evidence.
 
 Implemented detector sources:
 
@@ -236,7 +252,7 @@ Example user flow:
 2. ShakerScan still produces findings from deterministic evidence.
 3. The UI shows `ai_verdict`, confidence, rationale, and recommendations using deterministic fallback analysis.
 
-Critical limitation: deterministic markers are explainable and repeatable, but they can still miss nuanced failures or flag ambiguous text. Important findings still need manual validation.
+Current limitation: deterministic markers are explainable and repeatable, but they can still miss nuanced failures or flag ambiguous text. Important findings still need manual validation.
 
 ### Feature 8: Semantic and rubric judging
 
@@ -323,6 +339,10 @@ Implemented evidence includes:
 
 - Probe IDs
 - Probe family and technique
+- Scan-time evidence manifest
+- Coverage matrix
+- Probe catalog snapshot hashes
+- Detector/planner/judge metadata
 - Prompt text
 - Response excerpts
 - HTTP status
@@ -339,7 +359,9 @@ AI red-team report export is available through:
 - `/scans/{scan_id}/ai-redteam-report?format=json`
 - `/scans/{scan_id}/ai-redteam-report?format=markdown`
 
-Critical limitation: reports are useful drafts and evidence packages. They still need a human reviewer before being used as professional assessment deliverables.
+Reports include manifest and coverage details so reviewers can understand what ran, what was skipped, and which evidence hashes support the result.
+
+Current limitation: reports are useful drafts and evidence packages. They still need a human reviewer before being used as professional assessment deliverables.
 
 ### Feature 12: Learning guide, test-case catalog, and external exports
 
@@ -361,7 +383,7 @@ Export formats:
 - PyRIT-style JSON
 - garak-style JSONL/NDJSON
 
-Critical limitation: exports are generated from the current probe catalog. They are not snapshotted to the exact scan that ran in the past.
+Current limitation: standalone test-case exports are generated from the current probe catalog. Completed scan results include scan-time manifest/catalog hashes for audit context, but exported eval seeds are not yet bound to a specific historical scan.
 
 ### Feature 13: Custom probes and corpora
 
@@ -388,6 +410,7 @@ Model Intake inspects model artifacts without importing or executing model code.
 Implemented artifact checks include:
 
 - HTTP/HTTPS/local artifact fetch
+- Registry/reference parsing for Hugging Face, OCI, S3/GCS/Azure-style references
 - Download size limit
 - Timeout handling
 - SHA256 calculation
@@ -397,8 +420,11 @@ Implemented artifact checks include:
 - Executable file extension detection
 - ZIP/archive inspection
 - Risky files inside archives
+- Suspicious loader marker detection
+- Format-specific inspection for safetensors, ONNX, GGUF, archives, tokenizers, adapters, and config files
 - Metadata URL fetch
 - Inline metadata merge
+- AIBOM generation with artifact, base-model, adapter, tokenizer, dataset, dependency, provenance, signature, and completeness data
 
 Example user flow:
 
@@ -408,7 +434,7 @@ Example user flow:
 4. Queue the scan.
 5. Review the Model Intake section in `/scans/{scan_id}`.
 
-Critical limitation: Model Intake is static. It does not execute the model, sandbox inference, or prove runtime safety.
+Current limitation: Model Intake is static. It does not execute the model, sandbox inference, or prove runtime safety.
 
 ### Feature 16: Model supply-chain governance checks
 
@@ -425,13 +451,16 @@ Implemented evidence categories:
 - License evidence
 - SBOM/dependency evidence
 - Signature/signer evidence
+- Signature verification status
+- License policy posture
+- AIBOM completeness
 - Malware scan evidence
 - Security eval or red-team evidence
 - Deployment restrictions
 - Deployment approval
 - Monitoring plan
 
-Critical limitation: several checks are evidence-presence checks. ShakerScan does not yet cryptographically verify every signature, generate SBOMs, or run a real malware/YARA engine.
+Current limitation: several checks are still evidence-presence checks. ShakerScan records signature-verification status and generates an AIBOM, but it does not yet run a full cryptographic verifier for every registry type or a real AV/YARA engine.
 
 ### Feature 17: Model Intake decisions
 
@@ -447,7 +476,7 @@ Typical behavior:
 - Missing medium-severity governance evidence usually requires review.
 - Low/info-only issues can allow with advisory context.
 
-Critical limitation: unsupported registries such as Hugging Face, OCI, or S3 are not natively resolved yet. The scanner can flag unsupported schemes and still evaluate metadata, but it cannot fully inspect the remote artifact.
+Current limitation: registry references are parsed and reported, but non-HTTP registry artifact fetching is not fully implemented. The scanner can still evaluate supplied metadata and generate a registry-aware AIBOM, but it cannot inspect remote bytes from every registry scheme yet.
 
 ### Feature 18: Findings and exposure graph integration
 
@@ -457,10 +486,11 @@ Current behavior:
 
 - AI Gate findings use AI source classification and can be filtered with `source_type=ai`.
 - AI session findings also appear under `source_type=ai`.
-- Model Intake findings currently appear under the DAST/non-AI side because there is not yet a separate Model Intake product filter.
+- Model Intake findings use `tool=model_intake`/`source=model_intake` and can be filtered with `source_type=model_intake`.
 - The exposure graph includes AI targets, MCP tools, model artifacts, scans, and findings when that data is present.
+- Finding detail includes analyst validation actions for true positive, false positive, duplicate, accepted risk, and retest needed.
 
-Critical limitation: AI Gate findings are not retested through the normal DAST retest flow. Rerun the AI Gate target instead.
+Current limitation: AI Gate findings are not retested through the normal DAST retest flow. Rerun the AI Gate target instead.
 
 ---
 
@@ -828,6 +858,8 @@ The result contains:
     "artifact": {},
     "metadata": {},
     "metadata_fetch": {},
+    "aibom": {},
+    "supply_chain": {},
     "checks": {}
   },
   "findings": [],
@@ -848,7 +880,7 @@ The decision can be:
 - `review`
 - `block`
 
-Critical engineering note: Model Intake findings currently use `tool=model_intake` but do not have a separate top-level product filter in the findings UI. They are not AI Gate findings.
+Critical engineering note: Model Intake findings use `tool=model_intake` and `source=model_intake`. They have a first-class `source_type=model_intake` filter, but they are still not AI Gate findings.
 
 ---
 
@@ -859,10 +891,10 @@ AI-related output appears in several product areas:
 | Area | Behavior |
 |---|---|
 | Scan detail | Shows AI Gate or Model Intake sections when present |
-| Findings list | `source_type=ai` filters AI Gate and AI session findings |
-| Finding detail | Shows AI verdict, confidence, rationale, and recommendations when present |
+| Findings list | `source_type=ai` filters AI Gate/session findings; `source_type=model_intake` filters Model Intake findings |
+| Finding detail | Shows AI verdict, confidence, rationale, recommendations, and analyst validation actions when present |
 | AI red-team report | Exports scan evidence as JSON or Markdown |
-| Exposure graph | Shows AI targets, MCP tools, model artifacts, scans, and findings when available |
+| Exposure graph | Shows AI targets, MCP tools, model artifacts, scans, findings, and AI blast-radius metadata when available |
 
 Important distinction:
 
@@ -878,10 +910,14 @@ AI Gate:
 
 | Method/path | Purpose |
 |---|---|
+| `GET /ai/inventory` | Return saved AI assets, discovered candidates, coverage gaps, and blast-radius summaries |
 | `GET /ai/targets` | List AI targets |
 | `POST /ai/targets` | Create AI target |
 | `PATCH /ai/targets/{target_id}` | Update AI target |
 | `DELETE /ai/targets/{target_id}` | Soft-delete AI target |
+| `POST /ai/targets/{target_id}/test` | Run one sanitized target connectivity preflight |
+| `POST /ai/targets/{target_id}/mcp/live-readiness` | Run safe MCP/OAuth metadata readiness checks |
+| `GET /ai/targets/{target_id}/runtime-risk` | Return agent/tool blast-radius summary |
 | `POST /ai/targets/{target_id}/scan` | Queue AI Gate scan |
 | `GET /ai/scans/{scan_id}/transcript` | Return probe transcripts |
 | `GET /ai/test-scenarios` | Return target/scenario templates |
@@ -933,9 +969,12 @@ Primary pages:
 
 AI Gate page:
 
+- Shows AI inventory summary, coverage gaps, candidate targets, and blast-radius score.
 - Shows red-team resource links.
 - Shows scenario templates.
 - Lets users create targets.
+- Lets users preflight target connectivity.
+- Lets users run MCP readiness checks for MCP targets.
 - Lets users queue scans with selected pack/profile/environment.
 - Shows saved targets and last scan links.
 - Shows demo controls only when demo mode is enabled.
@@ -950,10 +989,11 @@ Model Intake page:
 Scan detail:
 
 - Shows AI Gate summary when the result contains AI Gate data.
+- Shows AI Gate coverage matrix and evidence manifest when present.
 - Shows transcripts and detector hits.
 - Shows semantic judge summary when present.
 - Shows AI control evidence when present.
-- Shows Model Intake artifact/check summaries when present.
+- Shows Model Intake artifact/check summaries, AIBOM completeness, signature status, and license policy when present.
 
 ---
 
@@ -961,21 +1001,20 @@ Scan detail:
 
 These are the highest-value improvement areas.
 
-1. **Native registry support**: Model Intake should resolve Hugging Face, OCI, and S3 references instead of only flagging unsupported schemes.
-2. **Cryptographic verification**: signature/signer evidence exists, but full model signing/provenance verification is not complete.
-3. **Real malware scanning**: Model Intake records malware scan evidence but does not run a full AV/YARA engine itself.
-4. **Model SBOM generation**: SBOM evidence is checked, not generated.
-5. **Model Intake source filter**: findings should eventually have a first-class Model Intake product filter instead of appearing under the non-AI/DAST side.
-6. **AI target connectivity test**: users need a test button before the first scan.
-7. **Better metadata editor**: `metadata_json` is too easy to typo; a control picker/validator would reduce false missing-control findings.
-8. **Structured agent/MCP trace ingestion**: current checks benefit from markers, but richer parsers would improve precision.
-9. **Widget maturity**: browser widget testing needs more UI support and more reliable selector setup.
-10. **Automatic AI endpoint discovery**: users currently describe AI targets manually.
-11. **Export snapshotting**: test-case exports are generated from the current catalog, not the exact scan-time catalog.
-12. **Provider-backed judging budgets**: UI should make semantic judge cost/latency limits more visible.
-13. **External deploy gate integration**: ShakerScan computes decisions, but users need CI/CD integration to enforce them.
+1. **Native registry byte fetching**: Model Intake parses Hugging Face, OCI, S3/GCS/Azure-style references, but full authenticated byte fetching for each registry is still pending.
+2. **Cryptographic verification engine**: signature verification status is recorded, but ShakerScan does not yet run Sigstore/cosign/in-toto verification itself for every registry type.
+3. **Real malware scanning**: Model Intake records malware scan evidence and flags suspicious loader markers but does not run a full AV/YARA engine itself.
+4. **Richer SBOM generation**: AIBOM is generated from supplied metadata and artifact inspection; dependency SBOM generation from package managers/containers is still incomplete.
+5. **Better metadata editor**: `metadata_json` is too easy to typo; a control picker/validator would reduce false missing-control findings.
+6. **Structured agent/MCP trace ingestion**: current checks benefit from markers, but richer parsers would improve precision.
+7. **Live MCP invocation sandbox**: live readiness validates metadata and declared controls; controlled tool/resource invocation fuzzing should be isolated and explicit.
+8. **Widget maturity**: browser widget testing needs more UI support and more reliable selector setup.
+9. **Discovery importers**: AI inventory finds candidates from stored scan evidence, but direct imports from proxy logs, cloud configs, source repos, and MCP registries are still pending.
+10. **Export snapshot UX**: scan results include evidence manifests, but standalone test-case exports should offer historical scan-bound bundles.
+11. **Provider-backed judging budgets**: UI should make semantic judge cost/latency limits more visible.
+12. **External deploy gate integration**: ShakerScan computes decisions, but users need CI/CD integration to enforce them.
+13. **Runtime observability**: prompt/retrieval/tool/memory telemetry and SIEM-style incident workflows are not yet first-class.
 14. **Engine modularity**: `api/ai_gate_scan.py` carries too many responsibilities and should be split over time.
-15. **Manual validation workflow**: UI can do more to help reviewers mark AI findings as validated, false positive, accepted risk, or retest-needed.
 
 ---
 

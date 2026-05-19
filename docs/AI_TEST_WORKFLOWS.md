@@ -20,6 +20,19 @@ curl "http://localhost:8080/ai/test-cases/export?format=pyrit"
 curl "http://localhost:8080/ai/test-cases/export?format=garak"
 ```
 
+AI asset inventory and target-readiness helpers:
+
+```bash
+curl http://localhost:8080/ai/inventory
+curl -X POST http://localhost:8080/ai/targets/{target_id}/test \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Connectivity check. Reply safely."}'
+curl -X POST http://localhost:8080/ai/targets/{target_id}/mcp/live-readiness \
+  -H "Content-Type: application/json" \
+  -d '{"timeout_seconds":8}'
+curl http://localhost:8080/ai/targets/{target_id}/runtime-risk
+```
+
 Completed AI Gate and Model Intake scans can be exported as evidence packs:
 
 ```bash
@@ -51,7 +64,7 @@ Expected evidence:
 - Threat model and cloud security design in target metadata.
 - RAG controls: document classification, ingestion controls, retrieval ACL matrix, metadata filtering, tenant isolation, malicious document tests, citations, content delimiting, retention, and no-training policy.
 - Agent controls: tool inventory, per-tool scopes, delegated identity, token audience validation, no token passthrough, user consent, approval for write/destructive actions, dry-run mode, transaction limits, sandboxing, audit logs, anomaly detection, and kill switch.
-- Probe transcripts with adversarial prompts, target responses, detector hits, semantic judge output when configured, and mapped findings.
+- Probe transcripts with adversarial prompts, target responses, detector hits, semantic judge output when configured, coverage matrix, evidence manifest, and mapped findings.
 
 Recommended scans:
 - RAG endpoint: `shaker-rag-lite`, `standard`
@@ -77,7 +90,10 @@ Canonical Honey endpoints:
 
 Expected evidence:
 - Artifact source/provenance, source repository, commit, dataset/training claims, model card, license, SBOM/dependencies, malware scan evidence, security evals, privacy/security review, deployment restrictions, monitoring plan, artifact signing/attestation, checksum, and deployment approval.
+- AIBOM components for artifact, base model, adapters, tokenizer, datasets, dependencies, provenance, signature status, registry reference, and completeness.
 - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, and risky archive entries.
+- Format-specific inspection for safetensors, ONNX, GGUF, archive components, tokenizers, adapters, and config files.
+- Suspicious loader marker and restricted-license policy checks.
 - Tamper detection through checksum mismatch.
 - Approval gating through `deployment_approved`, approver, and policy metadata.
 

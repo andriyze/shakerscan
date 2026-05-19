@@ -168,13 +168,15 @@ Register AI targets, choose auth, select probe packs, run smoke or focused check
 - **AI Gate and AI-Assisted Verification** (optional)
   - Chat, RAG, agent, and MCP probe packs
   - Prompt injection, sensitive disclosure, approval bypass, and tool-abuse checks
-  - AI asset inventory, risk tiering, RAG/agent control evidence, and optional missing-control findings from target metadata
+  - AI asset inventory, discovered target candidates, risk tiering, RAG/agent control evidence, and optional missing-control findings from target metadata
+  - Target connectivity preflight, MCP live-readiness checks, coverage matrix, evidence manifest, and analyst validation workflow
   - Chat-style evidence views with probe, target response, classifier output, and raw evidence
   - Confidence scoring and false-positive reduction
   - Cross-finding correlation and attack-chain analysis
 
 - **Model Intake Checks**
-  - Model provenance, checksum, signature/attestation, model-card, and deployment approval checks
+  - Model provenance, checksum, signature/attestation verification status, model-card, and deployment approval checks
+  - AIBOM generation, registry/reference parsing, format-specific inspection, suspicious loader markers, and license policy posture
   - Unsafe serialization detection for pickle-like artifacts, PyTorch archives, joblib/pickle files, and executable archive contents
   - License review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, and monitoring-plan checks
   - Safe, non-executing artifact inspection for pre-deployment model approval workflows
@@ -344,10 +346,10 @@ claude    # Claude reads CLAUDE.md and understands the project
 - **Exposure (`/exposure`)**: graph of domains, targets, APIs, auth roles, vendors, AI surfaces, MCP tools, model artifacts, scans, and findings
 - **Targets (`/targets`)**: hierarchical root/subdomains, filter and scan
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans
-- **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/date/domain, bulk cleanup, CVSS sorting
+- **Findings (`/findings`)**: filter by type (DAST, AI, Model Intake), severity/status/date/domain, bulk cleanup, CVSS sorting
 - **Finding Detail (`/findings/{id}`)**: triage buttons, analyst notes, evidence, AI analysis, remediation
-- **AI Gate (`/settings/ai-gate`)**: add AI targets, use Secure RAG + Agent presets, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
-- **Model Intake (`/settings/model-intake`)**: use model-intake presets and submit artifact checks for provenance, unsafe serialization, signing, checksum, model card, and approval metadata
+- **AI Gate (`/settings/ai-gate`)**: review inventory/candidates, add AI targets, test connectivity, run MCP readiness checks, choose auth, select probe packs/profiles, and run AI safety checks for chat, RAG, agent, and MCP surfaces
+- **Model Intake (`/settings/model-intake`)**: use model-intake presets and submit artifact checks for provenance, unsafe serialization, signing, checksum, model card, AIBOM, license, and approval metadata
 - **New Scan (`/scan/new`)**: scan type picker, coverage budget selector, and advanced toggles
 
 ## Configuration
