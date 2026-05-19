@@ -1728,13 +1728,23 @@ def _ai_demo_target_sql_predicate() -> str:
     return """(
         COALESCE(metadata_json->>'shakerscan_demo', '') = 'true'
         OR (metadata_json ? 'calibration_run' AND COALESCE(metadata_json->>'calibration_run', '') <> '')
+        OR metadata_json ? 'honey_scenario_id'
+        OR metadata_json ? 'safe_fixture'
+        OR metadata_json ? 'expected_shakerscan_findings'
     )"""
 
 
 def _is_ai_demo_target_row(row: dict[str, Any]) -> bool:
     metadata = _decode_json_value(row.get("metadata_json")) or {}
     demo_flag = metadata.get("shakerscan_demo")
-    return demo_flag is True or str(demo_flag).strip().lower() == "true" or bool(metadata.get("calibration_run"))
+    return (
+        demo_flag is True
+        or str(demo_flag).strip().lower() == "true"
+        or bool(metadata.get("calibration_run"))
+        or "honey_scenario_id" in metadata
+        or "safe_fixture" in metadata
+        or "expected_shakerscan_findings" in metadata
+    )
 
 
 def _demo_target_url(url: str, scanner_base_url: str, run_id: str, scenario_id: str) -> str:

@@ -182,6 +182,25 @@ function controlSummary(targetType: AITargetType | string, metadata: Record<stri
   }
 }
 
+function isCalibrationLikeTarget(target: AITarget, includeLegacyHints = false) {
+  const metadata = target.metadata_json || {}
+  const demoFlag = metadata.shakerscan_demo
+  if (demoFlag === true || String(demoFlag || '').trim().toLowerCase() === 'true') return true
+  if (metadata.calibration_run || metadata.honey_scenario_id || metadata.safe_fixture !== undefined) return true
+  if (Array.isArray(metadata.expected_shakerscan_findings)) return true
+
+  if (!includeLegacyHints) return false
+
+  const url = String(target.endpoint_url || '').toLowerCase()
+  if (url.includes('honey.shakerscan.com')) return true
+  if (url.includes('calibration_run=')) return true
+
+  const name = String(target.name || '').toLowerCase()
+  const nameLooksLab = name.includes(' calibration') || name.startsWith('calibration ') || name.includes(' honey ') || name.startsWith('honey ')
+  const urlLooksLocalLab = url.includes('host.docker.internal:18080') || url.includes('localhost:18080')
+  return nameLooksLab && urlLooksLocalLab
+}
+
 function defaultRunConfig(target: AITarget): RunConfig {
   const typeDefault = TARGET_TYPES.find((type) => type.value === target.target_type)
   return {
@@ -261,7 +280,7 @@ export default function AIGateSettingsPage() {
       try {
         const settings = await getAISettings()
         setAISettings(settings)
-        const payload = await getAITestScenarios({ includeDemo: Boolean(settings.demo_mode_enabled) })
+        const payload = await getAITestScenarios()
         setScenario(payload.scenarios.find((item) => item.id === 'secure-rag-agent') || null)
       } catch {
         setAISettings(null)
@@ -456,7 +475,12 @@ export default function AIGateSettingsPage() {
   const formControlSummary = scenario
     ? controlSummary(targetType, formMetadata, scenario.readiness_controls || [])
     : null
-  const shouldShowCreate = showAddTarget || (!loading && targets.length === 0)
+  const visibleTargets = useMemo(
+    () => targets.filter((target) => showDemoTargets || !isCalibrationLikeTarget(target, true)),
+    [targets, showDemoTargets]
+  )
+  const hiddenCalibrationCount = targets.length - visibleTargets.length
+  const shouldShowCreate = showAddTarget || (!loading && visibleTargets.length === 0)
 
   return (
     <div className="space-y-6">
@@ -487,145 +511,14 @@ export default function AIGateSettingsPage() {
       {message && <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-400">{message}</div>}
 
       {aiSettings?.demo_mode_enabled && (
-        <section className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 text-emerald-100">
-                <ShieldCheck className="h-4 w-4" />
-                <h2 className="text-sm font-semibold">Honey AI Demo</h2>
-              </div>
-              <p className="mt-1 max-w-3xl text-sm text-emerald-100/80">
-                Queue a small RAG, agent, and MCP demo suite. Demo targets stay hidden from the normal target list.
-              </p>
-              <div className="mt-2 text-xs text-emerald-100/70">
-                Scanner URL: {aiSettings.demo_honey_scanner_url}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={handleRunDemo}
-              disabled={demoRunning}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-            >
-              {demoRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              Run Demo
-            </button>
-          </div>
-          {demoResult && (
-            <div className="mt-3 space-y-2">
-              <div className="grid gap-2 md:grid-cols-2">
-                {demoResult.queued.map((item) => (
-                  <Link
-                    key={item.scan_id}
-                    href={`/scans/${item.scan_id}`}
-                    className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
-                  >
-                    <div className="font-medium">{item.name}</div>
-                    <div className="mt-1 text-xs text-emerald-100/60">
-                      {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
-                    </div>
-                  </Link>
-                ))}
-              </div>
-              {(demoResult.failed?.length || 0) > 0 && (
-                <div className="rounded border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-200">
-                  {demoResult.failed?.map((item) => (
-                    <div key={item.scenario_id} className="break-words">
-                      {item.scenario_id}: {item.error}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-      )}
-
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-white">
-              <Clipboard className="h-4 w-4 text-blue-300" />
-              <h2 className="text-sm font-semibold">AI Red-Team Resources</h2>
-            </div>
-            <p className="mt-1 max-w-3xl text-sm text-gray-400">
-              Generic probe catalogs, learning checkpoints, and eval seed exports for AI security practice.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {REDTEAM_RESOURCE_LINKS.map((item) => (
-              <a
-                key={item.label}
-                href={item.href}
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
-              >
-                {item.label}
-              </a>
-            ))}
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>Calibration Lab mode is enabled. Demo controls and lab targets are separated from normal AI targets.</span>
+            <Link href="/settings" className="rounded border border-amber-400/30 px-2 py-1 text-xs text-amber-100 hover:bg-amber-500/10">
+              Manage in Settings
+            </Link>
           </div>
         </div>
-      </section>
-
-      {shouldShowCreate && scenario && (
-        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 text-white">
-                <ShieldCheck className="h-4 w-4 text-emerald-300" />
-                <h2 className="text-sm font-semibold">{scenario.title}</h2>
-              </div>
-              <p className="mt-1 max-w-3xl text-sm text-gray-400">{scenario.summary}</p>
-            </div>
-            {scenario.honey_contract?.registry_url && (
-              <a href={scenario.honey_contract.registry_url} target="_blank" rel="noreferrer" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-                Honey registry
-              </a>
-            )}
-          </div>
-
-          <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.9fr]">
-            <div className="grid gap-2 sm:grid-cols-3">
-              {(scenario.target_templates || []).map((template) => (
-                <button
-                  key={template.key}
-                  type="button"
-                  onClick={() => applyScenarioTemplate(template)}
-                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-white">{template.name}</span>
-                    <Wand2 className="h-4 w-4 text-blue-300" />
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500">{template.recommended_scan?.probe_pack || 'custom'} · {template.recommended_scan?.scan_profile || 'standard'}</div>
-                </button>
-              ))}
-            </div>
-
-            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-gray-200">Current metadata</div>
-                {formControlSummary && (
-                  <span className={`rounded px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
-                    {formControlSummary.present}/{formControlSummary.required}
-                  </span>
-                )}
-              </div>
-              <div className="grid gap-1 sm:grid-cols-2">
-                {(formControlSummary?.missing.length ? formControlSummary.missing : applicableControls(targetType, scenario.readiness_controls || []).slice(0, 6)).slice(0, 6).map((control) => {
-                  const present = hasMetadataKey(formMetadata, control.keys)
-                  return (
-                    <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
-                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
-                      <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-        </section>
       )}
 
       {shouldShowCreate && (
@@ -765,6 +658,62 @@ export default function AIGateSettingsPage() {
           </div>
         </form>
 
+        {scenario && (
+          <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-white">
+                  <ShieldCheck className="h-4 w-4 text-emerald-300" />
+                  <h2 className="text-sm font-semibold">Starter Templates</h2>
+                </div>
+                <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                  Optional quick-fill templates for common RAG, agent, and MCP target shapes. Replace the example URLs before saving.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.9fr]">
+              <div className="grid gap-2 sm:grid-cols-3">
+                {(scenario.target_templates || []).map((template) => (
+                  <button
+                    key={template.key}
+                    type="button"
+                    onClick={() => applyScenarioTemplate(template)}
+                    className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-white">{template.name}</span>
+                      <Wand2 className="h-4 w-4 text-blue-300" />
+                    </div>
+                    <div className="mt-2 text-xs text-gray-500">{template.recommended_scan?.probe_pack || 'custom'} · {template.recommended_scan?.scan_profile || 'standard'}</div>
+                  </button>
+                ))}
+              </div>
+
+              <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium text-gray-200">Form readiness</div>
+                  {formControlSummary && (
+                    <span className={`rounded px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
+                      {formControlSummary.present}/{formControlSummary.required}
+                    </span>
+                  )}
+                </div>
+                <div className="grid gap-1 sm:grid-cols-2">
+                  {(formControlSummary?.missing.length ? formControlSummary.missing : applicableControls(targetType, scenario.readiness_controls || []).slice(0, 6)).slice(0, 6).map((control) => {
+                    const present = hasMetadataKey(formMetadata, control.keys)
+                    return (
+                      <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
+                        <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
+                        <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
       )}
 
@@ -783,7 +732,7 @@ export default function AIGateSettingsPage() {
                     onChange={(event) => setShowDemoTargets(event.target.checked)}
                     className="h-4 w-4 rounded border-gray-700 bg-gray-800"
                   />
-                  Show calibration targets
+                  Show demo/lab targets
                 </label>
               )}
               <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
@@ -793,7 +742,13 @@ export default function AIGateSettingsPage() {
             </div>
           </div>
 
-          {targets.length === 0 && !loading ? (
+          {hiddenCalibrationCount > 0 && !showDemoTargets && (
+            <div className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">
+              Hidden {hiddenCalibrationCount} demo/lab target{hiddenCalibrationCount === 1 ? '' : 's'} from the normal list.
+            </div>
+          )}
+
+          {visibleTargets.length === 0 && !loading ? (
             <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 text-center text-sm text-gray-500">
               <div>No AI Gate targets yet.</div>
               <button
@@ -806,15 +761,12 @@ export default function AIGateSettingsPage() {
               </button>
             </div>
           ) : (
-            targets.map((target) => {
+            visibleTargets.map((target) => {
               const config = runConfigs[target.id] || defaultRunConfig(target)
               const targetControlSummary = scenario
                 ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
                 : null
-              const demoFlag = target.metadata_json?.shakerscan_demo
-              const isDemoTarget = demoFlag === true
-                || String(demoFlag || '').toLowerCase() === 'true'
-                || Boolean(target.metadata_json?.calibration_run)
+              const isDemoTarget = isCalibrationLikeTarget(target, true)
               return (
                 <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -851,21 +803,31 @@ export default function AIGateSettingsPage() {
                         </div>
                       )}
                     </div>
-                    <button onClick={() => handleDelete(target)} className="rounded-lg p-2 text-gray-500 hover:bg-gray-800 hover:text-red-400" title="Disable target">
+                    <button onClick={() => handleDelete(target)} className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400" title="Disable target">
                       <Trash2 className="h-4 w-4" />
+                      Disable
                     </button>
                   </div>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-[1fr_0.8fr_0.8fr_auto]">
-                    <select value={config.probe_pack} onChange={(e) => updateRunConfig(target.id, { probe_pack: e.target.value as AIProbePack })} className={inputClass}>
-                      {PROBE_PACKS.map((pack) => <option key={pack.value} value={pack.value}>{pack.label}</option>)}
-                    </select>
-                    <select value={config.scan_profile} onChange={(e) => updateRunConfig(target.id, { scan_profile: e.target.value as AIScanProfile })} className={inputClass}>
-                      {SCAN_PROFILES.map((profile) => <option key={profile.value} value={profile.value}>{profile.label}</option>)}
-                    </select>
-                    <select value={config.environment} onChange={(e) => updateRunConfig(target.id, { environment: e.target.value as AIEnvironment })} className={inputClass}>
-                      {ENVIRONMENTS.map((env) => <option key={env.value} value={env.value}>{env.label}</option>)}
-                    </select>
+                    <label className="grid gap-1 text-xs text-gray-500">
+                      Probe pack
+                      <select value={config.probe_pack} onChange={(e) => updateRunConfig(target.id, { probe_pack: e.target.value as AIProbePack })} className={inputClass}>
+                        {PROBE_PACKS.map((pack) => <option key={pack.value} value={pack.value}>{pack.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-xs text-gray-500">
+                      Profile
+                      <select value={config.scan_profile} onChange={(e) => updateRunConfig(target.id, { scan_profile: e.target.value as AIScanProfile })} className={inputClass}>
+                        {SCAN_PROFILES.map((profile) => <option key={profile.value} value={profile.value}>{profile.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-xs text-gray-500">
+                      Environment
+                      <select value={config.environment} onChange={(e) => updateRunConfig(target.id, { environment: e.target.value as AIEnvironment })} className={inputClass}>
+                        {ENVIRONMENTS.map((env) => <option key={env.value} value={env.value}>{env.label}</option>)}
+                      </select>
+                    </label>
                     <button onClick={() => handleRun(target)} disabled={scanning === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
                       {scanning === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       Run
@@ -876,6 +838,90 @@ export default function AIGateSettingsPage() {
             })
           )}
         </div>
+
+      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-white">
+              <Clipboard className="h-4 w-4 text-blue-300" />
+              <h2 className="text-sm font-semibold">AI Red-Team Resources</h2>
+            </div>
+            <p className="mt-1 max-w-3xl text-sm text-gray-400">
+              Generic probe catalogs, learning checkpoints, and eval seed exports for AI security practice.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {REDTEAM_RESOURCE_LINKS.map((item) => (
+              <a
+                key={item.label}
+                href={item.href}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                {item.label}
+              </a>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {aiSettings?.demo_mode_enabled && (
+        <section className="rounded-lg border border-emerald-500/20 bg-gray-900 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-emerald-100">
+                <ShieldCheck className="h-4 w-4" />
+                <h2 className="text-sm font-semibold">Calibration Lab</h2>
+              </div>
+              <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                Optional Honey demo scans for local practice and regression checks. Keep disabled for normal production-facing use.
+              </p>
+              {aiSettings.demo_honey_scanner_url && (
+                <div className="mt-2 text-xs text-gray-500">
+                  Docker scanner URL: {aiSettings.demo_honey_scanner_url}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleRunDemo}
+              disabled={demoRunning}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {demoRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              Run Demo Suite
+            </button>
+          </div>
+          {demoResult && (
+            <div className="mt-3 space-y-2">
+              <div className="grid gap-2 md:grid-cols-2">
+                {demoResult.queued.map((item) => (
+                  <Link
+                    key={item.scan_id}
+                    href={`/scans/${item.scan_id}`}
+                    className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
+                  >
+                    <div className="font-medium">{item.name}</div>
+                    <div className="mt-1 text-xs text-emerald-100/60">
+                      {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
+                    </div>
+                  </Link>
+                ))}
+              </div>
+              {(demoResult.failed?.length || 0) > 0 && (
+                <div className="rounded border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-200">
+                  {demoResult.failed?.map((item) => (
+                    <div key={item.scenario_id} className="break-words">
+                      {item.scenario_id}: {item.error}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   )
 }

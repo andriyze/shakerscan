@@ -18,6 +18,27 @@ const inputClass =
 const textareaClass =
   'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 
+const COMPLETE_METADATA_EXAMPLE = {
+  source_repo: 'https://github.com/example/model-release',
+  commit_sha: '0123456789abcdef',
+  training_data_ref: 'internal-approved-dataset:v1',
+  signed_by: 'sigstore',
+  license: 'apache-2.0',
+  sbom: { components: [{ name: 'transformers', version: '4.x' }] },
+  malware_scan_result: { status: 'clean', scanned_at: '2026-05-19T00:00:00Z' },
+  security_evals: { status: 'passed', eval_set: 'ai-security-regression-v1' },
+  deployment_restrictions: ['staging', 'production'],
+  monitoring_plan: 'model-monitoring-v1',
+  deployment_approved: true,
+}
+
+const MINIMAL_METADATA_EXAMPLE = {
+  source_repo: 'https://github.com/example/model-release',
+  commit_sha: '0123456789abcdef',
+  license: 'apache-2.0',
+  model_card_url: 'https://example.com/model-card.md',
+}
+
 function parseOptionalJsonObject(raw: string): Record<string, unknown> | undefined {
   const trimmed = raw.trim()
   if (!trimmed) return undefined
@@ -123,6 +144,10 @@ export default function ModelIntakeSettingsPage() {
     setTimeoutSeconds(String(preset.timeout_seconds || 20))
   }
 
+  function applyMetadataExample(example: 'complete' | 'minimal') {
+    setMetadataJson(JSON.stringify(example === 'complete' ? COMPLETE_METADATA_EXAMPLE : MINIMAL_METADATA_EXAMPLE, null, 2))
+  }
+
   async function copyPayload() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
@@ -165,6 +190,22 @@ export default function ModelIntakeSettingsPage() {
   const readinessControls: AITestReadinessControl[] = scenario?.readiness_controls || []
   const missingControls = readinessControls.filter((control) => !hasMetadataKey(readinessMetadata, control.keys))
   const presentControls = readinessControls.length - missingControls.length
+  const hasIntakeInput = Boolean(
+    artifactUrl.trim() ||
+      name.trim() ||
+      metadataUrl.trim() ||
+      metadataJson.trim() ||
+      expectedSha256.trim() ||
+      signatureUrl.trim() ||
+      modelCardUrl.trim() ||
+      deploymentApproved
+  )
+  const evidenceBadgeClass = !hasIntakeInput
+    ? 'bg-gray-800 text-gray-400'
+    : missingControls.length
+      ? 'bg-yellow-900/50 text-yellow-200'
+      : 'bg-green-900/50 text-green-200'
+  const evidenceBadgeText = !hasIntakeInput ? 'Not started' : `${presentControls}/${readinessControls.length}`
 
   return (
     <div className="space-y-6">
@@ -183,66 +224,6 @@ export default function ModelIntakeSettingsPage() {
 
       {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
-      {scenario && (
-        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 text-white">
-                <ShieldCheck className="h-4 w-4 text-cyan-300" />
-                <h2 className="text-sm font-semibold">{scenario.title}</h2>
-              </div>
-              <p className="mt-1 max-w-3xl text-sm text-gray-400">{scenario.summary}</p>
-            </div>
-            {scenario.honey_contract?.registry_url && (
-              <a href={scenario.honey_contract.registry_url} target="_blank" rel="noreferrer" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-                Honey registry
-              </a>
-            )}
-          </div>
-
-          <div className="mt-4 grid gap-3 xl:grid-cols-[1.35fr_0.65fr]">
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {(scenario.request_presets || []).map((preset) => (
-                <button
-                  key={preset.key}
-                  type="button"
-                  onClick={() => applyPreset(preset)}
-                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-white">{preset.name}</span>
-                    <Wand2 className="h-4 w-4 text-cyan-300" />
-                  </div>
-                  <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
-                    {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
-                  </div>
-                </button>
-              ))}
-            </div>
-
-            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-gray-200">Current evidence</div>
-                <span className={`rounded px-2 py-1 text-xs ${missingControls.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
-                  {presentControls}/{readinessControls.length}
-                </span>
-              </div>
-              <div className="grid gap-1 sm:grid-cols-2">
-                {(missingControls.length ? missingControls : readinessControls.slice(0, 8)).slice(0, 8).map((control) => {
-                  const present = hasMetadataKey(readinessMetadata, control.keys)
-                  return (
-                    <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
-                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
-                      <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
       <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
           <Play className="h-4 w-4 text-cyan-300" />
@@ -259,6 +240,7 @@ export default function ModelIntakeSettingsPage() {
               placeholder="https://models.example.com/release/model.safetensors"
               required
             />
+            <span className="text-xs text-gray-500">Use a fetchable HTTP(S) artifact when possible. Registry-only references are reported as intake blockers.</span>
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Name
@@ -298,16 +280,30 @@ export default function ModelIntakeSettingsPage() {
               rows={9}
               placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","training_data_ref":"dataset:v1","signed_by":"sigstore","license":"apache-2.0","sbom":{"components":[]},"malware_scan_result":{"status":"clean"},"security_evals":{"status":"passed"},"monitoring_plan":"model-monitoring-v1"}'
             />
-            <span className="text-xs text-gray-500">
-              {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'Optional inline metadata'}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`text-xs ${metadataPreview === null ? 'text-red-300' : 'text-gray-500'}`}>
+                {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'Optional inline metadata'}
+              </span>
+              <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                Complete example
+              </button>
+              <button type="button" onClick={() => applyMetadataExample('minimal')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                Minimal example
+              </button>
+              {metadataJson.trim() && (
+                <button type="button" onClick={() => setMetadataJson('')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
+                  Clear
+                </button>
+              )}
+            </div>
           </label>
 
           <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <FileJson className="h-4 w-4 text-cyan-300" />
-              Policy controls
+              Policy requirements
             </div>
+            <p className="text-xs text-gray-500">These toggles define what the intake scan should enforce.</p>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
               Require checksum
@@ -324,17 +320,20 @@ export default function ModelIntakeSettingsPage() {
               <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
               Require governance evidence
             </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Mark request approved
-            </label>
+            <div className="border-t border-gray-800 pt-3">
+              <div className="mb-2 text-sm font-medium text-gray-200">Evidence provided</div>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Mark request approved
+              </label>
+            </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1 text-sm text-gray-300">
-                Max bytes
+                Download limit (bytes)
                 <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
               <label className="grid gap-1 text-sm text-gray-300">
-                Timeout
+                Timeout (seconds)
                 <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
             </div>
@@ -352,6 +351,69 @@ export default function ModelIntakeSettingsPage() {
           </button>
         </div>
       </form>
+
+      {scenario && (scenario.request_presets || []).length > 0 && (
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex items-center gap-2 text-white">
+            <Wand2 className="h-4 w-4 text-cyan-300" />
+            <h2 className="text-sm font-semibold">Starter Presets</h2>
+          </div>
+          <p className="mt-1 text-sm text-gray-400">Optional quick-fill requests for model intake practice. Review every value before queueing a scan.</p>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {(scenario.request_presets || []).map((preset) => (
+              <button
+                key={preset.key}
+                type="button"
+                onClick={() => applyPreset(preset)}
+                className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-white">{preset.name}</span>
+                  <Wand2 className="h-4 w-4 text-cyan-300" />
+                </div>
+                <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
+                  {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {scenario && readinessControls.length > 0 && (
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-white">
+                <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                <h2 className="text-sm font-semibold">Evidence Checklist</h2>
+              </div>
+              <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                Intake scans use this evidence to separate missing controls from supplied provenance, approval, and monitoring proof.
+              </p>
+            </div>
+            <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
+          </div>
+
+          {!hasIntakeInput ? (
+            <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+              Add an artifact URL, metadata URL, signature, checksum, or inline metadata to preview readiness gaps.
+            </div>
+          ) : (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {(missingControls.length ? missingControls : readinessControls).slice(0, 12).map((control) => {
+                const present = hasMetadataKey(readinessMetadata, control.keys)
+                return (
+                  <div key={control.id} className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-gray-950 px-3 py-2 text-xs">
+                    <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
+                    <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   )
 }
