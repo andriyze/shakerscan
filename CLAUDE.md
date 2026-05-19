@@ -6,12 +6,8 @@ This is an open-source Dynamic Application Security Testing (DAST) scanner. User
 
 If the scanner isn't running, start it:
 ```bash
-./scanner.sh start
-```
-
-Check status:
-```bash
-./scanner.sh status
+./scanner.sh start     # Start stack
+./scanner.sh status    # Check status
 ```
 
 ## How This Works
@@ -25,124 +21,70 @@ The scanner runs as Docker containers:
 
 ## Your Role
 
-When users ask about security scanning, you should:
+When users ask about security scanning:
 
 **Important**: After submitting a scan, report the scan ID and UI link, then stop. Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
 
-1. **Check if scanner is running** first:
-   ```bash
-   curl -s http://localhost:8080/health 2>/dev/null || echo "not running"
-   ```
-
-2. **Offer to start it** if not running:
-   ```bash
-   ./scanner.sh start
-   ```
-
+1. **Check if scanner is running**: `curl -s http://localhost:8080/health 2>/dev/null || echo "not running"`
+2. **Offer to start it** if not running: `./scanner.sh start`
 3. **Use the API** to perform operations (see below)
 
 ## API Reference
 
-Base URL: `http://localhost:8080`
+Base URL: `http://localhost:8080`. All POST/PATCH bodies are JSON (`Content-Type: application/json`).
 
 ### Submit a Scan
 
 ```bash
-# Quick scan (1-2 min) - DNS, TLS, headers
+# Template - swap scan_type per the table below
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{"target": "https://example.com", "options": {"scan_type": "quick"}}'
-
-# Standard scan (5-10 min) - + Nuclei, JS deps
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "standard"}}'
-
-# Deep scan (30-60 min) - + full Nuclei, top-ports scan (1000)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "deep"}}'
-
-# Full assessment (1-2 hrs) - + active XSS/SQLi - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "full"}}'
-
-# Aggressive (2+ hrs) - maximum coverage - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "aggressive"}}'
-
-# Smart (variable) - adaptive intelligent scanning - REQUIRES PERMISSION
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "smart"}}'
 ```
+
+Valid `scan_type` values: `quick`, `standard`, `deep`, `full`, `aggressive`, `smart`.
 
 **Important**: Never run `full`, `aggressive`, or `smart` scans without asking user permission first. These scan types include active XSS/SQLi probes.
 
 ### Check Scan Status
 
 ```bash
-# Get scan by ID
-curl http://localhost:8080/scans/{scan_id}
-
-# List recent scans (filter by status, domain)
-curl "http://localhost:8080/scans?limit=10"
+curl http://localhost:8080/scans/{scan_id}                         # Get scan by ID
+curl "http://localhost:8080/scans?limit=10"                        # List recent scans
 curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
-
-# Get full result JSON
-curl http://localhost:8080/scans/{scan_id}/result
-
-# Get recent scan logs (default 200 lines, max 1000)
-curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
-
-# Cancel a running or pending scan
-curl -X POST http://localhost:8080/scans/{scan_id}/cancel
+curl http://localhost:8080/scans/{scan_id}/result                  # Full result JSON
+curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"        # Logs (default 200, max 1000)
+curl -X POST http://localhost:8080/scans/{scan_id}/cancel          # Cancel running/pending scan
 ```
 
 ### Findings
 
 ```bash
-# List active findings
+# List / filter (combine params freely)
 curl "http://localhost:8080/findings?status=active"
-
-# Filter by severity
 curl "http://localhost:8080/findings?severity=critical"
-curl "http://localhost:8080/findings?severity=high"
-
-# Filter by recency (last 30 days)
 curl "http://localhost:8080/findings?seen_within_days=30"
-
-# Combined filters with sorting
 curl "http://localhost:8080/findings?severity=high&status=active&sort_by=cvss&sort_order=desc&limit=50"
 
 # Update finding status (with optional notes)
 curl -X PATCH http://localhost:8080/findings/{id} \
-  -H "Content-Type: application/json" \
   -d '{"status": "resolved", "notes": "Fixed in v2.1 deploy"}'
 
 # Delete a finding
 curl -X DELETE http://localhost:8080/findings/{id}
 
-# Bulk cleanup old findings (dry-run first)
+# Bulk cleanup old findings (always dry-run first to see count)
 curl -X POST http://localhost:8080/findings/cleanup \
-  -H "Content-Type: application/json" \
   -d '{"older_than_days": 90, "dry_run": true}'
-
-# Bulk cleanup (execute after reviewing dry-run count)
 curl -X POST http://localhost:8080/findings/cleanup \
-  -H "Content-Type: application/json" \
   -d '{"older_than_days": 90, "status": "resolved", "root_domain": "example.com", "dry_run": false}'
 
-# Bulk update finding statuses
+# Bulk update statuses
 curl -X POST http://localhost:8080/findings/bulk \
-  -H "Content-Type: application/json" \
   -d '{"finding_ids": ["id1", "id2"], "status": "false_positive", "notes": "Verified non-issue"}'
 
 # Create manual finding (from manual testing)
 curl -X POST http://localhost:8080/findings/manual \
-  -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",
     "title": "BOLA on User API",
@@ -155,33 +97,28 @@ curl -X POST http://localhost:8080/findings/manual \
 
 # Create finding from AI session (target auto-populated)
 curl -X POST "http://localhost:8080/session/{session_id}/findings" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "BOLA on Basket API",
-    "severity": "critical",
-    "description": "User2 can read/delete User1 basket items",
-    "category": "BOLA",
-    "cwe": "CWE-639"
-  }'
+  -d '{"title": "BOLA on Basket API", "severity": "critical",
+       "description": "User2 can read/delete User1 basket items",
+       "category": "BOLA", "cwe": "CWE-639"}'
 ```
 
-Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
+Status options: `active`, `resolved`, `false_positive`, `accepted_risk`.
 
-Finding type filter: use `source_type=dast` for non-AI findings and `source_type=ai` for AI Gate or AI-session findings. The UI intentionally exposes only these two product categories: **DAST** and **AI**.
+Finding type filter: `source_type=dast` for non-AI findings, `source_type=ai` for AI Gate or AI-session findings. The UI exposes only these two product categories: **DAST** and **AI**.
 
 **Findings Query Parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
-| `status` | Filter by status (active, resolved, false_positive, accepted_risk) |
-| `severity` | Filter by severity (critical, high, medium, low, info) |
-| `source_type` | Filter by product type: `dast` or `ai` |
-| `seen_within_days` | Only findings seen within N days (e.g., 7, 30, 60, 90) |
+| `status` | active, resolved, false_positive, accepted_risk |
+| `severity` | critical, high, medium, low, info |
+| `source_type` | `dast` or `ai` |
+| `seen_within_days` | Only findings seen within N days |
 | `root_domain` | Filter by root domain |
 | `target_id` | Filter by target ID |
 | `scan_id` | Filter by scan ID |
 | `search` | Search by title or URL |
-| `sort_by` | Sort field: severity, first_seen, last_seen, cvss |
+| `sort_by` | severity, first_seen, last_seen, cvss |
 | `sort_order` | asc or desc (default: desc) |
 | `limit` | Results per page (default: 100, max: 500) |
 | `offset` | Pagination offset |
@@ -189,99 +126,62 @@ Finding type filter: use `source_type=dast` for non-AI findings and `source_type
 ### Target Management
 
 ```bash
-# List targets (flat)
-curl http://localhost:8080/targets
-
-# List targets grouped by root domain (hierarchical view)
+curl http://localhost:8080/targets                                # List targets (flat)
 curl "http://localhost:8080/targets/grouped?sort_by=active_findings_count&sort_order=desc"
+curl http://localhost:8080/domains                                # Root domains (for filters)
+curl http://localhost:8080/targets/{target_id}                    # Details with recent scans
 
-# List root domains (for filter dropdowns)
-curl http://localhost:8080/domains
-
-# Add a target
+# Add target
 curl -X POST http://localhost:8080/targets \
-  -H "Content-Type: application/json" \
   -d '{"url": "https://example.com", "name": "Production"}'
-
-# Get target details with recent scans
-curl http://localhost:8080/targets/{target_id}
 
 # Update target
 curl -X PATCH http://localhost:8080/targets/{target_id} \
-  -H "Content-Type: application/json" \
   -d '{"name": "Staging", "scan_options": {"scan_type": "standard"}}'
 
-# Deactivate target (soft delete)
+# Soft delete
 curl -X DELETE http://localhost:8080/targets/{target_id}
 
-# Start scan for a specific target
+# Scan a specific target
 curl -X POST http://localhost:8080/targets/{target_id}/scan \
-  -H "Content-Type: application/json" \
   -d '{"options": {"scan_type": "quick"}}'
 ```
 
 ### Subdomain Discovery
 
 ```bash
-# Start subdomain discovery
-curl -X POST "http://localhost:8080/discovery?root_domain=example.com"
-
-# List discovery runs
-curl http://localhost:8080/discovery
-
-# Get discovery run details
-curl http://localhost:8080/discovery/{discovery_id}
+curl -X POST "http://localhost:8080/discovery?root_domain=example.com"   # Start
+curl http://localhost:8080/discovery                                     # List runs
+curl http://localhost:8080/discovery/{discovery_id}                      # Details
 ```
 
 ### Dashboard & Status
 
 ```bash
-# Dashboard metrics
-curl http://localhost:8080/dashboard
-
-# Queue status
-curl http://localhost:8080/queue/stats
-
-# Emergency clear all pending jobs
-curl -X DELETE http://localhost:8080/queue/clear
+curl http://localhost:8080/dashboard         # Dashboard metrics
+curl http://localhost:8080/queue/stats       # Queue status
+curl -X DELETE http://localhost:8080/queue/clear   # Emergency: clear pending jobs
 ```
 
 ### Worker Management
 
-Control the number of scanner workers to handle parallel scans:
+Control parallel-scan capacity. Worker limits: 1-20. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
 
 ```bash
-# Get current worker count and status
-curl http://localhost:8080/workers
-
-# Scale to 5 workers
-curl -X POST http://localhost:8080/workers \
-  -H "Content-Type: application/json" \
-  -d '{"count": 5}'
-
-# Scale to 10 workers for heavy workloads
-curl -X POST http://localhost:8080/workers \
-  -H "Content-Type: application/json" \
-  -d '{"count": 10}'
+curl http://localhost:8080/workers                                # Current count + status
+curl -X POST http://localhost:8080/workers -d '{"count": 5}'      # Scale to 5
+curl -X POST http://localhost:8080/workers -d '{"count": 10}'     # Scale to 10
 ```
-
-Worker limits: 1-20 workers. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.
 
 ### AI Gate
 
-AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. It is available in the UI at `/settings/ai-gate` and through REST APIs, so Claude Code and other AI coding agents can use ShakerScan as a local AI-safety testing tool.
+AI Gate tests AI application surfaces for prompt injection, sensitive disclosure, unsafe tool use, RAG leakage, and MCP/tool boundary failures. UI: `/settings/ai-gate`. Claude Code and other AI coding agents can use ShakerScan as a local AI-safety testing tool.
 
 AI Gate evaluates probes with deterministic/regex detectors first. When an AI provider is configured in AI settings, it also runs semantic AI judging on probe transcripts, populates `ai_verdict`, `ai_confidence`, `ai_rationale`, and `ai_recommendations`, and can downgrade high-confidence false positives before the AI Gate score and deploy decision are computed.
 
 AI Gate also builds an AI control-evidence pack from target `metadata_json`: asset owner, risk tier, data classification, RAG ACL/ingestion/tenant-isolation controls, agent tool scopes, delegated identity, token audience validation, approval/dry-run/transaction limits, sandboxing, audit logs, anomaly detection, kill switch, and governance mappings. Set `enforce_ai_control_baseline: true` to convert missing required controls into a finding.
 
-Use the shared scenario catalog for focused AI demo/prod-like workflows:
-
-```bash
-curl http://localhost:8080/ai/test-scenarios
-```
-
-The `secure-rag-agent` scenario includes the canonical Honey demo endpoints (`/api/secure-demo/rag-agent/*`, `/api/secure-demo/governance/mapping`, `/api/ai-gate/scenarios`, `/api/v1/rag/answer`, `/api/v1/agent/trace`, and `/api/v1/mcp/trace`) plus target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
+Use the shared scenario catalog for focused AI demo/prod-like workflows: `curl http://localhost:8080/ai/test-scenarios`. The `secure-rag-agent` scenario includes the canonical Honey demo endpoints (`/api/secure-demo/rag-agent/*`, `/api/secure-demo/governance/mapping`, `/api/ai-gate/scenarios`, `/api/v1/rag/answer`, `/api/v1/agent/trace`, `/api/v1/mcp/trace`) plus target templates with control metadata for threat model, retrieval ACLs, tool authorization, logging, cloud security design, and governance mapping.
 
 Target types:
 | Type | Description |
@@ -304,12 +204,10 @@ Probe packs:
 Scan profiles: `smoke`, `trace`, `standard`, `deep`. Environments: `preview`, `staging`, `development`, `production`.
 
 ```bash
-# List AI Gate targets
-curl http://localhost:8080/ai/targets
+curl http://localhost:8080/ai/targets         # List AI Gate targets
 
-# Create a chat API target. The request template must contain {{prompt}}.
+# Create a chat API target. The request_template must contain {{prompt}}.
 curl -X POST http://localhost:8080/ai/targets \
-  -H "Content-Type: application/json" \
   -d '{
     "name": "Support bot",
     "target_type": "api_chat",
@@ -323,8 +221,7 @@ curl -X POST http://localhost:8080/ai/targets \
     "request_budget": 10,
     "production_mode": false,
     "metadata_json": {
-      "asset_owner": "security",
-      "risk_tier": "high",
+      "asset_owner": "security", "risk_tier": "high",
       "data_classification": "restricted",
       "retrieval_acl_matrix": "tenant-user-doc",
       "tool_inventory": ["search_docs"],
@@ -335,19 +232,13 @@ curl -X POST http://localhost:8080/ai/targets \
 
 # Queue an AI Gate scan
 curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "probe_pack": "shaker-agent-abuse",
-    "scan_profile": "standard",
-    "environment": "staging"
-  }'
+  -d '{"probe_pack": "shaker-agent-abuse", "scan_profile": "standard", "environment": "staging"}'
 
 # Production targets require explicit confirmation
 curl -X POST http://localhost:8080/ai/targets/{target_id}/scan \
-  -H "Content-Type: application/json" \
   -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
 
-# Get transcripts for a completed AI Gate scan
+# Transcripts for a completed AI Gate scan
 curl http://localhost:8080/ai/scans/{scan_id}/transcript
 
 # Filter findings by product type
@@ -359,16 +250,14 @@ After submitting an AI Gate scan, report the scan ID and UI link (`/scans/{scan_
 
 ### Model Intake
 
-Model Intake checks model artifacts before deployment without importing or executing model code. It is available in the UI at `/settings/model-intake` and through REST APIs. It is for provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
+Model Intake checks model artifacts before deployment without importing or executing model code. UI: `/settings/model-intake`. Covers provenance, unsafe serialization, checksum/signature, model card, license review, SBOM/dependency evidence, malware scan evidence, security evals, deployment restrictions, monitoring plan, and deployment approval checks.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
 The `/ai/test-scenarios` catalog also includes `model-intake-pipeline` presets and the canonical Honey model-intake routes: scenario registry, index, artifact/manifest/signature/card reads, submit, status, scan, approve, and deploy.
 
 ```bash
-# Queue a model intake scan
 curl -X POST http://localhost:8080/model-intake/scan \
-  -H "Content-Type: application/json" \
   -d '{
     "artifact_url": "https://example.com/models/model.safetensors",
     "metadata_url": "https://example.com/models/model.metadata.json",
@@ -392,36 +281,23 @@ After submitting a Model Intake scan, report the scan ID and UI link (`/scans/{s
 ### Schedules (Recurring Scans)
 
 ```bash
-# List schedules
-curl http://localhost:8080/schedules
+curl http://localhost:8080/schedules                              # List
 
-# Create daily schedule
+# Daily schedule
 curl -X POST http://localhost:8080/schedules \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target_id": "target-uuid",
-    "frequency": "daily",
-    "time_of_day": "02:00",
-    "scan_type": "standard"
-  }'
+  -d '{"target_id": "target-uuid", "frequency": "daily",
+       "time_of_day": "02:00", "scan_type": "standard"}'
 
-# Create weekly schedule
+# Weekly schedule
 curl -X POST http://localhost:8080/schedules \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target_id": "target-uuid",
-    "frequency": "weekly",
-    "day_of_week": 1,
-    "time_of_day": "03:00",
-    "scan_type": "deep"
-  }'
+  -d '{"target_id": "target-uuid", "frequency": "weekly",
+       "day_of_week": 1, "time_of_day": "03:00", "scan_type": "deep"}'
 
-# Update/toggle schedule
+# Update/toggle
 curl -X PATCH http://localhost:8080/schedules/{schedule_id} \
-  -H "Content-Type: application/json" \
   -d '{"is_active": false}'
 
-# Delete schedule
+# Delete
 curl -X DELETE http://localhost:8080/schedules/{schedule_id}
 ```
 
@@ -429,109 +305,54 @@ Schedule fields: `target_id` (required), `frequency` (daily/weekly), `time_of_da
 
 ### Certificate Transparency Monitoring (Gungnir)
 
-Monitor CT logs in real-time to discover new certificates issued for your domains:
+Monitor CT logs in real-time to discover new certificates issued for your domains. Useful for detecting shadow IT, finding new attack surface as it appears, and monitoring for certificate mis-issuance.
 
 ```bash
-# Start Gungnir CT monitoring
-./scanner.sh gungnir start
-
-# Check Gungnir status
-curl http://localhost:8080/gungnir/status
-
-# View discovered subdomains for a domain
-curl "http://localhost:8080/gungnir/discoveries?domain=example.com"
+./scanner.sh gungnir start                                                # Start CT monitoring
+curl http://localhost:8080/gungnir/status                                 # Status
+curl "http://localhost:8080/gungnir/discoveries?domain=example.com"       # Discovered subdomains
 ```
-
-Gungnir watches Certificate Transparency logs and automatically discovers new subdomains when certificates are issued. Useful for:
-- Detecting shadow IT and unauthorized services
-- Finding new attack surface as it appears
-- Monitoring for certificate mis-issuance
 
 ### Authenticated Scanning
 
-Run scans with authentication to test protected endpoints:
+Auth is propagated to Playwright crawl, Nuclei, Dalfox, SQLmap, and custom checks. Long scans will attempt re-authentication when a session expires. Pass one or more of these auth fields in the scan `options`:
 
 ```bash
-# Bearer token auth (JWT, API keys)
+# Bearer token
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-    }
-  }'
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart", "auth_header": "Bearer eyJ..."}}'
 
-# Cookie-based auth (session cookies)
+# Cookie-based
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_cookies": "session_id=abc123; csrf_token=xyz789"
-    }
-  }'
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart", "auth_cookies": "session_id=abc; csrf_token=xyz"}}'
 
 # Form-based login (scanner auto-authenticates)
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "login_username": "testuser@example.com",
-      "login_password": "password123"
-    }
-  }'
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart",
+                   "login_username": "testuser@example.com",
+                   "login_password": "password123"}}'
 
 # Custom headers (API keys, etc.)
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_headers_json": "{\"X-API-Key\": \"your-api-key\", \"X-Custom\": \"value\"}"
-    }
-  }'
-
-# Focused SQLi-only scan with auth
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "sqli": true,
-      "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-    }
-  }'
-
-# Focused XSS-only scan with session cookies
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "xss": true,
-      "auth_cookies": "session_id=abc123; csrf_token=xyz789"
-    }
-  }'
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart",
+                   "auth_headers_json": "{\"X-API-Key\": \"your-api-key\"}"}}'
 
 # Multi-user auth for BOLA/IDOR testing
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer user1_token",
-      "user2_header": "Bearer user2_token"
-    }
-  }'
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart",
+                   "auth_header": "Bearer user1_token",
+                   "user2_header": "Bearer user2_token"}}'
+
+# Focused XSS-only or SQLi-only scan with auth
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart", "sqli": true,
+                   "auth_header": "Bearer eyJ..."}}'
 ```
 
 **Authentication Options:**
@@ -544,83 +365,34 @@ curl -X POST http://localhost:8080/scans \
 | `login_password` | Password for form-based login |
 | `login_url` | Login page URL (auto-detected if not provided) |
 | `login_extra_fields` | Extra form fields as JSON (e.g., '{"remember": "true"}') |
-| `user2_cookies` | Second user cookies for BOLA/IDOR comparison testing |
-| `user2_header` | Second user auth header for BOLA/IDOR comparison testing |
+| `user2_cookies` | Second user cookies for BOLA/IDOR comparison |
+| `user2_header` | Second user auth header for BOLA/IDOR comparison |
 
-Auth is propagated to Playwright crawl, Nuclei, Dalfox, SQLmap, and custom checks. Long scans will attempt re-authentication when a session expires.
+**Active Check Filters:** `xss: true` runs only XSS active checks; `sqli: true` runs only SQLi.
 
-**Active Check Filters (API options):**
-| Option | Description |
-|--------|-------------|
-| `xss` | Run only XSS active checks |
-| `sqli` | Run only SQLi active checks |
-
-**Workflow for authenticated scanning:**
-1. Create account on target app (or use existing test account)
-2. Login and capture the auth token/cookies
-3. Pass credentials to scanner via API options
-4. Scanner uses credentials for all authenticated requests
+**Workflow:** create test account → login + capture token/cookies → pass via API options → scanner uses creds for all authenticated requests.
 
 ### Advanced Scan Options
 
-Additional options for fine-tuning scan behavior:
-
 ```bash
-# Enable JSON link following (discovers API endpoints from responses)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "json_link_following": true
-    }
-  }'
-
-# Enable HTTP OPTIONS method discovery
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "options_method_discovery": true
-    }
-  }'
-
-# Enable gRPC reflection discovery
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://grpc.example.com",
-    "options": {
-      "scan_type": "smart",
-      "grpc_discovery": true
-    }
-  }'
-
 # Specify custom endpoints to test
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "custom_endpoints": [
-        "GET /api/v1/users?id=1&name=test",
-        "POST /api/v1/login json:{\"username\":\"test\",\"password\":\"test\"}",
-        "POST /api/v1/search form:query=test&limit=10",
-        "/graphql"
-      ]
-    }
-  }'
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart",
+                   "custom_endpoints": [
+                     "GET /api/v1/users?id=1&name=test",
+                     "POST /api/v1/login json:{\"username\":\"test\",\"password\":\"test\"}",
+                     "POST /api/v1/search form:query=test&limit=10",
+                     "/graphql"
+                   ]}}'
 ```
 
-**Custom Endpoint Format:**
-Each endpoint string follows the format: `[METHOD] /path [params]`
+Discovery toggles available in `options`: `json_link_following`, `options_method_discovery`, `grpc_discovery` (all booleans).
+
+**Custom Endpoint Format:** `[METHOD] /path [params]`
 - **METHOD** (optional): GET, POST, PUT, PATCH, DELETE (default: GET)
-- **params** (optional but recommended): Parameters to test for injection
-  - Query params: `?key=value` or `query:key=value`
+- **params** (optional but recommended): trigger injection testing
+  - Query: `?key=value` or `query:key=value`
   - JSON body: `json:{"key":"value"}`
   - Form body: `form:key=value&key2=value2`
   - Simple params: `param1 param2 param3`
@@ -633,16 +405,16 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
 | `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
 | `grpc_discovery` | Use gRPC reflection to discover services |
-| `custom_endpoints` | Array of endpoints with params to test (see format above) |
-| `budget_profile` | Coverage budget profile: `fast`, `balanced`, `thorough`, or `exhaustive` |
-| `custom_budget` | Advanced budget overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, and `active_params_per_endpoint` |
-| `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
-| `thorough_params` | Legacy shortcut for deeper smart active checks; when no budget is specified it promotes the scan to the `thorough` budget |
+| `custom_endpoints` | Array of endpoints with params (see format above) |
+| `budget_profile` | Coverage budget: `fast`, `balanced`, `thorough`, `exhaustive` |
+| `custom_budget` | Overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, `active_params_per_endpoint` |
+| `no_early_stop` | Disable early stopping in smart scan |
+| `thorough_params` | Legacy shortcut for deeper smart active checks; with no budget set, promotes to `thorough` |
 | `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
-| `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
-| `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
+| `deep_domxss` | Enable deep DOM XSS analysis (slower) |
+| `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF |
 
-**Performance/Safety Limits:**
+**Performance/Safety Limits** (defaults from `scanner/constants.py` via `SMART_SCAN_BUDGETS` and `SCAN_BUDGET_DEFAULTS`):
 | Option | Description | Default |
 |--------|-------------|---------|
 | `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 80 |
@@ -650,145 +422,64 @@ Each endpoint string follows the format: `[METHOD] /path [params]`
 | `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
 | `oob_max_findings` | Max findings for OOB SQLi test | 3 |
 
-Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS` and `SCAN_BUDGET_DEFAULTS`.
-
 ### Smart Scan Tuning
 
-For thorough penetration testing, you can disable early stopping and increase parameter coverage:
+Preferred depth control is `budget_profile`; scan type controls which modules run, budget controls how much depth/time they receive:
 
 ```bash
-# Thorough smart scan (disable early stopping, test more params)
+# Thorough smart scan (legacy shortcut)
 curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "no_early_stop": true,
-      "thorough_params": true
-    }
-  }'
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart", "no_early_stop": true, "thorough_params": true}}'
+
+# Explicit budget profile with overrides
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart", "budget_profile": "thorough",
+                   "custom_budget": {"max_urls": 2500, "browser_max_pages": 100,
+                                     "active_max_endpoints": 150,
+                                     "active_params_per_endpoint": 12}}}'
 ```
 
-Preferred depth control is `budget_profile`; scan type controls which modules run and budget controls how much depth/time they receive:
-
-```bash
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "budget_profile": "thorough",
-      "custom_budget": {
-        "max_urls": 2500,
-        "browser_max_pages": 100,
-        "active_max_endpoints": 150,
-        "active_params_per_endpoint": 12
-      }
-    }
-  }'
-```
-
-By default, smart scan:
-- **Stops early** when 3+ critical or 5+ high severity findings are found
-- **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
-
-With `no_early_stop` and `thorough_params`:
-- **Continues scanning** regardless of findings (finds all vulnerabilities, not just first few)
-- **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
+By default, smart scan stops early when 3+ critical or 5+ high findings are found, and uses the `balanced` budget. With `no_early_stop` and `thorough_params`, it keeps scanning regardless of findings and promotes to `thorough` (unless an explicit budget is set).
 
 ## Scan Types Explained
 
-Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules, then adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
+Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules; adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
 
-| Type | API Option | Time | What It Does |
-|------|------------|------|--------------|
-| **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
-| **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies (no port scan by default) |
-| **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
-| **full** | `"scan_type": "full"` | 1-2 hrs | + Active XSS/SQLi, all security tests, WebSocket |
-| **aggressive** | `"scan_type": "aggressive"` | 2+ hrs | + Aggressive exploits, extended ports, threat intel |
-| **smart** | `"scan_type": "smart"` | Variable | Adaptive: staged templates, DBMS-aware SQLi, context-aware XSS |
+| Type | Time | What It Does |
+|------|------|--------------|
+| **quick** | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
+| **standard** | 5-10 min | + Nuclei (safe), cookies, CORS, JS deps (no port scan by default) |
+| **deep** | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
+| **full** | 1-2 hrs | + Active XSS/SQLi, WebSocket, auth/session/file-upload/redirect/CSRF/API tests |
+| **aggressive** | 2+ hrs | + Aggressive exploits, full port scan (65535), threat intel, extended fuzzing |
+| **smart** | Variable | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chains |
 
-### Scan Type Details
+`full` advanced probes (SSRF/command injection) only run with non-safe exploit level and parameterized endpoints.
 
-**quick** - Fast passive recon:
-- DNS records (A, AAAA, MX, SPF, DMARC, DNSSEC)
-- TLS certificate analysis
-- HTTP security headers
-- Basic technology fingerprinting
-
-**standard** - Balanced assessment:
-- Everything in quick
-- Nuclei vulnerability scan (safe templates)
-- Cookie security analysis
-- CORS misconfiguration checks
-- JS dependency vulnerability scanning
-- No port scan by default (enable gRPC discovery or use deep/full/aggressive)
-
-**deep** - Thorough passive scan:
-- Everything in standard
-- Full Nuclei template scan
-- Port scanning (top 1000 ports)
-- Deep directory/file discovery (opt-in via `--deep-discovery`, enabled in aggressive)
-- JS secret scanning
-- Enhanced DNS checks
-
-**full** - Complete active assessment:
-- Everything in deep
-- Active XSS testing (dalfox)
-- Active SQLi testing (sqlmap)
-- WebSocket security testing
-- Auth/session vulnerability tests
-- File upload, open redirect, CSRF tests
-- API security testing
-- Advanced probes (SSRF/command injection) only run with non-safe exploit level and parameterized endpoints
-
-**aggressive** - Maximum coverage:
-- Everything in full
-- Aggressive exploit level
-- Full port scan (65535 ports)
-- Threat intelligence checks
-- Extended fuzzing and discovery
-
-**smart** - Adaptive intelligent scan:
-- Staged Nuclei template scanning (4 waves based on tech + signals)
-  - Wave 1: Critical CVEs + tech-specific (~60s budget)
-  - Wave 2: Signal-based expansion (~120s budget)
-  - Wave 3: Injection-focused (~300s budget, conditional)
-  - Wave 4: Deep scan (~480s budget, conditional)
-  - Yield-based budget adjustment (high-yield waves extend next budget)
-- Early stopping when confidence-weighted score ≥ 12 (3+ critical or 5+ high findings)
+**smart scan specifics:**
+- Staged Nuclei (4 waves, ~60s/120s/300s/480s budgets, yield-adjusted)
+- Early stop at confidence-weighted score ≥ 12 (3+ critical or 5+ high)
 - Verification phase for high-severity findings (browser proofs, timing analysis)
-- DBMS fingerprinting (SQLite, MySQL, PostgreSQL, MSSQL, Oracle)
-- DBMS-specific SQLi payloads with data extraction chaining
-- Context-aware XSS (detects reflection context: in_script, in_attribute, etc.)
-- DOM XSS static analysis (source-to-sink flow detection)
-- Recursive directory discovery (adapts depth based on findings)
+- DBMS fingerprinting (SQLite, MySQL, PostgreSQL, MSSQL, Oracle) with DBMS-specific SQLi + data extraction chaining
+- Context-aware XSS (in_script, in_attribute, etc.) + DOM XSS static analysis
+- Recursive directory discovery (depth adapts to findings)
 - Light port scan (top 33) for service hints and gRPC discovery
-- Post-nuclei discovery refinement based on signals
-- Authenticated Playwright crawl (multi-page) with API capture
-- Adaptive rate limiting (backs off on 429/503, speeds up on success)
-- JS bundle analysis for hidden endpoints
-- Auth-aware tool routing (Nuclei/Dalfox use discovered endpoints + auth headers)
-- Synthetic endpoints only generated when API hints exist (or `--thorough-params`)
-- Attack chain analysis (correlates findings into exploitable attack paths)
-- Coverage tracking (endpoint/parameter/template metrics)
+- Authenticated Playwright crawl (multi-page) with API capture; adaptive rate limiting
+- JS bundle analysis for hidden endpoints; auth-aware tool routing
+- Synthetic endpoints only when API hints exist (or `--thorough-params`)
+- Attack chain analysis + coverage tracking
 
 ## Response Interpretation
 
 Scans return:
 - **score**: 0-100 (higher is better)
 - **grade**: A, B, C, D, F
-- **findings**: Array of vulnerabilities
+- **findings**: Array of vulnerabilities (severities: `critical`, `high`, `medium`, `low`, `info`)
 - **result**: Rich object with detailed scan data (see below)
 
-Finding severities: `critical`, `high`, `medium`, `low`, `info`
-
 ### Rich Scan Data (in `result` object)
-
-The `/scans/{id}` endpoint returns detailed data you should report:
 
 | Path | Description |
 |------|-------------|
@@ -801,20 +492,19 @@ The `/scans/{id}` endpoint returns detailed data you should report:
 | `result.discovery.browser_api_endpoints` | Discovered API endpoints |
 | `result.discovery.browser_crawl` | Headless crawl stats + sampled page URLs |
 | `result.discovery.waf_detection` | WAF product detection |
-| `result.attack_chains` | Attack chain analysis (null if no chains detected) |
+| `result.attack_chains` | Attack chain analysis (null if no chains) |
 | `result.smart_coverage` | Endpoint/parameter/template coverage metrics |
 
-When AI is enabled, the report also includes `ai_correlations` (cross-finding correlations and an overall risk assessment) plus `ai_logs.summary.cross_finding_correlations`.
+When AI is enabled, the report also includes `ai_correlations` (cross-finding correlations and overall risk assessment) plus `ai_logs.summary.cross_finding_correlations`.
 
 ### Attack Chain Analysis
 
-Smart scans analyze findings to identify exploitable attack chains - multi-step vulnerability combinations that demonstrate real-world attack scenarios:
+Smart scans correlate findings into exploitable attack chains:
 
-**Chain Types:**
 | Chain | Findings Required | Business Impact |
 |-------|-------------------|-----------------|
-| `xss_to_account_takeover` | XSS + weak cookie flags | Session theft, account compromise |
-| `sqli_to_privilege_escalation` | SQLi + admin panel access | Database compromise, admin access |
+| `xss_to_account_takeover` | XSS + weak cookie flags | Session theft |
+| `sqli_to_privilege_escalation` | SQLi + admin panel access | DB / admin compromise |
 | `ssrf_to_cloud_breach` | SSRF + cloud metadata access | Cloud IAM credential theft |
 | `idor_to_data_breach` | BOLA + predictable IDs | Mass user data exfiltration |
 | `lfi_to_credential_theft` | LFI + sensitive file access | Credential file exposure |
@@ -824,189 +514,92 @@ Smart scans analyze findings to identify exploitable attack chains - multi-step 
 | `open_redirect_to_phishing` | Open redirect + auth pages | Credential phishing |
 | `info_disclosure_to_exploitation` | Info leak + known CVE | Targeted exploitation |
 
-**Enable partial chains in report:**
-```bash
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "smart", "include_partial_attack_chains": true}}'
-```
-
-**Result structure (`result.attack_chains`):**
-```json
-{
-  "chains": [...],           // Complete chains (always included)
-  "partial_chains": [...],   // Incomplete chains (in JSON; in human report only with option above)
-  "report": "...",           // Human-readable report text
-  "summary": {
-    "total_chains": 2,
-    "total_partial_chains": 3,
-    "critical_chains": 1,
-    "high_chains": 1,
-    "chain_types": ["xss_to_account_takeover", "sqli_to_privilege_escalation"],
-    "partial_chain_types": ["ssrf_to_cloud_breach"],
-    "partial_chains_included": false
-  }
-}
-```
+Enable partial chains in the human-readable report with `"include_partial_attack_chains": true`. `result.attack_chains` structure: `{chains, partial_chains, report, summary: {total_chains, total_partial_chains, critical_chains, high_chains, chain_types, partial_chain_types, partial_chains_included}}`.
 
 ### Smart Coverage Metrics
 
-The `smart_coverage` field tracks discovery vs testing coverage:
+`result.smart_coverage` tracks discovery vs testing coverage:
 
 | Path | Description |
 |------|-------------|
-| `result.smart_coverage.endpoints` | Discovered/tested counts, coverage ratio, by_method breakdown |
-| `result.smart_coverage.parameters` | By location (query, body, path) with discovered/tested counts |
-| `result.smart_coverage.nuclei_templates` | Templates run vs matched, hit_rate, by_category |
-| `result.smart_coverage.discovery_sources` | Array of discovery methods used (har_network_capture, url_crawl, etc.) |
-| `result.smart_coverage.auth_states_tested` | Array of auth states tested (anonymous, user1, user2) |
-
-**Example:**
-```json
-{
-  "endpoints": {
-    "discovered": 127,
-    "tested": 89,
-    "coverage": 0.701,
-    "by_method": {"GET": 85, "POST": 35, "PUT": 5, "DELETE": 2}
-  },
-  "parameters": {
-    "discovered": 234,
-    "tested": 156,
-    "coverage": 0.667,
-    "by_location": {"query": 120, "body": 95, "path": 19}
-  },
-  "nuclei_templates": {
-    "run": 1847,
-    "matched": 23,
-    "hit_rate": 0.012,
-    "by_category": {}
-  },
-  "discovery_sources": ["har_network_capture", "url_crawl", "js_bundle_analysis"],
-  "auth_states_tested": ["anonymous"]
-}
-```
+| `.endpoints` | discovered, tested, coverage, by_method |
+| `.parameters` | discovered, tested, coverage, by_location (query/body/path) |
+| `.nuclei_templates` | run, matched, hit_rate, by_category |
+| `.discovery_sources` | Methods used (e.g. har_network_capture, url_crawl, js_bundle_analysis) |
+| `.auth_states_tested` | e.g. anonymous, user1, user2 |
 
 ### Example Rich Report Output
 
 ```
 ✓ Scan completed
+Grade: C    Score: 72/100
 
-┌─────────────────────────────────────┐
-│  Grade: C    Score: 72/100          │
-└─────────────────────────────────────┘
+SUMMARY
+- TLS: Let's Encrypt R3, 45 days, RSA 4096-bit
+- CSP: Grade D (64/100) - 3 issues
+- Headers: HSTS, XFO, Referrer all set
+- Tech: React 18 (confirmed), Django (likely)
 
-📋 SUMMARY
-├─ TLS: Let's Encrypt R3, 45 days, RSA 4096-bit
-├─ CSP: Grade D (64/100) - 3 issues
-├─ Headers: HSTS ✓  XFO ✓  Referrer ✓
-└─ Tech: React 18 (confirmed), Django (likely)
+CSP Issues:
+- script-src allows 'unsafe-inline'
+- script-src allows 'unsafe-eval'
 
-⚠️  CSP Issues:
-  • script-src allows 'unsafe-inline'
-  • script-src allows 'unsafe-eval'
-
-🔍 Findings: 0 Critical, 0 High, 3 Medium, 4 Low
-
-📊 Full report: http://localhost:3000/scans/{id}
+Findings: 0 Critical, 0 High, 3 Medium, 4 Low
+Full report: http://localhost:3000/scans/{id}
 ```
 
 ## Example Interactions
 
-**User**: "Scan my site example.com"
-1. Check if scanner running
-2. Submit quick scan
-3. Report scan ID and UI link - done (don't poll/wait)
-
-**User**: "Show me critical vulnerabilities"
-1. GET /findings?severity=critical&status=active
-2. Format results nicely
-
-**User**: "Do a full security audit of example.com"
-1. **Ask permission** for active testing first
-2. If approved, submit with `"scan_type": "full"`
-3. Report scan ID and UI link - done (don't poll/wait)
-
-**User**: "Find subdomains for example.com"
-1. POST /discovery?root_domain=example.com
-2. Report that discovery was started - done (don't wait)
-
-**User**: "Scale up workers to handle more scans"
-1. GET /workers to check current count
-2. POST /workers with increased count
-3. Confirm new worker count
-
-**User**: "Test for BOLA vulnerabilities on api.example.com"
-1. **Ask permission** for active testing first
-2. Ask user for two different user auth tokens
-3. Submit smart scan with `auth_header` and `user2_header`
-4. Report scan ID and UI link - done (don't poll/wait)
-
-**User**: "Let's do interactive security testing on juice-shop.example.com"
-1. Start an AI security session with `/ai-security-session juice-shop.example.com`
-2. Follow the interactive workflow (see AI Security Sessions below)
+- **"Scan my site example.com"** → check scanner running → submit quick scan → report scan ID + UI link, stop.
+- **"Show me critical vulnerabilities"** → `GET /findings?severity=critical&status=active` → format.
+- **"Do a full security audit of example.com"** → ask permission for active testing → submit `scan_type: full` → report scan ID + UI link, stop.
+- **"Find subdomains for example.com"** → `POST /discovery?root_domain=example.com` → report started, stop.
+- **"Scale up workers"** → `GET /workers`, then `POST /workers` with new count.
+- **"Test for BOLA on api.example.com"** → ask permission → ask for two user auth tokens → smart scan with `auth_header` + `user2_header` → report scan ID + UI link, stop.
+- **"Interactive security testing on juice-shop.example.com"** → run `/ai-security-session juice-shop.example.com` (see below).
 
 ## AI Security Sessions
 
-The `/ai-security-session` skill enables interactive, collaborative security testing between you and Claude. Unlike automated scans, this is a manual workflow where:
+The `/ai-security-session` skill enables interactive, collaborative security testing. Unlike automated scans, you and Claude collaborate:
 
 1. Claude bootstraps from existing scan data (endpoints, tech, findings)
-2. Claude analyzes the target and suggests testing approaches
+2. Claude suggests testing approaches
 3. You direct which areas to test
 4. Claude executes tests and reports findings in real-time
 5. You can ask follow-up questions and explore deeper
 6. Validated findings are saved to the database
 
-**Recommended Workflow**: Run `/scan-smart <url>` first, then use `/ai-security-session <url>` to validate findings and explore areas scanners miss.
+**Recommended Workflow**: Run `/scan-smart <url>` first, then `/ai-security-session <url>` to validate findings and explore areas scanners miss.
 
 ### Session API
 
 ```bash
 # Start a session
 curl -X POST http://localhost:8080/session/start \
-  -H "Content-Type: application/json" \
   -d '{"target": "https://example.com"}'
 
-# Get session state
-curl http://localhost:8080/session/{session_id}
+curl http://localhost:8080/session/{session_id}                            # Get state
+curl -X POST "http://localhost:8080/session/{session_id}/screenshot"       # Screenshot
 
-# Take a screenshot
-curl -X POST "http://localhost:8080/session/{session_id}/screenshot"
-
-# Execute browser action
+# Browser action (navigate, click, fill, register, login, submit, wait, extract)
 curl -X POST "http://localhost:8080/session/{session_id}/action" \
-  -H "Content-Type: application/json" \
   -d '{"action": "navigate", "data": {"url": "/login"}}'
 
-# Login as a user
+# Login as a user (separate contexts per user label, e.g. user1/user2)
 curl -X POST "http://localhost:8080/session/{session_id}/action" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "login",
-    "user": "user1",
-    "data": {"email": "user1@test.com", "password": "pass123"}
-  }'
+  -d '{"action": "login", "user": "user1",
+       "data": {"email": "user1@test.com", "password": "pass123"}}'
 
 # Test endpoint for BOLA (cross-user access)
 curl -X POST "http://localhost:8080/session/{session_id}/test-endpoint" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "endpoint": "/api/items/42",
-    "method": "GET",
-    "as_user": "user2"
-  }'
+  -d '{"endpoint": "/api/items/42", "method": "GET", "as_user": "user2"}'
 
-# Save a finding discovered during the session
+# Save a finding
 curl -X POST "http://localhost:8080/session/{session_id}/findings" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "BOLA on Basket API",
-    "severity": "critical",
-    "description": "User2 can access User1 basket",
-    "category": "BOLA",
-    "cwe": "CWE-639",
-    "evidence": "GET /rest/basket/9 with User2 token returns User1 data"
-  }'
+  -d '{"title": "BOLA on Basket API", "severity": "critical",
+       "description": "User2 can access User1 basket",
+       "category": "BOLA", "cwe": "CWE-639",
+       "evidence": "GET /rest/basket/9 with User2 token returns User1 data"}'
 
 # End session
 curl -X DELETE "http://localhost:8080/session/{session_id}"
@@ -1027,17 +620,9 @@ curl -X DELETE "http://localhost:8080/session/{session_id}"
 
 ### BOLA Testing Workflow
 
-1. Start session for target
-2. Register/login as user1
-3. Navigate and discover resource IDs
-4. Register/login as user2 (separate context)
-5. Test endpoints with `as_user: "user2"` to check cross-user access
-6. **Save findings** with `POST /session/{id}/findings`
-7. Report findings
+1. Start session → 2. Register/login user1 → 3. Discover resource IDs → 4. Register/login user2 (separate context) → 5. Test endpoints with `as_user: "user2"` → 6. Save findings via `POST /session/{id}/findings` → 7. Report.
 
 ### Bootstrapping from Scan Data
-
-When starting an interactive session, first check for existing scan data:
 
 ```bash
 # Find existing scans for the target
@@ -1054,51 +639,39 @@ curl -s "http://localhost:8080/scans/{scan_id}/result" | jq '{
 curl -s "http://localhost:8080/findings?target_url=https://example.com&status=active"
 ```
 
-**Scan Context to Use:**
-| Data | Use For |
-|------|---------|
-| `browser_api_endpoints` | BOLA/IDOR testing candidates |
-| `browser_crawl.sampled_urls` | Navigation targets |
-| `tech.items` | Tailored attack vectors |
-| Active findings | Validation and exploitation |
+**Scan Context to Use:** `browser_api_endpoints` for BOLA/IDOR candidates; `browser_crawl.sampled_urls` for navigation; `tech.items` for tailored vectors; active findings for validation/exploitation.
 
 ### Interactive Session Testing Scenarios
 
 | Category | Scenarios | Best For |
 |----------|-----------|----------|
 | **Access Control** | BOLA/IDOR, privilege escalation, tenant isolation, function-level access | Multi-user apps, APIs with resource ownership |
-| **Authentication** | Session fixation, JWT flaws, concurrent sessions, token invalidation | Apps with login functionality |
-| **Business Logic** | Price manipulation, coupon abuse, workflow bypass, race conditions | E-commerce, financial apps |
+| **Authentication** | Session fixation, JWT flaws, concurrent sessions, token invalidation | Apps with login |
+| **Business Logic** | Price manipulation, coupon abuse, workflow bypass, race conditions | E-commerce, financial |
 | **API Security** | Mass assignment, GraphQL abuse, parameter pollution, rate limiting | REST/GraphQL APIs |
-| **Client-Side** | Stored/DOM XSS, open redirect, clickjacking, sensitive data exposure | Apps with user-generated content |
+| **Client-Side** | Stored/DOM XSS, open redirect, clickjacking, sensitive data exposure | User-generated content |
 
-**When to Use Interactive Sessions:**
-- Validating findings from automated scans
-- Testing vulnerabilities requiring human judgment
-- Verifying BOLA with real user contexts
-- Chaining findings into attack paths
-- Demonstrating vulnerabilities to stakeholders
+**Use Interactive Sessions for:** validating automated-scan findings; vulnerabilities requiring human judgment; BOLA with real user contexts; chaining findings into attack paths; stakeholder demos.
 
-**Saving Findings:** All discoveries can be persisted with `POST /session/{id}/findings` and will appear in the UI with `source: "ai_session"`.
+**Saving Findings:** persist via `POST /session/{id}/findings`; they appear in the UI with `source: "ai_session"`.
 
 ## Pre-Scan Helpers
 
-Two slash commands turn ShakerScan evidence into seeds for smart scans, and a third audits the skill surface itself:
+Slash commands that turn ShakerScan evidence into seeds for smart scans, plus a skill audit command:
 
-- `/js-analyze <target_url|scan_id|js_path>` — analyze JS bundles, frontend routes, and browser-captured APIs to produce a `custom_endpoints` block ready for `/scans`. Backed by `skills/js-analyze/SKILL.md` and the `js-analysis-agent` subagent.
-- `/content-discovery <target_url|scan_id>` — build a high-signal route and file discovery plan (`custom_list` for ffuf-style fuzzers plus `custom_endpoints` for smart scans). Backed by `skills/content-discovery/SKILL.md` and the `content-discovery-agent` subagent.
-- `/review-skills [scope]` — audit the local skill/command/agent surface for prompt bugs, broken references, and weak output contracts. Backed by `skills/review-skills/SKILL.md` and the `skills-reviewer` subagent.
+- `/js-analyze <target_url|scan_id|js_path>` — analyze JS bundles, frontend routes, browser-captured APIs → `custom_endpoints` block. Backed by `skills/js-analyze/SKILL.md` + `js-analysis-agent`.
+- `/content-discovery <target_url|scan_id>` — high-signal route/file discovery plan (`custom_list` for ffuf + `custom_endpoints` for smart scans). Backed by `skills/content-discovery/SKILL.md` + `content-discovery-agent`.
+- `/review-skills [scope]` — audit local skill/command/agent surface for prompt bugs, broken refs, weak output contracts. Backed by `skills/review-skills/SKILL.md` + `skills-reviewer`.
 
-Typical pre-scan flow: run `/js-analyze` to surface API candidates from JS, optionally pipe its output into `/content-discovery` to expand with route/file seeds, then submit the combined `custom_endpoints` to `/scan-smart`.
+Typical pre-scan flow: `/js-analyze` → optionally pipe into `/content-discovery` → submit combined `custom_endpoints` to `/scan-smart`.
 
 ## CLI Shortcuts
 
-Users can also use the CLI directly:
 ```bash
 # Basic scans
-./scanner.sh scan https://example.com       # Quick scan
-./scanner.sh scan-full https://example.com  # Full assessment
-./scanner.sh scan-smart https://example.com # Smart adaptive scan
+./scanner.sh scan https://example.com         # Quick scan
+./scanner.sh scan-full https://example.com    # Full assessment
+./scanner.sh scan-smart https://example.com   # Smart adaptive scan
 
 # Deeper smart coverage budget
 ./scanner.sh scan-smart https://example.com --budget-profile thorough
@@ -1106,11 +679,11 @@ Users can also use the CLI directly:
 # Use POST /scans for auth, focused XSS/SQLi, dual-auth BOLA, or custom budgets.
 
 # Management
-./scanner.sh status                          # Check status
-./scanner.sh scale 5                         # Scale to 5 workers
-./scanner.sh logs -f                         # Follow logs
-./scanner.sh rebuild                         # Full rebuild (code changes)
-./scanner.sh restart                         # Restart services
+./scanner.sh status                   # Check status
+./scanner.sh scale 5                  # Scale to 5 workers
+./scanner.sh logs -f                  # Follow logs
+./scanner.sh rebuild                  # Full rebuild (code changes)
+./scanner.sh restart                  # Restart services
 ```
 
 ## Files Structure
@@ -1119,26 +692,16 @@ Users can also use the CLI directly:
 scanner-oss/
 ├── scanner.sh           # CLI tool (start, stop, scan, scale, etc.)
 ├── docker-compose.yml   # Docker stack orchestration
-├── CLAUDE.md            # This file (Claude Code instructions)
+├── CLAUDE.md            # This file
 ├── AGENTS.md            # Cross-tool AI agent instructions
 ├── scanner/             # Core scanner engine
 │   ├── scanner.py       # Main orchestrator
-│   ├── scanner_tools/   # 61 specialized security modules
-│   │   ├── nuclei.py    # Nuclei vulnerability scanning
-│   │   ├── active_checks.py  # XSS/SQLi testing
-│   │   ├── discovery.py # Endpoint discovery
-│   │   └── ...          # DNS, TLS, ports, auth, etc.
+│   ├── scanner_tools/   # 61 specialized security modules (nuclei.py, active_checks.py, discovery.py, ...)
 │   ├── payloads/        # Attack payloads (SQLi, XSS)
 │   └── wordlists/       # Directory discovery wordlists
-├── api/                 # FastAPI backend
-│   ├── api.py           # REST API server
-│   ├── worker.py        # Redis job worker
-│   ├── gungnir_worker.py # CT log monitor worker
-│   └── session_manager.py # Interactive session management
+├── api/                 # FastAPI backend (api.py, worker.py, gungnir_worker.py, session_manager.py)
 ├── ui/                  # Next.js dashboard
-│   └── src/             # React components + pages
-├── db/                  # PostgreSQL
-│   └── init.sql         # Schema definition
+├── db/init.sql          # PostgreSQL schema
 └── results/             # Scan results (JSON)
 ```
 
@@ -1147,74 +710,41 @@ scanner-oss/
 ### Scanner Won't Start
 
 ```bash
-# Check Docker is running
-docker info
-
-# Check for port conflicts
-lsof -i :8080
-lsof -i :3000
-
-# View startup logs
-./scanner.sh logs
-
-# Full rebuild if needed
-./scanner.sh rebuild
+docker info                  # Docker running?
+lsof -i :8080; lsof -i :3000 # Port conflicts?
+./scanner.sh logs            # Startup logs
+./scanner.sh rebuild         # Full rebuild
 ```
 
 ### Database Connection Errors
 
 ```bash
-# Check PostgreSQL is healthy
-docker compose ps postgres
-
-# View database logs
-docker compose logs postgres
-
-# Reset database (WARNING: deletes all data)
-./scanner.sh reset
+docker compose ps postgres   # Health
+docker compose logs postgres # Logs
+./scanner.sh reset           # WARNING: deletes all data
 ```
 
 ### Scans Stuck in Pending
 
 ```bash
-# Check worker status
-curl http://localhost:8080/workers
-
-# Check queue stats
-curl http://localhost:8080/queue/stats
-
-# Scale up workers if queue is backed up
-curl -X POST http://localhost:8080/workers \
-  -H "Content-Type: application/json" \
-  -d '{"count": 5}'
-
-# View worker logs
-docker compose logs worker -f
+curl http://localhost:8080/workers          # Worker status
+curl http://localhost:8080/queue/stats      # Queue stats
+curl -X POST http://localhost:8080/workers -d '{"count": 5}'   # Scale up
+docker compose logs worker -f               # Worker logs
 ```
 
 ### Out of Memory
 
-Workers use 2-4GB RAM each. If running multiple workers:
-
+Workers use 2-4GB RAM each. Scale down:
 ```bash
-# Scale down workers
-curl -X POST http://localhost:8080/workers \
-  -H "Content-Type: application/json" \
-  -d '{"count": 2}'
-
-# Or restart with fewer workers
+curl -X POST http://localhost:8080/workers -d '{"count": 2}'
 ./scanner.sh restart -w 2
 ```
 
 ### API Not Responding
 
 ```bash
-# Check API health
-curl http://localhost:8080/health
-
-# Restart API service
-docker compose restart api
-
-# View API logs
-docker compose logs api -f
+curl http://localhost:8080/health    # Health
+docker compose restart api           # Restart
+docker compose logs api -f           # Logs
 ```
