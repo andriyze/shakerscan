@@ -82,22 +82,22 @@ const PLATFORM_OPTIONS: Array<{
   {
     value: 's3',
     label: 'S3',
-    helper: 'Use a signed HTTPS URL for now',
+    helper: 'Public object or signed URL',
     placeholder: 's3://bucket/path/model.safetensors',
     icon: Cloud,
   },
   {
     value: 'gcs',
     label: 'GCS',
-    helper: 'Use a signed HTTPS URL for now',
+    helper: 'Public object or signed URL',
     placeholder: 'gs://bucket/path/model.onnx',
     icon: Database,
   },
   {
     value: 'azure',
     label: 'Azure Blob',
-    helper: 'Use a signed HTTPS URL for now',
-    placeholder: 'azure://container/path/model.gguf',
+    helper: 'Account/container path or signed URL',
+    placeholder: 'azure://account/container/path/model.gguf',
     icon: Cloud,
   },
   {
@@ -557,7 +557,7 @@ export default function ModelIntakeSettingsPage() {
           <label className="grid gap-1 text-sm text-gray-300">
             Artifact URL
             <input value={artifactUrl} onChange={(e) => setArtifactUrl(e.target.value)} className={inputClass} placeholder="https://.../model.safetensors" required />
-            <span className="text-xs text-gray-500">Resolved HTTP(S) artifacts are preferred. Direct hf:// references are supported for public files.</span>
+            <span className="text-xs text-gray-500">Resolved HTTP(S), hf://, and public cloud object references are supported. Use signed HTTPS URLs for private artifacts.</span>
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Name

@@ -362,6 +362,7 @@ def test_model_intake_normalizes_cloud_and_registry_refs():
     assert s3_ref["object_key"] == "releases/ranker/model.safetensors"
     assert s3_ref["format_posture"] == "safer_static_format"
     assert s3_ref["metadata"]["storage_provider"] == "s3"
+    assert s3_ref["fetch_url"] == "https://models-prod.s3.amazonaws.com/releases/ranker/model.safetensors"
     assert s3_ref["warnings"]
 
     gcs_ref = normalize_model_artifact_reference("https://storage.googleapis.com/ml-bucket/releases/model.onnx", platform="gcs")
@@ -371,11 +372,12 @@ def test_model_intake_normalizes_cloud_and_registry_refs():
     assert gcs_ref["fetchable"] is True
     assert gcs_ref["warnings"] == []
 
-    azure_ref = normalize_model_artifact_reference("https://acct.blob.core.windows.net/models/release/model.gguf")
+    azure_ref = normalize_model_artifact_reference("azure://acct/models/release/model.gguf")
     assert azure_ref["kind"] == "azure_blob"
     assert azure_ref["account"] == "acct"
     assert azure_ref["container"] == "models"
     assert azure_ref["blob_path"] == "release/model.gguf"
+    assert azure_ref["fetch_url"] == "https://acct.blob.core.windows.net/models/release/model.gguf"
 
     oci_ref = normalize_model_artifact_reference("oci://registry.example.com/ml/ranker:latest")
     assert oci_ref["kind"] == "oci"
@@ -388,3 +390,49 @@ def test_model_intake_normalizes_cloud_and_registry_refs():
     assert mlflow_ref["kind"] == "mlflow"
     assert mlflow_ref["model_name"] == "fraud-detector"
     assert mlflow_ref["stage"] == "Production"
+
+
+def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):
+    artifact_bytes = b"safe tensor bytes"
+    expected_sha = hashlib.sha256(artifact_bytes).hexdigest()
+    observed_urls = []
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        observed_urls.append(url)
+        return artifact_bytes, {
+            "source": "http",
+            "status": 206,
+            "bytes_observed": len(artifact_bytes),
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    base_options = {
+        "expected_sha256": expected_sha,
+        "signature_url": "https://example.test/model.sig",
+        "model_card_url": "https://example.test/model-card",
+        "deployment_approved": True,
+        "metadata_json": {
+            "source_repo": "https://example.test/repo",
+            "license": "apache-2.0",
+            "sbom": {"components": []},
+            "malware_scan_result": {"status": "clean"},
+            "security_evals": {"status": "passed"},
+            "deployment_restrictions": ["staging"],
+            "monitoring_plan": "model-monitoring-v1",
+        },
+    }
+
+    result = asyncio.run(run_model_intake_scan("s3://models-prod/releases/model.safetensors", base_options))
+    assert observed_urls[-1] == "https://models-prod.s3.amazonaws.com/releases/model.safetensors"
+    assert result["model_intake"]["artifact"]["fetch"]["source"] == "s3"
+    assert "model_intake:artifact_fetch_failed" not in {finding["id"] for finding in result["findings"]}
+
+    result = asyncio.run(run_model_intake_scan("gs://ml-bucket/releases/model.onnx", base_options))
+    assert observed_urls[-1] == "https://storage.googleapis.com/ml-bucket/releases/model.onnx"
+    assert result["model_intake"]["artifact"]["fetch"]["source"] == "gcs"
+
+    result = asyncio.run(run_model_intake_scan("azure://acct/models/release/model.gguf", base_options))
+    assert observed_urls[-1] == "https://acct.blob.core.windows.net/models/release/model.gguf"
+    assert result["model_intake"]["artifact"]["fetch"]["source"] == "azure_blob"

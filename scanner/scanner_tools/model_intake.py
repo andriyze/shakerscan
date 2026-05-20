@@ -213,6 +213,36 @@ def _signed_http_hint(ref: str) -> bool:
     return parsed.scheme in {"http", "https"}
 
 
+def _quote_path(path: str) -> str:
+    return urllib.parse.quote(path.strip("/"), safe="/")
+
+
+def _cloud_object_fetch_url(parsed_ref: dict[str, Any]) -> str | None:
+    kind = str(parsed_ref.get("kind") or "")
+    if kind == "s3":
+        bucket = str(parsed_ref.get("bucket") or "").strip()
+        key = str(parsed_ref.get("object_key") or "").strip()
+        if not bucket or not key:
+            return None
+        region = parsed_ref.get("region")
+        host = f"{bucket}.s3.{region}.amazonaws.com" if region else f"{bucket}.s3.amazonaws.com"
+        return f"https://{host}/{_quote_path(key)}"
+    if kind == "gcs":
+        bucket = str(parsed_ref.get("bucket") or "").strip()
+        key = str(parsed_ref.get("object_key") or "").strip()
+        if not bucket or not key:
+            return None
+        return f"https://storage.googleapis.com/{urllib.parse.quote(bucket, safe='')}/{_quote_path(key)}"
+    if kind == "azure_blob":
+        account = str(parsed_ref.get("account") or "").strip()
+        container = str(parsed_ref.get("container") or "").strip()
+        blob_path = str(parsed_ref.get("blob_path") or "").strip()
+        if not account or not container or not blob_path:
+            return None
+        return f"https://{urllib.parse.quote(account, safe='')}.blob.core.windows.net/{urllib.parse.quote(container, safe='')}/{_quote_path(blob_path)}"
+    return None
+
+
 def normalize_model_artifact_reference(
     ref: str,
     metadata: dict[str, Any] | None = None,
@@ -252,6 +282,7 @@ def normalize_model_artifact_reference(
     if kind == "s3":
         bucket = parsed.netloc
         key = parsed.path.lstrip("/")
+        region = metadata.get("region") or metadata.get("aws_region") or metadata.get("s3_region")
         if parsed.scheme in {"http", "https"}:
             host = parsed.netloc
             if host.startswith("s3.") or host == "s3.amazonaws.com":
@@ -260,10 +291,15 @@ def normalize_model_artifact_reference(
                 key = "/".join(parts[1:])
             elif ".s3." in host or host.endswith(".s3.amazonaws.com"):
                 bucket = host.split(".s3", 1)[0]
-        parsed_ref.update({"registry": "amazon-s3", "repository": bucket or None, "path": key or None, "bucket": bucket or None, "object_key": key or None})
-        parsed_ref["metadata"].update({"artifact_bucket": bucket, "artifact_path": key, "storage_provider": "s3"})
+                region_match = re.search(r"\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+                if region_match:
+                    region = region_match.group(1)
+        parsed_ref.update({"registry": "amazon-s3", "repository": bucket or None, "path": key or None, "bucket": bucket or None, "object_key": key or None, "region": region or None})
+        fetch_url = raw if _signed_http_hint(raw) else _cloud_object_fetch_url(parsed_ref)
+        parsed_ref.update({"fetch_url": fetch_url, "fetchable": bool(fetch_url)})
+        parsed_ref["metadata"].update({"artifact_bucket": bucket, "artifact_path": key, "storage_provider": "s3", "artifact_fetch_url": fetch_url, "region": region})
         if parsed.scheme == "s3":
-            warnings.append("Native S3 fetching is not enabled yet; use a presigned HTTPS URL for executable intake.")
+            warnings.append("S3 object refs are fetched anonymously through the provider HTTPS endpoint; private objects need a presigned HTTPS URL.")
 
     elif kind in {"gs", "gcs"}:
         bucket = parsed.netloc
@@ -277,12 +313,14 @@ def normalize_model_artifact_reference(
             elif host.endswith(".storage.googleapis.com"):
                 bucket = host.removesuffix(".storage.googleapis.com")
         parsed_ref.update({"kind": "gcs", "registry": "google-cloud-storage", "repository": bucket or None, "path": key or None, "bucket": bucket or None, "object_key": key or None})
-        parsed_ref["metadata"].update({"artifact_platform": "gcs", "artifact_bucket": bucket, "artifact_path": key, "storage_provider": "gcs"})
+        fetch_url = raw if _signed_http_hint(raw) else _cloud_object_fetch_url(parsed_ref)
+        parsed_ref.update({"fetch_url": fetch_url, "fetchable": bool(fetch_url)})
+        parsed_ref["metadata"].update({"artifact_platform": "gcs", "artifact_bucket": bucket, "artifact_path": key, "storage_provider": "gcs", "artifact_fetch_url": fetch_url})
         if parsed.scheme in {"gs", "gcs"}:
-            warnings.append("Native GCS fetching is not enabled yet; use a signed HTTPS URL for executable intake.")
+            warnings.append("GCS object refs are fetched anonymously through storage.googleapis.com; private objects need a signed HTTPS URL.")
 
     elif kind in {"azure", "azure_blob"}:
-        account = None
+        account = metadata.get("artifact_account") or metadata.get("azure_account") or metadata.get("storage_account")
         container = parsed.netloc
         blob_path = parsed.path.lstrip("/")
         if parsed.scheme in {"http", "https"} and ".blob.core.windows.net" in parsed.netloc:
@@ -290,10 +328,20 @@ def normalize_model_artifact_reference(
             parts = [part for part in parsed.path.split("/") if part]
             container = parts[0] if parts else ""
             blob_path = "/".join(parts[1:])
+        elif parsed.scheme == "azure":
+            parts = [part for part in parsed.path.split("/") if part]
+            if not account and parsed.netloc and parts:
+                account = parsed.netloc
+                container = parts[0]
+                blob_path = "/".join(parts[1:])
         parsed_ref.update({"kind": "azure_blob", "registry": account or "azure-blob", "repository": container or None, "path": blob_path or None, "account": account, "container": container or None, "blob_path": blob_path or None})
-        parsed_ref["metadata"].update({"artifact_platform": "azure_blob", "artifact_account": account, "artifact_container": container, "artifact_path": blob_path, "storage_provider": "azure_blob"})
-        if parsed.scheme == "azure":
-            warnings.append("Native Azure Blob fetching is not enabled yet; use a signed HTTPS URL for executable intake.")
+        fetch_url = raw if _signed_http_hint(raw) else _cloud_object_fetch_url(parsed_ref)
+        parsed_ref.update({"fetch_url": fetch_url, "fetchable": bool(fetch_url)})
+        parsed_ref["metadata"].update({"artifact_platform": "azure_blob", "artifact_account": account, "artifact_container": container, "artifact_path": blob_path, "storage_provider": "azure_blob", "artifact_fetch_url": fetch_url})
+        if parsed.scheme == "azure" and fetch_url:
+            warnings.append("Azure Blob refs are fetched anonymously through blob.core.windows.net; private blobs need a signed HTTPS URL.")
+        elif parsed.scheme == "azure":
+            warnings.append("Azure Blob refs need an account, container, and blob path, or use a signed HTTPS URL.")
 
     elif kind == "oci":
         image_ref = raw.removeprefix("oci://")
@@ -476,6 +524,25 @@ def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, ti
     }
 
 
+def _download_cloud_object(ref: str, metadata: dict[str, Any], max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+    cloud_ref = normalize_model_artifact_reference(ref, metadata)
+    fetch_url = cloud_ref.get("fetch_url")
+    if not fetch_url:
+        return b"", {
+            "source": cloud_ref.get("kind") or urllib.parse.urlparse(ref).scheme,
+            "bytes_observed": 0,
+            "cloud": cloud_ref,
+            "error": "Cloud object reference could not be converted to a fetchable HTTPS URL.",
+        }
+    data, fetch_meta = _download_http(str(fetch_url), max_bytes, timeout_seconds)
+    return data, {
+        **fetch_meta,
+        "source": cloud_ref.get("kind") or fetch_meta.get("source") or "cloud_object",
+        "fetch_url": fetch_url,
+        "cloud": cloud_ref,
+    }
+
+
 async def _fetch_artifact(
     ref: str,
     max_bytes: int,
@@ -486,6 +553,8 @@ async def _fetch_artifact(
     try:
         if parsed.scheme == "hf" or (parsed.scheme in {"http", "https"} and parsed.netloc.endswith("huggingface.co")):
             return await asyncio.to_thread(_download_huggingface, ref, metadata or {}, max_bytes, timeout_seconds)
+        if parsed.scheme in {"s3", "gs", "gcs", "azure"}:
+            return await asyncio.to_thread(_download_cloud_object, ref, metadata or {}, max_bytes, timeout_seconds)
         if parsed.scheme in ("http", "https"):
             return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
         if parsed.scheme == "file" or not parsed.scheme:
