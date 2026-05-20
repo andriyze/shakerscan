@@ -2,7 +2,8 @@ import asyncio
 import hashlib
 import zipfile
 
-from scanner.scanner_tools.model_intake import _intake_decision, run_model_intake_scan
+from scanner.scanner_tools import model_intake
+from scanner.scanner_tools.model_intake import _intake_decision, parse_huggingface_ref, run_model_intake_scan
 
 
 def test_model_intake_detects_pickle_and_missing_controls(tmp_path):
@@ -135,7 +136,7 @@ def test_model_intake_records_fetch_failures_as_findings(tmp_path):
 def test_model_intake_reports_unsupported_artifact_scheme():
     result = asyncio.run(
         run_model_intake_scan(
-            "hf://honey/unsafe-pickle",
+            "oci://honey/unsafe-pickle",
             {"timeout_seconds": 5},
         )
     )
@@ -290,3 +291,60 @@ def test_model_intake_flags_restricted_license_and_loader_markers(tmp_path):
     assert "model_intake:restricted_license_policy" in finding_ids
     assert "model_intake:suspicious_loader_markers" in finding_ids
     assert result["model_intake"]["supply_chain"]["license_policy"]["status"] == "restricted"
+
+
+def test_model_intake_parses_huggingface_refs():
+    parsed = parse_huggingface_ref("https://huggingface.co/acme/ranker/blob/main/model.safetensors")
+
+    assert parsed["repo_id"] == "acme/ranker"
+    assert parsed["filename"] == "model.safetensors"
+    assert parsed["revision"] == "main"
+    assert parsed["resolve_url"] == "https://huggingface.co/acme/ranker/resolve/main/model.safetensors"
+
+    parsed = parse_huggingface_ref("hf://acme/ranker@abc123/weights/model.onnx")
+    assert parsed["repo_id"] == "acme/ranker"
+    assert parsed["filename"] == "weights/model.onnx"
+    assert parsed["revision"] == "abc123"
+
+
+def test_model_intake_fetches_huggingface_resolve_url(monkeypatch):
+    artifact_bytes = b"safe tensor bytes"
+    expected_sha = hashlib.sha256(artifact_bytes).hexdigest()
+    observed_urls = []
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        observed_urls.append(url)
+        return artifact_bytes, {
+            "source": "http",
+            "status": 206,
+            "bytes_observed": len(artifact_bytes),
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "expected_sha256": expected_sha,
+                "signature_url": "https://example.test/model.sig",
+                "model_card_url": "https://huggingface.co/acme/ranker",
+                "deployment_approved": True,
+                "metadata_json": {
+                    "source_repo": "https://huggingface.co/acme/ranker",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    assert observed_urls == ["https://huggingface.co/acme/ranker/resolve/abc123/model.safetensors"]
+    assert result["model_intake"]["summary"]["source_kind"] == "huggingface"
+    assert result["model_intake"]["artifact"]["fetch"]["source"] == "huggingface"
+    assert not any(finding["id"] == "model_intake:artifact_fetch_failed" for finding in result["findings"])

@@ -1317,6 +1317,15 @@ class ModelIntakeScanRequest(BaseModel):
     timeout_seconds: int = Field(default=20, ge=1, le=120)
 
 
+class ModelIntakeResolveRequest(BaseModel):
+    platform: str = Field(default="auto", pattern="^(auto|huggingface|http|s3|gcs|azure|oci|mlflow)$")
+    ref: str
+    revision: Optional[str] = None
+    filename: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=15, ge=1, le=60)
+
+
 AI_TARGET_TYPES = {"api_chat", "widget", "rag", "agent_trace", "mcp_trace"}
 AI_TARGET_METHODS = {"GET", "POST", "PUT", "PATCH"}
 AI_STREAMING_MODES = {"json", "sse"}
@@ -2795,6 +2804,7 @@ async def root():
             "ai_learning_guide": "/ai/learning-guide",
             "ai_test_cases": "/ai/test-cases",
             "model_intake": "/model-intake/scan",
+            "model_intake_resolve": "/model-intake/resolve",
             "findings": "/findings",
             "discovery": "/discovery",
             "exposure_graph": "/exposure/graph",
@@ -3210,6 +3220,237 @@ async def test_ai_settings(request: AISettingsProbeRequest):
 # MODEL INTAKE
 # ============================================================
 
+MODEL_INTAKE_SAFER_EXTENSIONS = {".safetensors", ".onnx", ".tflite", ".gguf"}
+MODEL_INTAKE_RISKY_EXTENSIONS = {".pkl", ".pickle", ".joblib", ".pt", ".pth", ".ckpt", ".bin", ".mar"}
+MODEL_INTAKE_COMMON_ARTIFACTS = {
+    "model.safetensors",
+    "pytorch_model.bin",
+    "tf_model.h5",
+    "model.onnx",
+    "model.tflite",
+    "model.gguf",
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+}
+
+
+def _import_hf_ref_parser():
+    try:
+        from scanner_tools.model_intake import parse_huggingface_ref
+    except ModuleNotFoundError as exc:
+        if exc.name != "scanner_tools":
+            raise
+        from scanner.scanner_tools.model_intake import parse_huggingface_ref
+    return parse_huggingface_ref
+
+
+def _is_hf_ref(ref: str) -> bool:
+    parsed = urllib.parse.urlparse(ref)
+    return parsed.scheme == "hf" or parsed.netloc.endswith("huggingface.co")
+
+
+def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int) -> dict[str, Any]:
+    suffix = f"/revision/{urllib.parse.quote(revision, safe='')}" if revision and revision != "main" else ""
+    url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}{suffix}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ShakerScan-ModelIntake/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read(1_000_000).decode("utf-8"))
+
+
+def _hf_candidate_score(path: str) -> int:
+    name = Path(path).name.lower()
+    ext = Path(path).suffix.lower()
+    if name in MODEL_INTAKE_COMMON_ARTIFACTS:
+        return 70
+    if ext == ".safetensors":
+        return 100
+    if ext == ".onnx":
+        return 90
+    if ext == ".gguf":
+        return 85
+    if ext == ".tflite":
+        return 80
+    if ext in MODEL_INTAKE_RISKY_EXTENSIONS:
+        return 45
+    return 0
+
+
+def _hf_file_candidates(model_info: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for sibling in model_info.get("siblings") or []:
+        path = str(sibling.get("rfilename") or sibling.get("path") or "")
+        score = _hf_candidate_score(path)
+        if not path or score <= 0:
+            continue
+        ext = Path(path).suffix.lower()
+        lfs = sibling.get("lfs") if isinstance(sibling.get("lfs"), dict) else {}
+        candidates.append({
+            "path": path,
+            "extension": ext,
+            "format_posture": "safer_static_format" if ext in MODEL_INTAKE_SAFER_EXTENSIONS else "unsafe_or_review_required",
+            "risk": "lower" if ext in MODEL_INTAKE_SAFER_EXTENSIONS else "higher",
+            "size_bytes": sibling.get("size") or lfs.get("size"),
+            "sha256": lfs.get("sha256"),
+            "blob_id": sibling.get("blobId"),
+            "score": score,
+        })
+    return sorted(candidates, key=lambda item: (-int(item.get("score") or 0), str(item.get("path") or "")))
+
+
+def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revision: str, selected: dict[str, Any] | None) -> dict[str, Any]:
+    card_data = model_info.get("cardData") if isinstance(model_info.get("cardData"), dict) else {}
+    tags = model_info.get("tags") if isinstance(model_info.get("tags"), list) else []
+    datasets = card_data.get("datasets") or [tag.removeprefix("dataset:") for tag in tags if isinstance(tag, str) and tag.startswith("dataset:")]
+    base_model = card_data.get("base_model") or card_data.get("base_models")
+    license_ref = card_data.get("license") or next((tag.removeprefix("license:") for tag in tags if isinstance(tag, str) and tag.startswith("license:")), None)
+    evals = card_data.get("model-index") or card_data.get("eval_results") or card_data.get("eval_results_v2")
+    sha = model_info.get("sha") or revision
+    metadata: dict[str, Any] = {
+        "huggingface_repo": repo_id,
+        "revision": sha,
+        "source_repo": f"https://huggingface.co/{repo_id}",
+        "model_card_url": f"https://huggingface.co/{repo_id}",
+        "publisher": repo_id.split("/", 1)[0],
+        "pipeline_tag": model_info.get("pipeline_tag") or card_data.get("pipeline_tag"),
+        "library_name": model_info.get("library_name") or card_data.get("library_name"),
+        "tags": tags[:50],
+        "gated": model_info.get("gated"),
+        "private": model_info.get("private"),
+    }
+    if license_ref:
+        metadata["license"] = license_ref
+    if datasets:
+        metadata["training_data_ref"] = datasets
+    if base_model:
+        metadata["base_model"] = base_model
+    if evals:
+        metadata["security_evals"] = {"source": "huggingface_model_card", "results": evals}
+    if selected:
+        metadata["huggingface_file"] = selected.get("path")
+        if selected.get("sha256"):
+            metadata["sha256"] = selected.get("sha256")
+    return {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+
+
+def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dict[str, Any]:
+    parse_huggingface_ref = _import_hf_ref_parser()
+    metadata = dict(request.metadata_json or {})
+    if request.revision:
+        metadata["revision"] = request.revision
+    if request.filename:
+        metadata["huggingface_file"] = request.filename
+    hf_ref = parse_huggingface_ref(request.ref, metadata)
+    repo_id = str(hf_ref.get("repo_id") or "")
+    if not repo_id:
+        raise HTTPException(status_code=400, detail="Hugging Face reference must include a model repo, such as org/model")
+
+    warnings: list[str] = []
+    model_info: dict[str, Any] = {}
+    try:
+        model_info = _hf_api_model_info(repo_id, str(hf_ref.get("revision") or "main"), request.timeout_seconds)
+    except Exception as exc:
+        warnings.append(f"Could not fetch Hugging Face model metadata: {type(exc).__name__}: {exc}")
+
+    candidates = _hf_file_candidates(model_info) if model_info else []
+    selected = next((item for item in candidates if item["path"] == request.filename), None) if request.filename else None
+    selected = selected or (candidates[0] if candidates else None)
+    if selected:
+        hf_ref = parse_huggingface_ref(request.ref, {
+            **metadata,
+            "revision": model_info.get("sha") or hf_ref.get("revision") or "main",
+            "huggingface_file": selected["path"],
+        })
+    elif not hf_ref.get("filename"):
+        warnings.append("No model artifact file was selected. Choose a .safetensors, .onnx, .gguf, .tflite, or reviewed legacy artifact.")
+
+    if selected and selected.get("extension") in MODEL_INTAKE_RISKY_EXTENSIONS:
+        warnings.append("Selected artifact uses a pickle-like or executable serialization format and should be reviewed before deployment.")
+    if str(hf_ref.get("revision") or "main") == "main" and not model_info.get("sha"):
+        warnings.append("Reference is not pinned to an immutable commit yet.")
+    if model_info.get("gated") or model_info.get("private"):
+        warnings.append("This model may require authenticated Hub access from the scanner worker.")
+
+    metadata_out = {
+        **_hf_metadata_from_model_info(model_info, repo_id, str(hf_ref.get("revision") or "main"), selected),
+        **metadata,
+    }
+    artifact_url = str(hf_ref.get("resolve_url") or request.ref).strip()
+    model_card_url = str(metadata_out.get("model_card_url") or f"https://huggingface.co/{repo_id}")
+    scan_payload = {
+        "artifact_url": artifact_url,
+        "name": f"Hugging Face: {repo_id}",
+        "metadata_json": metadata_out,
+        "expected_sha256": selected.get("sha256") if selected else metadata_out.get("sha256"),
+        "model_card_url": model_card_url,
+        "require_deployment_approval": True,
+        "require_signature": True,
+        "require_hash": True,
+        "require_model_governance": True,
+        "max_download_bytes": 10_000_000,
+        "timeout_seconds": 20,
+    }
+    return {
+        "platform": "huggingface",
+        "normalized_ref": artifact_url,
+        "repository": repo_id,
+        "revision": hf_ref.get("revision"),
+        "selected_file": selected,
+        "candidate_files": candidates[:25],
+        "metadata_json": metadata_out,
+        "warnings": warnings,
+        "scan_payload": scan_payload,
+    }
+
+
+@app.post("/model-intake/resolve")
+async def resolve_model_intake(request: ModelIntakeResolveRequest):
+    """Resolve a platform-specific model reference into a scan-ready payload."""
+    ref = (request.ref or "").strip()
+    if not ref:
+        raise HTTPException(status_code=400, detail="ref is required")
+    platform = request.platform
+    if platform == "auto":
+        platform = "huggingface" if _is_hf_ref(ref) or re.fullmatch(r"[\w.-]+/[\w.-]+", ref) else "http"
+    if platform == "huggingface":
+        normalized_ref = ref if _is_hf_ref(ref) else f"https://huggingface.co/{ref}"
+        return _resolve_huggingface_model_intake(request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}))
+
+    parsed = urllib.parse.urlparse(ref)
+    metadata = dict(request.metadata_json or {})
+    source_kind = platform if platform != "auto" else parsed.scheme or "http"
+    warnings = []
+    if source_kind in {"s3", "gcs", "azure", "oci", "mlflow"} and parsed.scheme not in {"http", "https"}:
+        warnings.append("This platform is recognized but native artifact fetching is not implemented yet. Use a signed HTTP(S) artifact URL when possible.")
+    scan_payload = {
+        "artifact_url": ref,
+        "name": f"Model artifact: {_short_url_label(ref)}",
+        "metadata_json": metadata,
+        "require_deployment_approval": True,
+        "require_signature": True,
+        "require_hash": True,
+        "require_model_governance": True,
+        "max_download_bytes": 10_000_000,
+        "timeout_seconds": 20,
+    }
+    return {
+        "platform": source_kind,
+        "normalized_ref": ref,
+        "repository": parsed.netloc or None,
+        "revision": request.revision,
+        "selected_file": None,
+        "candidate_files": [],
+        "metadata_json": metadata,
+        "warnings": warnings,
+        "scan_payload": scan_payload,
+    }
+
+
 @app.post("/model-intake/scan")
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
@@ -3217,8 +3458,8 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     if not artifact_ref:
         raise HTTPException(status_code=400, detail="artifact_url is required")
     parsed = urllib.parse.urlparse(artifact_ref)
-    if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci", "s3", "gs", "gcs", "azure"}:
-        raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, oci://, s3://, gs://, gcs://, or azure://")
+    if parsed.scheme and parsed.scheme not in {"http", "https", "hf", "oci", "s3", "gs", "gcs", "azure", "mlflow", "models"}:
+        raise HTTPException(status_code=400, detail="artifact_url must use http(s), hf://, oci://, s3://, gs://, gcs://, azure://, mlflow://, or models:/")
 
     r = get_redis()
     job_id = str(uuid.uuid4())

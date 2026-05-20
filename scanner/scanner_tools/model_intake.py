@@ -39,6 +39,17 @@ SAFER_MODEL_EXTENSIONS = {
     ".gguf",
 }
 
+MODEL_ARTIFACT_FILENAMES = {
+    "model.safetensors",
+    "pytorch_model.bin",
+    "tf_model.h5",
+    "model.onnx",
+    "model.tflite",
+    "model.gguf",
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+}
+
 EXECUTABLE_EXTENSIONS = {
     ".exe",
     ".dll",
@@ -98,6 +109,91 @@ def _artifact_ext(name: str) -> str:
     if len(suffixes) >= 2 and suffixes[-2:] in ([".tar", ".gz"], [".tar", ".xz"], [".tar", ".bz2"]):
         return "".join(suffixes[-2:]).lower()
     return Path(name).suffix.lower()
+
+
+def _is_model_artifact_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    return name in MODEL_ARTIFACT_FILENAMES or Path(name).suffix.lower() in RISKY_EXTENSIONS | SAFER_MODEL_EXTENSIONS
+
+
+def parse_huggingface_ref(ref: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize common Hugging Face refs without contacting the Hub."""
+    metadata = metadata or {}
+    raw = str(ref or "").strip()
+    revision = str(metadata.get("revision") or metadata.get("model_revision") or "main").strip() or "main"
+    repo_id = str(metadata.get("huggingface_repo") or metadata.get("hf_repo") or "").strip()
+    filename = str(metadata.get("huggingface_file") or metadata.get("hf_file") or "").strip()
+    source_url = raw
+
+    parsed = urllib.parse.urlparse(raw)
+    query = urllib.parse.parse_qs(parsed.query or "")
+    if query.get("revision"):
+        revision = query["revision"][0] or revision
+    if query.get("rev"):
+        revision = query["rev"][0] or revision
+    if query.get("filename"):
+        filename = query["filename"][0] or filename
+
+    if parsed.scheme in {"http", "https"} and parsed.netloc.endswith("huggingface.co"):
+        parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+        marker_index = next((idx for idx, part in enumerate(parts) if part in {"blob", "resolve", "raw", "tree"}), None)
+        if marker_index is not None:
+            repo_id = "/".join(parts[:marker_index]) or repo_id
+            if len(parts) > marker_index + 1:
+                revision = parts[marker_index + 1] or revision
+            if len(parts) > marker_index + 2 and parts[marker_index] != "tree":
+                filename = "/".join(parts[marker_index + 2:]) or filename
+        elif parts:
+            if len(parts) == 1:
+                repo_id = parts[0]
+            else:
+                repo_id = "/".join(parts[:2])
+                remainder = "/".join(parts[2:])
+                if remainder and _is_model_artifact_path(remainder):
+                    filename = remainder
+
+    elif parsed.scheme == "hf":
+        parts = [urllib.parse.unquote(part) for part in f"{parsed.netloc}{parsed.path}".split("/") if part]
+        if parts:
+            if "@" in parts[0]:
+                parts[0], rev = parts[0].split("@", 1)
+                revision = rev or revision
+            elif len(parts) >= 2 and "@" in parts[1]:
+                parts[1], rev = parts[1].split("@", 1)
+                revision = rev or revision
+
+            if repo_id:
+                consumed = 0
+            elif len(parts) == 1:
+                repo_id = parts[0]
+                consumed = 1
+            elif len(parts) == 2 and _is_model_artifact_path(parts[1]):
+                repo_id = parts[0]
+                consumed = 1
+            else:
+                repo_id = "/".join(parts[:2])
+                consumed = 2
+            if not filename and len(parts) > consumed:
+                filename = "/".join(parts[consumed:])
+
+    resolve_url = None
+    if repo_id and filename:
+        resolve_url = (
+            "https://huggingface.co/"
+            f"{urllib.parse.quote(repo_id, safe='/')}/resolve/"
+            f"{urllib.parse.quote(revision, safe='/')}/"
+            f"{urllib.parse.quote(filename, safe='/')}"
+        )
+
+    return {
+        "kind": "huggingface",
+        "input": raw,
+        "repo_id": repo_id or None,
+        "filename": filename or None,
+        "revision": revision,
+        "resolve_url": resolve_url,
+        "source_url": source_url,
+    }
 
 
 def _severity_score(severity: str) -> int:
@@ -182,13 +278,20 @@ def _read_local(path_ref: str, max_bytes: int) -> tuple[bytes, dict[str, Any]]:
     }
 
 
-def _download_http(url: str, max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+def _download_http(
+    url: str,
+    max_bytes: int,
+    timeout_seconds: int,
+    headers: dict[str, str] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    request_headers = {
+        "User-Agent": "ShakerScan-ModelIntake/1.0",
+        "Range": f"bytes=0-{max_bytes - 1}",
+        **(headers or {}),
+    }
     request = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "ShakerScan-ModelIntake/1.0",
-            "Range": f"bytes=0-{max_bytes - 1}",
-        },
+        headers=request_headers,
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         data = response.read(max_bytes + 1)
@@ -203,9 +306,45 @@ def _download_http(url: str, max_bytes: int, timeout_seconds: int) -> tuple[byte
         }
 
 
-async def _fetch_artifact(ref: str, max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+    hf_ref = parse_huggingface_ref(ref, metadata)
+    if not hf_ref.get("repo_id"):
+        return b"", {
+            "source": "huggingface",
+            "bytes_observed": 0,
+            "huggingface": hf_ref,
+            "error": "Hugging Face reference must include a model repository.",
+        }
+    if not hf_ref.get("filename"):
+        return b"", {
+            "source": "huggingface",
+            "bytes_observed": 0,
+            "huggingface": hf_ref,
+            "error": "Hugging Face reference must identify an artifact file. Use the resolver to choose one.",
+        }
+
+    auth_headers: dict[str, str] = {}
+    token = str(metadata.get("hf_token") or os.getenv("HF_TOKEN") or "").strip()
+    if token:
+        auth_headers["Authorization"] = f"Bearer {token}"
+    data, fetch_meta = _download_http(str(hf_ref["resolve_url"]), max_bytes, timeout_seconds, auth_headers)
+    return data, {
+        **fetch_meta,
+        "source": "huggingface",
+        "huggingface": hf_ref,
+    }
+
+
+async def _fetch_artifact(
+    ref: str,
+    max_bytes: int,
+    timeout_seconds: int,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(ref)
     try:
+        if parsed.scheme == "hf" or (parsed.scheme in {"http", "https"} and parsed.netloc.endswith("huggingface.co")):
+            return await asyncio.to_thread(_download_huggingface, ref, metadata or {}, max_bytes, timeout_seconds)
         if parsed.scheme in ("http", "https"):
             return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
         if parsed.scheme == "file" or not parsed.scheme:
@@ -314,6 +453,8 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         return "huggingface"
     if ref.startswith("oci://") or _metadata_value(metadata, "oci_ref", "image_ref"):
         return "oci"
+    if ref.startswith(("mlflow://", "models:/")) or _metadata_value(metadata, "mlflow_model_uri", "mlflow_run_id"):
+        return "mlflow"
     if ref.startswith(("s3://", "gs://", "gcs://", "azure://")):
         return urllib.parse.urlparse(ref).scheme
     if "blob.core.windows.net" in ref:
@@ -359,6 +500,8 @@ def _registry_reference(ref: str, metadata: dict[str, Any]) -> dict[str, Any]:
     elif source_kind == "azure_blob":
         parts = [part for part in parsed.path.split("/") if part]
         reference.update({"registry": parsed.netloc, "repository": parts[0] if parts else None, "path": "/".join(parts[1:]) or None})
+    elif source_kind == "mlflow":
+        reference.update({"registry": parsed.scheme or "mlflow", "repository": parsed.netloc or parsed.path.strip("/") or ref, "path": parsed.path or None})
     elif parsed.netloc:
         reference.update({"registry": parsed.netloc, "repository": parsed.path.strip("/") or None})
 
@@ -574,6 +717,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         artifact_ref,
         max_bytes=max_download_bytes,
         timeout_seconds=timeout_seconds,
+        metadata=metadata,
     )
 
     unsupported_scheme_error = bool(
@@ -940,4 +1084,4 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     }
 
 
-__all__ = ["run_model_intake_scan"]
+__all__ = ["parse_huggingface_ref", "run_model_intake_scan"]

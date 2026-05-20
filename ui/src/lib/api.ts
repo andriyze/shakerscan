@@ -71,6 +71,40 @@ export interface ModelIntakeScanResponse {
   ui_url: string
 }
 
+export type ModelIntakePlatform = 'auto' | 'huggingface' | 'http' | 's3' | 'gcs' | 'azure' | 'oci' | 'mlflow'
+
+export interface ModelIntakeResolveRequest {
+  platform: ModelIntakePlatform
+  ref: string
+  revision?: string
+  filename?: string
+  metadata_json?: Record<string, unknown>
+  timeout_seconds?: number
+}
+
+export interface ModelIntakeResolvedFile {
+  path: string
+  extension?: string
+  format_posture?: string
+  risk?: 'lower' | 'higher' | string
+  size_bytes?: number | null
+  sha256?: string | null
+  blob_id?: string | null
+  score?: number
+}
+
+export interface ModelIntakeResolveResponse {
+  platform: string
+  normalized_ref: string
+  repository?: string | null
+  revision?: string | null
+  selected_file?: ModelIntakeResolvedFile | null
+  candidate_files: ModelIntakeResolvedFile[]
+  metadata_json: Record<string, unknown>
+  warnings: string[]
+  scan_payload: ModelIntakeScanRequest
+}
+
 export interface AITestReadinessControl {
   id: string
   label: string
@@ -516,6 +550,18 @@ export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promi
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to submit model intake scan'))
+  }
+  return res.json()
+}
+
+export async function resolveModelIntakeReference(data: ModelIntakeResolveRequest): Promise<ModelIntakeResolveResponse> {
+  const res = await fetch(`${API_URL}/model-intake/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to resolve model reference'))
   }
   return res.json()
 }

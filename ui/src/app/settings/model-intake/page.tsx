@@ -3,13 +3,31 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { CheckCircle2, Clipboard, FileJson, PackageCheck, Play, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clipboard,
+  Cloud,
+  Database,
+  FileJson,
+  GitBranch,
+  Globe2,
+  PackageCheck,
+  Play,
+  RefreshCw,
+  Server,
+  ShieldCheck,
+  Wand2,
+} from 'lucide-react'
 import {
   getAITestScenarios,
+  resolveModelIntakeReference,
   submitModelIntakeScan,
   type AITestReadinessControl,
   type AITestScenario,
+  type ModelIntakePlatform,
   type ModelIntakePreset,
+  type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
 } from '@/lib/api'
 
@@ -40,6 +58,73 @@ const MINIMAL_METADATA_EXAMPLE = {
   model_card_url: 'https://example.com/model-card.md',
 }
 
+const PLATFORM_OPTIONS: Array<{
+  value: Exclude<ModelIntakePlatform, 'auto'>
+  label: string
+  helper: string
+  placeholder: string
+  icon: typeof PackageCheck
+}> = [
+  {
+    value: 'huggingface',
+    label: 'Hugging Face',
+    helper: 'Repo, file URL, or hf:// reference',
+    placeholder: 'mistralai/Mistral-7B-v0.1 or https://huggingface.co/org/model',
+    icon: PackageCheck,
+  },
+  {
+    value: 'http',
+    label: 'HTTP artifact',
+    helper: 'Direct model or manifest URL',
+    placeholder: 'https://models.example.com/release/model.safetensors',
+    icon: Globe2,
+  },
+  {
+    value: 's3',
+    label: 'S3',
+    helper: 'Use a signed HTTPS URL for now',
+    placeholder: 's3://bucket/path/model.safetensors',
+    icon: Cloud,
+  },
+  {
+    value: 'gcs',
+    label: 'GCS',
+    helper: 'Use a signed HTTPS URL for now',
+    placeholder: 'gs://bucket/path/model.onnx',
+    icon: Database,
+  },
+  {
+    value: 'azure',
+    label: 'Azure Blob',
+    helper: 'Use a signed HTTPS URL for now',
+    placeholder: 'azure://container/path/model.gguf',
+    icon: Cloud,
+  },
+  {
+    value: 'oci',
+    label: 'OCI registry',
+    helper: 'Containerized model package',
+    placeholder: 'oci://registry.example.com/models/ranker:1.2.0',
+    icon: Server,
+  },
+  {
+    value: 'mlflow',
+    label: 'MLflow',
+    helper: 'Registry metadata first',
+    placeholder: 'models:/fraud-detector/Production',
+    icon: GitBranch,
+  },
+]
+
+type PolicyProfile = 'research' | 'staging' | 'production' | 'strict'
+
+const POLICY_PROFILES: Array<{ value: PolicyProfile; label: string; helper: string }> = [
+  { value: 'research', label: 'Research', helper: 'Format and provenance review without approval gating' },
+  { value: 'staging', label: 'Staging', helper: 'Require checksum, signature evidence, and governance basics' },
+  { value: 'production', label: 'Production', helper: 'Require approval, evidence, and deployment controls' },
+  { value: 'strict', label: 'Strict', helper: 'Production plus verified signature evidence' },
+]
+
 function parseOptionalJsonObject(raw: string): Record<string, unknown> | undefined {
   const trimmed = raw.trim()
   if (!trimmed) return undefined
@@ -67,8 +152,30 @@ function hasMetadataKey(metadata: Record<string, unknown> | undefined, keys: str
   })
 }
 
+function formatBytes(value: number | null | undefined) {
+  if (!value) return 'size unknown'
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)} GB`
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} MB`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} KB`
+  return `${value} B`
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string {
+  const value = metadata?.[key]
+  if (value === undefined || value === null) return ''
+  if (Array.isArray(value)) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 export default function ModelIntakeSettingsPage() {
   const router = useRouter()
+  const [platform, setPlatform] = useState<Exclude<ModelIntakePlatform, 'auto'>>('huggingface')
+  const [sourceRef, setSourceRef] = useState('')
+  const [revision, setRevision] = useState('')
+  const [filename, setFilename] = useState('')
+  const [resolverResult, setResolverResult] = useState<ModelIntakeResolveResponse | null>(null)
+  const [resolving, setResolving] = useState(false)
   const [artifactUrl, setArtifactUrl] = useState('')
   const [name, setName] = useState('')
   const [metadataUrl, setMetadataUrl] = useState('')
@@ -84,6 +191,7 @@ export default function ModelIntakeSettingsPage() {
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
+  const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('production')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
@@ -97,16 +205,39 @@ export default function ModelIntakeSettingsPage() {
       .catch(() => setScenario(null))
   }, [])
 
-  const metadataPreview = useMemo(() => {
+  const selectedPlatform = PLATFORM_OPTIONS.find((item) => item.value === platform) || PLATFORM_OPTIONS[0]
+  const parsedMetadata = useMemo(() => {
     try {
-      const parsed = parseOptionalJsonObject(metadataJson)
-      return parsed ? Object.keys(parsed).length : 0
+      return parseOptionalJsonObject(metadataJson) || {}
     } catch {
-      return null
+      return undefined
     }
   }, [metadataJson])
+  const metadataPreview = parsedMetadata ? Object.keys(parsedMetadata).length : metadataJson.trim() ? null : 0
+
+  function applyScanPayload(payload: ModelIntakeScanRequest) {
+    setArtifactUrl(payload.artifact_url || '')
+    setName(payload.name || '')
+    setMetadataUrl(payload.metadata_url || '')
+    setMetadataJson(payload.metadata_json ? JSON.stringify(payload.metadata_json, null, 2) : '')
+    setExpectedSha256(payload.expected_sha256 || '')
+    setSignatureUrl(payload.signature_url || '')
+    setModelCardUrl(payload.model_card_url || '')
+    setDeploymentApproved(Boolean(payload.deployment_approved ?? payload.metadata_json?.deployment_approved))
+    setRequireDeploymentApproval(payload.require_deployment_approval ?? true)
+    setRequireSignature(payload.require_signature ?? true)
+    setRequireSignatureVerification(payload.require_signature_verification ?? false)
+    setRequireHash(payload.require_hash ?? true)
+    setRequireModelGovernance(payload.require_model_governance ?? true)
+    setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
+    setTimeoutSeconds(String(payload.timeout_seconds || 20))
+  }
 
   function buildPayload(): ModelIntakeScanRequest {
+    const maxBytes = Number(maxDownloadBytes || 10000000)
+    const timeout = Number(timeoutSeconds || 20)
+    if (!Number.isFinite(maxBytes) || maxBytes < 1024) throw new Error('Download limit must be at least 1024 bytes')
+    if (!Number.isFinite(timeout) || timeout < 1) throw new Error('Timeout must be at least 1 second')
     const payload: ModelIntakeScanRequest = {
       artifact_url: artifactUrl.trim(),
       name: optionalText(name),
@@ -121,35 +252,92 @@ export default function ModelIntakeSettingsPage() {
       require_signature_verification: requireSignatureVerification,
       require_hash: requireHash,
       require_model_governance: requireModelGovernance,
-      max_download_bytes: Number(maxDownloadBytes || 10000000),
-      timeout_seconds: Number(timeoutSeconds || 20),
+      max_download_bytes: maxBytes,
+      timeout_seconds: timeout,
     }
     if (!payload.artifact_url) {
-      throw new Error('Artifact URL is required')
+      throw new Error('Resolve or enter an artifact URL before queueing')
     }
     return payload
   }
 
   function applyPreset(preset: ModelIntakePreset) {
-    setArtifactUrl(preset.artifact_url || '')
-    setName(preset.name || '')
-    setMetadataUrl(preset.metadata_url || '')
-    setMetadataJson(preset.metadata_json ? JSON.stringify(preset.metadata_json, null, 2) : '')
-    setExpectedSha256(preset.expected_sha256 || '')
-    setSignatureUrl(preset.signature_url || '')
-    setModelCardUrl(preset.model_card_url || '')
-    setDeploymentApproved(Boolean(preset.deployment_approved ?? preset.metadata_json?.deployment_approved))
-    setRequireDeploymentApproval(preset.require_deployment_approval ?? true)
-    setRequireSignature(preset.require_signature ?? true)
-    setRequireSignatureVerification(preset.require_signature_verification ?? false)
-    setRequireHash(preset.require_hash ?? true)
-    setRequireModelGovernance(preset.require_model_governance ?? true)
-    setMaxDownloadBytes(String(preset.max_download_bytes || 10000000))
-    setTimeoutSeconds(String(preset.timeout_seconds || 20))
+    applyScanPayload({
+      artifact_url: preset.artifact_url || '',
+      name: preset.name || '',
+      metadata_url: preset.metadata_url,
+      metadata_json: preset.metadata_json,
+      expected_sha256: preset.expected_sha256,
+      signature_url: preset.signature_url,
+      model_card_url: preset.model_card_url,
+      deployment_approved: preset.deployment_approved,
+      require_deployment_approval: preset.require_deployment_approval,
+      require_signature: preset.require_signature,
+      require_signature_verification: preset.require_signature_verification,
+      require_hash: preset.require_hash,
+      require_model_governance: preset.require_model_governance,
+      max_download_bytes: preset.max_download_bytes,
+      timeout_seconds: preset.timeout_seconds,
+    })
   }
 
   function applyMetadataExample(example: 'complete' | 'minimal') {
     setMetadataJson(JSON.stringify(example === 'complete' ? COMPLETE_METADATA_EXAMPLE : MINIMAL_METADATA_EXAMPLE, null, 2))
+  }
+
+  function applyPolicyProfile(profile: PolicyProfile) {
+    setPolicyProfile(profile)
+    if (profile === 'research') {
+      setRequireDeploymentApproval(false)
+      setRequireSignature(false)
+      setRequireSignatureVerification(false)
+      setRequireHash(false)
+      setRequireModelGovernance(false)
+      setMaxDownloadBytes('10000000')
+      return
+    }
+    setRequireHash(true)
+    setRequireSignature(true)
+    setRequireModelGovernance(true)
+    setRequireDeploymentApproval(profile === 'production' || profile === 'strict')
+    setRequireSignatureVerification(profile === 'strict')
+    setMaxDownloadBytes(profile === 'strict' ? '50000000' : '10000000')
+  }
+
+  function updateMetadataField(key: string, value: string) {
+    const current = parsedMetadata || {}
+    const next = { ...current }
+    if (value.trim()) {
+      next[key] = key === 'training_data_ref' || key === 'deployment_restrictions'
+        ? value.split(',').map((item) => item.trim()).filter(Boolean)
+        : value
+    } else {
+      delete next[key]
+    }
+    setMetadataJson(Object.keys(next).length ? JSON.stringify(next, null, 2) : '')
+  }
+
+  async function resolveReference(filenameOverride?: string) {
+    setResolving(true)
+    setError(null)
+    try {
+      const result = await resolveModelIntakeReference({
+        platform,
+        ref: sourceRef.trim(),
+        revision: optionalText(revision),
+        filename: optionalText(filenameOverride || filename),
+        metadata_json: parseOptionalJsonObject(metadataJson),
+        timeout_seconds: Number(timeoutSeconds || 20),
+      })
+      setResolverResult(result)
+      applyScanPayload(result.scan_payload)
+      if (result.revision) setRevision(String(result.revision))
+      if (result.selected_file?.path) setFilename(result.selected_file.path)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to resolve model reference')
+    } finally {
+      setResolving(false)
+    }
   }
 
   async function copyPayload() {
@@ -176,13 +364,6 @@ export default function ModelIntakeSettingsPage() {
     }
   }
 
-  const parsedMetadata = useMemo(() => {
-    try {
-      return parseOptionalJsonObject(metadataJson) || {}
-    } catch {
-      return undefined
-    }
-  }, [metadataJson])
   const readinessMetadata: Record<string, unknown> = {
     ...(parsedMetadata || {}),
     artifact_url: artifactUrl.trim(),
@@ -219,7 +400,7 @@ export default function ModelIntakeSettingsPage() {
             <PackageCheck className="h-6 w-6 text-cyan-300" />
             <h1 className="text-2xl font-bold text-white">Model Intake</h1>
           </div>
-          <p className="mt-1 text-gray-400">Queue model artifact checks before deployment approval.</p>
+          <p className="mt-1 text-gray-400">Resolve model artifacts, collect supply-chain evidence, and queue deployment checks.</p>
         </div>
         <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
           Settings
@@ -228,23 +409,155 @@ export default function ModelIntakeSettingsPage() {
 
       {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
+      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <div className="flex items-center gap-2 text-white">
+          <Wand2 className="h-4 w-4 text-cyan-300" />
+          <h2 className="text-sm font-semibold">1. Choose Source</h2>
+        </div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {PLATFORM_OPTIONS.map((option) => {
+            const Icon = option.icon
+            const active = option.value === platform
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => {
+                  setPlatform(option.value)
+                  setResolverResult(null)
+                }}
+                className={`rounded-lg border p-3 text-left transition ${
+                  active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                }`}
+              >
+                <div className="flex items-center gap-2 text-sm font-medium text-white">
+                  <Icon className="h-4 w-4 text-cyan-300" />
+                  {option.label}
+                </div>
+                <div className="mt-1 text-xs text-gray-500">{option.helper}</div>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.35fr_0.45fr_auto]">
+          <label className="grid gap-1 text-sm text-gray-300">
+            Reference
+            <input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} className={inputClass} placeholder={selectedPlatform.placeholder} />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Revision
+            <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Artifact file
+            <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
+          </label>
+          <button
+            type="button"
+            onClick={() => resolveReference()}
+            disabled={resolving || !sourceRef.trim()}
+            className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+          >
+            {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+            Resolve
+          </button>
+        </div>
+
+        {resolverResult && (
+          <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr]">
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="text-sm font-medium text-white">Resolved artifact</div>
+              <div className="mt-2 break-all rounded border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
+                {resolverResult.normalized_ref}
+              </div>
+              <div className="mt-3 grid gap-2 text-xs text-gray-400 sm:grid-cols-2">
+                <div>Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
+                <div>Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
+                <div>File: <span className="text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
+                <div>Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
+              </div>
+              {resolverResult.warnings.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {resolverResult.warnings.map((warning) => (
+                    <div key={warning} className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-2 text-xs text-yellow-200">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{warning}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <div className="text-sm font-medium text-white">Candidate files</div>
+              {resolverResult.candidate_files.length === 0 ? (
+                <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+                  No artifact list was available. Enter a direct artifact URL or file path before queueing.
+                </div>
+              ) : (
+                <div className="mt-3 grid gap-2">
+                  {resolverResult.candidate_files.slice(0, 6).map((file) => {
+                    const selected = file.path === resolverResult.selected_file?.path
+                    return (
+                      <button
+                        key={file.path}
+                        type="button"
+                        onClick={() => resolveReference(file.path)}
+                        className={`rounded border px-3 py-2 text-left text-xs ${
+                          selected ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-mono text-gray-200">{file.path}</span>
+                          <span className={file.risk === 'lower' ? 'text-green-300' : 'text-orange-300'}>
+                            {file.risk === 'lower' ? 'lower risk' : 'review'}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-gray-500">{file.extension || 'unknown'} - {formatBytes(file.size_bytes)}</div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <div className="flex items-center gap-2 text-white">
+          <ShieldCheck className="h-4 w-4 text-cyan-300" />
+          <h2 className="text-sm font-semibold">2. Policy Profile</h2>
+        </div>
+        <div className="mt-4 grid gap-2 md:grid-cols-4">
+          {POLICY_PROFILES.map((profile) => (
+            <button
+              key={profile.value}
+              type="button"
+              onClick={() => applyPolicyProfile(profile.value)}
+              className={`rounded-lg border p-3 text-left ${
+                policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+              }`}
+            >
+              <div className="text-sm font-medium text-white">{profile.label}</div>
+              <div className="mt-1 text-xs text-gray-500">{profile.helper}</div>
+            </button>
+          ))}
+        </div>
+      </section>
+
       <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
           <Play className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">Queue Intake Scan</h2>
+          <h2 className="text-sm font-semibold">3. Review Scan Payload</h2>
         </div>
 
         <div className="grid gap-3 md:grid-cols-[1.3fr_0.7fr]">
           <label className="grid gap-1 text-sm text-gray-300">
             Artifact URL
-            <input
-              value={artifactUrl}
-              onChange={(e) => setArtifactUrl(e.target.value)}
-              className={inputClass}
-              placeholder="https://models.example.com/release/model.safetensors"
-              required
-            />
-            <span className="text-xs text-gray-500">Use a fetchable HTTP(S) artifact when possible. Registry-only references are reported as intake blockers.</span>
+            <input value={artifactUrl} onChange={(e) => setArtifactUrl(e.target.value)} className={inputClass} placeholder="https://.../model.safetensors" required />
+            <span className="text-xs text-gray-500">Resolved HTTP(S) artifacts are preferred. Direct hf:// references are supported for public files.</span>
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Name
@@ -274,19 +587,41 @@ export default function ModelIntakeSettingsPage() {
           </label>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-[1fr_0.7fr]">
-          <label className="grid gap-1 text-sm text-gray-300">
-            Metadata JSON
-            <textarea
-              value={metadataJson}
-              onChange={(e) => setMetadataJson(e.target.value)}
-              className={textareaClass}
-              rows={9}
-              placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","training_data_ref":"dataset:v1","signed_by":"sigstore","license":"apache-2.0","sbom":{"components":[]},"malware_scan_result":{"status":"clean"},"security_evals":{"status":"passed"},"monitoring_plan":"model-monitoring-v1"}'
-            />
+        <div className="grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+              <FileJson className="h-4 w-4 text-cyan-300" />
+              Evidence fields
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Source repo
+                <input value={metadataString(parsedMetadata, 'source_repo')} onChange={(e) => updateMetadataField('source_repo', e.target.value)} className={inputClass} placeholder="https://github.com/org/repo" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                License
+                <input value={metadataString(parsedMetadata, 'license')} onChange={(e) => updateMetadataField('license', e.target.value)} className={inputClass} placeholder="apache-2.0" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Base model
+                <input value={metadataString(parsedMetadata, 'base_model')} onChange={(e) => updateMetadataField('base_model', e.target.value)} className={inputClass} placeholder="org/base-model" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Training data
+                <input value={metadataString(parsedMetadata, 'training_data_ref')} onChange={(e) => updateMetadataField('training_data_ref', e.target.value)} className={inputClass} placeholder="dataset-a, dataset-b" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Security evals
+                <input value={metadataString(parsedMetadata, 'security_evals')} onChange={(e) => updateMetadataField('security_evals', e.target.value)} className={inputClass} placeholder="eval report URL or suite" />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Monitoring plan
+                <input value={metadataString(parsedMetadata, 'monitoring_plan')} onChange={(e) => updateMetadataField('monitoring_plan', e.target.value)} className={inputClass} placeholder="model-monitoring-v1" />
+              </label>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className={`text-xs ${metadataPreview === null ? 'text-red-300' : 'text-gray-500'}`}>
-                {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'Optional inline metadata'}
+                {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'No inline metadata yet'}
               </span>
               <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                 Complete example
@@ -300,39 +635,37 @@ export default function ModelIntakeSettingsPage() {
                 </button>
               )}
             </div>
-          </label>
+          </div>
 
           <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <FileJson className="h-4 w-4 text-cyan-300" />
-              Policy requirements
+              Requirements and raw metadata
             </div>
-            <p className="text-xs text-gray-500">These toggles define what the intake scan should enforce.</p>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require checksum
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require signature or attestation
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require signature verification
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require approval
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-              Require governance evidence
-            </label>
-            <div className="border-t border-gray-800 pt-3">
-              <div className="mb-2 text-sm font-medium text-gray-200">Evidence provided</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require checksum
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require signature
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Verify signature
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require approval
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                Require governance
+              </label>
               <label className="flex items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-                Mark request approved
+                Mark approved
               </label>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -345,6 +678,16 @@ export default function ModelIntakeSettingsPage() {
                 <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
             </div>
+            <label className="grid gap-1 text-sm text-gray-300">
+              Metadata JSON
+              <textarea
+                value={metadataJson}
+                onChange={(e) => setMetadataJson(e.target.value)}
+                className={textareaClass}
+                rows={8}
+                placeholder='{"source_repo":"https://github.com/acme/model","commit_sha":"abc123","license":"apache-2.0"}'
+              />
+            </label>
           </div>
         </div>
 
@@ -397,7 +740,7 @@ export default function ModelIntakeSettingsPage() {
                 <h2 className="text-sm font-semibold">Evidence Checklist</h2>
               </div>
               <p className="mt-1 max-w-3xl text-sm text-gray-400">
-                Intake scans use this evidence to separate missing controls from supplied provenance, approval, and monitoring proof.
+                Platform metadata covers public model facts. Your organization still owns approval, SBOM, malware scan, eval, and monitoring evidence.
               </p>
             </div>
             <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
@@ -405,7 +748,7 @@ export default function ModelIntakeSettingsPage() {
 
           {!hasIntakeInput ? (
             <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
-              Add an artifact URL, metadata URL, signature, checksum, or inline metadata to preview readiness gaps.
+              Resolve a platform reference or enter artifact evidence to preview readiness gaps.
             </div>
           ) : (
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
