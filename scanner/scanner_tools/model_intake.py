@@ -951,6 +951,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     ext = _artifact_ext(artifact_filename) or _artifact_ext(name)
     sha256 = hashlib.sha256(artifact_bytes).hexdigest() if artifact_bytes else None
     zip_info = _inspect_zip(artifact_bytes) if artifact_bytes[:4] == b"PK\x03\x04" else {"is_zip": False, "entries": []}
+    artifact_truncated = bool(artifact_meta.get("truncated"))
 
     findings: list[dict[str, Any]] = []
     expected_sha256 = options.get("expected_sha256") or metadata.get("sha256")
@@ -976,11 +977,12 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     license_policy = _license_policy(license_ref)
     format_inspection = _inspect_format(name, ext, artifact_bytes, zip_info)
     suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
+    aibom_hash = str(expected_sha256 or sha256 or "").strip() or None
     aibom = _generate_aibom(
         artifact_ref=artifact_ref,
         name=name,
         ext=ext,
-        sha256=sha256,
+        sha256=aibom_hash,
         metadata=metadata,
         registry=registry_reference,
         license_ref=license_ref,
@@ -1021,7 +1023,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 remediation="Make the model artifact reachable to the intake worker or provide an internal registry reference with access credentials.",
             ))
 
-    if expected_sha256 and sha256 and str(expected_sha256).lower() != sha256.lower():
+    checksum_status = "missing"
+    if expected_sha256 and sha256 and not artifact_truncated and str(expected_sha256).lower() == sha256.lower():
+        checksum_status = "verified"
+    elif expected_sha256 and sha256 and artifact_truncated:
+        checksum_status = "known_unverified_truncated"
+    elif expected_sha256:
+        checksum_status = "provided_unverified"
+
+    if expected_sha256 and sha256 and not artifact_truncated and str(expected_sha256).lower() != sha256.lower():
+        checksum_status = "mismatch"
         findings.append(_finding(
             finding_id="sha256_mismatch",
             title="Model artifact checksum mismatch",
@@ -1030,6 +1041,23 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "expected_sha256": expected_sha256, "observed_sha256": sha256},
             remediation="Block deployment, verify the source registry, and re-publish the artifact with a trusted checksum.",
+        ))
+    elif expected_sha256 and sha256 and artifact_truncated:
+        findings.append(_finding(
+            finding_id="checksum_not_fully_verified",
+            title="Model artifact checksum available but not fully verified",
+            severity="info",
+            description="A full-artifact SHA-256 value was supplied, but intake only inspected a byte range due to the configured download cap.",
+            artifact_ref=artifact_ref,
+            evidence={
+                "artifact": name,
+                "expected_sha256": expected_sha256,
+                "observed_sha256": sha256,
+                "observed_scope": "inspected_bytes",
+                "bytes_observed": artifact_meta.get("bytes_observed"),
+                "download_limit": max_download_bytes,
+            },
+            remediation="Increase the download cap to verify the full artifact, or rely on registry digest/signature evidence as the release pin.",
         ))
     elif require_hash and not expected_sha256 and not metadata_unavailable:
         findings.append(_finding(
@@ -1237,6 +1265,9 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "registry": registry_reference,
         "extension": ext,
         "sha256": sha256,
+        "sha256_scope": "inspected_bytes" if artifact_truncated else "full_artifact",
+        "expected_sha256": expected_sha256,
+        "checksum_status": checksum_status,
         "format_posture": format_posture,
         "signature_verification_status": signature_status["status"],
         "license_policy_status": license_policy["status"],
@@ -1284,7 +1315,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "unsafe_serialization": not any(f["id"].endswith("unsafe_serialization") for f in findings),
                 "artifact_signing": None if metadata_unavailable else bool(signature_url or signed_by),
                 "signature_verification": None if not require_signature_verification or metadata_unavailable else signature_status["verified"],
-                "checksum": bool(expected_sha256 and sha256 and str(expected_sha256).lower() == sha256.lower()) if not metadata_unavailable else None,
+                "checksum": None if metadata_unavailable else bool(expected_sha256 and checksum_status != "mismatch"),
                 "aibom": True,
                 "format_specific_inspection": True,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] in {"permissive", "review_required"},

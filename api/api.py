@@ -3232,6 +3232,37 @@ MODEL_INTAKE_COMMON_ARTIFACTS = {
     "adapter_model.safetensors",
     "adapter_model.bin",
 }
+MODEL_INTAKE_TOKENIZER_FILES = {
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocab.txt",
+}
+MODEL_INTAKE_DEPENDENCY_FILES = {
+    "conda.yml",
+    "dockerfile",
+    "environment.yml",
+    "package-lock.json",
+    "package.json",
+    "pipfile",
+    "pipfile.lock",
+    "poetry.lock",
+    "pyproject.toml",
+    "requirements-dev.txt",
+    "requirements.txt",
+    "setup.cfg",
+    "setup.py",
+}
+MODEL_INTAKE_METADATA_FILES = {
+    "config.json",
+    "generation_config.json",
+    "model_index.json",
+    "model.safetensors.index.json",
+    "readme.md",
+}
 
 
 def _import_model_intake_helpers():
@@ -3282,7 +3313,10 @@ def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = No
 
 def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int) -> dict[str, Any]:
     suffix = f"/revision/{urllib.parse.quote(revision, safe='')}" if revision and revision != "main" else ""
-    url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}{suffix}"
+    # `blobs=true` asks the Hub to include file metadata, including LFS sha256/size
+    # for hosted large model artifacts. Without it, `siblings` only contains names.
+    query = urllib.parse.urlencode({"blobs": "true"})
+    url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}{suffix}?{query}"
     request = urllib.request.Request(
         url,
         headers={
@@ -3298,7 +3332,7 @@ def _hf_candidate_score(path: str) -> int:
     name = Path(path).name.lower()
     ext = Path(path).suffix.lower()
     if name in MODEL_INTAKE_COMMON_ARTIFACTS:
-        return 70
+        return 120
     if ext == ".safetensors":
         return 100
     if ext == ".onnx":
@@ -3334,6 +3368,44 @@ def _hf_file_candidates(model_info: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(candidates, key=lambda item: (-int(item.get("score") or 0), str(item.get("path") or "")))
 
 
+def _hf_include_inventory_file(path: str) -> bool:
+    name = Path(path).name.lower()
+    if _hf_candidate_score(path) > 0:
+        return True
+    if name in MODEL_INTAKE_TOKENIZER_FILES | MODEL_INTAKE_DEPENDENCY_FILES | MODEL_INTAKE_METADATA_FILES:
+        return True
+    if name.endswith("_config.json"):
+        return True
+    return False
+
+
+def _hf_repo_file_inventory(model_info: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+    for sibling in model_info.get("siblings") or []:
+        path = str(sibling.get("rfilename") or sibling.get("path") or "")
+        if not path or not _hf_include_inventory_file(path):
+            continue
+        lfs = sibling.get("lfs") if isinstance(sibling.get("lfs"), dict) else {}
+        item = {
+            "path": path,
+            "size_bytes": sibling.get("size") or lfs.get("size"),
+            "sha256": lfs.get("sha256"),
+            "blob_id": sibling.get("blobId"),
+            "source": "huggingface_model_info",
+        }
+        inventory.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
+    return inventory[:limit]
+
+
+def _hf_files_named(model_info: dict[str, Any], names: set[str]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for item in _hf_repo_file_inventory(model_info):
+        name = Path(str(item.get("path") or "")).name.lower()
+        if name in names:
+            matches.append(item)
+    return matches
+
+
 def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revision: str, selected: dict[str, Any] | None) -> dict[str, Any]:
     card_data = model_info.get("cardData") if isinstance(model_info.get("cardData"), dict) else {}
     tags = model_info.get("tags") if isinstance(model_info.get("tags"), list) else []
@@ -3342,6 +3414,9 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
     license_ref = card_data.get("license") or next((tag.removeprefix("license:") for tag in tags if isinstance(tag, str) and tag.startswith("license:")), None)
     evals = card_data.get("model-index") or card_data.get("eval_results") or card_data.get("eval_results_v2")
     sha = model_info.get("sha") or revision
+    file_inventory = _hf_repo_file_inventory(model_info)
+    tokenizer_files = _hf_files_named(model_info, MODEL_INTAKE_TOKENIZER_FILES)
+    dependency_files = _hf_files_named(model_info, MODEL_INTAKE_DEPENDENCY_FILES)
     metadata: dict[str, Any] = {
         "huggingface_repo": repo_id,
         "revision": sha,
@@ -3353,6 +3428,7 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
         "tags": tags[:50],
         "gated": model_info.get("gated"),
         "private": model_info.get("private"),
+        "huggingface_file_inventory": file_inventory,
     }
     if license_ref:
         metadata["license"] = license_ref
@@ -3360,12 +3436,23 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
         metadata["training_data_ref"] = datasets
     if base_model:
         metadata["base_model"] = base_model
+    if tokenizer_files:
+        metadata["tokenizer"] = tokenizer_files
+    if dependency_files:
+        metadata["package_dependencies"] = {
+            "source": "huggingface_repo_files",
+            "files": dependency_files,
+        }
     if evals:
         metadata["security_evals"] = {"source": "huggingface_model_card", "results": evals}
     if selected:
         metadata["huggingface_file"] = selected.get("path")
         if selected.get("sha256"):
             metadata["sha256"] = selected.get("sha256")
+            metadata["sha256_source"] = "huggingface_lfs"
+            metadata["sha256_scope"] = "full_artifact"
+        if selected.get("size_bytes"):
+            metadata["artifact_size_bytes"] = selected.get("size_bytes")
     return {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
 
 
@@ -3389,7 +3476,8 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
         warnings.append(f"Could not fetch Hugging Face model metadata: {type(exc).__name__}: {exc}")
 
     candidates = _hf_file_candidates(model_info) if model_info else []
-    selected = next((item for item in candidates if item["path"] == request.filename), None) if request.filename else None
+    requested_filename = request.filename or hf_ref.get("filename")
+    selected = next((item for item in candidates if item["path"] == requested_filename), None) if requested_filename else None
     selected = selected or (candidates[0] if candidates else None)
     if selected:
         hf_ref = parse_huggingface_ref(request.ref, {
@@ -3496,9 +3584,48 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
     }
 
 
+def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
+    """Best-effort provider metadata lookup for direct API/UI scan submissions."""
+    artifact_ref = (request.artifact_url or "").strip()
+    metadata = dict(request.metadata_json or {})
+    if _detect_model_intake_platform(artifact_ref, metadata) != "huggingface":
+        return request
+
+    try:
+        resolve_request = ModelIntakeResolveRequest(
+            platform="huggingface",
+            ref=artifact_ref if _is_hf_ref(artifact_ref) else f"https://huggingface.co/{artifact_ref}",
+            revision=metadata.get("revision") if isinstance(metadata.get("revision"), str) else None,
+            filename=metadata.get("huggingface_file") if isinstance(metadata.get("huggingface_file"), str) else None,
+            metadata_json=metadata,
+            timeout_seconds=min(max(int(request.timeout_seconds or 20), 1), 60),
+        )
+        resolved = _resolve_huggingface_model_intake(resolve_request)
+    except Exception as exc:
+        logger.warning("Could not auto-enrich Hugging Face model intake request: %s: %s", type(exc).__name__, exc)
+        return request
+
+    scan_payload = resolved.get("scan_payload") if isinstance(resolved.get("scan_payload"), dict) else {}
+    resolved_metadata = scan_payload.get("metadata_json") if isinstance(scan_payload.get("metadata_json"), dict) else {}
+    merged_metadata = {**resolved_metadata, **metadata}
+    expected_sha = request.expected_sha256 or scan_payload.get("expected_sha256") or merged_metadata.get("sha256")
+    model_card_url = request.model_card_url or scan_payload.get("model_card_url") or merged_metadata.get("model_card_url")
+    artifact_url = scan_payload.get("artifact_url") or request.artifact_url
+    name = request.name or scan_payload.get("name")
+
+    return request.model_copy(update={
+        "artifact_url": artifact_url,
+        "name": name,
+        "metadata_json": merged_metadata,
+        "expected_sha256": expected_sha,
+        "model_card_url": model_card_url,
+    })
+
+
 @app.post("/model-intake/scan")
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
+    request = _enrich_model_intake_scan_request(request)
     artifact_ref = (request.artifact_url or "").strip()
     if not artifact_ref:
         raise HTTPException(status_code=400, detail="artifact_url is required")

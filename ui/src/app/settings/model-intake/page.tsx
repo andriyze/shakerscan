@@ -487,6 +487,8 @@ export default function ModelIntakeSettingsPage() {
                 <div>Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
                 <div>Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
                 <div>File: <span className="text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
+                <div>License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
+                <div>Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
                 <div>Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
               </div>
               {resolverResult.warnings.length > 0 && (
@@ -526,7 +528,9 @@ export default function ModelIntakeSettingsPage() {
                             {file.risk === 'lower' ? 'lower risk' : 'review'}
                           </span>
                         </div>
-                        <div className="mt-1 text-gray-500">{file.extension || 'unknown'} - {formatBytes(file.size_bytes)}</div>
+                        <div className="mt-1 text-gray-500">
+                          {file.extension || 'unknown'} - {formatBytes(file.size_bytes)}{file.sha256 ? ' - registry SHA-256 available' : ''}
+                        </div>
                       </button>
                     )
                   })}

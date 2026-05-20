@@ -110,6 +110,51 @@ def test_model_intake_does_not_flag_valid_safetensors_metadata_as_pickle(tmp_pat
     assert result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]["valid_json"] is True
 
 
+def test_model_intake_does_not_compare_full_hash_to_truncated_sample(monkeypatch):
+    artifact_bytes = b"a" * 1024
+    full_artifact_sha = "06e413d5827a06921fac327ce46db2569a05107ca9723076176809dca1294563"
+
+    def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
+        return artifact_bytes, {
+            "source": "huggingface",
+            "status": 206,
+            "bytes_observed": len(artifact_bytes),
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(model_intake, "_download_http", fake_download_http)
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            "hf://acme/ranker@abc123/model.safetensors",
+            {
+                "expected_sha256": full_artifact_sha,
+                "model_card_url": "https://huggingface.co/acme/ranker",
+                "deployment_approved": True,
+                "metadata_json": {
+                    "source_repo": "https://huggingface.co/acme/ranker",
+                    "license": "apache-2.0",
+                    "sha256": full_artifact_sha,
+                    "sha256_source": "huggingface_lfs",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:sha256_mismatch" not in finding_ids
+    assert "model_intake:missing_checksum" not in finding_ids
+    assert "model_intake:checksum_not_fully_verified" in finding_ids
+    assert result["model_intake"]["summary"]["checksum_status"] == "known_unverified_truncated"
+    assert result["model_intake"]["summary"]["expected_sha256"] == full_artifact_sha
+    assert result["model_intake"]["checks"]["checksum"] is True
+
+
 def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"

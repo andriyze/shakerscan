@@ -163,3 +163,110 @@ def test_sanitize_ai_settings_leaves_demo_urls_empty_by_default():
     assert settings["demo_honey_public_url"] == ""
     assert settings["demo_honey_scanner_url"] == ""
     assert api_module._normalize_demo_base_url("") == ""
+
+
+def test_huggingface_model_info_requests_lfs_blob_metadata(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit):
+            return b'{"siblings":[]}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(api_module.urllib.request, "urlopen", fake_urlopen)
+
+    result = api_module._hf_api_model_info("acme/ranker", "abc123", 7)
+
+    assert result == {"siblings": []}
+    assert captured["timeout"] == 7
+    assert captured["url"] == "https://huggingface.co/api/models/acme/ranker/revision/abc123?blobs=true"
+
+
+def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(monkeypatch):
+    model_info = {
+        "sha": "abc123",
+        "pipeline_tag": "text-generation",
+        "library_name": "transformers",
+        "tags": ["license:apache-2.0"],
+        "cardData": {"base_model": "base/model"},
+        "siblings": [
+            {
+                "rfilename": "vision/vit.safetensors",
+                "size": 1024,
+                "blobId": "blob-vit",
+                "lfs": {"sha256": "e" * 64, "size": 1024},
+            },
+            {
+                "rfilename": "model.safetensors",
+                "size": 2048,
+                "blobId": "blob-model",
+                "lfs": {"sha256": "f" * 64, "size": 2048},
+            },
+            {"rfilename": "tokenizer.json", "size": 100, "blobId": "blob-tokenizer"},
+            {"rfilename": "requirements.txt", "size": 42, "blobId": "blob-reqs"},
+        ],
+    }
+    monkeypatch.setattr(api_module, "_hf_api_model_info", lambda repo_id, revision, timeout_seconds: model_info)
+
+    resolved = api_module._resolve_huggingface_model_intake(
+        api_module.ModelIntakeResolveRequest(
+            platform="huggingface",
+            ref="https://huggingface.co/acme/ranker",
+            timeout_seconds=5,
+        )
+    )
+
+    metadata = resolved["metadata_json"]
+    assert resolved["selected_file"]["path"] == "model.safetensors"
+    assert resolved["scan_payload"]["expected_sha256"] == "f" * 64
+    assert metadata["sha256_source"] == "huggingface_lfs"
+    assert metadata["license"] == "apache-2.0"
+    assert metadata["tokenizer"][0]["path"] == "tokenizer.json"
+    assert metadata["package_dependencies"]["files"][0]["path"] == "requirements.txt"
+
+    resolved_file_url = api_module._resolve_huggingface_model_intake(
+        api_module.ModelIntakeResolveRequest(
+            platform="huggingface",
+            ref="https://huggingface.co/acme/ranker/resolve/abc123/vision/vit.safetensors",
+            timeout_seconds=5,
+        )
+    )
+    assert resolved_file_url["selected_file"]["path"] == "vision/vit.safetensors"
+    assert resolved_file_url["scan_payload"]["expected_sha256"] == "e" * 64
+
+
+def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
+    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", lambda request: {
+        "scan_payload": {
+            "artifact_url": "https://huggingface.co/acme/ranker/resolve/abc123/model.safetensors",
+            "name": "Hugging Face: acme/ranker",
+            "expected_sha256": "a" * 64,
+            "model_card_url": "https://huggingface.co/acme/ranker",
+            "metadata_json": {
+                "huggingface_repo": "acme/ranker",
+                "huggingface_file": "model.safetensors",
+                "license": "apache-2.0",
+                "sha256": "a" * 64,
+            },
+        },
+    })
+
+    request = api_module.ModelIntakeScanRequest(artifact_url="acme/ranker")
+    enriched = api_module._enrich_model_intake_scan_request(request)
+
+    assert enriched.artifact_url.endswith("/resolve/abc123/model.safetensors")
+    assert enriched.expected_sha256 == "a" * 64
+    assert enriched.model_card_url == "https://huggingface.co/acme/ranker"
+    assert enriched.metadata_json["license"] == "apache-2.0"

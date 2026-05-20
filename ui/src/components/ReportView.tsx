@@ -165,7 +165,7 @@ function getAIRecommendedFixes(findings: any[]) {
 const MODEL_INTAKE_CHECK_LABELS: Record<string, string> = {
   aibom: 'AIBOM generated',
   approval: 'Deployment approval',
-  checksum: 'Expected checksum match',
+  checksum: 'Checksum evidence',
   provenance: 'Source provenance',
   malware_scan: 'Malware scan evidence',
   license_policy: 'License policy',
@@ -182,15 +182,15 @@ const MODEL_INTAKE_CHECK_LABELS: Record<string, string> = {
 
 const MODEL_INTAKE_ACTIONS: Record<string, string> = {
   approval: 'Record deployment approval with approver, timestamp, and policy version.',
-  checksum: 'Add the observed SHA-256 as the expected checksum, then rerun intake.',
+  checksum: 'Supply a trusted expected SHA-256, or explicitly pin the observed SHA-256 as the approved baseline for this exact artifact revision, then rerun intake.',
   provenance: 'Attach source repository, revision, and release provenance evidence.',
-  malware_scan: 'Attach malware/YARA scan result with engine and timestamp.',
+  malware_scan: 'Attach or run a malware/YARA scan result with engine, result, and timestamp.',
   license_policy: 'Record the license and review whether it permits the intended deployment.',
   license_review: 'Add license or legal/security review evidence.',
   security_evals: 'Attach model safety/security evaluation results and acceptance criteria.',
   monitoring_plan: 'Define monitoring for drift, abuse, leakage, cost anomalies, and incident response.',
-  artifact_signing: 'Attach a signature, Sigstore bundle, cosign attestation, or registry signing evidence.',
-  sbom_dependencies: 'Attach SBOM or dependency inventory for model package and serving components.',
+  artifact_signing: 'Attach a signature, Sigstore bundle, cosign attestation, or registry signing evidence, then rerun intake for verification.',
+  sbom_dependencies: 'Attach or generate an SBOM/dependency inventory for the model package, tokenizer/adapters, and serving runtime.',
   unsafe_serialization: 'Use a non-executable format or run legacy artifacts only through a sandboxed conversion pipeline.',
   signature_verification: 'Verify the signature or attestation and record verification status.',
   deployment_restrictions: 'Record approved environments, data-use limits, prohibited uses, and rollback constraints.',
@@ -210,6 +210,9 @@ function hasModelIntakeSafeFormatEvidence(summary: any, supplyChain: any) {
 }
 
 function getModelIntakeCheckStatus(check: string, passed: any, summary: any, supplyChain: any) {
+  if (check === 'checksum' && summary?.checksum_status === 'known_unverified_truncated') {
+    return { label: 'pinned, sampled', className: 'text-yellow-300' }
+  }
   if (check === 'unsafe_serialization' && hasModelIntakeSafeFormatEvidence(summary, supplyChain)) {
     return { label: 'passed', className: 'text-green-300' }
   }
@@ -228,12 +231,14 @@ function getModelIntakeCheckStatus(check: string, passed: any, summary: any, sup
   return { label: 'missing', className: 'text-red-300' }
 }
 
-function getModelIntakeRequiredActions(checks: any, summary: any, supplyChain: any) {
+function getModelIntakeRequiredActions(checks: any, summary: any, supplyChain: any, fetchMeta?: any) {
   if (!checks || typeof checks !== 'object') return []
   const safeFormatEvidence = hasModelIntakeSafeFormatEvidence(summary, supplyChain)
+  const fetchWasTruncated = Boolean(fetchMeta?.truncated)
   return Object.entries(checks)
     .filter(([check, passed]) => {
       if (check === 'unsafe_serialization' && safeFormatEvidence) return false
+      if (check === 'signature_verification' && checks.artifact_signing === false) return false
       if (passed === true) return false
       if (passed === null || passed === undefined) {
         return check === 'license_policy' && supplyChain?.license_policy?.status === 'missing'
@@ -243,7 +248,10 @@ function getModelIntakeRequiredActions(checks: any, summary: any, supplyChain: a
     .map(([check]) => {
       const action = MODEL_INTAKE_ACTIONS[check] || `Review ${formatModelIntakeCheckName(check).toLowerCase()}.`
       if (check === 'checksum' && summary?.sha256) {
-        return `${action} Observed SHA-256: ${summary.sha256}`
+        if (fetchWasTruncated) {
+          return `Supply a trusted full-artifact SHA-256, or rerun intake with a larger download cap before pinning this artifact. Observed SHA-256 of inspected bytes: ${summary.sha256}`
+        }
+        return `${action} Observed SHA-256 available to copy/pin: ${summary.sha256}`
       }
       return action
     })
@@ -493,7 +501,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       : 'border-slate-700 bg-slate-900 text-slate-200'
   const modelIntakeFormatInspection = modelIntakeSupplyChain?.format_inspection || modelIntakeAibom?.format_inspection || null
   const modelIntakeSafetensorsHeader = modelIntakeFormatInspection?.safetensors_header || null
-  const modelIntakeRequiredActions = getModelIntakeRequiredActions(modelIntakeChecks, modelIntakeSummary, modelIntakeSupplyChain)
+  const modelIntakeRequiredActions = getModelIntakeRequiredActions(modelIntakeChecks, modelIntakeSummary, modelIntakeSupplyChain, modelIntakeFetch)
   const modelIntakeDisplayFormatPosture = hasModelIntakeSafeFormatEvidence(modelIntakeSummary, modelIntakeSupplyChain)
     ? 'safer_static_format'
     : modelIntakeSummary?.format_posture
@@ -1289,7 +1297,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
           {modelIntakeRequiredActions.length > 0 && (
             <div className="mt-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-3">
-              <div className="text-sm font-semibold text-yellow-100">Required to approve</div>
+              <div className="text-sm font-semibold text-yellow-100">Evidence needed before approval</div>
+              <p className="mt-1 text-xs text-yellow-100/75">
+                Scanner observations help fill the intake record, but trusted approval evidence must come from the release, registry, CI/CD, or governance process.
+              </p>
               <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
                 {modelIntakeRequiredActions.slice(0, 10).map((action, index) => (
                   <li key={`${action}-${index}`}>{action}</li>
@@ -1300,8 +1311,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
           {modelIntakeSummary?.sha256 && (
             <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
-              <div className="text-xs text-gray-400">Observed SHA-256</div>
+              <div className="text-xs text-gray-400">
+                Observed SHA-256{modelIntakeFetch?.truncated ? ' of inspected bytes' : ''}
+              </div>
               <div className="mt-1 break-all font-mono text-xs text-gray-300">{modelIntakeSummary.sha256}</div>
+            </div>
+          )}
+
+          {modelIntakeSummary?.expected_sha256 && modelIntakeSummary.expected_sha256 !== modelIntakeSummary?.sha256 && (
+            <div className="mt-3 rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="text-xs text-gray-400">Expected full-artifact SHA-256</div>
+              <div className="mt-1 break-all font-mono text-xs text-gray-300">{modelIntakeSummary.expected_sha256}</div>
+              {modelIntakeSummary?.checksum_status && (
+                <div className="mt-2 text-xs text-gray-500">Status: {String(modelIntakeSummary.checksum_status).replace(/_/g, ' ')}</div>
+              )}
             </div>
           )}
 
