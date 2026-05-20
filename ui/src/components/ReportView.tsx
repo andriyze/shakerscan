@@ -6,6 +6,7 @@ import ComplianceSection from '@/components/ComplianceSection'
 import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
+import { CheckCircle2 } from 'lucide-react'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -95,6 +96,61 @@ function compactJson(value: any): string {
   } catch {
     return String(value)
   }
+}
+
+function getAIDeployRecommendation(decision: string) {
+  if (decision === 'block') return 'Do not deploy'
+  if (decision === 'needs_approval') return 'Manual approval required'
+  if (decision === 'allow') return 'Deployable with monitoring'
+  return 'Awaiting verdict'
+}
+
+function formatAIProfile(profile: any) {
+  const value = String(profile || '').toLowerCase()
+  if (value === 'smoke') return 'Quick'
+  if (value === 'trace') return 'Trace'
+  if (value === 'standard') return 'Standard'
+  if (value === 'deep') return 'Deep'
+  return String(profile || 'AI Gate')
+}
+
+function formatAIProbePack(pack: any) {
+  const value = String(pack || '')
+  const labels: Record<string, string> = {
+    'shaker-ai-smoke': 'AI Smoke',
+    'shaker-owasp-llm': 'OWASP LLM',
+    'shaker-agent-abuse': 'Agent Abuse',
+    'shaker-mcp-security': 'MCP Security',
+    'shaker-rag-lite': 'RAG Lite',
+  }
+  return labels[value] || value
+}
+
+function getAIRecommendedFixes(findings: any[]) {
+  const text = findings
+    .map((finding) => `${finding.title || ''} ${finding.description || ''} ${finding.category || ''}`)
+    .join(' ')
+    .toLowerCase()
+  const fixes: string[] = []
+
+  if (text.includes('prompt') || text.includes('instruction')) {
+    fixes.push('Block system prompt and developer instruction disclosure.')
+  }
+  if (text.includes('secret') || text.includes('credential') || text.includes('token') || text.includes('pii')) {
+    fixes.push('Remove secrets from reachable context and add credential output filtering.')
+  }
+  if (text.includes('unbounded') || text.includes('cost') || text.includes('consumption')) {
+    fixes.push('Enforce output, token, and request limits for expensive generations.')
+  }
+  if (text.includes('rag') || text.includes('tenant') || text.includes('retrieval')) {
+    fixes.push('Apply retrieval ACLs before generation and redact cross-tenant source metadata.')
+  }
+  if (fixes.length === 0 && findings.length > 0) {
+    fixes.push('Review failed probe transcripts, fix the accepted findings, and rerun the same probe pack.')
+  }
+  if (findings.length > 0) fixes.push('Rerun AI Smoke after fixes before promoting the target.')
+
+  return fixes
 }
 
 function getAIProbeOutcome(
@@ -319,6 +375,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
   const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const aiScanProfile = scan.options?.ai_scan_profile || ai_gate?.scan_profile || 'AI Gate'
+  const aiScanProfileLabel = formatAIProfile(aiScanProfile)
   const aiGateFindingsByProbe = findings.reduce<Record<string, any[]>>((groups, finding) => {
     const evidence = parseEvidenceRecord(finding.evidence)
     const sourceFindingId = String(finding.source_finding_id || finding.id || '')
@@ -328,6 +385,29 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     groups[probeId] = [...(groups[probeId] || []), enrichedFinding]
     return groups
   }, {})
+  const aiGateProbeSummaries: Array<{
+    probeId: string
+    family: string
+    findings: any[]
+    detectorHits: any[]
+  }> = aiGateTranscripts.map((transcript: any, idx: number) => {
+    const probeId = String(transcript.probe_id || `probe-${idx + 1}`)
+    const turns = Array.isArray(transcript.turns) && transcript.turns.length > 0
+      ? transcript.turns
+      : [transcript]
+    const detectorHits = turns.flatMap((turn: any) => Array.isArray(turn?.detector_hits) ? turn.detector_hits : [])
+    return {
+      probeId,
+      family: transcript.probe_family || transcript.strategy_id || 'probe',
+      findings: aiGateFindingsByProbe[probeId] || [],
+      detectorHits,
+    }
+  })
+  const aiGateFailedProbeCount = aiGateProbeSummaries.filter((probe) => probe.findings.length > 0).length
+  const aiGateTotalProbeCount = Number(aiGateStats.total_probes ?? aiGateTranscripts.length)
+  const aiGateDeployRecommendation = getAIDeployRecommendation(aiGateDecisionText)
+  const aiGateRecommendedFixes = getAIRecommendedFixes(findings)
+  const aiGateTopFinding = findings[0]
 
   const [expandedAI, setExpandedAI] = useState<Set<string>>(new Set())
   const [expandedAIRubrics, setExpandedAIRubrics] = useState<Set<string>>(new Set())
@@ -480,9 +560,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <p className="text-lg font-semibold capitalize">{scanTypeLabel}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Profile' : isModelIntakeScan ? 'Intake Mode' : 'Scan Mode'}</h3>
+            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Depth' : isModelIntakeScan ? 'Intake Mode' : 'Scan Mode'}</h3>
             <p className="text-lg font-semibold capitalize">
-              {isAIScan ? aiScanProfile : isModelIntakeScan ? 'Artifact checks' : scan.options?.quick ? 'Quick' : 'Thorough'}
+              {isAIScan ? aiScanProfileLabel : isModelIntakeScan ? 'Artifact checks' : scan.options?.quick ? 'Quick' : 'Thorough'}
               {!isAIScan && !isModelIntakeScan && scan.options?.active && ' + Active'}
             </p>
           </div>
@@ -523,10 +603,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </span>
               )}
               {ai_gate.probe_pack && (
-                <span className="rounded bg-blue-900/40 px-3 py-1 text-sm text-blue-200">{ai_gate.probe_pack}</span>
+                <span className="rounded bg-blue-900/40 px-3 py-1 text-sm text-blue-200">Probe pack: {formatAIProbePack(ai_gate.probe_pack)}</span>
               )}
               {ai_gate.scan_profile && (
-                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">{ai_gate.scan_profile}</span>
+                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">Depth: {formatAIProfile(ai_gate.scan_profile)}</span>
               )}
             </div>
           </div>
@@ -536,6 +616,43 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               {aiGateDecision.rationale}
             </p>
           )}
+
+          <div className={`mb-5 rounded-lg border p-4 ${
+            aiGateDecisionText === 'block'
+              ? 'border-red-500/40 bg-red-950/30'
+              : aiGateDecisionText === 'needs_approval'
+              ? 'border-yellow-500/40 bg-yellow-950/20'
+              : aiGateDecisionText === 'allow'
+              ? 'border-green-500/40 bg-green-950/20'
+              : 'border-gray-700 bg-gray-900'
+          }`}>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Deploy decision</div>
+                <div className="mt-1 text-2xl font-bold text-white">{aiGateDeployRecommendation}</div>
+                <p className="mt-2 text-sm text-gray-300">
+                  {aiGateFailedProbeCount}/{aiGateTotalProbeCount || aiGateTranscripts.length} probes failed · {findings.length} finding{findings.length === 1 ? '' : 's'}
+                  {aiGateTopFinding?.title ? ` · top issue: ${aiGateTopFinding.title}` : ''}
+                </p>
+              </div>
+              <span className={`rounded px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
+                {aiGateDecision.decision || 'unknown'}
+              </span>
+            </div>
+            {aiGateRecommendedFixes.length > 0 && (
+              <div className="mt-4 rounded border border-gray-800 bg-black/20 p-3">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Fix first</div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {aiGateRecommendedFixes.slice(0, 6).map((fix) => (
+                    <div key={fix} className="flex gap-2 text-sm text-gray-200">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+                      <span>{fix}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 mb-5">
             <div className="bg-gray-700/40 rounded-lg p-3">
@@ -547,7 +664,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="text-lg font-semibold text-white">{aiGateStats.total_probes ?? aiGateTranscripts.length}</div>
             </div>
             <div className="bg-gray-700/40 rounded-lg p-3">
-              <div className="text-xs text-gray-400">Successful</div>
+              <div className="text-xs text-gray-400">Requests OK</div>
               <div className="text-lg font-semibold text-green-400">{aiGateStats.successful_requests ?? 0}</div>
             </div>
             <div className="bg-gray-700/40 rounded-lg p-3">
@@ -576,7 +693,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-semibold text-gray-300">AI Control Evidence</h3>
+                  <h3 className="text-sm font-semibold text-gray-300">Deployment Readiness</h3>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Control metadata, governance, and audit evidence. Probe failures above remain the primary ship/no-ship signal.
+                  </p>
                   <p className="mt-1 text-xs text-gray-500">
                     {aiGateControlEvidence.summary.present || 0} present / {aiGateControlEvidence.summary.required || 0} required controls
                   </p>
@@ -623,6 +743,40 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     </div>
                   )
                 })}
+              </div>
+            </div>
+          )}
+
+          {aiGateProbeSummaries.some((probe) => probe.findings.length > 0) && (
+            <div className="mb-5 rounded-lg border border-gray-700 bg-gray-900 p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-300">Findings by Probe</h3>
+                  <p className="mt-1 text-xs text-gray-500">What failed, grouped by the probe that produced accepted attack evidence.</p>
+                </div>
+                <span className="rounded bg-red-900/40 px-2 py-1 text-xs text-red-200">
+                  {aiGateFailedProbeCount} failed probe{aiGateFailedProbeCount === 1 ? '' : 's'}
+                </span>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                {aiGateProbeSummaries.filter((probe) => probe.findings.length > 0).map((probe) => (
+                  <div key={probe.probeId} className="rounded border border-red-500/30 bg-red-950/10 p-3">
+                    <div className="font-mono text-xs text-red-200">{probe.probeId}</div>
+                    <div className="mt-1 text-xs text-gray-500">{probe.family} · {probe.findings.length} finding{probe.findings.length === 1 ? '' : 's'}</div>
+                    <div className="mt-3 space-y-2">
+                      {probe.findings.slice(0, 4).map((finding: any) => (
+                        <div key={finding.id || finding.title} className="rounded bg-black/20 p-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${getSeverityPill(finding.severity)}`}>
+                              {finding.severity || 'info'}
+                            </span>
+                            <span className="text-xs font-medium text-gray-100">{finding.title || 'Finding'}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -2493,7 +2647,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Attack Chains Analysis */}
-      {attack_chains && (
+      {attack_chains && !isAIScan && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
             <h2 className="text-2xl font-bold">Attack Chain Analysis</h2>

@@ -99,7 +99,7 @@ const PROBE_PACKS: Array<{ value: AIProbePack; label: string }> = [
 ]
 
 const SCAN_PROFILES: Array<{ value: AIScanProfile; label: string }> = [
-  { value: 'smoke', label: 'Smoke' },
+  { value: 'smoke', label: 'Quick' },
   { value: 'trace', label: 'Trace' },
   { value: 'standard', label: 'Standard' },
   { value: 'deep', label: 'Deep' },
@@ -213,9 +213,22 @@ function defaultRunConfig(target: AITarget): RunConfig {
   const typeDefault = TARGET_TYPES.find((type) => type.value === target.target_type)
   return {
     probe_pack: typeDefault?.probePack || 'shaker-ai-smoke',
-    scan_profile: target.target_type === 'mcp_trace' ? 'smoke' : 'standard',
+    scan_profile: 'smoke',
     environment: target.production_mode ? 'production' : 'preview',
   }
+}
+
+function getRunButtonLabel(config: RunConfig) {
+  return config.scan_profile === 'smoke' ? 'Run Quick Scan' : 'Run AI Gate Scan'
+}
+
+function summarizeRequestTemplate(template: Record<string, unknown> | null | undefined) {
+  const request = template || {}
+  const promptFields = ['message', 'prompt', 'query', 'input', 'task', 'params']
+    .filter((field) => Object.prototype.hasOwnProperty.call(request, field))
+  if (promptFields.length > 0) return promptFields.slice(0, 3).join(', ')
+  const keys = Object.keys(request)
+  return keys.length ? keys.slice(0, 3).join(', ') : 'custom JSON'
 }
 
 export default function AIGateSettingsPage() {
@@ -237,6 +250,7 @@ export default function AIGateSettingsPage() {
   const [copied, setCopied] = useState<string | null>(null)
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [showAddTarget, setShowAddTarget] = useState(false)
+  const [showAdvancedTarget, setShowAdvancedTarget] = useState(false)
   const [showDemoTargets, setShowDemoTargets] = useState(false)
   const [demoRunning, setDemoRunning] = useState(false)
   const [demoResult, setDemoResult] = useState<AIDemoRunResponse | null>(null)
@@ -267,7 +281,7 @@ export default function AIGateSettingsPage() {
   const loadTargets = useCallback(async () => {
     setLoading(true)
     try {
-      const payload = await getAITargets({ includeInactive: false, includeDemo: showDemoTargets })
+      const payload = await getAITargets({ includeInactive: false, includeDemo: showDemoTargets, limit: 500 })
       setTargets(payload.targets)
       setRunConfigs((prev) => {
         const next = { ...prev }
@@ -341,6 +355,7 @@ export default function AIGateSettingsPage() {
     setCanaryTokens('')
     setControlMetadata('')
     setProductionMode(false)
+    setShowAdvancedTarget(false)
     applyTargetType('api_chat')
   }
 
@@ -358,6 +373,7 @@ export default function AIGateSettingsPage() {
     setTokenBudget(template.token_budget ? String(template.token_budget) : '')
     setControlMetadata(jsonText(template.metadata_json || {}))
     setProductionMode(false)
+    setShowAdvancedTarget(true)
   }
 
   async function copyCurrentPayload() {
@@ -516,6 +532,7 @@ export default function AIGateSettingsPage() {
     setSecret('')
     setProductionMode(false)
     setShowAddTarget(true)
+    setShowAdvancedTarget(true)
     setMessage(`Loaded discovered ${candidate.target_type} candidate into the form.`)
   }
 
@@ -729,52 +746,67 @@ export default function AIGateSettingsPage() {
             )}
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="grid gap-1 text-sm text-gray-300">
-              Request template JSON
-              <textarea value={requestTemplate} onChange={(e) => setRequestTemplate(e.target.value)} className={textareaClass} rows={7} />
-            </label>
-            <label className="grid gap-1 text-sm text-gray-300">
-              Headers template JSON
-              <textarea value={headersTemplate} onChange={(e) => setHeadersTemplate(e.target.value)} className={textareaClass} rows={7} />
-            </label>
+          <div className="rounded-lg border border-gray-800 bg-gray-950/40">
+            <button
+              type="button"
+              onClick={() => setShowAdvancedTarget((value) => !value)}
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-800/60"
+            >
+              <span>Advanced request, budgets, and deployment metadata</span>
+              <span className="text-xs text-blue-300">{showAdvancedTarget ? 'Hide' : 'Show'}</span>
+            </button>
+
+            {showAdvancedTarget && (
+              <div className="space-y-4 border-t border-gray-800 p-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="grid gap-1 text-sm text-gray-300">
+                    Request template JSON
+                    <textarea value={requestTemplate} onChange={(e) => setRequestTemplate(e.target.value)} className={textareaClass} rows={7} />
+                  </label>
+                  <label className="grid gap-1 text-sm text-gray-300">
+                    Headers template JSON
+                    <textarea value={headersTemplate} onChange={(e) => setHeadersTemplate(e.target.value)} className={textareaClass} rows={7} />
+                  </label>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="grid gap-1 text-sm text-gray-300">
+                    Rate limit RPS
+                    <input value={rateLimitRps} onChange={(e) => setRateLimitRps(e.target.value)} className={inputClass} inputMode="numeric" />
+                  </label>
+                  <label className="grid gap-1 text-sm text-gray-300">
+                    Request budget
+                    <input value={requestBudget} onChange={(e) => setRequestBudget(e.target.value)} className={inputClass} inputMode="numeric" />
+                  </label>
+                  <label className="grid gap-1 text-sm text-gray-300">
+                    Token budget
+                    <input value={tokenBudget} onChange={(e) => setTokenBudget(e.target.value)} className={inputClass} inputMode="numeric" placeholder="optional" />
+                  </label>
+                </div>
+
+                <label className="grid gap-1 text-sm text-gray-300">
+                  Canary tokens
+                  <textarea value={canaryTokens} onChange={(e) => setCanaryTokens(e.target.value)} className={textareaClass} rows={3} placeholder="One per line or comma-separated" />
+                </label>
+
+                <label className="grid gap-1 text-sm text-gray-300">
+                  Control metadata JSON
+                  <textarea
+                    value={controlMetadata}
+                    onChange={(e) => setControlMetadata(e.target.value)}
+                    className={textareaClass}
+                    rows={5}
+                    placeholder='{"asset_owner":"security","risk_tier":"high","data_classification":"restricted","retrieval_acl_matrix":"tenant-user-doc","tool_inventory":["refund"],"enforce_ai_control_baseline":true}'
+                  />
+                </label>
+
+                <label className="flex items-center gap-2 text-sm text-gray-300">
+                  <input type="checkbox" checked={productionMode} onChange={(e) => setProductionMode(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  Production target
+                </label>
+              </div>
+            )}
           </div>
-
-          <div className="grid gap-3 md:grid-cols-3">
-            <label className="grid gap-1 text-sm text-gray-300">
-              Rate limit RPS
-              <input value={rateLimitRps} onChange={(e) => setRateLimitRps(e.target.value)} className={inputClass} inputMode="numeric" />
-            </label>
-            <label className="grid gap-1 text-sm text-gray-300">
-              Request budget
-              <input value={requestBudget} onChange={(e) => setRequestBudget(e.target.value)} className={inputClass} inputMode="numeric" />
-            </label>
-            <label className="grid gap-1 text-sm text-gray-300">
-              Token budget
-              <input value={tokenBudget} onChange={(e) => setTokenBudget(e.target.value)} className={inputClass} inputMode="numeric" placeholder="optional" />
-            </label>
-          </div>
-
-          <label className="grid gap-1 text-sm text-gray-300">
-            Canary tokens
-            <textarea value={canaryTokens} onChange={(e) => setCanaryTokens(e.target.value)} className={textareaClass} rows={3} placeholder="One per line or comma-separated" />
-          </label>
-
-          <label className="grid gap-1 text-sm text-gray-300">
-            Control metadata JSON
-            <textarea
-              value={controlMetadata}
-              onChange={(e) => setControlMetadata(e.target.value)}
-              className={textareaClass}
-              rows={5}
-              placeholder='{"asset_owner":"security","risk_tier":"high","data_classification":"restricted","retrieval_acl_matrix":"tenant-user-doc","tool_inventory":["refund"],"enforce_ai_control_baseline":true}'
-            />
-          </label>
-
-          <label className="flex items-center gap-2 text-sm text-gray-300">
-            <input type="checkbox" checked={productionMode} onChange={(e) => setProductionMode(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
-            Production target
-          </label>
 
           <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
             <button type="submit" disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
@@ -932,6 +964,30 @@ export default function AIGateSettingsPage() {
                           )}
                         </div>
                       )}
+                      <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                          <div className="text-gray-500">Endpoint</div>
+                          <div className="mt-1 truncate text-gray-200">{target.method} {target.endpoint_url}</div>
+                        </div>
+                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                          <div className="text-gray-500">Prompt field</div>
+                          <div className="mt-1 truncate text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
+                        </div>
+                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                          <div className="text-gray-500">Response field</div>
+                          <div className="mt-1 truncate font-mono text-gray-200">{target.response_path || '$'}</div>
+                        </div>
+                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                          <div className="text-gray-500">Last scan</div>
+                          <div className="mt-1 truncate text-gray-200">
+                            {target.last_scan_id ? (
+                              <Link className="text-blue-400 hover:text-blue-300" href={`/scans/${target.last_scan_id}`}>Open result</Link>
+                            ) : (
+                              'Not run'
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                     <button onClick={() => handleDelete(target)} className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400" title="Disable target">
                       <Trash2 className="h-4 w-4" />
@@ -947,7 +1003,7 @@ export default function AIGateSettingsPage() {
                       </select>
                     </label>
                     <label className="grid gap-1 text-xs text-gray-500">
-                      Profile
+                      Depth
                       <select value={config.scan_profile} onChange={(e) => updateRunConfig(target.id, { scan_profile: e.target.value as AIScanProfile })} className={inputClass}>
                         {SCAN_PROFILES.map((profile) => <option key={profile.value} value={profile.value}>{profile.label}</option>)}
                       </select>
@@ -960,7 +1016,7 @@ export default function AIGateSettingsPage() {
                     </label>
                     <button onClick={() => handleConnectivityTest(target)} disabled={testingTarget === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-300 hover:bg-gray-800 disabled:opacity-50">
                       {testingTarget === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                      Test
+                      Test Connection
                     </button>
                     {target.target_type === 'mcp_trace' && (
                       <button onClick={() => handleMCPReadiness(target)} disabled={testingMCP === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/30 px-4 py-2 text-sm font-medium text-purple-100 hover:bg-purple-500/10 disabled:opacity-50">
@@ -970,7 +1026,7 @@ export default function AIGateSettingsPage() {
                     )}
                     <button onClick={() => handleRun(target)} disabled={scanning === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
                       {scanning === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                      Run
+                      {getRunButtonLabel(config)}
                     </button>
                   </div>
                   {connectivityResults[target.id] && (
