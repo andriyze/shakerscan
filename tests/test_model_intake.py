@@ -76,6 +76,40 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["result"]["decision"] == "allow"
 
 
+def test_model_intake_does_not_flag_valid_safetensors_metadata_as_pickle(tmp_path):
+    header = b'{"__metadata__":{"eval_set":"security-eval","note":"exec text in metadata is not pickle"},"weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
+    artifact = tmp_path / "model.safetensors"
+    artifact.write_bytes(len(header).to_bytes(8, "little") + header + b"\0\0\0\0")
+    expected_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "expected_sha256": expected_sha,
+                "signature_url": "https://example.test/model.safetensors.sig",
+                "model_card_url": "https://example.test/model-card",
+                "deployment_approved": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "license": "apache-2.0",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    finding_ids = {finding["id"] for finding in result["findings"]}
+    assert "model_intake:unsafe_serialization" not in finding_ids
+    assert result["model_intake"]["checks"]["unsafe_serialization"] is True
+    assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
+    assert result["model_intake"]["supply_chain"]["format_inspection"]["safetensors_header"]["valid_json"] is True
+
+
 def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "low"}, {"severity": "info"}])["decision"] == "allow"
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"

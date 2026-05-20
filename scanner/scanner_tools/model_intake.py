@@ -597,9 +597,11 @@ async def _fetch_json(url: str, timeout_seconds: int, max_bytes: int = 262_144) 
     return parsed, fetch_meta
 
 
-def _looks_like_pickle(data: bytes) -> bool:
+def _looks_like_pickle(data: bytes, ext: str = "") -> bool:
     if data.startswith(PICKLE_MAGIC_PREFIXES):
         return True
+    if ext in SAFER_MODEL_EXTENSIONS:
+        return False
     sample = data[:65536]
     return any(marker in sample for marker in PICKLE_OPCODE_MARKERS)
 
@@ -1067,7 +1069,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
-    pickle_like = _looks_like_pickle(artifact_bytes)
+    pickle_like = _looks_like_pickle(artifact_bytes, ext)
     zip_pickle_entries = zip_info.get("pickle_entries") or []
     zip_risky_entries = zip_info.get("risky_entries") or []
     if risky_ext or pickle_like or zip_pickle_entries:

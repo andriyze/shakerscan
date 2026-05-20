@@ -153,6 +153,93 @@ function getAIRecommendedFixes(findings: any[]) {
   return fixes
 }
 
+const MODEL_INTAKE_CHECK_LABELS: Record<string, string> = {
+  aibom: 'AIBOM generated',
+  approval: 'Deployment approval',
+  checksum: 'Expected checksum match',
+  provenance: 'Source provenance',
+  malware_scan: 'Malware scan evidence',
+  license_policy: 'License policy',
+  license_review: 'License review',
+  security_evals: 'Security evaluation evidence',
+  monitoring_plan: 'Monitoring plan',
+  artifact_signing: 'Signature or attestation',
+  sbom_dependencies: 'SBOM/dependencies',
+  unsafe_serialization: 'Safe serialization format',
+  signature_verification: 'Signature verification',
+  deployment_restrictions: 'Deployment restrictions',
+  format_specific_inspection: 'Format-specific inspection',
+}
+
+const MODEL_INTAKE_ACTIONS: Record<string, string> = {
+  approval: 'Record deployment approval with approver, timestamp, and policy version.',
+  checksum: 'Add the observed SHA-256 as the expected checksum, then rerun intake.',
+  provenance: 'Attach source repository, revision, and release provenance evidence.',
+  malware_scan: 'Attach malware/YARA scan result with engine and timestamp.',
+  license_policy: 'Record the license and review whether it permits the intended deployment.',
+  license_review: 'Add license or legal/security review evidence.',
+  security_evals: 'Attach model safety/security evaluation results and acceptance criteria.',
+  monitoring_plan: 'Define monitoring for drift, abuse, leakage, cost anomalies, and incident response.',
+  artifact_signing: 'Attach a signature, Sigstore bundle, cosign attestation, or registry signing evidence.',
+  sbom_dependencies: 'Attach SBOM or dependency inventory for model package and serving components.',
+  unsafe_serialization: 'Use a non-executable format or run legacy artifacts only through a sandboxed conversion pipeline.',
+  signature_verification: 'Verify the signature or attestation and record verification status.',
+  deployment_restrictions: 'Record approved environments, data-use limits, prohibited uses, and rollback constraints.',
+}
+
+function formatModelIntakeCheckName(check: string) {
+  return MODEL_INTAKE_CHECK_LABELS[check] || check.replace(/_/g, ' ')
+}
+
+function hasModelIntakeSafeFormatEvidence(summary: any, supplyChain: any) {
+  const inspection = supplyChain?.format_inspection || null
+  return Boolean(
+    summary?.extension === '.safetensors' &&
+      inspection?.lower_code_execution_risk &&
+      inspection?.safetensors_header?.valid_json
+  )
+}
+
+function getModelIntakeCheckStatus(check: string, passed: any, summary: any, supplyChain: any) {
+  if (check === 'unsafe_serialization' && hasModelIntakeSafeFormatEvidence(summary, supplyChain)) {
+    return { label: 'passed', className: 'text-green-300' }
+  }
+  if (check === 'license_policy' && supplyChain?.license_policy?.status === 'missing') {
+    return { label: 'missing', className: 'text-yellow-300' }
+  }
+  if (passed === null || passed === undefined) {
+    return { label: 'not requested', className: 'text-gray-400' }
+  }
+  if (passed) {
+    return { label: 'passed', className: 'text-green-300' }
+  }
+  if (check === 'unsafe_serialization' && summary?.extension === '.safetensors') {
+    return { label: 'needs review', className: 'text-yellow-300' }
+  }
+  return { label: 'missing', className: 'text-red-300' }
+}
+
+function getModelIntakeRequiredActions(checks: any, summary: any, supplyChain: any) {
+  if (!checks || typeof checks !== 'object') return []
+  const safeFormatEvidence = hasModelIntakeSafeFormatEvidence(summary, supplyChain)
+  return Object.entries(checks)
+    .filter(([check, passed]) => {
+      if (check === 'unsafe_serialization' && safeFormatEvidence) return false
+      if (passed === true) return false
+      if (passed === null || passed === undefined) {
+        return check === 'license_policy' && supplyChain?.license_policy?.status === 'missing'
+      }
+      return Boolean(MODEL_INTAKE_ACTIONS[check])
+    })
+    .map(([check]) => {
+      const action = MODEL_INTAKE_ACTIONS[check] || `Review ${formatModelIntakeCheckName(check).toLowerCase()}.`
+      if (check === 'checksum' && summary?.sha256) {
+        return `${action} Observed SHA-256: ${summary.sha256}`
+      }
+      return action
+    })
+}
+
 function getAIProbeOutcome(
   turns: any[],
   detectorHits: any[],
@@ -262,7 +349,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const http = scanData.http || {}
   const discovery = scanData.discovery || {}
   const server_versions = discovery.server_versions || {}
-  const rawFindings = Array.isArray(scanData.findings) ? scanData.findings : []
+  const rawModelIntake = scanData.model_intake || null
+  const rawModelIntakeSummary = rawModelIntake?.summary || null
+  const rawModelIntakeSupplyChain = rawModelIntake?.supply_chain || null
+  const suppressModelIntakeUnsafeSerialization = hasModelIntakeSafeFormatEvidence(rawModelIntakeSummary, rawModelIntakeSupplyChain)
+  const rawFindings = Array.isArray(scanData.findings)
+    ? scanData.findings.filter((finding: any) => {
+        if (!suppressModelIntakeUnsafeSerialization) return true
+        const id = String(finding?.id || finding?.fingerprint || finding?.source_finding_id || '')
+        return !id.endsWith('unsafe_serialization')
+      })
+    : []
   const persistedFindings = Array.isArray(scan.findings) ? scan.findings : []
   const rawOnlyFindings = rawFindings.length > 0 && persistedFindings.length === 0
   const findings = sortBySeverity(rawFindings)
@@ -336,7 +433,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const ai_logs = scanData.ai_logs || null
   const ai_summary = ai_logs?.summary || null
   const ai_executive = ai_summary?.executive_summary || null
-  const model_intake = scanData.model_intake || null
+  const model_intake = rawModelIntake
   const modelIntakeSummary = model_intake?.summary || null
   const modelIntakeArtifact = model_intake?.artifact || null
   const modelIntakeChecks = model_intake?.checks || null
@@ -374,6 +471,21 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
   const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const modelIntakeDecision = String(result?.decision || '').toLowerCase()
+  const modelIntakeDecisionClass =
+    modelIntakeDecision === 'block'
+      ? 'border-red-500/40 bg-red-950/30 text-red-100'
+      : modelIntakeDecision === 'review'
+      ? 'border-yellow-500/40 bg-yellow-950/30 text-yellow-100'
+      : modelIntakeDecision === 'allow'
+      ? 'border-green-500/40 bg-green-950/30 text-green-100'
+      : 'border-slate-700 bg-slate-900 text-slate-200'
+  const modelIntakeFormatInspection = modelIntakeSupplyChain?.format_inspection || modelIntakeAibom?.format_inspection || null
+  const modelIntakeSafetensorsHeader = modelIntakeFormatInspection?.safetensors_header || null
+  const modelIntakeRequiredActions = getModelIntakeRequiredActions(modelIntakeChecks, modelIntakeSummary, modelIntakeSupplyChain)
+  const modelIntakeDisplayFormatPosture = hasModelIntakeSafeFormatEvidence(modelIntakeSummary, modelIntakeSupplyChain)
+    ? 'safer_static_format'
+    : modelIntakeSummary?.format_posture
   const aiScanProfile = scan.options?.ai_scan_profile || ai_gate?.scan_profile || 'AI Gate'
   const aiScanProfileLabel = formatAIProfile(aiScanProfile)
   const aiGateFindingsByProbe = findings.reduce<Record<string, any[]>>((groups, finding) => {
@@ -1047,12 +1159,26 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {modelIntakeSummary?.artifact_ref || scan.target_url}
               </p>
             </div>
-            {modelIntakeSummary?.format_posture && (
+            {modelIntakeDisplayFormatPosture && (
               <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">
-                {String(modelIntakeSummary.format_posture).replace(/_/g, ' ')}
+                {String(modelIntakeDisplayFormatPosture).replace(/_/g, ' ')}
               </span>
             )}
           </div>
+
+          {modelIntakeDecision && (
+            <div className={`mb-5 rounded-lg border p-4 ${modelIntakeDecisionClass}`}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wide opacity-80">Deployment decision</div>
+                  <div className="mt-1 text-xl font-semibold">{modelIntakeDecision.replace(/_/g, ' ')}</div>
+                </div>
+                <div className="max-w-3xl text-sm opacity-90">
+                  {result?.decision_reason || 'Review model intake findings before approving this artifact.'}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-5">
             <div className="bg-gray-700/40 rounded-lg p-3">
@@ -1069,19 +1195,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
             <div className="bg-gray-700/40 rounded-lg p-3">
               <div className="text-xs text-gray-400">Findings</div>
-              <div className="text-lg font-semibold text-orange-400">{modelIntakeSummary?.findings_count ?? findings.length}</div>
+              <div className="text-lg font-semibold text-orange-400">{findings.length}</div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            {Object.entries(modelIntakeChecks || {}).map(([check, passed]) => (
-              <div key={check} className="rounded border border-gray-700 bg-gray-900 p-3">
-                <div className="text-xs text-gray-400">{check.replace(/_/g, ' ')}</div>
-                <div className={`mt-1 text-sm font-semibold ${passed ? 'text-green-300' : passed === null ? 'text-gray-400' : 'text-red-300'}`}>
-                  {passed === null ? 'not required' : passed ? 'passed' : 'failed'}
+            {Object.entries(modelIntakeChecks || {}).map(([check, passed]) => {
+              const status = getModelIntakeCheckStatus(check, passed, modelIntakeSummary, modelIntakeSupplyChain)
+              return (
+                <div key={check} className="rounded border border-gray-700 bg-gray-900 p-3">
+                  <div className="text-xs text-gray-400">{formatModelIntakeCheckName(check)}</div>
+                  <div className={`mt-1 text-sm font-semibold ${status.className}`}>{status.label}</div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           {(modelIntakeAibom || modelIntakeSupplyChain) && (
@@ -1107,6 +1234,56 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {modelIntakeSupplyChain?.license_policy?.status || modelIntakeSummary?.license_policy_status || 'unknown'}
                 </div>
               </div>
+            </div>
+          )}
+
+          {modelIntakeFormatInspection && (
+            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="text-xs text-gray-400">Format inspection</div>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <div className="text-xs text-gray-500">Format</div>
+                  <div className="text-sm font-semibold text-white">{modelIntakeFormatInspection.format || modelIntakeSummary?.extension || 'unknown'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Code execution risk</div>
+                  <div className={`text-sm font-semibold ${modelIntakeFormatInspection.lower_code_execution_risk ? 'text-green-300' : 'text-yellow-300'}`}>
+                    {modelIntakeFormatInspection.lower_code_execution_risk ? 'lower' : 'review required'}
+                  </div>
+                </div>
+                {modelIntakeSafetensorsHeader && (
+                  <>
+                    <div>
+                      <div className="text-xs text-gray-500">Safetensors header</div>
+                      <div className={`text-sm font-semibold ${modelIntakeSafetensorsHeader.valid_json ? 'text-green-300' : 'text-red-300'}`}>
+                        {modelIntakeSafetensorsHeader.valid_json ? 'valid' : 'invalid'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500">Tensor count</div>
+                      <div className="text-sm font-semibold text-white">{modelIntakeSafetensorsHeader.tensor_count ?? 'unknown'}</div>
+                    </div>
+                  </>
+                )}
+              </div>
+              {Array.isArray(modelIntakeSafetensorsHeader?.metadata_keys) && modelIntakeSafetensorsHeader.metadata_keys.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {modelIntakeSafetensorsHeader.metadata_keys.slice(0, 12).map((key: string) => (
+                    <span key={key} className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{key}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {modelIntakeRequiredActions.length > 0 && (
+            <div className="mt-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-3">
+              <div className="text-sm font-semibold text-yellow-100">Required to approve</div>
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
+                {modelIntakeRequiredActions.slice(0, 10).map((action, index) => (
+                  <li key={`${action}-${index}`}>{action}</li>
+                ))}
+              </ol>
             </div>
           )}
 
@@ -2647,7 +2824,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Attack Chains Analysis */}
-      {attack_chains && !isAIScan && (
+      {attack_chains && !isAIScan && !isModelIntakeScan && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
             <h2 className="text-2xl font-bold">Attack Chain Analysis</h2>
@@ -2926,7 +3103,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
-      {!attack_chains && findings.length > 0 && (
+      {!attack_chains && findings.length > 0 && !isAIScan && !isModelIntakeScan && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-2">Attack Chain Analysis</h2>
           <p className="text-gray-400 text-sm">
