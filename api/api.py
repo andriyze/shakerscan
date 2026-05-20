@@ -3249,6 +3249,37 @@ def _is_hf_ref(ref: str) -> bool:
     return parsed.scheme == "hf" or parsed.netloc.endswith("huggingface.co")
 
 
+def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    platform_hint = str(
+        metadata.get("artifact_platform")
+        or metadata.get("storage_provider")
+        or metadata.get("registry_provider")
+        or ""
+    ).strip().lower().replace("-", "_")
+    if platform_hint in {"huggingface", "http", "s3", "gcs", "azure", "azure_blob", "oci", "mlflow"}:
+        return "azure" if platform_hint == "azure_blob" else platform_hint
+
+    raw = str(ref or "").strip()
+    lowered = raw.lower()
+    parsed = urllib.parse.urlparse(raw)
+    host = parsed.netloc.lower()
+
+    if _is_hf_ref(raw) or re.fullmatch(r"[\w.-]+/[\w.-]+", raw):
+        return "huggingface"
+    if lowered.startswith("oci://"):
+        return "oci"
+    if lowered.startswith(("mlflow://", "models:/", "runs:/")):
+        return "mlflow"
+    if parsed.scheme == "s3" or host == "s3.amazonaws.com" or host.startswith("s3.") or ".s3." in host or ".s3-" in host:
+        return "s3"
+    if parsed.scheme in {"gs", "gcs"} or host == "storage.googleapis.com" or host.endswith(".storage.googleapis.com"):
+        return "gcs"
+    if parsed.scheme == "azure" or "blob.core.windows.net" in host:
+        return "azure"
+    return "http"
+
+
 def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int) -> dict[str, Any]:
     suffix = f"/revision/{urllib.parse.quote(revision, safe='')}" if revision and revision != "main" else ""
     url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}{suffix}"
@@ -3415,13 +3446,13 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
     if not ref:
         raise HTTPException(status_code=400, detail="ref is required")
     platform = request.platform
+    metadata = dict(request.metadata_json or {})
     if platform == "auto":
-        platform = "huggingface" if _is_hf_ref(ref) or re.fullmatch(r"[\w.-]+/[\w.-]+", ref) else "http"
+        platform = _detect_model_intake_platform(ref, metadata)
     if platform == "huggingface":
         normalized_ref = ref if _is_hf_ref(ref) else f"https://huggingface.co/{ref}"
         return _resolve_huggingface_model_intake(request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}))
 
-    metadata = dict(request.metadata_json or {})
     normalize_model_artifact_reference, _ = _import_model_intake_helpers()
     normalized = normalize_model_artifact_reference(ref, metadata, platform)
     source_kind = str(normalized.get("kind") or platform or "http")

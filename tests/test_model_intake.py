@@ -392,6 +392,28 @@ def test_model_intake_normalizes_cloud_and_registry_refs():
     assert mlflow_ref["stage"] == "Production"
 
 
+def test_model_intake_auto_detects_common_provider_urls():
+    s3_ref = normalize_model_artifact_reference("https://models-prod.s3.amazonaws.com/releases/model.safetensors")
+    assert s3_ref["kind"] == "s3"
+    assert s3_ref["bucket"] == "models-prod"
+    assert s3_ref["fetch_url"] == "https://models-prod.s3.amazonaws.com/releases/model.safetensors"
+
+    gcs_ref = normalize_model_artifact_reference("https://storage.googleapis.com/ml-bucket/releases/model.onnx")
+    assert gcs_ref["kind"] == "gcs"
+    assert gcs_ref["bucket"] == "ml-bucket"
+    assert gcs_ref["object_key"] == "releases/model.onnx"
+
+    azure_ref = normalize_model_artifact_reference("https://acct.blob.core.windows.net/models/release/model.gguf")
+    assert azure_ref["kind"] == "azure_blob"
+    assert azure_ref["account"] == "acct"
+    assert azure_ref["container"] == "models"
+
+    mlflow_ref = normalize_model_artifact_reference("runs:/abc123/model", platform="auto")
+    assert mlflow_ref["kind"] == "mlflow"
+    assert mlflow_ref["run_id"] == "abc123"
+    assert mlflow_ref["path"] == "model"
+
+
 def test_model_intake_fetches_public_cloud_object_refs(monkeypatch):
     artifact_bytes = b"safe tensor bytes"
     expected_sha = hashlib.sha256(artifact_bytes).hexdigest()

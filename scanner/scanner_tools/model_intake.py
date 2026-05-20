@@ -662,19 +662,24 @@ def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
         normalized = str(platform_hint).strip().lower().replace("-", "_")
         if normalized in {"huggingface", "oci", "s3", "gcs", "azure", "azure_blob", "mlflow"}:
             return normalized
+    parsed = urllib.parse.urlparse(ref)
+    host = parsed.netloc.lower()
     if _metadata_value(metadata, "huggingface_repo", "hf_repo"):
         return "huggingface"
     if ref.startswith("hf://") or "huggingface.co/" in ref:
         return "huggingface"
     if ref.startswith("oci://") or _metadata_value(metadata, "oci_ref", "image_ref"):
         return "oci"
-    if ref.startswith(("mlflow://", "models:/")) or _metadata_value(metadata, "mlflow_model_uri", "mlflow_run_id"):
+    if ref.startswith(("mlflow://", "models:/", "runs:/")) or _metadata_value(metadata, "mlflow_model_uri", "mlflow_run_id"):
         return "mlflow"
     if ref.startswith(("s3://", "gs://", "gcs://", "azure://")):
         return urllib.parse.urlparse(ref).scheme
-    if "blob.core.windows.net" in ref:
+    if host == "s3.amazonaws.com" or host.startswith("s3.") or ".s3." in host or ".s3-" in host:
+        return "s3"
+    if host == "storage.googleapis.com" or host.endswith(".storage.googleapis.com"):
+        return "gcs"
+    if "blob.core.windows.net" in host:
         return "azure_blob"
-    parsed = urllib.parse.urlparse(ref)
     return parsed.scheme or "local"
 
 

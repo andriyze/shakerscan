@@ -58,6 +58,14 @@ const MINIMAL_METADATA_EXAMPLE = {
   model_card_url: 'https://example.com/model-card.md',
 }
 
+const AUTO_PLATFORM_OPTION = {
+  value: 'auto' as const,
+  label: 'Auto-detect',
+  helper: 'Infer provider from reference',
+  placeholder: 'https://huggingface.co/org/model, hf://org/model@rev/file.safetensors, s3://bucket/path/model.onnx, models:/name/Production',
+  icon: Wand2,
+}
+
 const PLATFORM_OPTIONS: Array<{
   value: Exclude<ModelIntakePlatform, 'auto'>
   label: string
@@ -170,7 +178,7 @@ function metadataString(metadata: Record<string, unknown> | undefined, key: stri
 
 export default function ModelIntakeSettingsPage() {
   const router = useRouter()
-  const [platform, setPlatform] = useState<Exclude<ModelIntakePlatform, 'auto'>>('huggingface')
+  const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [sourceRef, setSourceRef] = useState('')
   const [revision, setRevision] = useState('')
   const [filename, setFilename] = useState('')
@@ -205,7 +213,9 @@ export default function ModelIntakeSettingsPage() {
       .catch(() => setScenario(null))
   }, [])
 
-  const selectedPlatform = PLATFORM_OPTIONS.find((item) => item.value === platform) || PLATFORM_OPTIONS[0]
+  const selectedPlatform = platform === 'auto'
+    ? AUTO_PLATFORM_OPTION
+    : PLATFORM_OPTIONS.find((item) => item.value === platform) || PLATFORM_OPTIONS[0]
   const parsedMetadata = useMemo(() => {
     try {
       return parseOptionalJsonObject(metadataJson) || {}
@@ -412,10 +422,35 @@ export default function ModelIntakeSettingsPage() {
       <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
           <Wand2 className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">1. Choose Source</h2>
+          <h2 className="text-sm font-semibold">1. Model Reference</h2>
         </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.35fr_0.45fr_auto]">
+          <label className="grid gap-1 text-sm text-gray-300">
+            Model reference
+            <input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} className={inputClass} placeholder={selectedPlatform.placeholder} />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Revision
+            <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Artifact file
+            <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
+          </label>
+          <button
+            type="button"
+            onClick={() => resolveReference()}
+            disabled={resolving || !sourceRef.trim()}
+            className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+          >
+            {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+            Resolve
+          </button>
+        </div>
+
         <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          {PLATFORM_OPTIONS.map((option) => {
+          {[AUTO_PLATFORM_OPTION, ...PLATFORM_OPTIONS].map((option) => {
             const Icon = option.icon
             const active = option.value === platform
             return (
@@ -440,30 +475,6 @@ export default function ModelIntakeSettingsPage() {
           })}
         </div>
 
-        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.35fr_0.45fr_auto]">
-          <label className="grid gap-1 text-sm text-gray-300">
-            Reference
-            <input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} className={inputClass} placeholder={selectedPlatform.placeholder} />
-          </label>
-          <label className="grid gap-1 text-sm text-gray-300">
-            Revision
-            <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
-          </label>
-          <label className="grid gap-1 text-sm text-gray-300">
-            Artifact file
-            <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
-          </label>
-          <button
-            type="button"
-            onClick={() => resolveReference()}
-            disabled={resolving || !sourceRef.trim()}
-            className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
-          >
-            {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-            Resolve
-          </button>
-        </div>
-
         {resolverResult && (
           <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr]">
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
@@ -472,6 +483,7 @@ export default function ModelIntakeSettingsPage() {
                 {resolverResult.normalized_ref}
               </div>
               <div className="mt-3 grid gap-2 text-xs text-gray-400 sm:grid-cols-2">
+                <div>Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
                 <div>Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
                 <div>Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
                 <div>File: <span className="text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
