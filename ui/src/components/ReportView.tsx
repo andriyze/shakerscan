@@ -98,6 +98,15 @@ function compactJson(value: any): string {
   }
 }
 
+function formatBytes(value: any): string {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown'
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
 function getAIDeployRecommendation(decision: string) {
   if (decision === 'block') return 'Do not deploy'
   if (decision === 'needs_approval') return 'Manual approval required'
@@ -436,6 +445,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const model_intake = rawModelIntake
   const modelIntakeSummary = model_intake?.summary || null
   const modelIntakeArtifact = model_intake?.artifact || null
+  const modelIntakeFetch = modelIntakeArtifact?.fetch || null
+  const modelIntakeMetadata = model_intake?.metadata || {}
   const modelIntakeChecks = model_intake?.checks || null
   const modelIntakeAibom = model_intake?.aibom || null
   const modelIntakeSupplyChain = model_intake?.supply_chain || null
@@ -1293,6 +1304,84 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="mt-1 break-all font-mono text-xs text-gray-300">{modelIntakeSummary.sha256}</div>
             </div>
           )}
+
+          <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="text-xs text-gray-400">Artifact fetch</div>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <div className="text-xs text-gray-500">Source</div>
+                  <div className="text-sm font-semibold text-white">{modelIntakeFetch?.source || modelIntakeSummary?.source_kind || 'unknown'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">HTTP status</div>
+                  <div className="text-sm font-semibold text-white">{modelIntakeFetch?.status ?? 'not applicable'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Bytes inspected</div>
+                  <div className="text-sm font-semibold text-white">
+                    {formatBytes(modelIntakeFetch?.bytes_observed)}
+                    {modelIntakeFetch?.truncated ? <span className="ml-2 text-xs text-yellow-300">truncated</span> : null}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Download limit</div>
+                  <div className="text-sm font-semibold text-white">{formatBytes(scan.options?.max_download_bytes || modelIntakeFetch?.content_length)}</div>
+                </div>
+              </div>
+              {modelIntakeFetch?.error && (
+                <div className="mt-3 rounded bg-red-950/30 p-2 text-xs text-red-200">{modelIntakeFetch.error}</div>
+              )}
+            </div>
+
+            <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="text-xs text-gray-400">Platform metadata</div>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <div className="text-xs text-gray-500">Repository</div>
+                  <div className="break-all text-sm font-semibold text-white">{modelIntakeMetadata.huggingface_repo || modelIntakeSummary?.registry?.repository || 'unknown'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Revision</div>
+                  <div className="break-all text-sm font-semibold text-white">{modelIntakeMetadata.revision || modelIntakeSummary?.registry?.revision || 'not pinned'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Library</div>
+                  <div className="text-sm font-semibold text-white">{modelIntakeMetadata.library_name || 'unknown'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Pipeline</div>
+                  <div className="text-sm font-semibold text-white">{modelIntakeMetadata.pipeline_tag || 'unknown'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Gated/private</div>
+                  <div className="text-sm font-semibold text-white">
+                    {modelIntakeMetadata.gated ? 'gated' : 'not gated'} / {modelIntakeMetadata.private ? 'private' : 'public'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">Artifact file</div>
+                  <div className="break-all text-sm font-semibold text-white">{modelIntakeMetadata.huggingface_file || modelIntakeSummary?.registry?.path || 'unknown'}</div>
+                </div>
+              </div>
+              {Array.isArray(modelIntakeMetadata.tags) && modelIntakeMetadata.tags.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {modelIntakeMetadata.tags.slice(0, 10).map((tag: string) => (
+                    <span key={tag} className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{tag}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="text-xs text-gray-400">Verification scope</div>
+            <div className="mt-2 grid gap-2 text-sm text-gray-300 md:grid-cols-3">
+              <div>No model code imported or executed.</div>
+              <div>Integrity is checked only when an expected checksum is supplied.</div>
+              <div>SBOM, malware, eval, and approval checks require attached evidence.</div>
+            </div>
+          </div>
         </div>
       )}
 
