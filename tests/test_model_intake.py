@@ -3,7 +3,12 @@ import hashlib
 import zipfile
 
 from scanner.scanner_tools import model_intake
-from scanner.scanner_tools.model_intake import _intake_decision, parse_huggingface_ref, run_model_intake_scan
+from scanner.scanner_tools.model_intake import (
+    _intake_decision,
+    normalize_model_artifact_reference,
+    parse_huggingface_ref,
+    run_model_intake_scan,
+)
 
 
 def test_model_intake_detects_pickle_and_missing_controls(tmp_path):
@@ -348,3 +353,38 @@ def test_model_intake_fetches_huggingface_resolve_url(monkeypatch):
     assert result["model_intake"]["summary"]["source_kind"] == "huggingface"
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "huggingface"
     assert not any(finding["id"] == "model_intake:artifact_fetch_failed" for finding in result["findings"])
+
+
+def test_model_intake_normalizes_cloud_and_registry_refs():
+    s3_ref = normalize_model_artifact_reference("s3://models-prod/releases/ranker/model.safetensors")
+    assert s3_ref["kind"] == "s3"
+    assert s3_ref["bucket"] == "models-prod"
+    assert s3_ref["object_key"] == "releases/ranker/model.safetensors"
+    assert s3_ref["format_posture"] == "safer_static_format"
+    assert s3_ref["metadata"]["storage_provider"] == "s3"
+    assert s3_ref["warnings"]
+
+    gcs_ref = normalize_model_artifact_reference("https://storage.googleapis.com/ml-bucket/releases/model.onnx", platform="gcs")
+    assert gcs_ref["kind"] == "gcs"
+    assert gcs_ref["bucket"] == "ml-bucket"
+    assert gcs_ref["object_key"] == "releases/model.onnx"
+    assert gcs_ref["fetchable"] is True
+    assert gcs_ref["warnings"] == []
+
+    azure_ref = normalize_model_artifact_reference("https://acct.blob.core.windows.net/models/release/model.gguf")
+    assert azure_ref["kind"] == "azure_blob"
+    assert azure_ref["account"] == "acct"
+    assert azure_ref["container"] == "models"
+    assert azure_ref["blob_path"] == "release/model.gguf"
+
+    oci_ref = normalize_model_artifact_reference("oci://registry.example.com/ml/ranker:latest")
+    assert oci_ref["kind"] == "oci"
+    assert oci_ref["registry"] == "registry.example.com"
+    assert oci_ref["repository"] == "ml/ranker"
+    assert oci_ref["tag"] == "latest"
+    assert any("digest" in warning for warning in oci_ref["warnings"])
+
+    mlflow_ref = normalize_model_artifact_reference("models:/fraud-detector/Production", platform="mlflow")
+    assert mlflow_ref["kind"] == "mlflow"
+    assert mlflow_ref["model_name"] == "fraud-detector"
+    assert mlflow_ref["stage"] == "Production"

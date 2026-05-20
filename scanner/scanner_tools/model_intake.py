@@ -196,6 +196,147 @@ def parse_huggingface_ref(ref: str, metadata: dict[str, Any] | None = None) -> d
     }
 
 
+def _split_tag_digest(image_ref: str) -> tuple[str, str | None, str | None]:
+    digest = None
+    if "@" in image_ref:
+        image_ref, digest = image_ref.split("@", 1)
+    tag = None
+    last_slash = image_ref.rfind("/")
+    last_colon = image_ref.rfind(":")
+    if last_colon > last_slash:
+        image_ref, tag = image_ref[:last_colon], image_ref[last_colon + 1:]
+    return image_ref, tag, digest
+
+
+def _signed_http_hint(ref: str) -> bool:
+    parsed = urllib.parse.urlparse(ref)
+    return parsed.scheme in {"http", "https"}
+
+
+def normalize_model_artifact_reference(
+    ref: str,
+    metadata: dict[str, Any] | None = None,
+    platform: str | None = None,
+) -> dict[str, Any]:
+    """Parse common model registry/storage references into stable metadata."""
+    metadata = metadata or {}
+    raw = str(ref or "").strip()
+    parsed = urllib.parse.urlparse(raw)
+    explicit_platform = (platform or "").strip().lower()
+    kind = explicit_platform if explicit_platform and explicit_platform != "auto" else _source_kind(raw, metadata)
+    warnings: list[str] = []
+    parsed_ref: dict[str, Any] = {
+        "kind": kind,
+        "ref": raw,
+        "registry": parsed.netloc or None,
+        "repository": None,
+        "path": parsed.path.lstrip("/") or None,
+        "fetchable": parsed.scheme in {"http", "https", "file"} or not parsed.scheme,
+        "metadata": {"artifact_platform": kind},
+        "warnings": warnings,
+    }
+
+    if kind == "huggingface":
+        hf_ref = parse_huggingface_ref(raw, metadata)
+        parsed_ref.update(hf_ref)
+        parsed_ref["repository"] = hf_ref.get("repo_id")
+        parsed_ref["path"] = hf_ref.get("filename")
+        parsed_ref["fetchable"] = bool(hf_ref.get("resolve_url") or _signed_http_hint(raw))
+        parsed_ref["metadata"].update({
+            "huggingface_repo": hf_ref.get("repo_id"),
+            "huggingface_file": hf_ref.get("filename"),
+            "revision": hf_ref.get("revision"),
+        })
+        return parsed_ref
+
+    if kind == "s3":
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if parsed.scheme in {"http", "https"}:
+            host = parsed.netloc
+            if host.startswith("s3.") or host == "s3.amazonaws.com":
+                parts = [part for part in parsed.path.split("/") if part]
+                bucket = parts[0] if parts else ""
+                key = "/".join(parts[1:])
+            elif ".s3." in host or host.endswith(".s3.amazonaws.com"):
+                bucket = host.split(".s3", 1)[0]
+        parsed_ref.update({"registry": "amazon-s3", "repository": bucket or None, "path": key or None, "bucket": bucket or None, "object_key": key or None})
+        parsed_ref["metadata"].update({"artifact_bucket": bucket, "artifact_path": key, "storage_provider": "s3"})
+        if parsed.scheme == "s3":
+            warnings.append("Native S3 fetching is not enabled yet; use a presigned HTTPS URL for executable intake.")
+
+    elif kind in {"gs", "gcs"}:
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if parsed.scheme in {"http", "https"}:
+            host = parsed.netloc
+            parts = [part for part in parsed.path.split("/") if part]
+            if host == "storage.googleapis.com":
+                bucket = parts[0] if parts else ""
+                key = "/".join(parts[1:])
+            elif host.endswith(".storage.googleapis.com"):
+                bucket = host.removesuffix(".storage.googleapis.com")
+        parsed_ref.update({"kind": "gcs", "registry": "google-cloud-storage", "repository": bucket or None, "path": key or None, "bucket": bucket or None, "object_key": key or None})
+        parsed_ref["metadata"].update({"artifact_platform": "gcs", "artifact_bucket": bucket, "artifact_path": key, "storage_provider": "gcs"})
+        if parsed.scheme in {"gs", "gcs"}:
+            warnings.append("Native GCS fetching is not enabled yet; use a signed HTTPS URL for executable intake.")
+
+    elif kind in {"azure", "azure_blob"}:
+        account = None
+        container = parsed.netloc
+        blob_path = parsed.path.lstrip("/")
+        if parsed.scheme in {"http", "https"} and ".blob.core.windows.net" in parsed.netloc:
+            account = parsed.netloc.split(".blob.core.windows.net", 1)[0]
+            parts = [part for part in parsed.path.split("/") if part]
+            container = parts[0] if parts else ""
+            blob_path = "/".join(parts[1:])
+        parsed_ref.update({"kind": "azure_blob", "registry": account or "azure-blob", "repository": container or None, "path": blob_path or None, "account": account, "container": container or None, "blob_path": blob_path or None})
+        parsed_ref["metadata"].update({"artifact_platform": "azure_blob", "artifact_account": account, "artifact_container": container, "artifact_path": blob_path, "storage_provider": "azure_blob"})
+        if parsed.scheme == "azure":
+            warnings.append("Native Azure Blob fetching is not enabled yet; use a signed HTTPS URL for executable intake.")
+
+    elif kind == "oci":
+        image_ref = raw.removeprefix("oci://")
+        registry, _, repository = image_ref.partition("/")
+        repository, tag, digest = _split_tag_digest(repository or image_ref)
+        parsed_ref.update({"registry": registry or None, "repository": repository or None, "path": repository or None, "tag": tag, "digest": digest, "fetchable": False})
+        parsed_ref["metadata"].update({"oci_registry": registry, "oci_repository": repository, "oci_tag": tag, "digest": digest})
+        warnings.append("Native OCI artifact fetching is not enabled yet; export or sign a fetchable artifact URL for executable intake.")
+        if tag and not digest:
+            warnings.append("OCI reference is tag-based. Pin to a digest before production approval.")
+        if not tag and not digest:
+            warnings.append("OCI reference is missing a tag or digest.")
+
+    elif kind == "mlflow":
+        model_name = None
+        model_stage = None
+        run_id = None
+        artifact_path = None
+        if raw.startswith("models:/"):
+            parts = [part for part in raw.removeprefix("models:/").split("/") if part]
+            model_name = parts[0] if parts else None
+            model_stage = "/".join(parts[1:]) if len(parts) > 1 else None
+        elif raw.startswith("runs:/"):
+            parts = [part for part in raw.removeprefix("runs:/").split("/") if part]
+            run_id = parts[0] if parts else None
+            artifact_path = "/".join(parts[1:]) if len(parts) > 1 else None
+        parsed_ref.update({"registry": "mlflow", "repository": model_name or run_id, "path": artifact_path or model_stage, "model_name": model_name, "stage": model_stage, "run_id": run_id, "fetchable": False})
+        parsed_ref["metadata"].update({"mlflow_model_name": model_name, "mlflow_stage": model_stage, "mlflow_run_id": run_id, "artifact_path": artifact_path})
+        warnings.append("MLflow registry refs need an exported model artifact URL or a gateway fetcher before executable intake.")
+
+    else:
+        ext = _artifact_ext(_artifact_name(raw))
+        parsed_ref["extension"] = ext
+        parsed_ref["metadata"].update({"artifact_platform": "http" if parsed.scheme in {"http", "https"} else kind})
+
+    extension = _artifact_ext(parsed_ref.get("path") or _artifact_name(raw))
+    parsed_ref["extension"] = extension
+    if extension in RISKY_EXTENSIONS:
+        warnings.append("Artifact extension is pickle-like or framework-serialized and should be reviewed before deployment.")
+    parsed_ref["format_posture"] = "safer_static_format" if extension in SAFER_MODEL_EXTENSIONS else "unsafe_or_review_required" if extension in RISKY_EXTENSIONS else "unknown_or_unclassified_format"
+    return parsed_ref
+
+
 def _severity_score(severity: str) -> int:
     return {"critical": 30, "high": 20, "medium": 10, "low": 3, "info": 0}.get(severity, 0)
 
@@ -447,6 +588,11 @@ def _metadata_value(metadata: dict[str, Any], *keys: str) -> Any:
 
 
 def _source_kind(ref: str, metadata: dict[str, Any]) -> str:
+    platform_hint = _metadata_value(metadata, "artifact_platform", "storage_provider", "registry_provider")
+    if platform_hint:
+        normalized = str(platform_hint).strip().lower().replace("-", "_")
+        if normalized in {"huggingface", "oci", "s3", "gcs", "azure", "azure_blob", "mlflow"}:
+            return normalized
     if _metadata_value(metadata, "huggingface_repo", "hf_repo"):
         return "huggingface"
     if ref.startswith("hf://") or "huggingface.co/" in ref:
@@ -1084,4 +1230,4 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     }
 
 
-__all__ = ["parse_huggingface_ref", "run_model_intake_scan"]
+__all__ = ["normalize_model_artifact_reference", "parse_huggingface_ref", "run_model_intake_scan"]

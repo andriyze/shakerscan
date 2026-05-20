@@ -3234,14 +3234,14 @@ MODEL_INTAKE_COMMON_ARTIFACTS = {
 }
 
 
-def _import_hf_ref_parser():
+def _import_model_intake_helpers():
     try:
-        from scanner_tools.model_intake import parse_huggingface_ref
+        from scanner_tools.model_intake import normalize_model_artifact_reference, parse_huggingface_ref
     except ModuleNotFoundError as exc:
         if exc.name != "scanner_tools":
             raise
-        from scanner.scanner_tools.model_intake import parse_huggingface_ref
-    return parse_huggingface_ref
+        from scanner.scanner_tools.model_intake import normalize_model_artifact_reference, parse_huggingface_ref
+    return normalize_model_artifact_reference, parse_huggingface_ref
 
 
 def _is_hf_ref(ref: str) -> bool:
@@ -3339,7 +3339,7 @@ def _hf_metadata_from_model_info(model_info: dict[str, Any], repo_id: str, revis
 
 
 def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dict[str, Any]:
-    parse_huggingface_ref = _import_hf_ref_parser()
+    _, parse_huggingface_ref = _import_model_intake_helpers()
     metadata = dict(request.metadata_json or {})
     if request.revision:
         metadata["revision"] = request.revision
@@ -3421,16 +3421,30 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
         normalized_ref = ref if _is_hf_ref(ref) else f"https://huggingface.co/{ref}"
         return _resolve_huggingface_model_intake(request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}))
 
-    parsed = urllib.parse.urlparse(ref)
     metadata = dict(request.metadata_json or {})
-    source_kind = platform if platform != "auto" else parsed.scheme or "http"
-    warnings = []
-    if source_kind in {"s3", "gcs", "azure", "oci", "mlflow"} and parsed.scheme not in {"http", "https"}:
-        warnings.append("This platform is recognized but native artifact fetching is not implemented yet. Use a signed HTTP(S) artifact URL when possible.")
+    normalize_model_artifact_reference, _ = _import_model_intake_helpers()
+    normalized = normalize_model_artifact_reference(ref, metadata, platform)
+    source_kind = str(normalized.get("kind") or platform or "http")
+    metadata_out = {
+        **(normalized.get("metadata") if isinstance(normalized.get("metadata"), dict) else {}),
+        **metadata,
+    }
+    ext = str(normalized.get("extension") or Path(urllib.parse.urlparse(ref).path).suffix or "")
+    selected_file = {
+        "path": normalized.get("path") or _short_url_label(ref),
+        "extension": ext,
+        "format_posture": normalized.get("format_posture"),
+        "risk": "lower" if ext in MODEL_INTAKE_SAFER_EXTENSIONS else "higher" if ext in MODEL_INTAKE_RISKY_EXTENSIONS else "unknown",
+        "size_bytes": None,
+        "sha256": metadata_out.get("sha256") or metadata_out.get("expected_sha256"),
+        "score": 70 if ext in MODEL_INTAKE_SAFER_EXTENSIONS else 45 if ext in MODEL_INTAKE_RISKY_EXTENSIONS else 10,
+    } if normalized.get("path") or ext else None
     scan_payload = {
         "artifact_url": ref,
-        "name": f"Model artifact: {_short_url_label(ref)}",
-        "metadata_json": metadata,
+        "name": f"{source_kind.replace('_', ' ').title()}: {_short_url_label(ref)}",
+        "metadata_json": metadata_out,
+        "expected_sha256": metadata_out.get("sha256") or metadata_out.get("expected_sha256"),
+        "model_card_url": metadata_out.get("model_card_url"),
         "require_deployment_approval": True,
         "require_signature": True,
         "require_hash": True,
@@ -3441,12 +3455,12 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
     return {
         "platform": source_kind,
         "normalized_ref": ref,
-        "repository": parsed.netloc or None,
-        "revision": request.revision,
-        "selected_file": None,
-        "candidate_files": [],
-        "metadata_json": metadata,
-        "warnings": warnings,
+        "repository": normalized.get("repository") or normalized.get("registry"),
+        "revision": normalized.get("revision") or request.revision or normalized.get("tag") or normalized.get("digest"),
+        "selected_file": selected_file,
+        "candidate_files": [selected_file] if selected_file else [],
+        "metadata_json": metadata_out,
+        "warnings": normalized.get("warnings") or [],
         "scan_payload": scan_payload,
     }
 
