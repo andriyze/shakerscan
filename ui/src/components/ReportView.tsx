@@ -330,6 +330,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   }, {})
 
   const [expandedAI, setExpandedAI] = useState<Set<string>>(new Set())
+  const [expandedAIRubrics, setExpandedAIRubrics] = useState<Set<string>>(new Set())
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set(['critical', 'high', 'medium', 'low', 'info']))
   const [minChainConfidence, setMinChainConfidence] = useState<number>(0.5)
   const [showPartialChains, setShowPartialChains] = useState<boolean>(false)
@@ -338,6 +339,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
   const toggleAIDetails = (id: string) => {
     setExpandedAI(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const toggleAIRubric = (id: string) => {
+    setExpandedAIRubrics(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
@@ -696,6 +705,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   const detectorHits = turns.flatMap((turn: any) => Array.isArray(turn?.detector_hits) ? turn.detector_hits : [])
                   const probeFindings = aiGateFindingsByProbe[probeId] || []
                   const isExpanded = expandedAI.has(transcriptKey)
+                  const hasRubric = Boolean(transcript.expected_safe_behavior || transcript.expected_attack_success)
+                  const isRubricExpanded = expandedAIRubrics.has(transcriptKey)
                   const wasSemanticallyReviewed = semanticReviewedIds.has(probeId)
                   const probeOutcome = getAIProbeOutcome(turns, detectorHits, probeFindings, wasSemanticallyReviewed)
 
@@ -744,18 +755,29 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         </div>
                       </div>
 
-                      {(transcript.expected_safe_behavior || transcript.expected_attack_success) && (
-                        <div className="mb-3 grid gap-2 md:grid-cols-2">
-                          {transcript.expected_safe_behavior && (
-                            <div className="rounded border border-gray-800 bg-black/20 p-3">
-                              <div className="mb-1 text-xs font-medium text-green-300">Expected safe behavior</div>
-                              <p className="text-xs text-gray-400">{transcript.expected_safe_behavior}</p>
-                            </div>
-                          )}
-                          {transcript.expected_attack_success && (
-                            <div className="rounded border border-gray-800 bg-black/20 p-3">
-                              <div className="mb-1 text-xs font-medium text-red-300">Attack success condition</div>
-                              <p className="text-xs text-gray-400">{transcript.expected_attack_success}</p>
+                      {hasRubric && (
+                        <div className="mb-3">
+                          <button
+                            type="button"
+                            onClick={() => toggleAIRubric(transcriptKey)}
+                            className="text-xs text-blue-300 hover:text-blue-200"
+                          >
+                            {isRubricExpanded ? 'Hide expected/fail behavior' : 'Show expected/fail behavior'}
+                          </button>
+                          {isRubricExpanded && (
+                            <div className="mt-2 grid gap-2 md:grid-cols-2">
+                              {transcript.expected_safe_behavior && (
+                                <div className="rounded border border-gray-800 bg-black/20 p-3">
+                                  <div className="mb-1 text-xs font-medium text-green-300">Expected safe behavior</div>
+                                  <p className="text-xs text-gray-400">{transcript.expected_safe_behavior}</p>
+                                </div>
+                              )}
+                              {transcript.expected_attack_success && (
+                                <div className="rounded border border-gray-800 bg-black/20 p-3">
+                                  <div className="mb-1 text-xs font-medium text-red-300">Attack success condition</div>
+                                  <p className="text-xs text-gray-400">{transcript.expected_attack_success}</p>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>

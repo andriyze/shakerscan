@@ -193,6 +193,7 @@ function isCalibrationLikeTarget(target: AITarget, includeLegacyHints = false) {
   const metadata = target.metadata_json || {}
   const demoFlag = metadata.shakerscan_demo
   if (demoFlag === true || String(demoFlag || '').trim().toLowerCase() === 'true') return true
+  if (demoFlag === false || String(demoFlag || '').trim().toLowerCase() === 'false') return false
   if (metadata.calibration_run || metadata.honey_scenario_id || metadata.safe_fixture !== undefined) return true
   if (Array.isArray(metadata.expected_shakerscan_findings)) return true
 
@@ -565,7 +566,7 @@ export default function AIGateSettingsPage() {
     [inventory]
   )
   const hiddenCalibrationCount = targets.length - visibleTargets.length
-  const shouldShowCreate = showAddTarget || (!loading && visibleTargets.length === 0)
+  const shouldShowCreate = showAddTarget
 
   return (
     <div className="space-y-6">
@@ -877,7 +878,7 @@ export default function AIGateSettingsPage() {
             </div>
           )}
 
-          {visibleTargets.length === 0 && !loading ? (
+          {visibleTargets.length === 0 && !loading && !showAddTarget ? (
             <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 text-center text-sm text-gray-500">
               <div>No AI Gate targets yet.</div>
               <button
