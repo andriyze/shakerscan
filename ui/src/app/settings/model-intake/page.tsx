@@ -340,9 +340,25 @@ export default function ModelIntakeSettingsPage() {
         timeout_seconds: Number(timeoutSeconds || 20),
       })
       setResolverResult(result)
-      applyScanPayload(result.scan_payload)
+      if (result.scan_payload) {
+        applyScanPayload(result.scan_payload)
+      } else {
+        applyScanPayload({
+          artifact_url: '',
+          name: result.repository ? `Hugging Face: ${result.repository}` : '',
+          metadata_json: result.metadata_json || {},
+          model_card_url: metadataString(result.metadata_json, 'model_card_url') || undefined,
+          require_deployment_approval: true,
+          require_signature: true,
+          require_hash: true,
+          require_model_governance: true,
+          max_download_bytes: 10_000_000,
+          timeout_seconds: Number(timeoutSeconds || 20),
+        })
+      }
       if (result.revision) setRevision(String(result.revision))
       if (result.selected_file?.path) setFilename(result.selected_file.path)
+      else if (!result.scan_payload) setFilename('')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to resolve model reference')
     } finally {
@@ -401,6 +417,7 @@ export default function ModelIntakeSettingsPage() {
       ? 'bg-yellow-900/50 text-yellow-200'
       : 'bg-green-900/50 text-green-200'
   const evidenceBadgeText = !hasIntakeInput ? 'Not started' : `${presentControls}/${readinessControls.length}`
+  const scanBlockedByResolver = Boolean(resolverResult && !resolverResult.scan_payload && !artifactUrl.trim())
 
   return (
     <div className="space-y-6">
@@ -428,7 +445,16 @@ export default function ModelIntakeSettingsPage() {
         <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.35fr_0.45fr_auto]">
           <label className="grid gap-1 text-sm text-gray-300">
             Model reference
-            <input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} className={inputClass} placeholder={selectedPlatform.placeholder} />
+            <input
+              value={sourceRef}
+              onChange={(e) => {
+                setSourceRef(e.target.value)
+                setResolverResult(null)
+                setFilename('')
+              }}
+              className={inputClass}
+              placeholder={selectedPlatform.placeholder}
+            />
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Revision
@@ -708,9 +734,9 @@ export default function ModelIntakeSettingsPage() {
         </div>
 
         <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-          <button type="submit" disabled={submitting} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+          <button type="submit" disabled={submitting || scanBlockedByResolver} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
             {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            Queue Model Intake Scan
+            {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
           </button>
           <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
             <Clipboard className="h-4 w-4" />

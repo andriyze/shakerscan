@@ -214,9 +214,12 @@ def _candidate_from_endpoint(
     normalized_url = endpoint_url.rstrip("/")
     if normalized_url in existing_urls:
         return None
+    normalized_method = str(method or "").upper()
+    if normalized_method not in {"GET", "POST", "PUT", "PATCH"}:
+        return None
     target_type, confidence, evidence = infer_ai_target_type(
         endpoint_url,
-        method=method,
+        method=normalized_method,
         fields=fields or [],
         source=source,
     )
@@ -229,7 +232,7 @@ def _candidate_from_endpoint(
         "name": f"Discovered {_path_from_url(endpoint_url).rstrip('/') or endpoint_url}",
         "target_type": target_type,
         "endpoint_url": endpoint_url,
-        "method": "POST" if method.upper() not in {"GET", "POST", "PUT", "PATCH"} else method.upper(),
+        "method": normalized_method,
         "headers_template": headers,
         "request_template": _default_request_template(target_type),
         "response_path": _default_response_path(target_type),

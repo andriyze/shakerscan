@@ -513,7 +513,10 @@ def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, ti
         }
 
     auth_headers: dict[str, str] = {}
-    token = str(metadata.get("hf_token") or os.getenv("HF_TOKEN") or "").strip()
+    metadata_token = str(metadata.get("hf_token") or "").strip()
+    env_token = str(os.getenv("HF_TOKEN") or "").strip()
+    token = metadata_token or env_token
+    auth_source = "metadata" if metadata_token else "env" if env_token else None
     if token:
         auth_headers["Authorization"] = f"Bearer {token}"
     data, fetch_meta = _download_http(str(hf_ref["resolve_url"]), max_bytes, timeout_seconds, auth_headers)
@@ -521,6 +524,8 @@ def _download_huggingface(ref: str, metadata: dict[str, Any], max_bytes: int, ti
         **fetch_meta,
         "source": "huggingface",
         "huggingface": hf_ref,
+        "authenticated": bool(token),
+        "auth_source": auth_source,
     }
 
 
@@ -1318,7 +1323,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "checksum": None if metadata_unavailable else bool(expected_sha256 and checksum_status != "mismatch"),
                 "aibom": True,
                 "format_specific_inspection": True,
-                "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] in {"permissive", "review_required"},
+                "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
                 "license_review": (None if metadata_unavailable else bool(license_ref)) if require_governance else None,
                 "sbom_dependencies": (None if metadata_unavailable else bool(sbom_ref)) if require_governance else None,

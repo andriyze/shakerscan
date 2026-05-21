@@ -195,6 +195,30 @@ def test_huggingface_model_info_requests_lfs_blob_metadata(monkeypatch):
     assert captured["url"] == "https://huggingface.co/api/models/acme/ranker/revision/abc123?blobs=true"
 
 
+def test_huggingface_model_info_rejects_oversized_payload(monkeypatch):
+    class FakeResponse:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit):
+            return b"x" * limit
+
+    monkeypatch.setattr(api_module, "HF_MODEL_INFO_MAX_BYTES", 10)
+    monkeypatch.setattr(api_module.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+
+    try:
+        api_module._hf_api_model_info("acme/ranker", "main", 7)
+    except RuntimeError as exc:
+        assert "exceeded 10 byte cap" in str(exc)
+    else:
+        raise AssertionError("expected oversized Hugging Face payload to be rejected")
+
+
 def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(monkeypatch):
     model_info = {
         "sha": "abc123",
@@ -246,6 +270,25 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
     )
     assert resolved_file_url["selected_file"]["path"] == "vision/vit.safetensors"
     assert resolved_file_url["scan_payload"]["expected_sha256"] == "e" * 64
+
+
+def test_huggingface_resolver_does_not_emit_scan_payload_without_metadata_or_file(monkeypatch):
+    def unavailable_model_info(repo_id, revision, timeout_seconds):
+        raise RuntimeError("hub unavailable")
+
+    monkeypatch.setattr(api_module, "_hf_api_model_info", unavailable_model_info)
+
+    resolved = api_module._resolve_huggingface_model_intake(
+        api_module.ModelIntakeResolveRequest(
+            platform="huggingface",
+            ref="https://huggingface.co/acme/ranker",
+            timeout_seconds=5,
+        )
+    )
+
+    assert resolved["scan_payload"] is None
+    assert resolved["candidate_files"] == []
+    assert any("metadata is required" in warning for warning in resolved["warnings"])
 
 
 def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):

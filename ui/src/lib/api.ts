@@ -102,7 +102,7 @@ export interface ModelIntakeResolveResponse {
   candidate_files: ModelIntakeResolvedFile[]
   metadata_json: Record<string, unknown>
   warnings: string[]
-  scan_payload: ModelIntakeScanRequest
+  scan_payload: ModelIntakeScanRequest | null
 }
 
 export interface AITestReadinessControl {

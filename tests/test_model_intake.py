@@ -76,6 +76,35 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["result"]["decision"] == "allow"
 
 
+def test_model_intake_license_policy_requires_permissive_status(tmp_path):
+    artifact = tmp_path / "model.onnx"
+    artifact.write_bytes(b"onnx model bytes")
+
+    result = asyncio.run(
+        run_model_intake_scan(
+            str(artifact),
+            {
+                "require_deployment_approval": False,
+                "require_hash": False,
+                "require_signature": False,
+                "require_model_governance": True,
+                "metadata_json": {
+                    "source_repo": "https://github.com/example/model",
+                    "license": "vendor-custom-license",
+                    "sbom": {"components": []},
+                    "malware_scan_result": {"status": "clean"},
+                    "security_evals": {"status": "passed"},
+                    "deployment_restrictions": ["staging"],
+                    "monitoring_plan": "model-monitoring-v1",
+                },
+            },
+        )
+    )
+
+    assert result["model_intake"]["supply_chain"]["license_policy"]["status"] == "review_required"
+    assert result["model_intake"]["checks"]["license_policy"] is False
+
+
 def test_model_intake_does_not_flag_valid_safetensors_metadata_as_pickle(tmp_path):
     header = b'{"__metadata__":{"eval_set":"security-eval","note":"exec text in metadata is not pickle"},"weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
     artifact = tmp_path / "model.safetensors"
@@ -375,6 +404,7 @@ def test_model_intake_flags_restricted_license_and_loader_markers(tmp_path):
     assert "model_intake:restricted_license_policy" in finding_ids
     assert "model_intake:suspicious_loader_markers" in finding_ids
     assert result["model_intake"]["supply_chain"]["license_policy"]["status"] == "restricted"
+    assert result["model_intake"]["checks"]["license_policy"] is False
 
 
 def test_model_intake_parses_huggingface_refs():
@@ -395,9 +425,11 @@ def test_model_intake_fetches_huggingface_resolve_url(monkeypatch):
     artifact_bytes = b"safe tensor bytes"
     expected_sha = hashlib.sha256(artifact_bytes).hexdigest()
     observed_urls = []
+    observed_headers = []
 
     def fake_download_http(url, max_bytes, timeout_seconds, headers=None):
         observed_urls.append(url)
+        observed_headers.append(headers or {})
         return artifact_bytes, {
             "source": "http",
             "status": 206,
@@ -417,6 +449,7 @@ def test_model_intake_fetches_huggingface_resolve_url(monkeypatch):
                 "deployment_approved": True,
                 "metadata_json": {
                     "source_repo": "https://huggingface.co/acme/ranker",
+                    "hf_token": "hf_test_token",
                     "license": "apache-2.0",
                     "sbom": {"components": []},
                     "malware_scan_result": {"status": "clean"},
@@ -429,8 +462,11 @@ def test_model_intake_fetches_huggingface_resolve_url(monkeypatch):
     )
 
     assert observed_urls == ["https://huggingface.co/acme/ranker/resolve/abc123/model.safetensors"]
+    assert observed_headers == [{"Authorization": "Bearer hf_test_token"}]
     assert result["model_intake"]["summary"]["source_kind"] == "huggingface"
     assert result["model_intake"]["artifact"]["fetch"]["source"] == "huggingface"
+    assert result["model_intake"]["artifact"]["fetch"]["authenticated"] is True
+    assert result["model_intake"]["artifact"]["fetch"]["auth_source"] == "metadata"
     assert not any(finding["id"] == "model_intake:artifact_fetch_failed" for finding in result["findings"])
 
 

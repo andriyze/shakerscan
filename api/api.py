@@ -3263,6 +3263,7 @@ MODEL_INTAKE_METADATA_FILES = {
     "model.safetensors.index.json",
     "readme.md",
 }
+HF_MODEL_INFO_MAX_BYTES = 10_000_000
 
 
 def _import_model_intake_helpers():
@@ -3325,7 +3326,10 @@ def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int)
         },
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return json.loads(response.read(1_000_000).decode("utf-8"))
+        raw = response.read(HF_MODEL_INFO_MAX_BYTES + 1)
+        if len(raw) > HF_MODEL_INFO_MAX_BYTES:
+            raise RuntimeError(f"Hugging Face model metadata exceeded {HF_MODEL_INFO_MAX_BYTES} byte cap")
+        return json.loads(raw.decode("utf-8"))
 
 
 def _hf_candidate_score(path: str) -> int:
@@ -3477,6 +3481,26 @@ def _resolve_huggingface_model_intake(request: ModelIntakeResolveRequest) -> dic
 
     candidates = _hf_file_candidates(model_info) if model_info else []
     requested_filename = request.filename or hf_ref.get("filename")
+    if not model_info and not requested_filename:
+        warnings.append("Hugging Face metadata is required to choose a model artifact. Enter a direct artifact file path or retry when the Hub is reachable.")
+        metadata_out = {
+            **metadata,
+            "huggingface_repo": repo_id,
+            "revision": hf_ref.get("revision") or metadata.get("revision") or "main",
+            "source_repo": f"https://huggingface.co/{repo_id}",
+            "model_card_url": f"https://huggingface.co/{repo_id}",
+        }
+        return {
+            "platform": "huggingface",
+            "normalized_ref": request.ref,
+            "repository": repo_id,
+            "revision": hf_ref.get("revision"),
+            "selected_file": None,
+            "candidate_files": [],
+            "metadata_json": {key: value for key, value in metadata_out.items() if value not in (None, "", [], {})},
+            "warnings": warnings,
+            "scan_payload": None,
+        }
     selected = next((item for item in candidates if item["path"] == requested_filename), None) if requested_filename else None
     selected = selected or (candidates[0] if candidates else None)
     if selected:

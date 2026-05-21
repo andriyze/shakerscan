@@ -74,6 +74,38 @@ def test_build_ai_inventory_discovers_openapi_ai_candidates_and_blast_radius():
     assert "agent_runtime_controls_missing" in inventory["summary"]["coverage_gaps"]
 
 
+def test_build_ai_inventory_skips_unsupported_ai_candidate_methods():
+    inventory = ai_assurance.build_ai_inventory(
+        targets=[],
+        ai_targets=[],
+        scans=[
+            {
+                "id": "scan-web",
+                "target_url": "https://app.example.com",
+                "run_kind": "web_dast",
+                "result": {
+                    "discovery": {
+                        "api_security": {
+                            "openapi": {
+                                "endpoints": [
+                                    {
+                                        "method": "DELETE",
+                                        "path": "/api/agent/trace",
+                                        "body_params": ["tool", "prompt"],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            }
+        ],
+        findings=[],
+    )
+
+    assert inventory["candidates"] == []
+
+
 def test_mcp_live_readiness_probe_uses_metadata_and_attestations(monkeypatch):
     def fake_fetch(url, *, method="GET", timeout_seconds=8):
         return {
