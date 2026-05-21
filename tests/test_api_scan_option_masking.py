@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import types
@@ -264,7 +265,7 @@ def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
     })
 
     request = api_module.ModelIntakeScanRequest(artifact_url="acme/ranker")
-    enriched = api_module._enrich_model_intake_scan_request(request)
+    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
 
     assert enriched.artifact_url.endswith("/resolve/abc123/model.safetensors")
     assert enriched.expected_sha256 == "a" * 64

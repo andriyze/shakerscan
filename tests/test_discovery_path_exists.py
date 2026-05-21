@@ -1,10 +1,9 @@
 """
 Unit tests for discovery path_exists helper.
 """
+import asyncio
 import os
 import sys
-
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
@@ -152,8 +151,7 @@ class TestPathExists:
         assert reason == "html_success"
         assert not protected
 
-    @pytest.mark.asyncio
-    async def test_get_baseline_signature_cached(self):
+    def test_get_baseline_signature_cached(self):
         _BASELINE_SIGNATURE_CACHE.clear()
         response = DummyResponse(
             status_code=404,
@@ -163,8 +161,12 @@ class TestPathExists:
         client = DummyClient(response)
         base_url = "https://example.invalid"
 
-        sig_first = await get_baseline_signature(base_url, client, timeout=1.0)
-        sig_second = await get_baseline_signature(base_url, client, timeout=1.0)
+        async def run_checks():
+            sig_first = await get_baseline_signature(base_url, client, timeout=1.0)
+            sig_second = await get_baseline_signature(base_url, client, timeout=1.0)
+            return sig_first, sig_second
+
+        sig_first, sig_second = asyncio.run(run_checks())
 
         assert sig_first == sig_second
         assert client.calls == 1

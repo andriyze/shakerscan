@@ -3539,7 +3539,10 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
         platform = _detect_model_intake_platform(ref, metadata)
     if platform == "huggingface":
         normalized_ref = ref if _is_hf_ref(ref) else f"https://huggingface.co/{ref}"
-        return _resolve_huggingface_model_intake(request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}))
+        return await asyncio.to_thread(
+            _resolve_huggingface_model_intake,
+            request.model_copy(update={"ref": normalized_ref, "platform": "huggingface"}),
+        )
 
     normalize_model_artifact_reference, _ = _import_model_intake_helpers()
     normalized = normalize_model_artifact_reference(ref, metadata, platform)
@@ -3584,7 +3587,7 @@ async def resolve_model_intake(request: ModelIntakeResolveRequest):
     }
 
 
-def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
+async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
     """Best-effort provider metadata lookup for direct API/UI scan submissions."""
     artifact_ref = (request.artifact_url or "").strip()
     metadata = dict(request.metadata_json or {})
@@ -3600,7 +3603,7 @@ def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelI
             metadata_json=metadata,
             timeout_seconds=min(max(int(request.timeout_seconds or 20), 1), 60),
         )
-        resolved = _resolve_huggingface_model_intake(resolve_request)
+        resolved = await asyncio.to_thread(_resolve_huggingface_model_intake, resolve_request)
     except Exception as exc:
         logger.warning("Could not auto-enrich Hugging Face model intake request: %s: %s", type(exc).__name__, exc)
         return request
@@ -3625,7 +3628,7 @@ def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> ModelI
 @app.post("/model-intake/scan")
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
-    request = _enrich_model_intake_scan_request(request)
+    request = await _enrich_model_intake_scan_request(request)
     artifact_ref = (request.artifact_url or "").strip()
     if not artifact_ref:
         raise HTTPException(status_code=400, detail="artifact_url is required")
