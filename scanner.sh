@@ -22,14 +22,35 @@ FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
 COMPOSE_FILE_ARGS=()
+DOCKER_NEEDS_SUDO=0
 PLATFORM=""
 PLATFORM_VERSION=""
+PLATFORM_ID=""
+PLATFORM_ID_LIKE=""
+PLATFORM_NAME=""
+PLATFORM_CODENAME=""
+PLATFORM_UBUNTU_CODENAME=""
 USE_PREBUILT=1
 PREBUILT_COMPOSE_FILE="docker-compose.prebuilt.yml"
 IMAGE_TAG_OVERRIDE=""
 
 command_exists() {
     command -v "$1" > /dev/null 2>&1
+}
+
+docker_info_available() {
+    DOCKER_NEEDS_SUDO=0
+
+    if docker info > /dev/null 2>&1; then
+        return 0
+    fi
+
+    if command_exists sudo && sudo -n docker info > /dev/null 2>&1; then
+        DOCKER_NEEDS_SUDO=1
+        return 0
+    fi
+
+    return 1
 }
 
 has_docker_compose_v2() {
@@ -47,6 +68,18 @@ has_docker_compose() {
 resolve_compose_command() {
     if [ ${#DOCKER_COMPOSE_CMD[@]} -gt 0 ]; then
         return 0
+    fi
+
+    if [ "$DOCKER_NEEDS_SUDO" -eq 1 ]; then
+        if command_exists sudo && command_exists docker && sudo -n docker compose version > /dev/null 2>&1; then
+            DOCKER_COMPOSE_CMD=(sudo docker compose)
+            return 0
+        fi
+
+        if command_exists sudo && command_exists docker-compose && sudo -n docker-compose version > /dev/null 2>&1; then
+            DOCKER_COMPOSE_CMD=(sudo docker-compose)
+            return 0
+        fi
     fi
 
     if has_docker_compose_v2; then
@@ -119,33 +152,487 @@ run_with_sudo() {
 detect_platform() {
     PLATFORM="unsupported"
     PLATFORM_VERSION=""
+    PLATFORM_ID=""
+    PLATFORM_ID_LIKE=""
+    PLATFORM_NAME=""
+    PLATFORM_CODENAME=""
+    PLATFORM_UBUNTU_CODENAME=""
 
     case "$(uname -s)" in
         Darwin)
             PLATFORM="macos"
             PLATFORM_VERSION="$(sw_vers -productVersion 2>/dev/null || echo "")"
+            PLATFORM_ID="macos"
+            PLATFORM_NAME="macOS"
             ;;
         Linux)
+            PLATFORM="linux"
             if [ -f /etc/os-release ]; then
                 # shellcheck disable=SC1091
                 source /etc/os-release
-                if [ "$ID" = "ubuntu" ]; then
-                    PLATFORM="ubuntu"
-                    PLATFORM_VERSION="${VERSION_ID:-}"
-                else
-                    PLATFORM="linux-other"
-                    PLATFORM_VERSION="${ID:-linux}"
-                fi
+                PLATFORM_ID="${ID:-linux}"
+                PLATFORM_ID_LIKE="${ID_LIKE:-}"
+                PLATFORM_NAME="${NAME:-Linux}"
+                PLATFORM_VERSION="${VERSION_ID:-}"
+                PLATFORM_CODENAME="${VERSION_CODENAME:-}"
+                PLATFORM_UBUNTU_CODENAME="${UBUNTU_CODENAME:-}"
             else
-                PLATFORM="linux-other"
+                PLATFORM_ID="linux"
+                PLATFORM_NAME="Linux"
                 PLATFORM_VERSION="unknown"
             fi
             ;;
     esac
 }
 
+linux_id_matches() {
+    local needle="$1"
+    local id_like
+
+    [ "$PLATFORM_ID" = "$needle" ] && return 0
+    for id_like in $PLATFORM_ID_LIKE; do
+        [ "$id_like" = "$needle" ] && return 0
+    done
+
+    return 1
+}
+
+platform_label() {
+    if [ "$PLATFORM" = "macos" ]; then
+        echo "macOS ${PLATFORM_VERSION:-}"
+    elif [ "$PLATFORM" = "linux" ]; then
+        echo "${PLATFORM_NAME:-Linux} ${PLATFORM_VERSION:-}"
+    else
+        echo "unsupported"
+    fi
+}
+
+detect_package_manager() {
+    if command_exists apt-get; then
+        echo "apt"
+    elif command_exists dnf; then
+        echo "dnf"
+    elif command_exists yum; then
+        echo "yum"
+    elif command_exists pacman; then
+        echo "pacman"
+    elif command_exists zypper; then
+        echo "zypper"
+    elif command_exists apk; then
+        echo "apk"
+    else
+        echo ""
+    fi
+}
+
 apt_has_package() {
     apt-cache show "$1" > /dev/null 2>&1
+}
+
+dnf_has_package() {
+    local manager="$1"
+    local package="$2"
+    "$manager" list --available "$package" > /dev/null 2>&1
+}
+
+current_login_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != "root" ]; then
+        echo "$SUDO_USER"
+    elif [ "$(id -u)" -ne 0 ]; then
+        id -un
+    else
+        echo ""
+    fi
+}
+
+start_docker_daemon_linux() {
+    if ! command_exists docker; then
+        return 0
+    fi
+
+    if command_exists systemctl; then
+        run_with_sudo systemctl enable docker > /dev/null 2>&1 || true
+        run_with_sudo systemctl start docker > /dev/null 2>&1 || true
+    fi
+
+    if ! docker_info_available && command_exists service; then
+        run_with_sudo service docker start > /dev/null 2>&1 || true
+    fi
+
+    if ! docker_info_available && command_exists rc-service; then
+        run_with_sudo rc-update add docker default > /dev/null 2>&1 || true
+        run_with_sudo rc-service docker start > /dev/null 2>&1 || true
+    fi
+}
+
+add_user_to_docker_group_if_needed() {
+    local docker_user
+
+    if ! command_exists getent || ! getent group docker > /dev/null 2>&1; then
+        return 0
+    fi
+
+    docker_user="$(current_login_user)"
+    if [ -z "$docker_user" ]; then
+        return 0
+    fi
+
+    if ! id -nG "$docker_user" | grep -qw docker; then
+        if command_exists usermod && run_with_sudo usermod -aG docker "$docker_user"; then
+            echo -e "${YELLOW}$docker_user was added to the docker group. Log out/in or run 'newgrp docker' for permission changes.${NC}"
+        elif command_exists addgroup && run_with_sudo addgroup "$docker_user" docker; then
+            echo -e "${YELLOW}$docker_user was added to the docker group. Log out/in or run 'newgrp docker' for permission changes.${NC}"
+        else
+            echo -e "${YELLOW}Could not add $docker_user to the docker group automatically.${NC}"
+            echo "You may need to run: sudo usermod -aG docker $docker_user"
+        fi
+    fi
+}
+
+install_packages_if_missing_apt() {
+    local packages=()
+
+    command_exists curl || packages+=("curl")
+    command_exists jq || packages+=("jq")
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        run_with_sudo apt-get update
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo apt-get install -y "${packages[@]}"
+    fi
+}
+
+apt_docker_repo_family() {
+    if [ "$PLATFORM_ID" = "ubuntu" ] || linux_id_matches ubuntu || [ -n "$PLATFORM_UBUNTU_CODENAME" ]; then
+        echo "ubuntu"
+    elif [ "$PLATFORM_ID" = "debian" ] || [ "$PLATFORM_ID" = "raspbian" ]; then
+        echo "debian"
+    else
+        echo ""
+    fi
+}
+
+apt_docker_repo_codename() {
+    local family="$1"
+
+    if [ "$family" = "ubuntu" ]; then
+        echo "${PLATFORM_UBUNTU_CODENAME:-${PLATFORM_CODENAME:-}}"
+    else
+        echo "${PLATFORM_CODENAME:-}"
+    fi
+}
+
+configure_docker_apt_repository() {
+    local family
+    local codename
+    local repo_url
+    local arch
+    local temp_sources
+
+    family="$(apt_docker_repo_family)"
+    if [ -z "$family" ]; then
+        return 1
+    fi
+
+    codename="$(apt_docker_repo_codename "$family")"
+    if [ -z "$codename" ]; then
+        echo -e "${YELLOW}Could not determine the $family codename for Docker's apt repository.${NC}"
+        return 1
+    fi
+
+    repo_url="https://download.docker.com/linux/$family"
+    echo -e "${GREEN}Configuring Docker apt repository for $family ($codename)...${NC}"
+
+    run_with_sudo apt-get update
+    run_with_sudo apt-get install -y ca-certificates curl
+    run_with_sudo install -m 0755 -d /etc/apt/keyrings
+    run_with_sudo curl -fsSL "$repo_url/gpg" -o /etc/apt/keyrings/docker.asc
+    run_with_sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+    arch="$(dpkg --print-architecture)"
+    temp_sources="$(mktemp)"
+    {
+        echo "Types: deb"
+        echo "URIs: $repo_url"
+        echo "Suites: $codename"
+        echo "Components: stable"
+        echo "Architectures: $arch"
+        echo "Signed-By: /etc/apt/keyrings/docker.asc"
+    } > "$temp_sources"
+    run_with_sudo install -m 0644 "$temp_sources" /etc/apt/sources.list.d/docker.sources
+    rm -f "$temp_sources"
+
+    if ! run_with_sudo apt-get update; then
+        echo -e "${YELLOW}Docker apt repository did not work for this release; removing it and trying distro packages.${NC}"
+        run_with_sudo rm -f /etc/apt/sources.list.d/docker.sources || true
+        return 1
+    fi
+}
+
+install_docker_from_apt_repository() {
+    local packages=()
+
+    if ! command_exists docker; then
+        packages+=("docker-ce" "docker-ce-cli" "containerd.io" "docker-buildx-plugin")
+    fi
+
+    if ! has_docker_compose; then
+        packages+=("docker-compose-plugin")
+    fi
+
+    if [ ${#packages[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    configure_docker_apt_repository || return 1
+    echo -e "${GREEN}Installing Docker packages: ${packages[*]}${NC}"
+    run_with_sudo apt-get install -y "${packages[@]}"
+}
+
+install_docker_from_apt_distro_packages() {
+    local packages=()
+    local compose_pkg=""
+
+    run_with_sudo apt-get update
+
+    if ! command_exists docker; then
+        if apt_has_package docker.io; then
+            packages+=("docker.io")
+        elif apt_has_package docker; then
+            packages+=("docker")
+        else
+            echo -e "${RED}Error: Could not find a Docker Engine package in apt repositories.${NC}"
+            return 1
+        fi
+    fi
+
+    if ! has_docker_compose; then
+        if apt_has_package docker-compose-v2; then
+            compose_pkg="docker-compose-v2"
+        elif apt_has_package docker-compose-plugin; then
+            compose_pkg="docker-compose-plugin"
+        elif apt_has_package docker-compose; then
+            compose_pkg="docker-compose"
+        fi
+
+        if [ -n "$compose_pkg" ]; then
+            packages+=("$compose_pkg")
+        else
+            echo -e "${RED}Error: Could not find a Docker Compose package in apt repositories.${NC}"
+            return 1
+        fi
+    fi
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo apt-get install -y "${packages[@]}"
+    fi
+}
+
+install_dependencies_apt() {
+    install_packages_if_missing_apt
+
+    if ! command_exists docker || ! has_docker_compose; then
+        if ! install_docker_from_apt_repository; then
+            echo -e "${YELLOW}Falling back to distro Docker packages from apt.${NC}"
+            install_docker_from_apt_distro_packages
+        fi
+    fi
+}
+
+dnf_docker_repo_url() {
+    if [ "$PLATFORM_ID" = "fedora" ]; then
+        echo "https://download.docker.com/linux/fedora/docker-ce.repo"
+    elif [ "$PLATFORM_ID" = "rhel" ] || [ "$PLATFORM_ID" = "redhat" ]; then
+        echo "https://download.docker.com/linux/rhel/docker-ce.repo"
+    elif linux_id_matches rhel || linux_id_matches centos || [ "$PLATFORM_ID" = "rocky" ] || [ "$PLATFORM_ID" = "almalinux" ] || [ "$PLATFORM_ID" = "ol" ]; then
+        echo "https://download.docker.com/linux/centos/docker-ce.repo"
+    elif linux_id_matches fedora; then
+        echo "https://download.docker.com/linux/fedora/docker-ce.repo"
+    else
+        echo ""
+    fi
+}
+
+configure_docker_dnf_repository() {
+    local manager="$1"
+    local repo_url
+
+    repo_url="$(dnf_docker_repo_url)"
+    if [ -z "$repo_url" ]; then
+        return 1
+    fi
+
+    echo -e "${GREEN}Configuring Docker rpm repository...${NC}"
+    if [ "$manager" = "dnf" ]; then
+        run_with_sudo dnf -y install dnf-plugins-core || true
+    elif [ "$manager" = "yum" ]; then
+        run_with_sudo yum -y install yum-utils || true
+    fi
+
+    run_with_sudo install -m 0755 -d /etc/yum.repos.d
+    run_with_sudo curl -fsSL "$repo_url" -o /etc/yum.repos.d/docker-ce.repo
+}
+
+install_docker_from_dnf_repository() {
+    local manager="$1"
+    local packages=()
+
+    if ! command_exists docker; then
+        packages+=("docker-ce" "docker-ce-cli" "containerd.io" "docker-buildx-plugin")
+    fi
+
+    if ! has_docker_compose; then
+        packages+=("docker-compose-plugin")
+    fi
+
+    if [ ${#packages[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    configure_docker_dnf_repository "$manager" || return 1
+    echo -e "${GREEN}Installing Docker packages: ${packages[*]}${NC}"
+    if ! run_with_sudo "$manager" -y install "${packages[@]}"; then
+        run_with_sudo rm -f /etc/yum.repos.d/docker-ce.repo || true
+        return 1
+    fi
+}
+
+install_docker_from_dnf_distro_packages() {
+    local manager="$1"
+    local packages=()
+    local compose_pkg=""
+
+    if ! command_exists docker; then
+        if dnf_has_package "$manager" moby-engine; then
+            packages+=("moby-engine")
+        elif dnf_has_package "$manager" docker; then
+            packages+=("docker")
+        else
+            echo -e "${RED}Error: Could not find a Docker Engine package in $manager repositories.${NC}"
+            return 1
+        fi
+    fi
+
+    if ! has_docker_compose; then
+        if dnf_has_package "$manager" docker-compose-plugin; then
+            compose_pkg="docker-compose-plugin"
+        elif dnf_has_package "$manager" docker-compose; then
+            compose_pkg="docker-compose"
+        fi
+
+        if [ -n "$compose_pkg" ]; then
+            packages+=("$compose_pkg")
+        else
+            echo -e "${RED}Error: Could not find a Docker Compose package in $manager repositories.${NC}"
+            return 1
+        fi
+    fi
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo "$manager" -y install "${packages[@]}"
+    fi
+}
+
+install_dependencies_dnf() {
+    local manager="$1"
+    local base_packages=()
+
+    command_exists curl || base_packages+=("curl")
+    command_exists jq || base_packages+=("jq")
+
+    if [ ${#base_packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${base_packages[*]}${NC}"
+        run_with_sudo "$manager" -y install "${base_packages[@]}"
+    fi
+
+    if ! command_exists docker || ! has_docker_compose; then
+        if ! install_docker_from_dnf_repository "$manager"; then
+            echo -e "${YELLOW}Falling back to distro Docker packages from $manager.${NC}"
+            install_docker_from_dnf_distro_packages "$manager"
+        fi
+    fi
+}
+
+install_dependencies_pacman() {
+    local packages=()
+
+    command_exists docker || packages+=("docker")
+    has_docker_compose || packages+=("docker-compose")
+    command_exists curl || packages+=("curl")
+    command_exists jq || packages+=("jq")
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo pacman -Sy --needed --noconfirm "${packages[@]}"
+    fi
+}
+
+install_dependencies_zypper() {
+    local packages=()
+
+    command_exists docker || packages+=("docker")
+    has_docker_compose || packages+=("docker-compose")
+    command_exists curl || packages+=("curl")
+    command_exists jq || packages+=("jq")
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo zypper --non-interactive install "${packages[@]}"
+    fi
+}
+
+install_dependencies_apk() {
+    local packages=()
+
+    command_exists docker || packages+=("docker")
+    has_docker_compose || packages+=("docker-cli-compose")
+    command_exists curl || packages+=("curl")
+    command_exists jq || packages+=("jq")
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
+        run_with_sudo apk add "${packages[@]}"
+    fi
+}
+
+install_dependencies_linux() {
+    local package_manager
+
+    echo "Detected: $(platform_label)"
+    package_manager="$(detect_package_manager)"
+
+    case "$package_manager" in
+        apt)
+            install_dependencies_apt
+            ;;
+        dnf|yum)
+            install_dependencies_dnf "$package_manager"
+            ;;
+        pacman)
+            install_dependencies_pacman
+            ;;
+        zypper)
+            install_dependencies_zypper
+            ;;
+        apk)
+            install_dependencies_apk
+            ;;
+        *)
+            echo -e "${RED}Automatic install is not supported for this Linux package manager.${NC}"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
+            return 1
+            ;;
+    esac
+
+    start_docker_daemon_linux
+    add_user_to_docker_group_if_needed
+
+    if command_exists docker && ! docker_info_available; then
+        echo -e "${YELLOW}Docker installed, but the daemon is not reachable yet.${NC}"
+        echo "If you were just added to the docker group, log out/in or run 'newgrp docker'."
+    fi
 }
 
 ensure_homebrew_in_path() {
@@ -179,80 +666,6 @@ install_homebrew_if_missing() {
     if ! command_exists brew; then
         echo -e "${RED}Error: Homebrew installation failed${NC}"
         return 1
-    fi
-}
-
-install_dependencies_ubuntu() {
-    local packages=()
-    local compose_pkg=""
-    local added_to_docker_group=0
-    local needs_apt_update=0
-
-    if [ "$PLATFORM_VERSION" != "24.04" ]; then
-        echo -e "${YELLOW}Note: Ubuntu $PLATFORM_VERSION detected. Installer is optimized for Ubuntu 24.04.${NC}"
-    fi
-
-    if ! command_exists docker; then
-        packages+=("docker.io")
-        needs_apt_update=1
-    fi
-
-    if ! command_exists curl; then
-        packages+=("curl")
-        needs_apt_update=1
-    fi
-
-    if ! command_exists jq; then
-        packages+=("jq")
-        needs_apt_update=1
-    fi
-
-    if ! has_docker_compose; then
-        needs_apt_update=1
-    fi
-
-    if [ "$needs_apt_update" -eq 1 ]; then
-        run_with_sudo apt-get update
-    fi
-
-    if ! has_docker_compose; then
-        if apt_has_package docker-compose-v2; then
-            compose_pkg="docker-compose-v2"
-        elif apt_has_package docker-compose-plugin; then
-            compose_pkg="docker-compose-plugin"
-        elif apt_has_package docker-compose; then
-            compose_pkg="docker-compose"
-        fi
-
-        if [ -n "$compose_pkg" ]; then
-            packages+=("$compose_pkg")
-        else
-            echo -e "${RED}Error: Could not find a Docker Compose package in apt repositories${NC}"
-            return 1
-        fi
-    fi
-
-    if [ ${#packages[@]} -eq 0 ]; then
-        echo -e "${GREEN}All required dependencies are already installed${NC}"
-    else
-        echo -e "${GREEN}Installing packages: ${packages[*]}${NC}"
-        run_with_sudo apt-get install -y "${packages[@]}"
-    fi
-
-    if command_exists docker && command_exists systemctl; then
-        run_with_sudo systemctl enable docker > /dev/null 2>&1 || true
-        run_with_sudo systemctl start docker > /dev/null 2>&1 || true
-    fi
-
-    if command_exists docker && command_exists getent && getent group docker > /dev/null 2>&1; then
-        if [ "$(id -u)" -ne 0 ] && ! id -nG "$USER" | grep -qw docker; then
-            run_with_sudo usermod -aG docker "$USER" || true
-            added_to_docker_group=1
-        fi
-    fi
-
-    if [ "$added_to_docker_group" -eq 1 ]; then
-        echo -e "${YELLOW}You were added to the docker group. Log out/in (or run 'newgrp docker') for permission changes.${NC}"
     fi
 }
 
@@ -295,15 +708,15 @@ install_dependencies() {
     echo -e "${BLUE}Installing missing scanner dependencies...${NC}"
 
     case "$PLATFORM" in
-        ubuntu)
-            install_dependencies_ubuntu
+        linux)
+            install_dependencies_linux
             ;;
         macos)
             install_dependencies_macos
             ;;
         *)
-            echo -e "${RED}Automatic install is supported on Ubuntu 24.04 and macOS.${NC}"
-            echo "Install manually: Docker + Docker Compose + curl + jq"
+            echo -e "${RED}Automatic install is supported on macOS and Linux hosts with apt, dnf/yum, pacman, zypper, or apk.${NC}"
+            echo "Install manually: Docker Engine + Docker Compose + curl + jq"
             return 1
             ;;
     esac
@@ -409,26 +822,28 @@ ensure_command_dependencies() {
     fi
 
     if command_needs_docker_runtime "$cmd"; then
-        if ! docker info > /dev/null 2>&1; then
+        if ! docker_info_available; then
             detect_platform
-            if [ "$PLATFORM" = "ubuntu" ] && command_exists systemctl; then
+            if [ "$PLATFORM" = "linux" ]; then
                 echo -e "${YELLOW}Docker daemon is not running. Attempting to start Docker...${NC}"
-                run_with_sudo systemctl start docker > /dev/null 2>&1 || true
+                start_docker_daemon_linux
             elif [ "$PLATFORM" = "macos" ]; then
                 echo -e "${YELLOW}Docker daemon is not running. Launching Docker Desktop...${NC}"
                 open -a Docker > /dev/null 2>&1 || true
             fi
         fi
 
-        if ! docker info > /dev/null 2>&1; then
+        if ! docker_info_available; then
             echo -e "${RED}Error: Docker daemon is not running${NC}"
             if [ "$PLATFORM" = "macos" ]; then
                 echo "Open Docker Desktop and wait until it is ready."
-            elif [ "$PLATFORM" = "ubuntu" ]; then
+            elif [ "$PLATFORM" = "linux" ]; then
                 echo "Try: sudo systemctl start docker"
+                echo "If Docker was just installed, log out/in or run 'newgrp docker' for group permissions."
             fi
             return 1
         fi
+        DOCKER_COMPOSE_CMD=()
 
         if ! resolve_compose_command; then
             echo -e "${RED}Error: Docker Compose is not available${NC}"
@@ -566,8 +981,12 @@ print_help() {
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
     echo ""
+    echo "Auto-install support:"
+    echo "  macOS; Linux with apt, dnf/yum, pacman, zypper, or apk"
+    echo ""
     echo "Examples:"
     echo "  ./scanner.sh start                    # Start with latest prebuilt images"
+    echo "  ./scanner.sh start -y                 # Install prerequisites if missing, then start"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"

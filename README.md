@@ -42,6 +42,14 @@ If your machine is missing prerequisites:
 ./scanner.sh start
 ```
 
+For a new machine, you can let the first start install missing prerequisites automatically:
+
+```bash
+./scanner.sh start -y
+```
+
+The installer supports macOS and common Linux package managers: apt-based hosts such as Ubuntu, Debian, Pop!_OS, Linux Mint, Zorin, and Kali; rpm-based hosts such as Fedora, RHEL, CentOS, Rocky, and AlmaLinux; plus Arch, openSUSE, and Alpine. It installs Docker Engine or Docker Desktop, Docker Compose, `curl`, and `jq`, then starts/enables Docker where the host init system allows it.
+
 To build locally instead of using prebuilt images:
 
 ```bash
@@ -461,9 +469,11 @@ docker stats                             # Check memory usage
 ## Prerequisites
 
 - Docker and Docker Compose
-- curl and jq (CLI can auto-install missing prerequisites)
+- curl and jq
 - 8GB+ RAM recommended
 - Linux, macOS, or Windows with WSL2
+
+`./scanner.sh install-deps` can install missing prerequisites on macOS and on Linux hosts using `apt`, `dnf`, `yum`, `pacman`, `zypper`, or `apk`. On Linux, the script starts/enables the Docker service and adds the invoking user to the `docker` group when needed; log out/in or run `newgrp docker` if group permissions were just changed.
 
 ## Contributing
 
