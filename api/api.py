@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -196,17 +196,50 @@ def _decode_json_value(value: Any) -> Any:
 
 
 SENSITIVE_SCAN_OPTION_KEYS = {
+    "access_token",
     "ai_api_key",
-    "secret",
-    "secret_value",
+    "api_key",
+    "api_token",
     "auth_cookies",
     "auth_header",
     "auth_headers_json",
     "auth_scenario_json",
+    "authorization",
+    "bearer_token",
+    "client_secret",
+    "credential",
+    "credentials",
+    "hf_token",
+    "huggingface_token",
     "login_password",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "secret_value",
+    "session_token",
+    "token",
     "user2_cookies",
     "user2_header",
 }
+
+SENSITIVE_SCAN_OPTION_KEY_FRAGMENTS = (
+    "_secret",
+    "secret_",
+    "_token",
+    "token_",
+    "_credential",
+    "credential_",
+    "private_key",
+    "password",
+)
+
+
+def _is_sensitive_scan_option_key(key: Any) -> bool:
+    normalized = str(key or "").strip().lower().replace("-", "_")
+    return normalized in SENSITIVE_SCAN_OPTION_KEYS or any(
+        fragment in normalized for fragment in SENSITIVE_SCAN_OPTION_KEY_FRAGMENTS
+    )
 
 
 def _sanitize_scan_options(value: Any) -> Any:
@@ -219,7 +252,7 @@ def _sanitize_scan_options(value: Any) -> Any:
         if isinstance(candidate, dict):
             masked_dict = {}
             for key, item in candidate.items():
-                if key in SENSITIVE_SCAN_OPTION_KEYS and item not in (None, "", [], {}):
+                if _is_sensitive_scan_option_key(key) and item not in (None, "", [], {}):
                     masked_dict[key] = "***"
                 else:
                     masked_dict[key] = mask_nested(item)
@@ -1313,6 +1346,8 @@ class ModelIntakeScanRequest(BaseModel):
     require_signature_verification: bool = False
     require_hash: bool = True
     require_model_governance: bool = True
+    policy_profile: Optional[str] = None
+    policy_exceptions: Optional[list[dict[str, Any]]] = None
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
 
@@ -1339,6 +1374,7 @@ AI_AUTH_KINDS = {
     "multi_header",
     "query_param",
 }
+AI_PRINCIPAL_ROLES = {"attacker", "victim", "admin", "service", "observer"}
 AI_PROBE_PACKS = {
     "shaker-ai-smoke",
     "shaker-owasp-llm",
@@ -1398,6 +1434,24 @@ class AITargetUpdate(BaseModel):
     credential: Optional[AITargetCredential] = None
 
 
+class AITargetPrincipalCreate(BaseModel):
+    label: str
+    role: str = "attacker"
+    tenant_id: Optional[str] = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+    credential: AITargetCredential = Field(default_factory=AITargetCredential)
+
+
+class AITargetPrincipalUpdate(BaseModel):
+    label: Optional[str] = None
+    role: Optional[str] = None
+    tenant_id: Optional[str] = None
+    metadata_json: Optional[dict[str, Any]] = None
+    is_active: Optional[bool] = None
+    credential: Optional[AITargetCredential] = None
+
+
 class AITargetScanRequest(BaseModel):
     probe_pack: str = "shaker-ai-smoke"
     scan_profile: str = "smoke"
@@ -1452,6 +1506,12 @@ class FindingRetestRequest(BaseModel):
     method: Optional[str] = None
     request_body: Optional[str] = None
     requested_by: Optional[str] = "api"
+
+
+class AIFindingRetestRequest(BaseModel):
+    mode: str = Field(default="same_probe", pattern="^(same_probe|same_family|strict_replay)$")
+    requested_by: Optional[str] = "api"
+    confirm_production: bool = False
 
 
 class FindingsBulkRetestRequest(BaseModel):
@@ -1760,6 +1820,62 @@ def _sanitize_ai_credential(row: Optional[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _normalize_ai_principal_role(value: Any) -> str:
+    role = str(value or "attacker").strip().lower().replace("-", "_")
+    if role not in AI_PRINCIPAL_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"role must be one of: {', '.join(sorted(AI_PRINCIPAL_ROLES))}",
+        )
+    return role
+
+
+def _normalize_ai_principal_label(value: Any) -> str:
+    label = str(value or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="principal label is required")
+    if len(label) > 80:
+        raise HTTPException(status_code=400, detail="principal label must be 80 characters or fewer")
+    return label
+
+
+def _sanitize_ai_principal(row: Any) -> dict[str, Any]:
+    principal = row_to_dict(row)
+    principal["metadata_json"] = _sanitize_scan_options(
+        _decode_json_value(principal.get("metadata_json")) or {}
+    )
+    principal["credential"] = _sanitize_ai_credential(principal)
+    for secret_key in ("secret_value", "secret_preview", "auth_kind", "header_name"):
+        principal.pop(secret_key, None)
+    return principal
+
+
+def _ai_principal_ref(row: Any) -> dict[str, Any]:
+    principal = row_to_dict(row)
+    metadata = _decode_json_value(principal.get("metadata_json")) or {}
+    return {
+        "id": principal.get("id"),
+        "label": principal.get("label"),
+        "role": principal.get("role"),
+        "tenant_id": principal.get("tenant_id"),
+        "auth_kind": principal.get("auth_kind") or "none",
+        "credential_configured": bool(principal.get("secret_value")),
+        "metadata_json": _sanitize_scan_options(metadata),
+    }
+
+
+def _runtime_ai_principal_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    credential = _runtime_credential_from_row(row)
+    return {
+        "id": str(row.get("id")),
+        "label": row.get("label"),
+        "role": row.get("role") or "attacker",
+        "tenant_id": row.get("tenant_id"),
+        "metadata_json": _decode_json_value(row.get("metadata_json")) or {},
+        "credential": credential,
+    }
+
+
 def _ai_target_response(target_row: Any, credential_row: Optional[Any] = None) -> dict[str, Any]:
     target = row_to_dict(target_row)
     for key in ("headers_template", "request_template", "metadata_json"):
@@ -1870,13 +1986,27 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             raise HTTPException(status_code=404, detail="AI target not found")
         if not target_row["is_active"]:
             raise HTTPException(status_code=409, detail="AI target is inactive")
-        if target_row["production_mode"] and not request.confirm_production:
+        production_scan = bool(target_row["production_mode"]) or request.environment == "production"
+        if production_scan and not request.confirm_production:
+            reason = (
+                "This AI target is marked production"
+                if target_row["production_mode"]
+                else "This AI Gate scan targets the production environment"
+            )
             raise HTTPException(
                 status_code=409,
-                detail="This AI target is marked production. Re-submit with confirm_production=true.",
+                detail=f"{reason}. Re-submit with confirm_production=true.",
             )
         credential_row = await conn.fetchrow(
             "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
+        principal_rows = await conn.fetch(
+            """
+            SELECT * FROM ai_target_principals
+            WHERE ai_target_id = $1 AND is_active = true
+            ORDER BY role, label
+            """,
             uuid.UUID(target_id),
         )
 
@@ -1888,6 +2018,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             target=target,
             credential=credential,
             request=request,
+            principals=list(principal_rows),
         )
         run_kind = storage_options["run_kind"]
 
@@ -1973,6 +2104,251 @@ def _graph_edge(
 
 def _severity_sort_value(value: Any) -> int:
     return SEVERITY_ORDER.get(str(value or "").lower(), 0)
+
+
+def _deployment_gate_findings(findings: Any, *, minimum: str = "high", limit: int = 20) -> list[dict[str, Any]]:
+    if not isinstance(findings, list):
+        return []
+    threshold = SEVERITY_ORDER.get(minimum, SEVERITY_ORDER["high"])
+    selected: list[dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity") or "info").lower()
+        if SEVERITY_ORDER.get(severity, 0) < threshold:
+            continue
+        selected.append({
+            "id": finding.get("id") or finding.get("source_finding_id"),
+            "title": finding.get("title"),
+            "severity": severity,
+            "tool": finding.get("tool"),
+            "url": finding.get("url"),
+        })
+    selected.sort(key=lambda item: SEVERITY_ORDER.get(str(item.get("severity")), 0), reverse=True)
+    return selected[:limit]
+
+
+def _deployment_gate_required_evidence_missing(result: dict[str, Any], product: str) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    if product == "ai_gate":
+        ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
+        execution_plan = ai_gate.get("execution_plan") if isinstance(ai_gate.get("execution_plan"), dict) else {}
+        quality_gate = execution_plan.get("judging_quality_gate") if isinstance(execution_plan.get("judging_quality_gate"), dict) else {}
+        if quality_gate.get("judging_required") and not quality_gate.get("judging_completed"):
+            missing.append({
+                "id": "semantic_judging",
+                "label": "Semantic judging",
+                "status": quality_gate.get("status") or "judging_required",
+            })
+    elif product == "model_intake":
+        model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+        checks = model_intake.get("checks") if isinstance(model_intake.get("checks"), dict) else {}
+        for key, value in checks.items():
+            if value is False:
+                missing.append({"id": str(key), "label": str(key).replace("_", " "), "status": "failed"})
+            elif value is None and key in {"signature_verification", "approval_evidence"}:
+                missing.append({"id": str(key), "label": str(key).replace("_", " "), "status": "missing"})
+    return missing
+
+
+POLICY_PROFILES: dict[str, dict[str, Any]] = {
+    "development": {
+        "name": "development-ai-v1",
+        "minimum_block_severity": "critical",
+        "expires_days": 14,
+        "allow_active_exceptions": True,
+        "strict_model_intake": False,
+    },
+    "staging": {
+        "name": "staging-ai-v1",
+        "minimum_block_severity": "high",
+        "expires_days": 21,
+        "allow_active_exceptions": True,
+        "strict_model_intake": False,
+    },
+    "production": {
+        "name": "production-ai-v1",
+        "minimum_block_severity": "high",
+        "expires_days": 30,
+        "allow_active_exceptions": True,
+        "strict_model_intake": True,
+    },
+}
+
+
+def _policy_profile_for_scan(scan: dict[str, Any], result: dict[str, Any], product: str) -> dict[str, Any]:
+    options = _sanitize_scan_options(scan.get("options")) if scan.get("options") is not None else {}
+    raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
+    policy_profile = ""
+    if isinstance(raw_options, dict):
+        policy_profile = str(
+            raw_options.get("policy_profile")
+            or raw_options.get("ai_environment")
+            or raw_options.get("environment")
+            or ""
+        ).strip().lower()
+    if not policy_profile and product == "ai_gate":
+        ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
+        decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
+        policy_profile = str(decision.get("environment") or "").strip().lower()
+    if not policy_profile and product == "model_intake":
+        summary = (result.get("model_intake") or {}).get("summary") if isinstance(result.get("model_intake"), dict) else {}
+        policy_profile = str((summary or {}).get("deployment_environment") or "").strip().lower()
+    if policy_profile not in POLICY_PROFILES:
+        policy_profile = "production" if product in {"ai_gate", "model_intake"} else "staging"
+    profile = dict(POLICY_PROFILES[policy_profile])
+    profile["id"] = policy_profile
+    if isinstance(options, dict) and options.get("policy_profile"):
+        profile["requested_profile"] = options.get("policy_profile")
+    return profile
+
+
+def _exception_records(scan: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
+    candidates: list[Any] = []
+    if isinstance(raw_options, dict):
+        candidates.append(raw_options.get("policy_exceptions"))
+        candidates.append(raw_options.get("exceptions"))
+    if isinstance(result, dict):
+        candidates.append(result.get("policy_exceptions"))
+        for product_key in ("ai_gate", "model_intake"):
+            product = result.get(product_key)
+            if isinstance(product, dict):
+                candidates.append(product.get("policy_exceptions"))
+    exceptions: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            exceptions.extend(item for item in candidate if isinstance(item, dict))
+    return exceptions
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _active_exception_ids(exceptions: list[dict[str, Any]]) -> set[str]:
+    now = datetime.now(timezone.utc)
+    active: set[str] = set()
+    for item in exceptions:
+        finding_id = str(item.get("finding_id") or item.get("id") or "").strip()
+        if not finding_id:
+            continue
+        status = str(item.get("status") or item.get("decision") or "active").strip().lower()
+        if status not in {"active", "approved", "accepted_risk"}:
+            continue
+        expires_at = _parse_iso_datetime(item.get("expires_at") or item.get("expiry"))
+        if expires_at is None or expires_at <= now:
+            continue
+        if not item.get("approved_by") and not item.get("approver"):
+            continue
+        active.add(finding_id)
+    return active
+
+
+def _apply_policy_exceptions(
+    blocking_findings: list[dict[str, Any]],
+    exceptions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    active_ids = _active_exception_ids(exceptions)
+    if not active_ids:
+        return blocking_findings, []
+    remaining: list[dict[str, Any]] = []
+    applied: list[dict[str, Any]] = []
+    for finding in blocking_findings:
+        finding_id = str(finding.get("id") or "")
+        if finding_id in active_ids:
+            applied.append(finding)
+        else:
+            remaining.append(finding)
+    return remaining, applied
+
+
+def build_deployment_decision(scan: dict[str, Any]) -> dict[str, Any]:
+    result = _decode_json_value(scan.get("result")) or {}
+    run_kind = str(scan.get("run_kind") or "")
+    scan_type = str(scan.get("scan_type") or "")
+    product = "dast"
+    policy_name = "dast-default-v1"
+    raw_decision = "needs_review"
+    rationale = "Scan has not completed or has no deployment decision."
+    findings = result.get("findings") if isinstance(result, dict) else []
+
+    product_for_policy = "dast"
+    if isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
+        product_for_policy = "ai_gate"
+    elif isinstance(result, dict) and (result.get("model_intake") or run_kind == "model_intake"):
+        product_for_policy = "model_intake"
+    policy_profile = _policy_profile_for_scan(scan, result if isinstance(result, dict) else {}, product_for_policy)
+
+    if isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
+        product = "ai_gate"
+        decision_obj = (result.get("ai_gate") or {}).get("decision") if isinstance(result.get("ai_gate"), dict) else {}
+        raw_decision = str((decision_obj or {}).get("decision") or "needs_review")
+        rationale = str((decision_obj or {}).get("rationale") or "AI Gate decision requires review.")
+        policy_name = str((decision_obj or {}).get("policy_name") or policy_profile["name"])
+    elif isinstance(result, dict) and (result.get("model_intake") or run_kind == "model_intake"):
+        product = "model_intake"
+        result_obj = result.get("result") if isinstance(result.get("result"), dict) else {}
+        intake_decision = str(result_obj.get("decision") or "review")
+        raw_decision = "needs_approval" if intake_decision == "review" else intake_decision
+        rationale = str(result_obj.get("decision_reason") or "Model Intake decision requires review.")
+        policy_name = policy_profile["name"]
+    elif isinstance(result, dict) and scan.get("status") == "completed":
+        blocking = _deployment_gate_findings(findings)
+        if blocking:
+            raw_decision = "block"
+            rationale = f"{len(blocking)} high/critical finding(s) require a block before deploy."
+        else:
+            raw_decision = "allow"
+            rationale = "No high/critical findings met the deployment block threshold."
+        policy_name = f"{scan_type or 'scan'}-default-v1"
+
+    if raw_decision == "review":
+        raw_decision = "needs_approval"
+    if raw_decision not in {"allow", "needs_approval", "needs_review", "block"}:
+        raw_decision = "needs_review"
+
+    missing = _deployment_gate_required_evidence_missing(result if isinstance(result, dict) else {}, product)
+    if raw_decision == "allow" and missing:
+        raw_decision = "needs_review"
+        rationale = "Required deployment evidence is missing or incomplete."
+    blocking_findings = _deployment_gate_findings(
+        findings,
+        minimum=str(policy_profile.get("minimum_block_severity") or "high"),
+    )
+    exceptions = _exception_records(scan, result if isinstance(result, dict) else {})
+    blocking_findings, applied_exceptions = _apply_policy_exceptions(blocking_findings, exceptions)
+    if blocking_findings and raw_decision == "allow":
+        raw_decision = "block"
+        rationale = f"{len(blocking_findings)} finding(s) meet the {policy_profile['id']} block threshold."
+    if raw_decision == "block" and not blocking_findings and applied_exceptions:
+        raw_decision = "needs_approval"
+        rationale = "Blocking findings are covered by active time-bound policy exceptions."
+
+    return {
+        "scan_id": str(scan.get("id")),
+        "status": scan.get("status"),
+        "decision": raw_decision,
+        "product": product,
+        "policy_name": policy_name,
+        "policy_profile": policy_profile["id"],
+        "rationale": rationale,
+        "blocking_findings": blocking_findings,
+        "applied_exceptions": applied_exceptions,
+        "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
+        "required_evidence_missing": missing,
+        "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),
+        "grade": scan.get("grade") or (result.get("result") or {}).get("grade") if isinstance(result, dict) else scan.get("grade"),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=int(policy_profile.get("expires_days") or 30))).isoformat(),
+    }
 
 
 def _highest_severity(values: list[str | None]) -> str | None:
@@ -2639,6 +3015,7 @@ def _build_ai_worker_options(
     target: dict[str, Any],
     credential: dict[str, Any],
     request: AITargetScanRequest,
+    principals: Optional[list[Any]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     probe_pack = request.probe_pack if request.probe_pack in AI_PROBE_PACKS else "shaker-ai-smoke"
     scan_profile = request.scan_profile if request.scan_profile in AI_SCAN_PROFILES else "smoke"
@@ -2650,6 +3027,18 @@ def _build_ai_worker_options(
         metadata_json["ai_judge_enabled"] = request.ai_judge_enabled
     if request.semantic_judge_enabled is not None:
         metadata_json["semantic_judge_enabled"] = request.semantic_judge_enabled
+    production_scan = bool(target.get("production_mode")) or environment == "production"
+    production_confirmation = None
+    if production_scan:
+        production_confirmation = {
+            "confirmed": bool(request.confirm_production),
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "environment": environment,
+            "target_production_mode": bool(target.get("production_mode")),
+            "probe_pack": probe_pack,
+            "scan_profile": scan_profile,
+        }
+        metadata_json["production_confirmation"] = production_confirmation
 
     storage_options = {
         "run_kind": run_kind,
@@ -2665,6 +3054,16 @@ def _build_ai_worker_options(
         "ai_request_budget": target.get("request_budget"),
         "ai_token_budget": target.get("token_budget"),
     }
+    if production_confirmation:
+        storage_options["production_confirmation"] = production_confirmation
+    principal_refs = [_ai_principal_ref(row) for row in (principals or [])]
+    if principal_refs:
+        metadata_json["principal_count"] = len(principal_refs)
+        metadata_json["principal_roles"] = sorted(
+            {str(item.get("role") or "") for item in principal_refs if item.get("role")}
+        )
+        storage_options["ai_principal_count"] = len(principal_refs)
+        storage_options["ai_principal_roles"] = metadata_json["principal_roles"]
     worker_options = {
         **storage_options,
         "ai_target": {
@@ -2682,15 +3081,110 @@ def _build_ai_worker_options(
             "request_budget": target.get("request_budget"),
             "production_mode": target.get("production_mode"),
             "metadata_json": metadata_json,
-            "credential": credential,
+            "credential_ref": {
+                "ai_target_id": target["id"],
+                "configured": bool(credential.get("secret"))
+                or bool((credential.get("metadata_json") or {}).get("headers")),
+            },
         },
     }
-    ai_settings = _load_effective_ai_settings()
-    if ai_settings.get("ai_url") and ai_settings.get("ai_api_key"):
-        worker_options["ai_url"] = ai_settings.get("ai_url")
-        worker_options["ai_api_key"] = ai_settings.get("ai_api_key")
-        worker_options["ai_model"] = ai_settings.get("ai_model") or "gpt-4o-mini"
+    if principal_refs:
+        worker_options["ai_target"]["principal_refs"] = principal_refs
     return worker_options, storage_options
+
+
+def _ai_finding_probe_context(finding: dict[str, Any]) -> dict[str, Any]:
+    evidence = parse_json_field(finding.get("evidence")) or {}
+    probe_id = str(evidence.get("probe_id") or "").strip()
+    probe_family = str(evidence.get("probe_family") or evidence.get("strategy_id") or "").strip()
+    source_finding_id = str(evidence.get("source_finding_id") or "").strip()
+    if not source_finding_id:
+        raw_expected = evidence.get("expected_finding") or evidence.get("oracle_expected_finding")
+        if probe_id and raw_expected:
+            source_finding_id = f"{probe_id}:{str(raw_expected).split(':')[-1]}"
+    if not probe_id and source_finding_id and ":" in source_finding_id:
+        probe_id = source_finding_id.split(":", 1)[0]
+    turns = evidence.get("turns")
+    if not probe_family and isinstance(turns, list) and turns:
+        first_turn = turns[0] if isinstance(turns[0], dict) else {}
+        probe_family = str(first_turn.get("probe_family") or "").strip()
+    return {
+        "probe_id": probe_id,
+        "probe_family": probe_family,
+        "source_finding_id": source_finding_id,
+        "evidence": evidence,
+    }
+
+
+def _ai_scan_options_from_row(scan_row: Any) -> dict[str, Any]:
+    if not scan_row:
+        return {}
+    options = scan_row.get("options") if isinstance(scan_row, dict) else scan_row["options"]
+    return parse_json_field(options) or {}
+
+
+def _build_ai_finding_retest_scan_options(
+    *,
+    target: dict[str, Any],
+    credential: dict[str, Any],
+    finding: dict[str, Any],
+    original_scan_options: dict[str, Any],
+    request: AIFindingRetestRequest,
+    verification_id: uuid.UUID,
+    principals: Optional[list[Any]] = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    context = _ai_finding_probe_context(finding)
+    probe_id = context.get("probe_id")
+    probe_family = context.get("probe_family")
+    if request.mode in {"same_probe", "strict_replay"} and not probe_id:
+        raise HTTPException(status_code=400, detail="AI Gate finding is missing probe_id context for focused replay")
+    if request.mode == "same_family" and not probe_family:
+        raise HTTPException(status_code=400, detail="AI Gate finding is missing probe_family context for family replay")
+
+    original_confirmation = original_scan_options.get("production_confirmation")
+    original_confirmed = isinstance(original_confirmation, dict) and original_confirmation.get("confirmed") is True
+    scan_request = AITargetScanRequest(
+        probe_pack=str(original_scan_options.get("ai_probe_pack") or "shaker-ai-smoke"),
+        scan_profile=str(original_scan_options.get("ai_scan_profile") or "smoke"),
+        environment=str(original_scan_options.get("ai_environment") or "preview"),
+        confirm_production=bool(request.confirm_production or original_confirmed),
+        ai_judge_enabled=original_scan_options.get("ai_judge_enabled"),
+        semantic_judge_enabled=original_scan_options.get("semantic_judge_enabled"),
+    )
+    worker_options, storage_options = _build_ai_worker_options(
+        target=target,
+        credential=credential,
+        request=scan_request,
+        principals=principals,
+    )
+
+    focus_probe_ids = [probe_id] if request.mode in {"same_probe", "strict_replay"} and probe_id else []
+    focus_probe_family = probe_family if request.mode == "same_family" else None
+    metadata_json = worker_options["ai_target"].setdefault("metadata_json", {})
+    if focus_probe_ids:
+        worker_options["ai_focus_probe_ids"] = focus_probe_ids
+        metadata_json["ai_focus_probe_ids"] = focus_probe_ids
+    if focus_probe_family:
+        worker_options["ai_focus_probe_family"] = focus_probe_family
+        metadata_json["ai_focus_probe_family"] = focus_probe_family
+    if request.mode == "strict_replay":
+        metadata_json["strict_replay"] = True
+        metadata_json["replay_previous_response"] = context["evidence"].get("response_excerpt")
+
+    replay_plan = {
+        "mode": request.mode,
+        "finding_id": str(finding["id"]),
+        "verification_id": str(verification_id),
+        "probe_id": probe_id,
+        "probe_family": probe_family,
+        "source_finding_id": context.get("source_finding_id"),
+        "probe_pack": scan_request.probe_pack,
+        "scan_profile": scan_request.scan_profile,
+        "environment": scan_request.environment,
+    }
+    worker_options["ai_finding_retest"] = replay_plan
+    storage_options["ai_finding_retest"] = replay_plan
+    return worker_options, storage_options, replay_plan
 
 
 def _mask_ai_headers_for_preview(headers: dict[str, str]) -> dict[str, str]:
@@ -3678,9 +4172,15 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "require_signature_verification": request.require_signature_verification,
         "require_hash": request.require_hash,
         "require_model_governance": request.require_model_governance,
+        "policy_profile": request.policy_profile,
+        "policy_exceptions": request.policy_exceptions or [],
         "max_download_bytes": request.max_download_bytes,
         "timeout_seconds": request.timeout_seconds,
     }
+    if request.policy_profile in POLICY_PROFILES:
+        options["environment"] = request.policy_profile
+        if request.policy_profile == "production":
+            options["strict_governance"] = True
 
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT id FROM targets WHERE url = $1", artifact_ref)
@@ -4028,6 +4528,164 @@ async def delete_ai_target(target_id: str):
     return {"status": "deleted", "target_id": target_id}
 
 
+@app.get("/ai/targets/{target_id}/principals")
+async def list_ai_target_principals(target_id: str, include_inactive: bool = False):
+    """List non-secret principal identities configured for one AI Gate target."""
+    async with db_pool.acquire() as conn:
+        target_exists = await conn.fetchval(
+            "SELECT 1 FROM ai_targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
+        if not target_exists:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        query = """
+            SELECT * FROM ai_target_principals
+            WHERE ai_target_id = $1
+        """
+        if not include_inactive:
+            query += " AND is_active = true"
+        query += " ORDER BY role, label"
+        rows = await conn.fetch(query, uuid.UUID(target_id))
+
+    return {
+        "target_id": target_id,
+        "principals": [_sanitize_ai_principal(row) for row in rows],
+    }
+
+
+@app.post("/ai/targets/{target_id}/principals")
+async def create_ai_target_principal(target_id: str, request: AITargetPrincipalCreate):
+    """Create a principal credential for cross-user RAG and agent authorization tests."""
+    label = _normalize_ai_principal_label(request.label)
+    role = _normalize_ai_principal_role(request.role)
+    credential = _build_ai_credential_db_record(request.credential)
+    principal_metadata = {**(credential["metadata_json"] or {}), **(request.metadata_json or {})}
+    async with db_pool.acquire() as conn:
+        target_exists = await conn.fetchval(
+            "SELECT 1 FROM ai_targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
+        if not target_exists:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        try:
+            principal_id = await conn.fetchval("""
+                INSERT INTO ai_target_principals (
+                    ai_target_id, label, role, tenant_id, auth_kind, header_name,
+                    secret_value, secret_preview, metadata_json, is_active, rotated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                RETURNING id
+            """,
+                uuid.UUID(target_id),
+                label,
+                role,
+                str(request.tenant_id or "").strip() or None,
+                credential["auth_kind"],
+                credential["header_name"],
+                credential["secret_value"],
+                credential["secret_preview"],
+                json.dumps(principal_metadata),
+                request.is_active,
+            )
+        except Exception as exc:
+            if "unique" in str(exc).lower():
+                raise HTTPException(status_code=409, detail="Principal label already exists for this AI target") from exc
+            raise
+        row = await conn.fetchrow("SELECT * FROM ai_target_principals WHERE id = $1", principal_id)
+    return {"principal": _sanitize_ai_principal(row)}
+
+
+@app.patch("/ai/targets/{target_id}/principals/{principal_id}")
+async def update_ai_target_principal(
+    target_id: str,
+    principal_id: str,
+    request: AITargetPrincipalUpdate,
+):
+    """Update a principal credential without returning its raw secret."""
+    payload = request.model_dump(exclude_unset=True)
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT * FROM ai_target_principals WHERE id = $1 AND ai_target_id = $2",
+            uuid.UUID(principal_id),
+            uuid.UUID(target_id),
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="AI target principal not found")
+
+        update_data: dict[str, Any] = {}
+        if "label" in payload and payload["label"] is not None:
+            update_data["label"] = _normalize_ai_principal_label(payload["label"])
+        if "role" in payload and payload["role"] is not None:
+            update_data["role"] = _normalize_ai_principal_role(payload["role"])
+        if "tenant_id" in payload:
+            update_data["tenant_id"] = str(payload.get("tenant_id") or "").strip() or None
+        if "metadata_json" in payload:
+            update_data["metadata_json"] = json.dumps(payload.get("metadata_json") or {})
+        if "is_active" in payload:
+            update_data["is_active"] = bool(payload["is_active"])
+
+        if request.credential is not None:
+            credential = _build_ai_credential_db_record(request.credential, dict(existing))
+            update_data.update({
+                "auth_kind": credential["auth_kind"],
+                "header_name": credential["header_name"],
+                "secret_value": credential["secret_value"],
+                "secret_preview": credential["secret_preview"],
+                "metadata_json": json.dumps(
+                    {
+                        **(_decode_json_value(existing.get("metadata_json")) or {}),
+                        **(credential["metadata_json"] or {}),
+                        **(
+                            payload.get("metadata_json")
+                            if isinstance(payload.get("metadata_json"), dict)
+                            else {}
+                        ),
+                    }
+                ),
+                "rotated_at": datetime.now(timezone.utc),
+            })
+
+        if update_data:
+            assignments = []
+            values = []
+            for idx, (key, value) in enumerate(update_data.items(), start=1):
+                assignments.append(f"{key} = ${idx}")
+                values.append(value)
+            assignments.append("updated_at = NOW()")
+            values.extend([uuid.UUID(principal_id), uuid.UUID(target_id)])
+            await conn.execute(
+                f"""
+                UPDATE ai_target_principals
+                SET {', '.join(assignments)}
+                WHERE id = ${len(values) - 1} AND ai_target_id = ${len(values)}
+                """,
+                *values,
+            )
+
+        row = await conn.fetchrow(
+            "SELECT * FROM ai_target_principals WHERE id = $1 AND ai_target_id = $2",
+            uuid.UUID(principal_id),
+            uuid.UUID(target_id),
+        )
+    return {"principal": _sanitize_ai_principal(row)}
+
+
+@app.delete("/ai/targets/{target_id}/principals/{principal_id}")
+async def delete_ai_target_principal(target_id: str, principal_id: str):
+    """Deactivate a principal credential."""
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE ai_target_principals
+            SET is_active = false, updated_at = NOW()
+            WHERE id = $1 AND ai_target_id = $2
+        """,
+            uuid.UUID(principal_id),
+            uuid.UUID(target_id),
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="AI target principal not found")
+    return {"status": "deleted", "target_id": target_id, "principal_id": principal_id}
+
+
 @app.post("/ai/targets/{target_id}/scan")
 async def scan_ai_target(target_id: str, request: AITargetScanRequest):
     """Queue an AI Gate scan for a saved AI target."""
@@ -4072,10 +4730,15 @@ async def test_ai_target_mcp_live_readiness(target_id: str, request: AIMCPLiveRe
         target_row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id = $1", uuid.UUID(target_id))
         if not target_row:
             raise HTTPException(status_code=404, detail="AI target not found")
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            uuid.UUID(target_id),
+        )
 
     target = row_to_dict(target_row)
     for key in ("headers_template", "request_template", "metadata_json"):
         target[key] = _decode_json_value(target.get(key)) or {}
+    target["credential"] = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
 
     result = await asyncio.to_thread(
         run_mcp_live_readiness_probe,
@@ -4122,7 +4785,7 @@ async def get_ai_target_runtime_risk(target_id: str):
 
 
 @app.get("/ai/scans/{scan_id}/transcript")
-async def get_ai_scan_transcript(scan_id: str):
+async def get_ai_scan_transcript(scan_id: str, include_sensitive: bool = False):
     """Return AI Gate transcripts for a completed scan."""
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow(
@@ -4136,7 +4799,52 @@ async def get_ai_scan_transcript(scan_id: str):
     transcripts = ai_gate.get("transcripts") if isinstance(ai_gate, dict) else None
     if not transcripts:
         raise HTTPException(status_code=404, detail="Transcript not available")
-    return {"scan_id": scan_id, "transcripts": transcripts}
+    retention = ai_gate.get("transcript_retention") if isinstance(ai_gate, dict) else {}
+    return {
+        "scan_id": scan_id,
+        "transcripts": transcripts,
+        "transcript_retention": retention or {
+            "redaction_applied": True,
+            "include_sensitive_available": False,
+        },
+        "include_sensitive": include_sensitive,
+        "include_sensitive_available": bool((retention or {}).get("include_sensitive_available")),
+    }
+
+
+@app.delete("/ai/scans/{scan_id}/transcript")
+async def purge_ai_scan_transcript(scan_id: str):
+    """Purge stored AI Gate transcript bodies while preserving scan and finding metadata."""
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow(
+            "SELECT result, run_kind FROM scans WHERE id = $1",
+            uuid.UUID(scan_id),
+        )
+        if not scan or scan["run_kind"] not in {"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp"}:
+            raise HTTPException(status_code=404, detail="AI scan not found")
+        result = _decode_json_value(scan["result"]) or {}
+        ai_gate = result.get("ai_gate") if isinstance(result, dict) else None
+        if not isinstance(ai_gate, dict):
+            raise HTTPException(status_code=404, detail="AI Gate result not available")
+        transcripts = ai_gate.get("transcripts")
+        purged_count = len(transcripts) if isinstance(transcripts, list) else 0
+        ai_gate["transcripts"] = []
+        retention = ai_gate.get("transcript_retention") if isinstance(ai_gate.get("transcript_retention"), dict) else {}
+        retention.update({
+            "purged": True,
+            "purged_at": datetime.now(timezone.utc).isoformat(),
+            "purged_transcript_count": purged_count,
+            "redaction_applied": True,
+            "include_sensitive_available": False,
+        })
+        ai_gate["transcript_retention"] = retention
+        result["ai_gate"] = ai_gate
+        await conn.execute(
+            "UPDATE scans SET result = $1 WHERE id = $2",
+            json.dumps(result),
+            uuid.UUID(scan_id),
+        )
+    return {"scan_id": scan_id, "purged": True, "purged_transcript_count": purged_count}
 
 
 # ============================================================
@@ -4529,6 +5237,21 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
     return result
+
+
+@app.get("/scans/{scan_id}/deployment-decision")
+async def get_scan_deployment_decision(scan_id: str):
+    """Return a machine-readable deployment gate decision for CI/CD."""
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow("""
+            SELECT id, status, scan_type, run_kind, result, score, grade, completed_at
+            FROM scans
+            WHERE id = $1
+        """, uuid.UUID(scan_id))
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+    return build_deployment_decision(row_to_dict(scan))
 
 
 @app.get("/scans/{scan_id}/ai-redteam-report")
@@ -5418,6 +6141,174 @@ async def retest_finding(
         "finding_type": retest_inputs["finding_type"],
         "target_url": retest_inputs["target_url"],
         "replay_commands": build_replay_commands(retest_inputs),
+    }
+
+
+@app.post("/ai/findings/{finding_id:path}/retest")
+async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | None = None):
+    """Queue a focused AI Gate replay for one AI Gate finding."""
+    request = request or AIFindingRetestRequest()
+    r = get_redis()
+    try:
+        r.ping()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
+
+    scan_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    verification_id = uuid.uuid4()
+
+    async with db_pool.acquire() as conn:
+        finding = await get_finding_record(conn, finding_id)
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        finding_data = dict(finding)
+        if not (finding_data.get("source") == "ai_gate" or finding_data.get("ai_target_id")):
+            raise HTTPException(status_code=400, detail="Finding is not an AI Gate finding")
+        if not finding_data.get("ai_target_id"):
+            raise HTTPException(status_code=400, detail="AI Gate finding is missing ai_target_id")
+
+        target_row = await conn.fetchrow(
+            "SELECT * FROM ai_targets WHERE id = $1",
+            finding_data["ai_target_id"],
+        )
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        if not target_row["is_active"]:
+            raise HTTPException(status_code=409, detail="AI target is inactive")
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            finding_data["ai_target_id"],
+        )
+        principal_rows = await conn.fetch(
+            """
+            SELECT * FROM ai_target_principals
+            WHERE ai_target_id = $1 AND is_active = true
+            ORDER BY role, label
+            """,
+            finding_data["ai_target_id"],
+        )
+        original_scan = None
+        if finding_data.get("scan_id"):
+            original_scan = await conn.fetchrow(
+                "SELECT options FROM scans WHERE id = $1",
+                finding_data["scan_id"],
+            )
+
+        target = row_to_dict(target_row)
+        for key in ("headers_template", "request_template", "metadata_json"):
+            target[key] = _decode_json_value(target.get(key)) or {}
+        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+        original_options = _ai_scan_options_from_row(original_scan)
+        worker_options, storage_options, replay_plan = _build_ai_finding_retest_scan_options(
+            target=target,
+            credential=credential,
+            finding=finding_data,
+            original_scan_options=original_options,
+            request=request,
+            verification_id=verification_id,
+            principals=list(principal_rows),
+        )
+
+        production_scan = bool(target.get("production_mode")) or storage_options.get("ai_environment") == "production"
+        confirmed = bool((storage_options.get("production_confirmation") or {}).get("confirmed"))
+        if production_scan and not confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail="Focused AI Gate replay targets production. Re-submit with confirm_production=true.",
+            )
+
+        run_kind = storage_options["run_kind"]
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, ai_target_id, target_url, job_id, status,
+                options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, NULL, $2, $3, $4, 'pending', $5, 'ai_gate', $6, $7)
+        """,
+            uuid.UUID(scan_id),
+            finding_data["ai_target_id"],
+            target["endpoint_url"],
+            job_id,
+            json.dumps(storage_options),
+            run_kind,
+            f"ai_finding_retest:{finding_data['id']}",
+        )
+        await conn.execute("""
+            INSERT INTO finding_verifications (
+                id, finding_id, scan_id, target_id, job_id, requested_by, status,
+                finding_type, target_url, original_url, replay_commands,
+                verification_mode, ai_plan, message
+            ) VALUES (
+                $1, $2, $3, NULL, $4, $5, 'queued',
+                'ai_gate', $6, $7, $8,
+                'ai_driven', $9, $10
+            )
+        """,
+            verification_id,
+            finding_data["id"],
+            uuid.UUID(scan_id),
+            job_id,
+            request.requested_by or "api",
+            target["endpoint_url"],
+            finding_data.get("url"),
+            json.dumps([{
+                "description": "Focused AI Gate replay",
+                "scan_id": scan_id,
+                **replay_plan,
+            }]),
+            json.dumps(replay_plan),
+            "Queued focused AI Gate replay",
+        )
+        await conn.execute("""
+            UPDATE findings
+            SET last_verification_status = 'queued',
+                last_verification_verdict = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+        """, finding_data["id"])
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": target["endpoint_url"],
+        "options": worker_options,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r.rpush(QUEUE_NAME, json.dumps(job_data))
+        r.hset(
+            f"job:{job_id}",
+            mapping={
+                "status": "queued",
+                "target": target["endpoint_url"],
+                "scan_id": scan_id,
+                "verification_id": str(verification_id),
+                "finding_id": str(finding_data["id"]),
+            },
+        )
+        r.expire(f"job:{job_id}", 86400)
+    except Exception as e:
+        async with db_pool.acquire() as conn:
+            await mark_retest_enqueue_failed(
+                conn,
+                verification_id=verification_id,
+                finding_id=finding_data["id"],
+                error_message=f"AI Gate replay queue enqueue failed: {type(e).__name__}: {e}",
+            )
+        raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
+
+    return {
+        "retest_id": str(verification_id),
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "status": "queued",
+        "mode": request.mode,
+        "finding_id": str(finding_data["id"]),
+        "finding_type": "ai_gate",
+        "target_url": target["endpoint_url"],
+        "probe_id": replay_plan.get("probe_id"),
+        "probe_family": replay_plan.get("probe_family"),
+        "ui_url": f"/scans/{scan_id}",
     }
 
 

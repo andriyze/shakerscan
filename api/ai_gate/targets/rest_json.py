@@ -9,11 +9,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 try:
-    from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+    from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 except ModuleNotFoundError as exc:  # pragma: no cover - supports package-style local imports
     if exc.name not in {"ai_gate", "ai_gate.budget"}:
         raise
-    from api.ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE
+    from api.ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
 
 
 CALIBRATION_METADATA_ERROR_KEY = "calibration_metadata_error"
@@ -315,6 +315,10 @@ def build_url(endpoint_url: str, target: dict[str, Any]) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
+def _principal_lookup_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def append_query_params(endpoint_url: str, params: dict[str, Any]) -> str:
     parsed = urlparse(endpoint_url)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -461,10 +465,28 @@ class RestJsonConversationTarget:
             target.get("response_path") if isinstance(target.get("response_path"), str) else None
         )
         self.headers = build_headers(target)
+        self.principals = self._read_principals(target.get("principals"))
+        self.principals_by_key: dict[str, dict[str, Any]] = {}
+        for principal in self.principals:
+            for key in (
+                principal.get("role"),
+                principal.get("label"),
+                principal.get("id"),
+            ):
+                lookup_key = _principal_lookup_key(key)
+                if lookup_key and lookup_key not in self.principals_by_key:
+                    self.principals_by_key[lookup_key] = principal
         self.streaming_mode = "sse" if target.get("streaming_mode") == "sse" else "json"
         if self.streaming_mode == "sse":
             self.headers.setdefault("Accept", "text/event-stream")
         metadata = as_dict(target.get("metadata_json"))
+        self.max_response_bytes = _coerce_int(
+            metadata.get("max_response_bytes", target.get("max_response_bytes")),
+            262_144,
+            minimum=1_024,
+            maximum=5_000_000,
+        )
+        self.request_budget: RequestBudget | None = None
         self.calibration_mode = _metadata_allows_calibration(metadata)
         self.setup_requests = self._read_lifecycle_requests(
             metadata,
@@ -504,6 +526,102 @@ class RestJsonConversationTarget:
         self._session_replacements: dict[str, dict[str, str]] = {}
         self._lifecycle_events: list[dict[str, Any]] = []
         self._lifecycle_captured_keys: set[str] = set()
+
+    def _read_principals(self, raw_principals: Any) -> tuple[dict[str, Any], ...]:
+        if not isinstance(raw_principals, list):
+            return ()
+        principals: list[dict[str, Any]] = []
+        for item in raw_principals:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("role") or item.get("id") or "").strip()
+            role = str(item.get("role") or label or "attacker").strip().lower()
+            credential = as_dict(item.get("credential"))
+            principals.append({
+                "id": str(item.get("id") or ""),
+                "label": label,
+                "role": role,
+                "tenant_id": str(item.get("tenant_id") or ""),
+                "metadata_json": as_dict(item.get("metadata_json")),
+                "credential": credential,
+            })
+        return tuple(principals)
+
+    def _select_principal(self, principal: str | None) -> dict[str, Any] | None:
+        if not principal:
+            return None
+        return self.principals_by_key.get(_principal_lookup_key(principal))
+
+    def _target_for_principal(self, principal: str | None) -> dict[str, Any]:
+        selected = self._select_principal(principal)
+        if not selected:
+            return self.target
+        target = dict(self.target)
+        target["credential"] = selected.get("credential") or {"auth_kind": "none"}
+        return target
+
+    def _headers_for_principal(self, principal: str | None) -> dict[str, str]:
+        selected = self._select_principal(principal)
+        if not selected:
+            return self.headers
+        return build_headers(self._target_for_principal(principal))
+
+    def _endpoint_for_principal(self, principal: str | None) -> str:
+        selected = self._select_principal(principal)
+        if not selected:
+            return self.endpoint_url
+        raw_url = str(self.target.get("endpoint_url") or self.endpoint_url)
+        return build_url(raw_url, self._target_for_principal(principal))
+
+    def _principal_replacements(self, principal: str | None) -> dict[str, str]:
+        selected = self._select_principal(principal)
+        if not selected:
+            return {}
+        replacements = {
+            "principal_id": str(selected.get("id") or ""),
+            "principal_label": str(selected.get("label") or ""),
+            "principal_role": str(selected.get("role") or ""),
+            "principal_tenant_id": str(selected.get("tenant_id") or ""),
+        }
+        for item in self.principals:
+            role = _principal_lookup_key(item.get("role"))
+            if not role:
+                continue
+            replacements.setdefault(f"{role}_principal_label", str(item.get("label") or ""))
+            replacements.setdefault(f"{role}_tenant_id", str(item.get("tenant_id") or ""))
+        return replacements
+
+    def set_request_budget(self, request_budget: RequestBudget) -> None:
+        self.request_budget = request_budget
+
+    def _consume_request_budget(self, phase: str) -> None:
+        if self.request_budget is not None:
+            self.request_budget.consume(phase=phase)
+
+    def _record_request_response(self, status_code: int | None) -> None:
+        if self.request_budget is not None:
+            self.request_budget.record_response(status_code=status_code)
+
+    async def _read_response_text_capped(self, response: Any) -> tuple[str, bool, int]:
+        content = getattr(response, "content", None)
+        read = getattr(content, "read", None)
+        if callable(read):
+            raw_bytes = await read(self.max_response_bytes + 1)
+            if isinstance(raw_bytes, str):
+                raw_bytes = raw_bytes.encode("utf-8")
+            truncated = len(raw_bytes) > self.max_response_bytes
+            observed = len(raw_bytes)
+            body = raw_bytes[:self.max_response_bytes]
+            charset = getattr(response, "charset", None) or "utf-8"
+            return body.decode(charset, errors="replace"), truncated, observed
+
+        raw_text = await response.text()
+        raw_bytes = raw_text.encode("utf-8")
+        truncated = len(raw_bytes) > self.max_response_bytes
+        if not truncated:
+            return raw_text, False, len(raw_bytes)
+        capped = raw_bytes[:self.max_response_bytes]
+        return capped.decode("utf-8", errors="replace"), True, len(raw_bytes)
 
     def get_session_canary_tokens(self, session_id: str) -> list[str]:
         replacements = self._session_replacements.get(session_id)
@@ -546,6 +664,7 @@ class RestJsonConversationTarget:
         replacements: dict[str, str],
         *,
         phase: str,
+        principal: str | None = None,
     ) -> tuple[int, str, Any]:
         method = str(request_config.get("method") or self.method).upper()
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
@@ -555,7 +674,7 @@ class RestJsonConversationTarget:
             request_config.get("url")
             or request_config.get("endpoint_url")
             or request_config.get("target_url")
-            or self.endpoint_url
+            or self._endpoint_for_principal(principal)
         )
         if not isinstance(configured_url, str) or not configured_url.strip():
             raise ValueError(f"{phase} request url is required")
@@ -575,16 +694,25 @@ class RestJsonConversationTarget:
         )
         body = replace_placeholders(body_template, replacements)
         headers = _merge_headers(
-            self.headers,
+            self._headers_for_principal(principal),
             replace_placeholders(request_config.get("headers"), replacements),
         )
         request_kwargs: dict[str, Any] = {"headers": headers}
         if method not in {"GET", "DELETE"}:
             request_kwargs["json"] = body if isinstance(body, (dict, list)) else {}
 
+        self._consume_request_budget(phase)
         async with session.request(method, request_url, **request_kwargs) as response:
-            raw_text = await response.text()
+            self._record_request_response(response.status)
+            raw_text, response_truncated, raw_bytes_observed = await self._read_response_text_capped(response)
             content_type = response.headers.get("Content-Type", "")
+            if response_truncated:
+                self._lifecycle_events.append({
+                    "phase": phase,
+                    "response_truncated": True,
+                    "bytes_observed": raw_bytes_observed,
+                    "max_response_bytes": self.max_response_bytes,
+                })
             return response.status, raw_text, _parse_response_payload(raw_text, content_type)
 
     def _capture_lifecycle_values(
@@ -705,6 +833,7 @@ class RestJsonConversationTarget:
                     wait_config,
                     replacements,
                     phase="setup wait",
+                    principal=None,
                 )
                 last_status = status
                 matched, actual = self._evaluate_wait_condition(
@@ -777,6 +906,7 @@ class RestJsonConversationTarget:
                     setup_request,
                     replacements,
                     phase="setup",
+                    principal=None,
                 )
                 event = {"phase": "setup", "index": index, "status_code": status}
                 if status < 200 or status >= 400:
@@ -839,6 +969,7 @@ class RestJsonConversationTarget:
                     cleanup_request,
                     replacements,
                     phase="cleanup",
+                    principal=None,
                 )
                 event = {"phase": "cleanup", "index": index, "status_code": status}
                 if status < 200 or status >= 400:
@@ -882,25 +1013,35 @@ class RestJsonConversationTarget:
         *,
         session_id: str,
         replacements: dict[str, str],
+        principal: str | None = None,
     ) -> str | None:
-        if not self.preflight_requests or session_id in self._preflight_completed_session_ids:
+        preflight_key = f"{session_id}:{_principal_lookup_key(principal)}"
+        if not self.preflight_requests or preflight_key in self._preflight_completed_session_ids:
             return None
 
         for preflight_request in self.preflight_requests:
             body = replace_placeholders(preflight_request, replacements)
+            endpoint_url = self._endpoint_for_principal(principal)
             request_url = (
-                append_query_params(self.endpoint_url, body)
+                append_query_params(endpoint_url, body)
                 if self.method == "GET"
-                else self.endpoint_url
+                else endpoint_url
             )
             try:
+                self._consume_request_budget("preflight")
                 async with session.request(
                     self.method,
                     request_url,
                     **({} if self.method == "GET" else {"json": body}),
-                    headers=self.headers,
+                    headers=self._headers_for_principal(principal),
                 ) as response:
-                    raw_text = await response.text()
+                    self._record_request_response(response.status)
+                    raw_text, response_truncated, raw_bytes_observed = await self._read_response_text_capped(response)
+                    if response_truncated:
+                        return (
+                            "Preflight response exceeded "
+                            f"{self.max_response_bytes} byte cap ({raw_bytes_observed} bytes observed)"
+                        )
                     if response.status < 200 or response.status >= 400:
                         return (
                             f"Preflight request failed with {response.status}: "
@@ -909,7 +1050,7 @@ class RestJsonConversationTarget:
             except Exception as exc:  # noqa: BLE001
                 return f"Preflight request failed: {exc}"
 
-        self._preflight_completed_session_ids.add(session_id)
+        self._preflight_completed_session_ids.add(preflight_key)
         return None
 
     async def send_message(
@@ -919,6 +1060,7 @@ class RestJsonConversationTarget:
         prompt: str,
         probe_id: str,
         session_id: str,
+        principal: str | None = None,
         replacements: dict[str, str] | None = None,
     ) -> ConversationExchange:
         runtime_replacements = {
@@ -928,6 +1070,7 @@ class RestJsonConversationTarget:
         }
         if replacements:
             runtime_replacements.update(replacements)
+        runtime_replacements.update(self._principal_replacements(principal))
         runtime_replacements.update(self._session_replacements.get(session_id, {}))
 
         setup_error = await self._ensure_lifecycle_setup(
@@ -949,6 +1092,7 @@ class RestJsonConversationTarget:
             session,
             session_id=session_id,
             replacements=runtime_replacements,
+            principal=principal,
         )
         if preflight_error is not None:
             return ConversationExchange(
@@ -963,18 +1107,22 @@ class RestJsonConversationTarget:
             self.request_template,
             runtime_replacements,
         )
-        request_url = append_query_params(self.endpoint_url, body) if self.method == "GET" else self.endpoint_url
+        endpoint_url = self._endpoint_for_principal(principal)
+        request_url = append_query_params(endpoint_url, body) if self.method == "GET" else endpoint_url
+        headers = self._headers_for_principal(principal)
 
         input_chars = len(json.dumps(body, ensure_ascii=False))
         started = time.perf_counter()
         try:
+            self._consume_request_budget("target")
             async with session.request(
                 self.method,
                 request_url,
                 **({} if self.method == "GET" else {"json": body}),
-                headers=self.headers,
+                headers=headers,
             ) as response:
-                raw_text = await response.text()
+                self._record_request_response(response.status)
+                raw_text, response_truncated, raw_bytes_observed = await self._read_response_text_capped(response)
                 elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
                 content_type = response.headers.get("Content-Type", "")
                 response_text = extract_response_text(raw_text, content_type, self.response_path)
@@ -986,7 +1134,20 @@ class RestJsonConversationTarget:
                 response_metadata: dict[str, Any] = {
                     "streaming_mode": self.streaming_mode,
                     "content_type": content_type,
+                    "response_truncated": response_truncated,
+                    "max_response_bytes": self.max_response_bytes,
+                    "raw_response_bytes_observed": raw_bytes_observed,
                 }
+                if self.request_budget is not None:
+                    response_metadata["request_budget"] = self.request_budget.to_dict()
+                selected_principal = self._select_principal(principal)
+                if selected_principal:
+                    response_metadata["principal"] = {
+                        "id": selected_principal.get("id"),
+                        "label": selected_principal.get("label"),
+                        "role": selected_principal.get("role"),
+                        "tenant_id": selected_principal.get("tenant_id"),
+                    }
                 if self.calibration_mode:
                     response_metadata["calibration_mode"] = True
                 oracle_metadata = (
@@ -1010,11 +1171,14 @@ class RestJsonConversationTarget:
                     prompt=prompt,
                     response_excerpt=response_text,
                     input_chars=input_chars,
-                    output_chars=len(raw_text),
+                    output_chars=raw_bytes_observed,
                     response_metadata=response_metadata,
                 )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            response_metadata: dict[str, Any] = {"streaming_mode": self.streaming_mode}
+            if self.request_budget is not None:
+                response_metadata["request_budget"] = self.request_budget.to_dict()
             return ConversationExchange(
                 request_method=self.method,
                 status_code=None,
@@ -1022,7 +1186,7 @@ class RestJsonConversationTarget:
                 prompt=prompt,
                 error=str(exc),
                 input_chars=input_chars,
-                response_metadata={"streaming_mode": self.streaming_mode},
+                response_metadata=response_metadata,
             )
 
     async def send_probe(self, session: Any, probe: dict[str, str], session_id: str) -> ConversationExchange:
@@ -1031,6 +1195,7 @@ class RestJsonConversationTarget:
             prompt=probe["prompt"],
             probe_id=probe["id"],
             session_id=session_id,
+            principal=probe.get("principal"),
         )
 
 

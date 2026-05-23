@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, TokenBudget
+from ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget, TokenBudget
 from ai_gate.models import Probe
 from ai_gate.targets.rest_json import replace_placeholders
 
@@ -18,6 +18,7 @@ class PackRunResult:
     errors: list[str]
     successful_requests: int
     stopped_by_rate_limit: bool
+    stopped_by_request_budget: bool
 
 
 class ConversationTarget(Protocol):
@@ -30,6 +31,7 @@ class ConversationTarget(Protocol):
         prompt: str,
         probe_id: str,
         session_id: str,
+        principal: str | None = None,
         replacements: dict[str, str] | None = None,
     ) -> Any: ...
 
@@ -183,6 +185,7 @@ class ConversationRunner:
         aiohttp_module: Any,
         target: ConversationTarget,
         token_budget: TokenBudget,
+        request_budget: RequestBudget | None,
         metadata_json: dict[str, Any],
         analyze_probe: Callable[..., list[dict[str, Any]]],
         classify_response: Callable[..., list[dict[str, Any]]],
@@ -192,6 +195,7 @@ class ConversationRunner:
         self.aiohttp = aiohttp_module
         self.target = target
         self.token_budget = token_budget
+        self.request_budget = request_budget
         self.metadata_json = metadata_json
         self.analyze_probe = analyze_probe
         self.classify_response = classify_response
@@ -219,6 +223,9 @@ class ConversationRunner:
             )
             else 0
         )
+        set_request_budget = getattr(self.target, "set_request_budget", None)
+        if callable(set_request_budget) and self.request_budget is not None:
+            set_request_budget(self.request_budget)
 
     def _metadata_for_session(self, session_id: str) -> dict[str, Any]:
         metadata = dict(self.metadata_json)
@@ -274,6 +281,14 @@ class ConversationRunner:
                 )
                 break
 
+            if self.request_budget is not None and self.request_budget.exhausted:
+                stop_reason = "request_budget"
+                errors.append(
+                    f"{probe.id}: turn {turn_index} skipped — request budget exhausted "
+                    f"({self.request_budget.attempted_requests}/{self.request_budget.limit})"
+                )
+                break
+
             if consecutive_429s >= self.max_consecutive_429s:
                 stop_reason = "rate_limit"
                 stopped_by_rate_limit = True
@@ -296,6 +311,7 @@ class ConversationRunner:
                 prompt=message,
                 probe_id=probe.id,
                 session_id=session_id,
+                principal=turn.principal or probe.principal or turn.role,
                 replacements={
                     "turn_index": str(turn_index),
                     "previous_response": previous_response,
@@ -308,6 +324,7 @@ class ConversationRunner:
             turn_transcript = exchange.to_transcript(legacy_probe)
             turn_transcript["turn_index"] = turn_index
             turn_transcript["role"] = turn.role
+            turn_transcript["principal"] = turn.principal or probe.principal or turn.role
             turn_transcript["session_hash"] = _session_hash(session_id)
             turn_transcript["strategy_id"] = probe.technique or probe.family
             if probe.technique:
@@ -452,6 +469,7 @@ class ConversationRunner:
         successful_requests = 0
         consecutive_429s = 0
         stopped_by_rate_limit = False
+        stopped_by_request_budget = False
         shared_session_id = uuid.uuid4().hex
         session_ids: set[str] = set()
 
@@ -462,6 +480,14 @@ class ConversationRunner:
                     if self.token_budget.exceeded:
                         errors.append(
                             f"{probe.id}: skipped — token budget exhausted ({self.token_budget.total}/{self.token_budget.limit})"
+                        )
+                        break
+
+                    if self.request_budget is not None and self.request_budget.exhausted:
+                        stopped_by_request_budget = True
+                        errors.append(
+                            f"{probe.id}: skipped — request budget exhausted "
+                            f"({self.request_budget.attempted_requests}/{self.request_budget.limit})"
                         )
                         break
 
@@ -489,6 +515,9 @@ class ConversationRunner:
                     errors.extend(probe_errors)
                     successful_requests += probe_successes
                     stopped_by_rate_limit = stopped_by_rate_limit or probe_rate_limited
+                    stopped_by_request_budget = stopped_by_request_budget or (
+                        self.request_budget.exhausted if self.request_budget is not None else False
+                    )
 
                     if per_request_delay > 0:
                         await asyncio.sleep(per_request_delay)
@@ -512,4 +541,5 @@ class ConversationRunner:
             errors=errors,
             successful_requests=successful_requests,
             stopped_by_rate_limit=stopped_by_rate_limit,
+            stopped_by_request_budget=stopped_by_request_budget,
         )

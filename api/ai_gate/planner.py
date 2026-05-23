@@ -60,9 +60,11 @@ def _probe_manifest_entry(probe: Probe) -> dict[str, Any]:
         "severity_if_success": probe.severity_if_success,
         "max_turns": probe.max_turns,
         "safe_for_production": probe.safe_for_production,
+        "principal": probe.principal,
         "turns": [
             {
                 "role": turn.role,
+                "principal": turn.principal,
                 "message": turn.message,
             }
             for turn in probe.conversation_turns
@@ -87,6 +89,8 @@ def plan_probe_pack(
     slug: str | None,
     scan_profile: object,
     metadata_json: dict[str, object] | None = None,
+    *,
+    production_mode: bool = False,
 ) -> ProbePackPlan:
     normalized_slug = slug or "shaker-ai-smoke"
     normalized_profile = normalize_scan_profile(scan_profile)
@@ -110,20 +114,36 @@ def plan_probe_pack(
             continue
         custom_probes.append(probe)
     raw_pack = base_pack + tuple(custom_probes)
-    probes = tuple(
+    profile_probes = tuple(
         _plan_probe(probe, normalized_profile)
         for probe in raw_pack
         if _probe_supported_in_profile(probe, normalized_profile)
+    )
+    blocked_for_production = tuple(
+        probe for probe in profile_probes if production_mode and not probe.safe_for_production
+    )
+    if blocked_for_production:
+        validation_errors.extend(
+            f"probe blocked in production mode because safe_for_production=false: {probe.id}"
+            for probe in blocked_for_production
+        )
+    probes = tuple(
+        probe
+        for probe in profile_probes
+        if not (production_mode and not probe.safe_for_production)
     )
     custom_probe_ids = {probe.id for probe in custom_probes}
     planned_custom_probes = tuple(probe for probe in probes if probe.id in custom_probe_ids)
     manifest = {
         "base_pack": normalized_slug,
         "scan_profile": normalized_profile,
+        "production_mode": production_mode,
         "base_probe_count": len(base_pack),
         "custom_probe_count": len(custom_probes),
         "planned_custom_probe_count": len(planned_custom_probes),
         "planned_probe_count": len(probes),
+        "blocked_for_production_count": len(blocked_for_production),
+        "blocked_for_production_probe_ids": [probe.id for probe in blocked_for_production],
         "planned_probe_hash": _sha256_prefixed([_probe_manifest_entry(probe) for probe in probes]),
         "custom_probe_hash": (
             _sha256_prefixed([_probe_manifest_entry(probe) for probe in custom_probes])

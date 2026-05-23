@@ -404,6 +404,35 @@ export interface AITarget {
   credential: AITargetCredential
 }
 
+export type AIPrincipalRole = 'attacker' | 'victim' | 'admin' | 'service' | 'observer'
+
+export interface AITargetPrincipal {
+  id: string
+  ai_target_id: string
+  label: string
+  role: AIPrincipalRole
+  tenant_id?: string | null
+  metadata_json?: Record<string, unknown> | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  credential: AITargetCredential
+}
+
+export interface AITargetPrincipalPayload {
+  label: string
+  role: AIPrincipalRole
+  tenant_id?: string | null
+  metadata_json?: Record<string, unknown>
+  is_active?: boolean
+  credential: {
+    auth_kind: AIAuthKind
+    header_name?: string | null
+    secret?: string | null
+    metadata_json?: Record<string, unknown> | null
+  }
+}
+
 export interface AITargetPayload {
   name?: string
   target_type: AITargetType
@@ -728,6 +757,37 @@ export async function retestFinding(
   return res.json()
 }
 
+export async function retestAiFinding(
+  id: string,
+  params: {
+    mode?: 'same_probe' | 'same_family' | 'strict_replay'
+    requested_by?: string
+    confirm_production?: boolean
+  } = {}
+): Promise<{
+  retest_id: string
+  job_id: string
+  scan_id: string
+  status: string
+  mode?: string
+  finding_id: string
+  finding_type: string
+  target_url: string
+  probe_id?: string
+  probe_family?: string
+  ui_url?: string
+}> {
+  const res = await fetch(`${API_URL}/ai/findings/${id}/retest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to queue AI Gate replay'))
+  }
+  return res.json()
+}
+
 export async function getFindingRetests(id: string, limit: number = 20): Promise<{
   finding_id: string
   retests: RetestRecord[]
@@ -916,6 +976,34 @@ export async function updateAITarget(
 export async function deleteAITarget(id: string): Promise<{ status: string; target_id: string }> {
   const res = await fetch(`${API_URL}/ai/targets/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target'))
+  return res.json()
+}
+
+export async function getAITargetPrincipals(id: string): Promise<{ target_id: string; principals: AITargetPrincipal[] }> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/principals`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI target principals'))
+  return res.json()
+}
+
+export async function createAITargetPrincipal(
+  id: string,
+  data: AITargetPrincipalPayload
+): Promise<{ principal: AITargetPrincipal }> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/principals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create AI target principal'))
+  return res.json()
+}
+
+export async function deleteAITargetPrincipal(
+  targetId: string,
+  principalId: string
+): Promise<{ status: string; target_id: string; principal_id: string }> {
+  const res = await fetch(`${API_URL}/ai/targets/${targetId}/principals/${principalId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete AI target principal'))
   return res.json()
 }
 

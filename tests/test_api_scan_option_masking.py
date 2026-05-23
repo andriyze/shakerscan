@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import types
+import uuid
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -74,6 +75,11 @@ def test_sanitize_scan_options_masks_sensitive_keys():
         "auth_scenario_json": "{\"steps\":[]}",
         "login_password": "password123",
         "ai_api_key": "sk-test",
+        "metadata_json": {
+            "hf_token": "hf-secret",
+            "tokenizer": "keep-tokenizer-name",
+            "nested": {"client_secret": "client-secret"},
+        },
         "non_sensitive": "keep-me",
     }
 
@@ -89,6 +95,9 @@ def test_sanitize_scan_options_masks_sensitive_keys():
     assert sanitized["auth_scenario_json"] == "***"
     assert sanitized["login_password"] == "***"
     assert sanitized["ai_api_key"] == "***"
+    assert sanitized["metadata_json"]["hf_token"] == "***"
+    assert sanitized["metadata_json"]["tokenizer"] == "keep-tokenizer-name"
+    assert sanitized["metadata_json"]["nested"]["client_secret"] == "***"
 
 
 def test_sanitize_scan_options_decodes_json_string():
@@ -96,6 +105,245 @@ def test_sanitize_scan_options_decodes_json_string():
     sanitized = api_module._sanitize_scan_options(raw)
     assert sanitized["scan_type"] == "smart"
     assert sanitized["auth_header"] == "***"
+
+
+def test_build_ai_worker_options_records_production_confirmation():
+    target = {
+        "id": "target-id",
+        "name": "Production bot",
+        "target_type": "api_chat",
+        "endpoint_url": "https://example.test/chat",
+        "method": "POST",
+        "headers_template": {},
+        "request_template": {"message": "{{prompt}}"},
+        "response_path": "$.answer",
+        "streaming_mode": "json",
+        "rate_limit_rps": None,
+        "token_budget": None,
+        "request_budget": 3,
+        "production_mode": False,
+        "metadata_json": {},
+    }
+    request = api_module.AITargetScanRequest(
+        probe_pack="shaker-ai-smoke",
+        scan_profile="smoke",
+        environment="production",
+        confirm_production=True,
+    )
+
+    worker_options, storage_options = api_module._build_ai_worker_options(
+        target=target,
+        credential={"auth_kind": "bearer", "secret": "secret-token", "metadata_json": {}},
+        request=request,
+    )
+
+    assert storage_options["production_confirmation"]["confirmed"] is True
+    assert storage_options["production_confirmation"]["environment"] == "production"
+    assert worker_options["ai_target"]["metadata_json"]["production_confirmation"]["probe_pack"] == "shaker-ai-smoke"
+    assert worker_options["ai_target"]["credential_ref"]["configured"] is True
+    assert "secret-token" not in str(worker_options)
+
+
+def test_build_ai_worker_options_uses_principal_refs_without_secrets():
+    target = {
+        "id": "target-id",
+        "name": "RAG bot",
+        "target_type": "rag",
+        "endpoint_url": "https://example.test/rag",
+        "method": "POST",
+        "headers_template": {},
+        "request_template": {"message": "{{prompt}}"},
+        "response_path": "$.answer",
+        "streaming_mode": "json",
+        "rate_limit_rps": None,
+        "token_budget": None,
+        "request_budget": 3,
+        "production_mode": False,
+        "metadata_json": {},
+    }
+    request = api_module.AITargetScanRequest(
+        probe_pack="shaker-rag-lite",
+        scan_profile="standard",
+        environment="staging",
+    )
+    principal_id = uuid.uuid4()
+
+    worker_options, storage_options = api_module._build_ai_worker_options(
+        target=target,
+        credential={"auth_kind": "none", "secret": None, "metadata_json": {}},
+        request=request,
+        principals=[
+            {
+                "id": principal_id,
+                "label": "tenant-a-user",
+                "role": "attacker",
+                "tenant_id": "tenant-a",
+                "auth_kind": "bearer",
+                "header_name": "Authorization",
+                "secret_value": "principal-secret",
+                "metadata_json": {"note": "ok"},
+            }
+        ],
+    )
+
+    principal_refs = worker_options["ai_target"]["principal_refs"]
+    assert principal_refs[0]["id"] == str(principal_id)
+    assert principal_refs[0]["role"] == "attacker"
+    assert principal_refs[0]["credential_configured"] is True
+    assert storage_options["ai_principal_roles"] == ["attacker"]
+    assert "principal-secret" not in str(worker_options)
+
+
+def test_build_ai_finding_retest_options_focuses_original_probe():
+    target = {
+        "id": "target-id",
+        "name": "Support bot",
+        "target_type": "api_chat",
+        "endpoint_url": "https://example.test/chat",
+        "method": "POST",
+        "headers_template": {},
+        "request_template": {"message": "{{prompt}}"},
+        "response_path": "$.answer",
+        "streaming_mode": "json",
+        "rate_limit_rps": None,
+        "token_budget": None,
+        "request_budget": 3,
+        "production_mode": False,
+        "metadata_json": {},
+    }
+    finding_id = uuid.uuid4()
+
+    worker_options, storage_options, replay_plan = api_module._build_ai_finding_retest_scan_options(
+        target=target,
+        credential={"auth_kind": "none", "secret": None, "metadata_json": {}},
+        finding={
+            "id": finding_id,
+            "evidence": {
+                "probe_id": "smoke.prompt-leakage",
+                "probe_family": "prompt_leakage",
+                "response_excerpt": "leaked",
+            },
+        },
+        original_scan_options={
+            "ai_probe_pack": "shaker-ai-smoke",
+            "ai_scan_profile": "smoke",
+            "ai_environment": "staging",
+        },
+        request=api_module.AIFindingRetestRequest(mode="same_probe", requested_by="test"),
+        verification_id=uuid.uuid4(),
+    )
+
+    assert worker_options["ai_focus_probe_ids"] == ["smoke.prompt-leakage"]
+    assert worker_options["ai_target"]["metadata_json"]["ai_focus_probe_ids"] == ["smoke.prompt-leakage"]
+    assert storage_options["ai_finding_retest"]["mode"] == "same_probe"
+    assert replay_plan["finding_id"] == str(finding_id)
+
+
+def test_deployment_decision_escalates_missing_ai_judging():
+    decision = api_module.build_deployment_decision({
+        "id": "scan-id",
+        "status": "completed",
+        "run_kind": "ai_rag",
+        "scan_type": "ai_gate",
+        "result": {
+            "result": {"score": 100, "grade": "A"},
+            "findings": [],
+            "ai_gate": {
+                "decision": {"decision": "allow", "rationale": "No findings", "policy_name": "ai-gate:test"},
+                "execution_plan": {
+                    "judging_quality_gate": {
+                        "judging_required": True,
+                        "judging_completed": False,
+                        "status": "judging_unavailable",
+                    }
+                },
+            },
+        },
+    })
+
+    assert decision["product"] == "ai_gate"
+    assert decision["decision"] == "needs_review"
+    assert decision["required_evidence_missing"][0]["id"] == "semantic_judging"
+
+
+def test_deployment_decision_reports_model_intake_blockers():
+    decision = api_module.build_deployment_decision({
+        "id": "scan-id",
+        "status": "completed",
+        "run_kind": "model_intake",
+        "scan_type": "model_intake",
+        "result": {
+            "result": {"score": 60, "grade": "D", "decision": "block", "decision_reason": "blocked"},
+            "findings": [
+                {"id": "model_intake:unsafe_serialization", "title": "Unsafe", "severity": "critical", "tool": "model_intake"},
+            ],
+            "model_intake": {"checks": {"checksum": False, "sbom_dependencies": False}},
+        },
+    })
+
+    assert decision["product"] == "model_intake"
+    assert decision["decision"] == "block"
+    assert decision["blocking_findings"][0]["id"] == "model_intake:unsafe_serialization"
+    assert {item["id"] for item in decision["required_evidence_missing"]} >= {"checksum", "sbom_dependencies"}
+
+
+def test_deployment_decision_applies_time_bound_policy_exception():
+    future = "2999-01-01T00:00:00Z"
+    decision = api_module.build_deployment_decision({
+        "id": "scan-id",
+        "status": "completed",
+        "run_kind": "model_intake",
+        "scan_type": "model_intake",
+        "options": {"policy_profile": "production"},
+        "result": {
+            "result": {"score": 50, "grade": "F", "decision": "block", "decision_reason": "blocked"},
+            "findings": [
+                {"id": "model_intake:unsafe_serialization", "title": "Unsafe", "severity": "critical", "tool": "model_intake"},
+            ],
+            "policy_exceptions": [
+                {
+                    "finding_id": "model_intake:unsafe_serialization",
+                    "status": "approved",
+                    "approved_by": "security",
+                    "expires_at": future,
+                }
+            ],
+            "model_intake": {"checks": {"checksum": True}},
+        },
+    })
+
+    assert decision["decision"] == "needs_approval"
+    assert decision["blocking_findings"] == []
+    assert decision["applied_exceptions"][0]["id"] == "model_intake:unsafe_serialization"
+    assert decision["policy_profile"] == "production"
+
+
+def test_deployment_decision_ignores_expired_exception():
+    decision = api_module.build_deployment_decision({
+        "id": "scan-id",
+        "status": "completed",
+        "run_kind": "model_intake",
+        "scan_type": "model_intake",
+        "options": {"policy_profile": "production"},
+        "result": {
+            "result": {"score": 50, "grade": "F", "decision": "block", "decision_reason": "blocked"},
+            "findings": [
+                {"id": "model_intake:unsafe_serialization", "title": "Unsafe", "severity": "critical", "tool": "model_intake"},
+            ],
+            "policy_exceptions": [
+                {
+                    "finding_id": "model_intake:unsafe_serialization",
+                    "status": "approved",
+                    "approved_by": "security",
+                    "expires_at": "2020-01-01T00:00:00Z",
+                }
+            ],
+            "model_intake": {"checks": {"checksum": True}},
+        },
+    })
+
+    assert decision["decision"] == "block"
+    assert decision["blocking_findings"][0]["id"] == "model_intake:unsafe_serialization"
 
 
 def test_ai_demo_target_detection_uses_structured_metadata_only():

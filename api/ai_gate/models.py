@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 class ProbeTurnTemplate:
     message: str
     role: str = "attacker"
+    principal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class Probe:
     requires_state: bool = False
     requires_fresh_session: bool = False
     safe_for_production: bool = True
+    principal: str | None = None
 
     def with_default_turns(self) -> "Probe":
         if self.turns:
@@ -52,6 +54,7 @@ class Probe:
             requires_state=self.requires_state,
             requires_fresh_session=self.requires_fresh_session,
             safe_for_production=self.safe_for_production,
+            principal=self.principal,
         )
 
     @property
@@ -71,4 +74,6 @@ class Probe:
             payload["technique"] = self.technique
         if self.source_name:
             payload["source_name"] = self.source_name
+        if self.principal:
+            payload["principal"] = self.principal
         return payload

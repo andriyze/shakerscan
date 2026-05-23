@@ -107,7 +107,30 @@ def test_build_ai_inventory_skips_unsupported_ai_candidate_methods():
 
 
 def test_mcp_live_readiness_probe_uses_metadata_and_attestations(monkeypatch):
-    def fake_fetch(url, *, method="GET", timeout_seconds=8):
+    captured = []
+
+    def fake_fetch(url, *, method="GET", timeout_seconds=8, headers=None, json_body=None):
+        captured.append({"url": url, "method": method, "headers": headers or {}, "json_body": json_body})
+        if isinstance(json_body, dict) and json_body.get("method") == "tools/list":
+            if not (headers or {}).get("Authorization"):
+                return {
+                    "ok": False,
+                    "url": url,
+                    "method": method,
+                    "status_code": 401,
+                    "headers": {"Content-Type": "application/json"},
+                    "json": {"error": "unauthorized"},
+                    "body_excerpt": "{}",
+                }
+            return {
+                "ok": True,
+                "url": url,
+                "method": method,
+                "status_code": 200,
+                "headers": {"Content-Type": "application/json"},
+                "json": {"result": {"tools": [{"name": "search_docs", "inputSchema": {"type": "object"}}]}},
+                "body_excerpt": "{}",
+            }
         return {
             "ok": True,
             "url": url,
@@ -133,13 +156,65 @@ def test_mcp_live_readiness_probe_uses_metadata_and_attestations(monkeypatch):
                 "session_isolation": True,
                 "ssrf_protection": True,
             },
+            "credential": {"auth_kind": "bearer", "secret": "token", "metadata_json": {}},
         }
     )
 
     assert result["ok"] is True
     assert result["summary"]["warnings"] == 0
+    assert result["protocol_probes"]["used_saved_credential"] is True
+    assert any(item["headers"].get("Authorization") == "Bearer token" for item in captured)
     assert {check["id"] for check in result["checks"]} >= {
         "mcp.protected_resource_metadata",
         "mcp.token_audience_validation",
         "mcp.no_token_passthrough",
     }
+
+
+def test_mcp_live_readiness_flags_unauthenticated_tools_and_schema_risks(monkeypatch):
+    def fake_fetch(url, *, method="GET", timeout_seconds=8, headers=None, json_body=None):
+        if isinstance(json_body, dict) and json_body.get("method") == "tools/list":
+            return {
+                "ok": True,
+                "url": url,
+                "method": method,
+                "status_code": 200,
+                "headers": {"Content-Type": "application/json"},
+                "json": {
+                    "result": {
+                        "tools": [
+                            {"name": "delete_users", "description": "delete admin users", "inputSchema": {"type": "object"}}
+                        ]
+                    }
+                },
+                "body_excerpt": "{}",
+            }
+        return {
+            "ok": True,
+            "url": url,
+            "method": method,
+            "status_code": 200,
+            "headers": {"Content-Type": "application/json"},
+            "json": {"authorization_servers": ["https://auth.example.com"], "code_challenge_methods_supported": ["S256"]},
+            "body_excerpt": "{}",
+        }
+
+    monkeypatch.setattr(ai_assurance, "_fetch_url_metadata", fake_fetch)
+    result = ai_assurance.run_mcp_live_readiness_probe(
+        {
+            "target_type": "mcp_trace",
+            "endpoint_url": "https://api.example.com/mcp",
+            "metadata_json": {
+                "token_audience_validation": True,
+                "no_token_passthrough": True,
+                "mcp_scopes": ["tools.read"],
+                "session_isolation": True,
+                "ssrf_protection": True,
+            },
+        }
+    )
+
+    checks = {check["id"]: check for check in result["checks"]}
+    assert checks["mcp.unauthenticated_tools_blocked"]["status"] == "warn"
+    assert checks["mcp.tool_schema_minimization"]["status"] == "warn"
+    assert result["protocol_probes"]["unauthenticated_tool_count"] == 1

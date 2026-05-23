@@ -558,8 +558,20 @@ def build_ai_inventory(
     }
 
 
-def _fetch_url_metadata(url: str, *, method: str = "GET", timeout_seconds: int = 8) -> dict[str, Any]:
-    request = urllib.request.Request(url, method=method, headers={"Accept": "application/json"})
+def _fetch_url_metadata(
+    url: str,
+    *,
+    method: str = "GET",
+    timeout_seconds: int = 8,
+    headers: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    data = None
+    if json_body is not None:
+        request_headers.setdefault("Content-Type", "application/json")
+        data = json.dumps(json_body).encode("utf-8")
+    request = urllib.request.Request(url, method=method, headers=request_headers, data=data)
     started = _utc_now()
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured target
@@ -600,6 +612,60 @@ def _fetch_url_metadata(url: str, *, method: str = "GET", timeout_seconds: int =
     }
 
 
+def _credential_headers(target: dict[str, Any]) -> dict[str, str]:
+    credential = _as_dict(target.get("credential"))
+    auth_kind = str(credential.get("auth_kind") or "none")
+    secret = credential.get("secret")
+    header_name = credential.get("header_name")
+    metadata = _as_dict(credential.get("metadata_json"))
+    headers: dict[str, str] = {}
+    if auth_kind == "multi_header":
+        for pair in _as_list(metadata.get("headers")):
+            if isinstance(pair, dict) and isinstance(pair.get("name"), str) and isinstance(pair.get("value"), str):
+                headers[pair["name"].strip()] = pair["value"]
+    elif auth_kind == "cookie" and isinstance(secret, str) and secret:
+        headers["Cookie"] = secret
+    elif auth_kind == "bearer" and isinstance(secret, str) and secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    elif auth_kind in {"api_key_header", "custom_header"} and isinstance(header_name, str) and isinstance(secret, str) and secret:
+        headers[header_name] = secret
+    return headers
+
+
+def _mcp_jsonrpc_request(method: str, request_id: str) -> dict[str, Any]:
+    if method == "initialize":
+        params: dict[str, Any] = {
+            "protocolVersion": "2025-03-26",
+            "clientInfo": {"name": "ShakerScan readiness", "version": "1.0"},
+            "capabilities": {},
+        }
+    else:
+        params = {}
+    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+
+
+def _extract_mcp_tools(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, dict) and isinstance(result.get("tools"), list):
+        return [item for item in result["tools"] if isinstance(item, dict)]
+    if isinstance(payload.get("tools"), list):
+        return [item for item in payload["tools"] if isinstance(item, dict)]
+    return []
+
+
+def _tool_schema_risks(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    for tool in tools[:100]:
+        name = str(tool.get("name") or "")
+        text = json.dumps(tool, ensure_ascii=False).lower()
+        matched = [hint for hint in HIGH_RISK_SCOPE_HINTS if hint in text]
+        if matched:
+            risks.append({"tool": name, "risk_markers": matched[:5]})
+    return risks[:25]
+
+
 def _metadata_urls(endpoint_url: str) -> list[str]:
     parsed = urllib.parse.urlparse(endpoint_url)
     if not parsed.scheme or not parsed.netloc:
@@ -625,8 +691,32 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
             "error": "Live MCP readiness checks require an mcp_trace AI target.",
         }
 
-    metadata_fetches = [_fetch_url_metadata(url, timeout_seconds=timeout_seconds) for url in _metadata_urls(endpoint_url)]
-    endpoint_options = _fetch_url_metadata(endpoint_url, method="OPTIONS", timeout_seconds=timeout_seconds)
+    auth_headers = _credential_headers(target)
+    metadata_fetches = [_fetch_url_metadata(url, timeout_seconds=timeout_seconds, headers=auth_headers) for url in _metadata_urls(endpoint_url)]
+    endpoint_options = _fetch_url_metadata(endpoint_url, method="OPTIONS", timeout_seconds=timeout_seconds, headers=auth_headers)
+    initialize_probe = _fetch_url_metadata(
+        endpoint_url,
+        method="POST",
+        timeout_seconds=timeout_seconds,
+        headers=auth_headers,
+        json_body=_mcp_jsonrpc_request("initialize", "shakerscan-readiness-initialize"),
+    )
+    tools_list_probe = _fetch_url_metadata(
+        endpoint_url,
+        method="POST",
+        timeout_seconds=timeout_seconds,
+        headers=auth_headers,
+        json_body=_mcp_jsonrpc_request("tools/list", "shakerscan-readiness-tools"),
+    )
+    unauthenticated_tools_probe = _fetch_url_metadata(
+        endpoint_url,
+        method="POST",
+        timeout_seconds=timeout_seconds,
+        json_body=_mcp_jsonrpc_request("tools/list", "shakerscan-readiness-unauth-tools"),
+    )
+    tools = _extract_mcp_tools(tools_list_probe.get("json"))
+    unauthenticated_tools = _extract_mcp_tools(unauthenticated_tools_probe.get("json"))
+    tool_schema_risks = _tool_schema_risks(tools)
     json_docs = [item.get("json") for item in metadata_fetches if isinstance(item.get("json"), dict)]
     authenticate_headers = [
         str(fetch.get("headers", {}).get("WWW-Authenticate") or fetch.get("headers", {}).get("www-authenticate") or "")
@@ -684,6 +774,30 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
             "status": "pass" if metadata.get("ssrf_protection") or metadata.get("egress_allowlist") else "warn",
             "evidence": "SSRF/egress policy declared" if (metadata.get("ssrf_protection") or metadata.get("egress_allowlist")) else "No egress/SSRF policy declared",
         },
+        {
+            "id": "mcp.jsonrpc_initialize",
+            "label": "JSON-RPC initialize",
+            "status": "pass" if initialize_probe.get("ok") else "warn",
+            "evidence": f"initialize returned HTTP {initialize_probe.get('status_code')}" if initialize_probe.get("status_code") else initialize_probe.get("error", "initialize did not complete"),
+        },
+        {
+            "id": "mcp.authenticated_tools_list",
+            "label": "Authenticated tools/list",
+            "status": "pass" if tools_list_probe.get("ok") and tools else "warn",
+            "evidence": f"{len(tools)} tool(s) listed with configured credentials" if tools else "No authenticated tool list was returned",
+        },
+        {
+            "id": "mcp.unauthenticated_tools_blocked",
+            "label": "Unauthenticated tools/list blocked",
+            "status": "warn" if unauthenticated_tools_probe.get("ok") and unauthenticated_tools else "pass",
+            "evidence": f"{len(unauthenticated_tools)} tool(s) listed without credentials" if unauthenticated_tools else "Unauthenticated tools/list did not expose tools",
+        },
+        {
+            "id": "mcp.tool_schema_minimization",
+            "label": "Tool schema minimization",
+            "status": "warn" if tool_schema_risks else "pass",
+            "evidence": f"{len(tool_schema_risks)} tool schema(s) contain high-risk action markers" if tool_schema_risks else "No high-risk tool schema markers detected",
+        },
     ]
 
     warnings = [check for check in checks if check["status"] == "warn"]
@@ -701,4 +815,13 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
         "checks": checks,
         "metadata_fetches": metadata_fetches,
         "endpoint_options": endpoint_options,
+        "protocol_probes": {
+            "initialize": initialize_probe,
+            "tools_list": tools_list_probe,
+            "unauthenticated_tools_list": unauthenticated_tools_probe,
+            "tool_count": len(tools),
+            "unauthenticated_tool_count": len(unauthenticated_tools),
+            "tool_schema_risks": tool_schema_risks,
+            "used_saved_credential": bool(auth_headers),
+        },
     }

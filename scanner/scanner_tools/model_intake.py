@@ -13,9 +13,11 @@ import hashlib
 import json
 import os
 import re
+import struct
 import urllib.parse
 import urllib.request
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -78,6 +80,23 @@ SUSPICIOUS_LOADER_MARKERS = {
     b"base64.b64decode": "encoded_payload",
 }
 
+SAFETENSORS_SUSPICIOUS_METADATA_KEYS = {
+    "chat_template",
+    "system_prompt",
+    "developer_prompt",
+    "trust_remote_code",
+    "tool_call_schema",
+}
+
+RISKY_TEMPLATE_MARKERS = (
+    "tool_call",
+    "function_call",
+    "developer",
+    "system",
+    "ignore previous",
+    "bypass",
+)
+
 PERMISSIVE_LICENSES = {
     "apache-2.0",
     "apache 2.0",
@@ -95,6 +114,109 @@ RESTRICTIVE_LICENSE_HINTS = (
     "restricted",
     "unknown",
 )
+
+SENSITIVE_METADATA_KEYS = {
+    "access_key",
+    "access_key_id",
+    "access_token",
+    "api_key",
+    "api_secret",
+    "api_token",
+    "authorization",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "azure_sas_token",
+    "bearer_token",
+    "client_secret",
+    "credential",
+    "credentials",
+    "gcp_credentials",
+    "hf_token",
+    "huggingface_token",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "secret_access_key",
+    "secret_value",
+    "session_token",
+    "token",
+}
+
+SENSITIVE_METADATA_KEY_FRAGMENTS = (
+    "_secret",
+    "secret_",
+    "_token",
+    "token_",
+    "_credential",
+    "credential_",
+    "private_key",
+    "password",
+)
+
+SENSITIVE_QUERY_KEYS = {
+    "access_token",
+    "access-token",
+    "api_key",
+    "api-key",
+    "awsaccesskeyid",
+    "expires",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-amz-signature",
+    "signature",
+    "sig",
+    "token",
+}
+
+
+def _is_sensitive_metadata_key(key: Any) -> bool:
+    normalized = str(key or "").strip().lower().replace("-", "_")
+    return normalized in SENSITIVE_METADATA_KEYS or any(fragment in normalized for fragment in SENSITIVE_METADATA_KEY_FRAGMENTS)
+
+
+def _redact_reference(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    netloc = parsed.netloc
+    if parsed.password:
+        hostname = parsed.hostname or ""
+        username = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""), safe="")
+        host = f"{username}:***@{hostname}" if username else hostname
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        netloc = host
+
+    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if query_pairs:
+        redacted_pairs = [
+            (key, "***" if key.strip().lower().replace("_", "-") in SENSITIVE_QUERY_KEYS else value)
+            for key, value in query_pairs
+        ]
+        query = urllib.parse.urlencode(redacted_pairs, doseq=True)
+    else:
+        query = parsed.query
+    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment))
+
+
+def redact_model_intake_value(value: Any) -> Any:
+    """Mask secrets in model-intake metadata and user-visible artifacts."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_metadata_key(key) and item not in (None, "", [], {}):
+                redacted[key] = "***"
+            else:
+                redacted[key] = redact_model_intake_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_model_intake_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_reference(value)
+    return value
 
 
 def _artifact_name(ref: str) -> str:
@@ -467,6 +589,20 @@ def _read_local(path_ref: str, max_bytes: int) -> tuple[bytes, dict[str, Any]]:
     }
 
 
+def _parse_content_range(value: str | None) -> dict[str, int | None] | None:
+    if not value:
+        return None
+    match = re.match(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", value, flags=re.IGNORECASE)
+    if not match:
+        return None
+    total = None if match.group(3) == "*" else int(match.group(3))
+    return {
+        "start": int(match.group(1)),
+        "end": int(match.group(2)),
+        "total": total,
+    }
+
+
 def _download_http(
     url: str,
     max_bytes: int,
@@ -485,13 +621,27 @@ def _download_http(
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         data = response.read(max_bytes + 1)
         headers = dict(response.headers.items())
+        content_range = _parse_content_range(headers.get("Content-Range"))
+        content_length = headers.get("Content-Length")
+        try:
+            declared_length = int(content_length) if content_length is not None else None
+        except ValueError:
+            declared_length = None
+        if content_range:
+            total = content_range.get("total")
+            truncated = total is None or int(content_range["end"]) + 1 < int(total)
+        else:
+            truncated = len(data) > max_bytes or (declared_length is not None and declared_length > max_bytes)
         return data[:max_bytes], {
             "source": "http",
             "status": getattr(response, "status", None),
             "content_type": headers.get("Content-Type"),
-            "content_length": headers.get("Content-Length"),
+            "content_length": content_length,
+            "content_range": headers.get("Content-Range"),
+            "range_requested": f"bytes=0-{max_bytes - 1}",
+            "range_satisfied": bool(content_range),
             "bytes_observed": min(len(data), max_bytes),
-            "truncated": len(data) > max_bytes or bool(headers.get("Content-Range")),
+            "truncated": truncated,
         }
 
 
@@ -553,6 +703,7 @@ async def _fetch_artifact(
     max_bytes: int,
     timeout_seconds: int,
     metadata: dict[str, Any] | None = None,
+    allow_local_files: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     parsed = urllib.parse.urlparse(ref)
     try:
@@ -563,6 +714,12 @@ async def _fetch_artifact(
         if parsed.scheme in ("http", "https"):
             return await asyncio.to_thread(_download_http, ref, max_bytes, timeout_seconds)
         if parsed.scheme == "file" or not parsed.scheme:
+            if not allow_local_files:
+                return b"", {
+                    "source": "local_file",
+                    "bytes_observed": 0,
+                    "error": "Local artifact reads are disabled for model intake. Use http(s), hf, or cloud object references, or enable allow_local_files in local development.",
+                }
             return await asyncio.to_thread(_read_local, ref, max_bytes)
     except Exception as exc:
         return b"", {
@@ -577,8 +734,18 @@ async def _fetch_artifact(
     }
 
 
-async def _fetch_json(url: str, timeout_seconds: int, max_bytes: int = 262_144) -> tuple[dict[str, Any], dict[str, Any]]:
-    data, meta = await _fetch_artifact(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+async def _fetch_json(
+    url: str,
+    timeout_seconds: int,
+    max_bytes: int = 262_144,
+    allow_local_files: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    data, meta = await _fetch_artifact(
+        url,
+        max_bytes=max_bytes,
+        timeout_seconds=timeout_seconds,
+        allow_local_files=allow_local_files,
+    )
     fetch_meta = {**meta, "url": url}
     if fetch_meta.get("error"):
         return {}, fetch_meta
@@ -622,18 +789,41 @@ def _inspect_zip(data: bytes) -> dict[str, Any]:
         risky_entries = []
         executable_entries = []
         pickle_entries = []
+        path_traversal_entries = []
+        nested_archive_entries = []
+        zip_bomb_entries = []
+        risky_config_entries = []
         with zipfile.ZipFile(tmp_path) as zf:
             for info in zf.infolist()[:500]:
                 entry = info.filename
                 entries.append(entry)
                 ext = Path(entry).suffix.lower()
                 lowered = entry.lower()
+                parts = Path(entry.replace("\\", "/")).parts
+                if entry.startswith(("/", "\\")) or ".." in parts or re.match(r"^[a-zA-Z]:", entry):
+                    path_traversal_entries.append(entry)
+                if lowered.endswith((".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".7z")):
+                    nested_archive_entries.append(entry)
+                if info.compress_size > 0 and info.file_size > 1_000_000 and info.file_size / info.compress_size > 100:
+                    zip_bomb_entries.append(entry)
                 if ext in RISKY_EXTENSIONS or lowered.endswith("/data.pkl") or lowered.endswith("pickle"):
                     risky_entries.append(entry)
                 if ext in EXECUTABLE_EXTENSIONS:
                     executable_entries.append(entry)
                 if lowered.endswith((".pkl", ".pickle", "data.pkl")):
                     pickle_entries.append(entry)
+                if (
+                    info.file_size <= 262_144
+                    and Path(entry).name.lower() in {"config.json", "tokenizer_config.json", "generation_config.json"}
+                ):
+                    try:
+                        content = zf.read(info, pwd=None)[:262_144].lower()
+                    except (KeyError, RuntimeError, zipfile.BadZipFile):
+                        content = b""
+                    if b"trust_remote_code" in content and b"true" in content:
+                        risky_config_entries.append({"entry": entry, "risk": "trust_remote_code"})
+                    if b"chat_template" in content and any(marker in content for marker in (b"tool_call", b"system", b"developer")):
+                        risky_config_entries.append({"entry": entry, "risk": "risky_chat_template"})
         return {
             "is_zip": True,
             "entries": entries[:50],
@@ -641,6 +831,10 @@ def _inspect_zip(data: bytes) -> dict[str, Any]:
             "risky_entries": risky_entries[:50],
             "pickle_entries": pickle_entries[:50],
             "executable_entries": executable_entries[:50],
+            "path_traversal_entries": path_traversal_entries[:50],
+            "nested_archive_entries": nested_archive_entries[:50],
+            "zip_bomb_entries": zip_bomb_entries[:50],
+            "risky_config_entries": risky_config_entries[:50],
         }
     finally:
         try:
@@ -736,30 +930,43 @@ def _registry_reference(ref: str, metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _signature_verification_status(metadata: dict[str, Any], signature_url: Any, signed_by: Any) -> dict[str, Any]:
-    verified_keys = (
+    claim_keys = (
         "signature_verified",
         "sigstore_verified",
         "cosign_verified",
         "attestation_verified",
         "provenance_verified",
     )
-    verified = any(_boolish(metadata.get(key)) for key in verified_keys)
+    cryptographic_verification_keys = (
+        "signature_cryptographically_verified",
+        "cryptographic_signature_verified",
+        "sigstore_bundle_verified",
+        "cosign_bundle_verified",
+        "attestation_cryptographically_verified",
+        "provenance_cryptographically_verified",
+    )
+    claimed_verified = any(_boolish(metadata.get(key)) for key in claim_keys)
+    cryptographically_verified = any(_boolish(metadata.get(key)) for key in cryptographic_verification_keys)
     present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
-    if verified:
+    if cryptographically_verified:
         status = "verified"
+    elif claimed_verified:
+        status = "claimed_verified"
     elif present:
         status = "present_unverified"
     else:
         status = "missing"
     return {
         "status": status,
-        "verified": verified,
+        "verified": cryptographically_verified,
+        "claimed_verified": claimed_verified,
+        "cryptographically_verified": cryptographically_verified,
         "present": present,
         "signature_url": signature_url,
         "signed_by": signed_by,
         "verification_evidence": {
             key: metadata.get(key)
-            for key in verified_keys
+            for key in (*claim_keys, *cryptographic_verification_keys)
             if metadata.get(key) not in (None, "", [], {})
         },
     }
@@ -783,6 +990,161 @@ def _license_policy(license_ref: Any) -> dict[str, Any]:
     }
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _evidence_status(value: Any, *keys: str) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        raw = value.get(key)
+        if raw not in (None, "", [], {}):
+            return str(raw).strip().lower()
+    return ""
+
+
+def _sbom_policy(value: Any, *, strict: bool) -> dict[str, Any]:
+    if value in (None, "", [], {}):
+        return {"status": "missing", "valid": False, "component_count": 0, "format": None}
+    if isinstance(value, str):
+        return {
+            "status": "reference_unverified" if strict else "reference_present",
+            "valid": not strict,
+            "component_count": None,
+            "format": "url",
+        }
+    if isinstance(value, list):
+        return {
+            "status": "valid" if value else "empty",
+            "valid": bool(value) or not strict,
+            "component_count": len(value),
+            "format": "component_list",
+        }
+    if not isinstance(value, dict):
+        return {"status": "invalid_shape", "valid": False, "component_count": 0, "format": type(value).__name__}
+
+    if str(value.get("bomFormat") or "").lower() == "cyclonedx":
+        components = value.get("components")
+        count = len(components) if isinstance(components, list) else 0
+        return {
+            "status": "valid" if count else "empty",
+            "valid": count > 0 or not strict,
+            "component_count": count,
+            "format": "cyclonedx",
+        }
+    if value.get("spdxVersion"):
+        packages = value.get("packages")
+        count = len(packages) if isinstance(packages, list) else 0
+        return {
+            "status": "valid" if count else "empty",
+            "valid": count > 0 or not strict,
+            "component_count": count,
+            "format": "spdx",
+        }
+    if isinstance(value.get("components"), list):
+        count = len(value["components"])
+        return {
+            "status": "valid" if count else "empty",
+            "valid": count > 0 or not strict,
+            "component_count": count,
+            "format": "generic_components",
+        }
+    return {"status": "invalid_shape" if strict else "present_unvalidated", "valid": not strict, "component_count": 0, "format": "unknown"}
+
+
+def _malware_policy(value: Any, *, strict: bool, expected_sha256: Any, max_age_days: int = 30) -> dict[str, Any]:
+    if value in (None, "", [], {}):
+        return {"status": "missing", "valid": False}
+    if isinstance(value, str):
+        return {"status": "reference_unverified" if strict else "reference_present", "valid": not strict}
+    if not isinstance(value, dict):
+        return {"status": "invalid_shape", "valid": False}
+
+    status = _evidence_status(value, "status", "result", "verdict")
+    clean = status in {"clean", "passed", "pass", "no_findings", "no findings"}
+    scanner = _metadata_value(value, "scanner", "engine", "tool")
+    version = _metadata_value(value, "engine_version", "scanner_version", "version")
+    digest = _metadata_value(value, "artifact_digest", "sha256", "model_sha256", "digest")
+    timestamp_value = _metadata_value(value, "timestamp", "scanned_at", "date")
+    scanned_at = _parse_datetime(timestamp_value)
+    stale = False
+    if scanned_at is not None:
+        age_days = (datetime.now(timezone.utc) - scanned_at).days
+        stale = age_days > max_age_days
+    expected = str(expected_sha256 or "").strip().lower()
+    digest_matches = not expected or str(digest or "").replace("sha256:", "").strip().lower() == expected
+    valid = clean and bool(scanner) and bool(version) and bool(scanned_at) and bool(digest) and digest_matches and not stale
+    return {
+        "status": "valid" if valid else "invalid",
+        "valid": valid if strict else clean,
+        "clean": clean,
+        "scanner_present": bool(scanner),
+        "engine_version_present": bool(version),
+        "timestamp_present": bool(scanned_at),
+        "artifact_digest_present": bool(digest),
+        "artifact_digest_matches": digest_matches,
+        "stale": stale,
+        "max_age_days": max_age_days,
+    }
+
+
+def _eval_policy(value: Any, *, strict: bool, expected_sha256: Any) -> dict[str, Any]:
+    if value in (None, "", [], {}):
+        return {"status": "missing", "valid": False}
+    if isinstance(value, str):
+        return {"status": "reference_unverified" if strict else "reference_present", "valid": not strict}
+    if not isinstance(value, dict):
+        return {"status": "invalid_shape", "valid": False}
+
+    status = _evidence_status(value, "status", "result", "verdict")
+    passed = status in {"passed", "pass", "clean", "accepted"}
+    suite = _metadata_value(value, "suite_id", "eval_suite_id", "suite", "report_id")
+    timestamp = _parse_datetime(_metadata_value(value, "date", "evaluated_at", "timestamp"))
+    digest = _metadata_value(value, "target_sha256", "model_sha256", "artifact_digest", "model_digest")
+    thresholds = _metadata_value(value, "thresholds", "acceptance_thresholds", "criteria")
+    expected = str(expected_sha256 or "").strip().lower()
+    digest_matches = not expected or str(digest or "").replace("sha256:", "").strip().lower() == expected
+    valid = passed and bool(suite) and bool(timestamp) and bool(digest) and digest_matches and bool(thresholds)
+    return {
+        "status": "valid" if valid else "invalid",
+        "valid": valid if strict else passed,
+        "passed": passed,
+        "suite_present": bool(suite),
+        "date_present": bool(timestamp),
+        "target_digest_present": bool(digest),
+        "target_digest_matches": digest_matches,
+        "thresholds_present": bool(thresholds),
+    }
+
+
+def _approval_policy(metadata: dict[str, Any], *, deployment_approved: bool, strict: bool) -> dict[str, Any]:
+    if not deployment_approved:
+        return {"status": "missing", "valid": False}
+    approved_by = _metadata_value(metadata, "approved_by", "approver")
+    approved_at = _parse_datetime(_metadata_value(metadata, "approved_at", "approval_timestamp", "approval_date"))
+    policy_version = _metadata_value(metadata, "approval_policy_version", "policy_version")
+    environment = _metadata_value(metadata, "environment", "deployment_environment", "approved_environment")
+    valid = bool(approved_by and approved_at and policy_version and environment)
+    return {
+        "status": "valid" if valid else "incomplete",
+        "valid": valid if strict else True,
+        "approved_by_present": bool(approved_by),
+        "approved_at_present": bool(approved_at),
+        "policy_version_present": bool(policy_version),
+        "environment_present": bool(environment),
+    }
+
+
 def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> list[dict[str, str]]:
     sample = data[:1_000_000].lower()
     hits = [
@@ -800,6 +1162,209 @@ def _scan_suspicious_loader_markers(data: bytes, zip_info: dict[str, Any]) -> li
     return list(deduped.values())[:25]
 
 
+def _inspect_safetensors(data: bytes) -> dict[str, Any]:
+    header: dict[str, Any] = {"present": False, "valid_json": False, "valid": False}
+    if len(data) < 8:
+        header["error"] = "too_short_for_header_length"
+        return header
+
+    header_len = int.from_bytes(data[:8], "little", signed=False)
+    header["length"] = header_len
+    if header_len <= 0:
+        header["error"] = "empty_header"
+        return header
+    if header_len > 100_000_000:
+        header["error"] = "header_length_unreasonable"
+        return header
+    if header_len > 1_048_576:
+        header["error"] = "header_exceeds_intake_limit"
+        return header
+    if len(data) < 8 + header_len:
+        header["error"] = "truncated_header"
+        return header
+
+    duplicate_keys: list[str] = []
+
+    def object_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        seen: set[str] = set()
+        obj: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in seen and key not in duplicate_keys:
+                duplicate_keys.append(key)
+            seen.add(key)
+            obj[key] = value
+        return obj
+
+    try:
+        parsed = json.loads(
+            data[8:8 + header_len].decode("utf-8"),
+            object_pairs_hook=object_pairs_hook,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        header["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return header
+
+    if not isinstance(parsed, dict):
+        header["error"] = "header_json_not_object"
+        return header
+
+    header["present"] = True
+    header["valid_json"] = True
+    if duplicate_keys:
+        header["duplicate_keys"] = duplicate_keys[:25]
+
+    metadata = parsed.get("__metadata__")
+    metadata_keys = sorted(metadata.keys())[:25] if isinstance(metadata, dict) else []
+    suspicious_metadata_keys = [
+        key for key in metadata_keys
+        if key.lower() in SAFETENSORS_SUSPICIOUS_METADATA_KEYS
+        or any(fragment in key.lower() for fragment in ("token", "secret", "credential"))
+    ]
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            text = str(value or "").lower()
+            if key.lower() == "chat_template" and any(marker in text for marker in RISKY_TEMPLATE_MARKERS):
+                suspicious_metadata_keys.append(key)
+
+    tensor_ranges: list[tuple[int, int, str]] = []
+    invalid_tensors: list[dict[str, Any]] = []
+    payload_size = max(0, len(data) - 8 - header_len)
+    for name, tensor in parsed.items():
+        if name == "__metadata__":
+            continue
+        if not isinstance(tensor, dict):
+            invalid_tensors.append({"tensor": name, "reason": "metadata_not_object"})
+            continue
+        offsets = tensor.get("data_offsets")
+        if not (
+            isinstance(offsets, list)
+            and len(offsets) == 2
+            and all(isinstance(item, int) for item in offsets)
+        ):
+            invalid_tensors.append({"tensor": name, "reason": "missing_or_invalid_data_offsets"})
+            continue
+        start, end = offsets
+        if start < 0 or end < start or end > payload_size:
+            invalid_tensors.append({
+                "tensor": name,
+                "reason": "offset_out_of_bounds",
+                "start": start,
+                "end": end,
+                "payload_size": payload_size,
+            })
+            continue
+        tensor_ranges.append((start, end, str(name)))
+
+    overlaps: list[dict[str, Any]] = []
+    for previous, current in zip(sorted(tensor_ranges), sorted(tensor_ranges)[1:]):
+        if current[0] < previous[1]:
+            overlaps.append({
+                "previous_tensor": previous[2],
+                "tensor": current[2],
+                "previous_end": previous[1],
+                "start": current[0],
+            })
+
+    header.update({
+        "valid": not duplicate_keys and not invalid_tensors and not overlaps,
+        "tensor_count": len([key for key in parsed.keys() if key != "__metadata__"]),
+        "metadata_keys": metadata_keys,
+        "suspicious_metadata_keys": sorted(set(suspicious_metadata_keys))[:25],
+        "invalid_tensors": invalid_tensors[:25],
+        "overlapping_tensors": overlaps[:25],
+        "payload_size": payload_size,
+    })
+    return header
+
+
+def _extract_ascii_strings(data: bytes, *, minimum: int = 4, limit: int = 200) -> list[str]:
+    strings = [
+        match.group(0).decode("utf-8", errors="ignore")
+        for match in re.finditer(rb"[\x20-\x7e]{%d,}" % minimum, data)
+    ]
+    return strings[:limit]
+
+
+def _inspect_onnx(data: bytes) -> dict[str, Any]:
+    sample = data[:2_000_000]
+    strings = _extract_ascii_strings(sample, limit=500)
+    lowered_strings = [item.lower() for item in strings]
+    external_locations = [
+        item for item in strings
+        if item.startswith(("/", "file:", "http://", "https://", "s3://", "gs://", "../"))
+        or "external_data" in item.lower()
+        or item.lower().endswith((".bin", ".data"))
+    ][:25]
+    custom_domains = [
+        item for item in strings
+        if item.startswith(("ai.onnx.contrib", "com.microsoft", "com.", "org."))
+        or "customop" in item.lower()
+    ][:25]
+    parsed_with = "string_table"
+    graph_name = None
+    try:
+        import onnx  # type: ignore
+
+        model = onnx.load_model_from_string(data)
+        parsed_with = "onnx"
+        graph_name = getattr(getattr(model, "graph", None), "name", None) or None
+        for initializer in getattr(getattr(model, "graph", None), "initializer", []) or []:
+            for entry in getattr(initializer, "external_data", []) or []:
+                key = getattr(entry, "key", "")
+                value = getattr(entry, "value", "")
+                if key == "location" and value:
+                    external_locations.append(str(value))
+        for node in getattr(getattr(model, "graph", None), "node", []) or []:
+            domain = getattr(node, "domain", "")
+            if domain and domain not in {"", "ai.onnx", "ai.onnx.ml"}:
+                custom_domains.append(str(domain))
+    except Exception:
+        pass
+
+    return {
+        "parsed_with": parsed_with,
+        "graph_name": graph_name,
+        "external_data_hint": (
+            b"external_data" in sample.lower()
+            or b"location" in sample.lower()
+            or bool(external_locations)
+        ),
+        "external_data_locations": sorted(set(external_locations))[:25],
+        "custom_operator_hint": any(
+            marker in " ".join(lowered_strings)
+            for marker in ("ai.onnx.contrib", "com.microsoft", "customop")
+        ) or bool(custom_domains),
+        "custom_operator_domains": sorted(set(custom_domains))[:25],
+    }
+
+
+def _inspect_gguf(data: bytes) -> dict[str, Any]:
+    magic_present = data.startswith(b"GGUF")
+    version = int.from_bytes(data[4:8], "little", signed=False) if magic_present and len(data) >= 8 else None
+    tensor_count = None
+    metadata_kv_count = None
+    if magic_present and len(data) >= 24:
+        try:
+            tensor_count, metadata_kv_count = struct.unpack_from("<QQ", data, 8)
+        except struct.error:
+            tensor_count = None
+            metadata_kv_count = None
+    strings = _extract_ascii_strings(data[:1_000_000], limit=200)
+    suspicious_strings = [
+        item for item in strings
+        if item.startswith(("http://", "https://", "file:", "s3://", "gs://"))
+        or any(marker in item.lower() for marker in RISKY_TEMPLATE_MARKERS)
+    ][:25]
+    return {
+        "magic_present": magic_present,
+        "version": version,
+        "tensor_count": tensor_count,
+        "metadata_kv_count": metadata_kv_count,
+        "valid_header": bool(magic_present and version in {1, 2, 3}),
+        "suspicious_metadata_strings": suspicious_strings,
+    }
+
+
 def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) -> dict[str, Any]:
     inspection: dict[str, Any] = {
         "artifact_name": name,
@@ -808,32 +1373,11 @@ def _inspect_format(name: str, ext: str, data: bytes, zip_info: dict[str, Any]) 
         "lower_code_execution_risk": ext in SAFER_MODEL_EXTENSIONS,
     }
     if ext == ".safetensors":
-        header = {"present": False, "valid_json": False}
-        if len(data) >= 8:
-            header_len = int.from_bytes(data[:8], "little", signed=False)
-            header["length"] = header_len
-            if 0 < header_len <= 1_048_576 and len(data) >= 8 + header_len:
-                try:
-                    parsed = json.loads(data[8:8 + header_len].decode("utf-8"))
-                    if isinstance(parsed, dict):
-                        header["present"] = True
-                        header["valid_json"] = True
-                        header["tensor_count"] = len([key for key in parsed.keys() if key != "__metadata__"])
-                        header["metadata_keys"] = sorted((parsed.get("__metadata__") or {}).keys())[:25] if isinstance(parsed.get("__metadata__"), dict) else []
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    header["valid_json"] = False
-        inspection["safetensors_header"] = header
+        inspection["safetensors_header"] = _inspect_safetensors(data)
     elif ext == ".onnx":
-        sample = data[:1_000_000].lower()
-        inspection["onnx"] = {
-            "external_data_hint": b"external_data" in sample or b"location" in sample,
-            "custom_operator_hint": any(marker in sample for marker in (b"ai.onnx.contrib", b"com.microsoft", b"customop")),
-        }
+        inspection["onnx"] = _inspect_onnx(data)
     elif ext == ".gguf":
-        inspection["gguf"] = {
-            "magic_present": data.startswith(b"GGUF"),
-            "version": int.from_bytes(data[4:8], "little", signed=False) if data.startswith(b"GGUF") and len(data) >= 8 else None,
-        }
+        inspection["gguf"] = _inspect_gguf(data)
 
     if zip_info.get("is_zip"):
         entries = [str(entry) for entry in (zip_info.get("entries") or [])]
@@ -935,9 +1479,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     metadata_fetch_meta: dict[str, Any] = {}
     timeout_seconds = int(options.get("timeout_seconds") or 20)
     max_download_bytes = int(options.get("max_download_bytes") or 10_000_000)
+    allow_local_files = _boolish(options.get("allow_local_files")) or _boolish(os.getenv("MODEL_INTAKE_ALLOW_LOCAL_FILES"))
 
     if metadata_url:
-        remote_metadata, metadata_fetch_meta = await _fetch_json(str(metadata_url), timeout_seconds=timeout_seconds)
+        remote_metadata, metadata_fetch_meta = await _fetch_json(
+            str(metadata_url),
+            timeout_seconds=timeout_seconds,
+            allow_local_files=allow_local_files,
+        )
         metadata = {**remote_metadata, **metadata}
 
     artifact_bytes, artifact_meta = await _fetch_artifact(
@@ -945,6 +1494,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         max_bytes=max_download_bytes,
         timeout_seconds=timeout_seconds,
         metadata=metadata,
+        allow_local_files=allow_local_files,
     )
 
     unsupported_scheme_error = bool(
@@ -969,17 +1519,48 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     require_signature = _boolish(options.get("require_signature", True))
     require_hash = _boolish(options.get("require_hash", True))
     require_governance = _boolish(options.get("require_model_governance", True))
+    deployment_environment = str(
+        options.get("environment")
+        or options.get("deployment_environment")
+        or metadata.get("environment")
+        or metadata.get("deployment_environment")
+        or ""
+    ).strip().lower()
+    strict_governance = (
+        _boolish(options.get("strict_governance"))
+        or _boolish(metadata.get("strict_governance"))
+        or _boolish(metadata.get("production_policy"))
+        or deployment_environment == "production"
+    )
     license_ref = _metadata_value(metadata, "license", "model_license", "license_url")
     sbom_ref = _metadata_value(metadata, "sbom_url", "sbom", "dependencies", "package_dependencies")
     malware_scan_ref = _metadata_value(metadata, "malware_scan_url", "malware_scan_result", "yara_scan", "av_scan")
     eval_ref = _metadata_value(metadata, "eval_report_url", "security_evals", "red_team_report", "eval_results")
     deployment_restrictions = _metadata_value(metadata, "deployment_restrictions", "allowed_environments", "use_restrictions")
     monitoring_plan = _metadata_value(metadata, "monitoring_plan", "monitoring_plan_url", "drift_monitoring", "incident_response_plan")
+    training_data_ref = _metadata_value(metadata, "training_data_ref", "training_datasets", "datasets", "dataset_refs")
+    dataset_digest = _metadata_value(metadata, "dataset_digest", "training_data_digest", "dataset_sha256", "training_data_sha256")
+    base_model_ref = _metadata_value(metadata, "base_model", "base_models", "foundation_model")
+    fine_tune_provenance = _metadata_value(metadata, "fine_tuning_job", "fine_tune_job", "training_run_id", "training_pipeline")
+    poisoning_eval_ref = _metadata_value(metadata, "poisoning_evals", "backdoor_evals", "canary_eval_report", "data_poisoning_evals")
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
     registry_reference = _registry_reference(artifact_ref, metadata)
     signature_status = _signature_verification_status(metadata, signature_url, signed_by)
     license_policy = _license_policy(license_ref)
+    sbom_policy = _sbom_policy(sbom_ref, strict=strict_governance)
+    try:
+        malware_scan_max_age_days = int(options.get("malware_scan_max_age_days") or metadata.get("malware_scan_max_age_days") or 30)
+    except (TypeError, ValueError):
+        malware_scan_max_age_days = 30
+    malware_policy = _malware_policy(
+        malware_scan_ref,
+        strict=strict_governance,
+        expected_sha256=expected_sha256,
+        max_age_days=malware_scan_max_age_days,
+    )
+    eval_policy = _eval_policy(eval_ref, strict=strict_governance, expected_sha256=expected_sha256)
+    approval_policy = _approval_policy(metadata, deployment_approved=deployment_approved, strict=strict_governance)
     format_inspection = _inspect_format(name, ext, artifact_bytes, zip_info)
     suspicious_loader_markers = _scan_suspicious_loader_markers(artifact_bytes, zip_info)
     aibom_hash = str(expected_sha256 or sha256 or "").strip() or None
@@ -1051,7 +1632,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         findings.append(_finding(
             finding_id="checksum_not_fully_verified",
             title="Model artifact checksum available but not fully verified",
-            severity="info",
+            severity="medium" if require_hash else "info",
             description="A full-artifact SHA-256 value was supplied, but intake only inspected a byte range due to the configured download cap.",
             artifact_ref=artifact_ref,
             evidence={
@@ -1063,6 +1644,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "download_limit": max_download_bytes,
             },
             remediation="Increase the download cap to verify the full artifact, or rely on registry digest/signature evidence as the release pin.",
+        ))
+    elif require_hash and expected_sha256 and not sha256 and not metadata_unavailable and not artifact_meta.get("error"):
+        findings.append(_finding(
+            finding_id="checksum_not_verified",
+            title="Model artifact checksum could not be verified",
+            severity="medium",
+            description="A full-artifact SHA-256 value was supplied, but intake could not observe artifact bytes to verify it.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "expected_sha256": expected_sha256, "fetch": artifact_meta},
+            remediation="Make the model artifact reachable to intake or verify the digest through a trusted registry/signature verifier before deployment.",
         ))
     elif require_hash and not expected_sha256 and not metadata_unavailable:
         findings.append(_finding(
@@ -1088,17 +1679,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
 
     if (
         require_signature_verification
-        and signature_status["status"] == "present_unverified"
+        and signature_status["status"] in {"present_unverified", "claimed_verified"}
         and not metadata_unavailable
     ):
         findings.append(_finding(
             finding_id="signature_not_verified",
             title="Model artifact signature is present but not verified",
             severity="medium",
-            description="The artifact has signature or attestation metadata, but the intake metadata does not record successful verification.",
+            description="The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence.",
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "signature": signature_status},
-            remediation="Verify the signature or attestation with Sigstore/cosign or the registry verifier and record verification status in model intake metadata.",
+            remediation="Verify the signature or attestation with Sigstore/cosign or the registry verifier and record cryptographic verification evidence in model intake metadata.",
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
@@ -1122,6 +1713,72 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Prefer non-executable formats such as safetensors, ONNX, TFLite, or GGUF. If legacy formats are unavoidable, load only in a sandboxed conversion pipeline.",
         ))
 
+    safetensors_header = format_inspection.get("safetensors_header") if isinstance(format_inspection.get("safetensors_header"), dict) else {}
+    if ext == ".safetensors" and artifact_bytes and not safetensors_header.get("valid"):
+        findings.append(_finding(
+            finding_id="safetensors_header_invalid",
+            title="Safetensors header failed structural validation",
+            severity="high",
+            description="The safetensors header is missing, malformed, truncated, has duplicate keys, overlapping tensor ranges, or tensor offsets outside the payload.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "safetensors_header": safetensors_header},
+            remediation="Reject malformed safetensors artifacts and re-export from a trusted conversion pipeline with valid tensor offsets.",
+        ))
+    if safetensors_header.get("suspicious_metadata_keys"):
+        findings.append(_finding(
+            finding_id="safetensors_suspicious_metadata",
+            title="Safetensors metadata contains risky runtime hints",
+            severity="medium",
+            description="The safetensors metadata includes prompt, credential, remote-code, or tool-template markers that should be reviewed before deployment.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "safetensors_header": safetensors_header},
+            remediation="Remove sensitive or behavior-changing metadata and review tokenizer/chat-template configuration separately from tensor artifacts.",
+        ))
+
+    onnx_inspection = format_inspection.get("onnx") if isinstance(format_inspection.get("onnx"), dict) else {}
+    if onnx_inspection.get("external_data_hint"):
+        findings.append(_finding(
+            finding_id="onnx_external_data_reference",
+            title="ONNX artifact references external tensor data",
+            severity="medium",
+            description="The ONNX artifact appears to reference external data, which can move executable or model-critical content outside the inspected artifact.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "onnx": onnx_inspection},
+            remediation="Bundle and hash external tensor data, reject absolute/remote locations, and verify the complete model directory before deployment.",
+        ))
+    if onnx_inspection.get("custom_operator_hint"):
+        findings.append(_finding(
+            finding_id="onnx_custom_operator",
+            title="ONNX artifact may require custom operators",
+            severity="medium",
+            description="The ONNX artifact contains custom-operator hints that may require privileged runtime extensions.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "onnx": onnx_inspection},
+            remediation="Review custom operator implementations and load the model only in a restricted runtime with approved extensions.",
+        ))
+
+    gguf_inspection = format_inspection.get("gguf") if isinstance(format_inspection.get("gguf"), dict) else {}
+    if ext == ".gguf" and artifact_bytes and not gguf_inspection.get("valid_header"):
+        findings.append(_finding(
+            finding_id="gguf_header_invalid",
+            title="GGUF artifact header is invalid or unsupported",
+            severity="high",
+            description="The GGUF artifact does not have a valid GGUF magic/version header, so intake cannot trust its model metadata.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "gguf": gguf_inspection},
+            remediation="Reject malformed GGUF artifacts and require a valid GGUF export from a trusted build pipeline.",
+        ))
+    if gguf_inspection.get("suspicious_metadata_strings"):
+        findings.append(_finding(
+            finding_id="gguf_suspicious_metadata",
+            title="GGUF metadata contains risky URLs or templates",
+            severity="medium",
+            description="The GGUF metadata includes URLs or prompt/tool template strings that can indicate unexpected runtime behavior.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "gguf": gguf_inspection},
+            remediation="Review tokenizer templates, embedded URLs, and metadata provenance before approving the artifact.",
+        ))
+
     executable_entries = zip_info.get("executable_entries") or []
     if executable_entries:
         findings.append(_finding(
@@ -1132,6 +1789,54 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "executable_entries": executable_entries},
             remediation="Block deployment pending malware analysis and require a clean re-packaged artifact.",
+        ))
+
+    path_traversal_entries = zip_info.get("path_traversal_entries") or []
+    if path_traversal_entries:
+        findings.append(_finding(
+            finding_id="archive_path_traversal",
+            title="Model archive contains path traversal entries",
+            severity="high",
+            description="The model archive contains absolute or parent-directory paths that could overwrite files when extracted unsafely.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "path_traversal_entries": path_traversal_entries},
+            remediation="Reject the artifact and require a package with normalized relative paths only.",
+        ))
+
+    zip_bomb_entries = zip_info.get("zip_bomb_entries") or []
+    if zip_bomb_entries:
+        findings.append(_finding(
+            finding_id="archive_zip_bomb_risk",
+            title="Model archive has zip-bomb compression characteristics",
+            severity="high",
+            description="One or more archive entries expand far beyond their compressed size and can exhaust intake or deployment resources.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "zip_bomb_entries": zip_bomb_entries},
+            remediation="Reject highly compressed oversized archive entries or unpack only inside strict resource limits.",
+        ))
+
+    nested_archive_entries = zip_info.get("nested_archive_entries") or []
+    if nested_archive_entries:
+        findings.append(_finding(
+            finding_id="nested_model_archive",
+            title="Model artifact contains nested archives",
+            severity="medium",
+            description="Nested archives reduce inspectability and can hide executable or oversized payloads from shallow intake checks.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "nested_archive_entries": nested_archive_entries},
+            remediation="Require a flattened model package or recursively inspect nested archives in a sandboxed intake pipeline.",
+        ))
+
+    risky_config_entries = zip_info.get("risky_config_entries") or []
+    if risky_config_entries:
+        findings.append(_finding(
+            finding_id="risky_model_config",
+            title="Model package configuration requests risky runtime behavior",
+            severity="high",
+            description="The model package contains configuration such as trust_remote_code or risky chat templates that can expand runtime execution or tool-use risk.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "risky_config_entries": risky_config_entries},
+            remediation="Disable trust_remote_code, review chat templates, and require conversion through a controlled model packaging pipeline.",
         ))
 
     if suspicious_loader_markers:
@@ -1156,6 +1861,61 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require source repository, commit hash, training data reference, build workflow, and attestation URL before deployment approval.",
         ))
 
+    if require_governance and strict_governance and not training_data_ref and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="missing_dataset_lineage",
+            title="Model training dataset lineage missing",
+            severity="medium",
+            description="Strict model-intake policy requires training dataset lineage so poisoning and unauthorized data-source risk can be reviewed.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Record training dataset references, ownership, allowed source policy, and dataset version before production deployment.",
+        ))
+
+    if require_governance and strict_governance and training_data_ref and not dataset_digest and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="missing_dataset_digest",
+            title="Model training dataset digest missing",
+            severity="medium",
+            description="Training dataset lineage was provided without a digest, so intake cannot bind eval and approval evidence to immutable data.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "training_data_ref": training_data_ref},
+            remediation="Attach a dataset SHA-256, manifest digest, or signed data version identifier for the training corpus.",
+        ))
+
+    if require_governance and strict_governance and not base_model_ref and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="missing_base_model_lineage",
+            title="Base model lineage missing",
+            severity="medium",
+            description="Strict model-intake policy requires base model lineage to assess inherited license, safety, and supply-chain risk.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Record base model identifier, version, digest, and source registry for derivative or fine-tuned models.",
+        ))
+
+    if require_governance and strict_governance and not fine_tune_provenance and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="missing_training_pipeline_provenance",
+            title="Fine-tuning or training pipeline provenance missing",
+            severity="low",
+            description="No fine-tuning job, training run, or build pipeline provenance was supplied for the model artifact.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Record the fine-tuning job, build workflow, runner identity, and attested source revision for reproducibility.",
+        ))
+
+    if require_governance and strict_governance and not poisoning_eval_ref and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="missing_poisoning_eval_evidence",
+            title="Model poisoning or backdoor eval evidence missing",
+            severity="medium",
+            description="Strict model-intake policy requires data/model poisoning or backdoor eval evidence before production deployment.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
+            remediation="Attach canary, backdoor, data-poisoning, or regression eval evidence bound to the artifact digest and model version.",
+        ))
+
     if not model_card and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_model_card",
@@ -1176,6 +1936,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "approved_by": metadata.get("approved_by"), "deployment_approved": deployment_approved},
             remediation="Route the artifact through approval before deployment and record approver, timestamp, and policy version.",
+        ))
+
+    if require_approval and strict_governance and deployment_approved and not approval_policy["valid"] and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="incomplete_deployment_approval",
+            title="Model deployment approval evidence is incomplete",
+            severity="medium",
+            description="Strict model-intake policy requires approver, timestamp, policy version, and approved environment, not only a boolean approval flag.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "approval_policy": approval_policy},
+            remediation="Record approved_by, approval timestamp, approval policy version, and deployment environment before production approval.",
         ))
 
     if require_governance and not license_ref and not metadata_unavailable:
@@ -1211,6 +1982,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Attach SBOM or dependency inventory for model package code, adapters, tokenizers, and serving dependencies.",
         ))
 
+    if require_governance and sbom_ref and strict_governance and not sbom_policy["valid"] and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="invalid_sbom_evidence",
+            title="Model SBOM evidence is incomplete or unvalidated",
+            severity="medium",
+            description="Strict model-intake policy requires a CycloneDX/SPDX or component-list SBOM with at least one component.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "sbom_policy": sbom_policy},
+            remediation="Attach a valid CycloneDX or SPDX SBOM with package components, purls, hashes, and license evidence.",
+        ))
+
     if require_governance and not malware_scan_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_malware_scan",
@@ -1222,6 +2004,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require static malware/YARA scanning and record scan result, engine, and timestamp before approval.",
         ))
 
+    if require_governance and malware_scan_ref and strict_governance and not malware_policy["valid"] and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="invalid_malware_scan_evidence",
+            title="Model malware scan evidence is incomplete, stale, or not bound to the artifact",
+            severity="medium",
+            description="Strict model-intake policy requires a clean malware scan with scanner/version, timestamp, artifact digest, and fresh evidence.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "malware_policy": malware_policy},
+            remediation="Run malware/YARA scanning against the exact artifact digest and record scanner, engine version, timestamp, and clean status.",
+        ))
+
     if require_governance and not eval_ref and not metadata_unavailable:
         findings.append(_finding(
             finding_id="missing_eval_evidence",
@@ -1231,6 +2024,17 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "metadata_keys": sorted(metadata.keys())},
             remediation="Attach safety/security eval results, red-team coverage, and deployment-specific acceptance criteria.",
+        ))
+
+    if require_governance and eval_ref and strict_governance and not eval_policy["valid"] and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="invalid_security_eval_evidence",
+            title="Model security evaluation evidence is incomplete or not bound to the artifact",
+            severity="medium",
+            description="Strict model-intake policy requires passing security eval evidence with suite id, date, target digest, and thresholds.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "eval_policy": eval_policy},
+            remediation="Attach eval suite id, date, target artifact digest, result, and acceptance thresholds for the deployment model version.",
         ))
 
     if require_governance and not deployment_restrictions and not metadata_unavailable:
@@ -1255,32 +2059,79 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Define monitoring for drift, abuse, data leakage, cost anomalies, incidents, and periodic reassessment.",
         ))
 
-    if ext in SAFER_MODEL_EXTENSIONS and not any(f["id"].endswith("unsafe_serialization") for f in findings):
+    format_specific_blocked = any(
+        f["id"] in {
+            "model_intake:safetensors_header_invalid",
+            "model_intake:gguf_header_invalid",
+        }
+        for f in findings
+    )
+    if ext in SAFER_MODEL_EXTENSIONS and not any(f["id"].endswith("unsafe_serialization") for f in findings) and not format_specific_blocked:
         format_posture = "safer_static_format"
     elif ext in RISKY_EXTENSIONS or pickle_like:
         format_posture = "unsafe_executable_serialization"
     else:
         format_posture = "unknown_or_unclassified_format"
 
+    observed_hash_scope = "inspected_bytes" if artifact_truncated and sha256 else "full_artifact" if sha256 else None
+    checksum_match = True if checksum_status == "verified" else False if checksum_status == "mismatch" else None
+    if checksum_status == "verified":
+        checksum_policy_status = "pass"
+    elif require_hash and expected_sha256:
+        checksum_policy_status = "fail_unverified"
+    elif require_hash:
+        checksum_policy_status = "fail_missing"
+    elif expected_sha256:
+        checksum_policy_status = "review"
+    else:
+        checksum_policy_status = "not_required"
+    format_specific_ok = not any(
+        finding["id"] in {
+            "model_intake:safetensors_header_invalid",
+            "model_intake:onnx_external_data_reference",
+            "model_intake:onnx_custom_operator",
+            "model_intake:gguf_header_invalid",
+        }
+        for finding in findings
+    )
+
     score = max(0, 100 - sum(_severity_score(f.get("severity", "info")) for f in findings))
+    safe_artifact_ref = redact_model_intake_value(artifact_ref)
+    safe_registry_reference = redact_model_intake_value(registry_reference)
+    safe_metadata = redact_model_intake_value(metadata)
+    safe_metadata_fetch_meta = redact_model_intake_value(metadata_fetch_meta)
+    safe_artifact_meta = redact_model_intake_value(artifact_meta)
+    safe_signature_status = redact_model_intake_value(signature_status)
+    safe_aibom = redact_model_intake_value(aibom)
+    safe_findings = redact_model_intake_value(findings)
     summary = {
         "artifact_name": name,
-        "artifact_ref": artifact_ref,
+        "artifact_ref": safe_artifact_ref,
         "source_kind": _source_kind(artifact_ref, metadata),
-        "registry": registry_reference,
+        "registry": safe_registry_reference,
         "extension": ext,
         "sha256": sha256,
-        "sha256_scope": "inspected_bytes" if artifact_truncated else "full_artifact",
+        "sha256_scope": observed_hash_scope,
         "expected_sha256": expected_sha256,
         "checksum_status": checksum_status,
+        "checksum_match": checksum_match,
+        "checksum_policy_status": checksum_policy_status,
         "format_posture": format_posture,
         "signature_verification_status": signature_status["status"],
         "license_policy_status": license_policy["status"],
+        "strict_governance": strict_governance,
+        "deployment_environment": deployment_environment or None,
+        "sbom_policy_status": sbom_policy["status"],
+        "malware_policy_status": malware_policy["status"],
+        "eval_policy_status": eval_policy["status"],
+        "approval_policy_status": approval_policy["status"],
         "aibom_generated": True,
         "aibom_completeness": aibom["completeness"]["score"],
         "provenance_present": bool(provenance_ref),
         "signature_present": bool(signature_url or signed_by),
         "signature_verified": signature_status["verified"],
+        "signature_claimed_verified": signature_status["claimed_verified"],
+        "signature_cryptographically_verified": signature_status["cryptographically_verified"],
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
@@ -1289,6 +2140,11 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "eval_evidence_present": bool(eval_ref),
         "deployment_restrictions_present": bool(deployment_restrictions),
         "monitoring_plan_present": bool(monitoring_plan),
+        "training_data_lineage_present": bool(training_data_ref),
+        "dataset_digest_present": bool(dataset_digest),
+        "base_model_lineage_present": bool(base_model_ref),
+        "training_pipeline_provenance_present": bool(fine_tune_provenance),
+        "poisoning_eval_present": bool(poisoning_eval_ref),
         "metadata_fetch_failed": bool(metadata_fetch_meta.get("error")),
         "findings_count": len(findings),
     }
@@ -1296,22 +2152,26 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     return {
         "schema_version": "2026-05-10.model-intake.v1",
         "scan_mode": "model_intake",
-        "target": artifact_ref,
+        "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
             "artifact": {
                 "name": name,
                 "extension": ext,
-                "fetch": artifact_meta,
+                "fetch": safe_artifact_meta,
                 "archive": zip_info,
             },
-            "metadata": metadata,
-            "metadata_fetch": metadata_fetch_meta if metadata_url else None,
-            "aibom": aibom,
+            "metadata": safe_metadata,
+            "metadata_fetch": safe_metadata_fetch_meta if metadata_url else None,
+            "aibom": safe_aibom,
             "supply_chain": {
-                "registry": registry_reference,
-                "signature": signature_status,
+                "registry": safe_registry_reference,
+                "signature": safe_signature_status,
                 "license_policy": license_policy,
+                "sbom_policy": sbom_policy,
+                "malware_policy": malware_policy,
+                "eval_policy": eval_policy,
+                "approval_policy": approval_policy,
                 "suspicious_loader_markers": suspicious_loader_markers,
                 "format_inspection": format_inspection,
             },
@@ -1320,20 +2180,41 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
                 "unsafe_serialization": not any(f["id"].endswith("unsafe_serialization") for f in findings),
                 "artifact_signing": None if metadata_unavailable else bool(signature_url or signed_by),
                 "signature_verification": None if not require_signature_verification or metadata_unavailable else signature_status["verified"],
-                "checksum": None if metadata_unavailable else bool(expected_sha256 and checksum_status != "mismatch"),
+                "checksum": None if metadata_unavailable else checksum_status == "verified",
                 "aibom": True,
-                "format_specific_inspection": True,
+                "format_specific_inspection": format_specific_ok,
                 "license_policy": None if metadata_unavailable or not license_ref else license_policy["status"] == "permissive",
                 "approval": (None if metadata_unavailable else deployment_approved) if require_approval else None,
+                "approval_evidence": (
+                    None if metadata_unavailable else approval_policy["valid"]
+                ) if require_approval and strict_governance else None,
                 "license_review": (None if metadata_unavailable else bool(license_ref)) if require_governance else None,
-                "sbom_dependencies": (None if metadata_unavailable else bool(sbom_ref)) if require_governance else None,
-                "malware_scan": (None if metadata_unavailable else bool(malware_scan_ref)) if require_governance else None,
-                "security_evals": (None if metadata_unavailable else bool(eval_ref)) if require_governance else None,
+                "sbom_dependencies": (
+                    None if metadata_unavailable else (sbom_policy["valid"] if strict_governance else bool(sbom_ref))
+                ) if require_governance else None,
+                "malware_scan": (
+                    None if metadata_unavailable else (malware_policy["valid"] if strict_governance else bool(malware_scan_ref))
+                ) if require_governance else None,
+                "security_evals": (
+                    None if metadata_unavailable else (eval_policy["valid"] if strict_governance else bool(eval_ref))
+                ) if require_governance else None,
                 "deployment_restrictions": (None if metadata_unavailable else bool(deployment_restrictions)) if require_governance else None,
                 "monitoring_plan": (None if metadata_unavailable else bool(monitoring_plan)) if require_governance else None,
+                "dataset_lineage": (
+                    None if metadata_unavailable else bool(training_data_ref)
+                ) if require_governance and strict_governance else None,
+                "dataset_digest": (
+                    None if metadata_unavailable else bool(dataset_digest)
+                ) if require_governance and strict_governance and bool(training_data_ref) else None,
+                "base_model_lineage": (
+                    None if metadata_unavailable else bool(base_model_ref)
+                ) if require_governance and strict_governance else None,
+                "poisoning_evals": (
+                    None if metadata_unavailable else bool(poisoning_eval_ref)
+                ) if require_governance and strict_governance else None,
             },
         },
-        "findings": findings,
+        "findings": safe_findings,
         "result": {
             "score": score,
             "grade": _grade(score),

@@ -445,7 +445,7 @@ async def run_schema_migrations(pool) -> None:
                 WHERE verification_count IS NULL
             """)
 
-            # AI Gate targets (single-user OSS edition).
+            # AI Gate targets.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_targets (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -500,6 +500,48 @@ async def run_schema_migrations(pool) -> None:
                             'query_param'
                         ))
                 )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_target_principals (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    ai_target_id UUID NOT NULL REFERENCES ai_targets(id) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'attacker',
+                    tenant_id TEXT,
+                    auth_kind TEXT NOT NULL DEFAULT 'none',
+                    header_name TEXT,
+                    secret_value TEXT,
+                    secret_preview TEXT,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    rotated_at TIMESTAMPTZ,
+                    CONSTRAINT ai_target_principals_target_label_unique UNIQUE (ai_target_id, label),
+                    CONSTRAINT ai_target_principals_role_check
+                        CHECK (role IN (
+                            'attacker',
+                            'victim',
+                            'admin',
+                            'service',
+                            'observer'
+                        )),
+                    CONSTRAINT ai_target_principals_auth_kind_check
+                        CHECK (auth_kind IN (
+                            'none',
+                            'bearer',
+                            'api_key_header',
+                            'custom_header',
+                            'basic_auth',
+                            'cookie',
+                            'multi_header',
+                            'query_param'
+                        ))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_target_principals_target_active
+                ON ai_target_principals(ai_target_id, is_active)
             """)
             await conn.execute("""
                 ALTER TABLE scans

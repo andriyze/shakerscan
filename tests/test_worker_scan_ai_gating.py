@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import types
+from datetime import datetime, timezone
 
 
 
@@ -30,6 +31,156 @@ class _FakeProcess:
 
     async def wait(self):
         return self.returncode
+
+
+class _FakeCredentialPool:
+    async def fetchrow(self, query, target_id):
+        return {
+            "auth_kind": "bearer",
+            "header_name": None,
+            "secret_value": "runtime-target-secret",
+            "metadata_json": {},
+        }
+
+    async def fetch(self, query, target_id):
+        return []
+
+
+class _FakePrincipalPool(_FakeCredentialPool):
+    async def fetch(self, query, target_id):
+        return [
+            {
+                "id": "00000000-0000-0000-0000-000000000010",
+                "label": "tenant-a-user",
+                "role": "attacker",
+                "tenant_id": "tenant-a",
+                "auth_kind": "bearer",
+                "header_name": None,
+                "secret_value": "principal-runtime-secret",
+                "metadata_json": {"purpose": "cross-tenant"},
+            }
+        ]
+
+
+class _FakeFinalizeConnection:
+    def __init__(self):
+        self.executions = []
+
+    async def execute(self, query, *args):
+        self.executions.append((query, args))
+
+
+class _FakeFinalizePool:
+    def __init__(self):
+        self.conn = _FakeFinalizeConnection()
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
+    target_id = "00000000-0000-0000-0000-000000000001"
+    monkeypatch.setattr(worker, "db_pool", _FakeCredentialPool())
+    monkeypatch.setattr(
+        worker,
+        "_load_runtime_ai_settings",
+        lambda: {
+            "ai_url": "https://ai.example/v1/chat/completions",
+            "ai_api_key": "runtime-ai-key",
+            "ai_model": "model-a",
+            "ai_model_fallback": "",
+        },
+    )
+
+    options = {
+        "run_kind": "ai_api",
+        "ai_target_id": target_id,
+        "ai_target": {
+            "id": target_id,
+            "endpoint_url": "https://example.test/chat",
+            "credential_ref": {"ai_target_id": target_id, "configured": True},
+        },
+    }
+
+    hydrated = asyncio.run(worker._hydrate_ai_gate_options(options))
+
+    assert hydrated["ai_target"]["credential"]["secret"] == "runtime-target-secret"
+    assert "credential_ref" not in hydrated["ai_target"]
+    assert hydrated["ai_api_key"] == "runtime-ai-key"
+
+
+def test_hydrate_ai_gate_options_loads_principal_credentials_in_worker(monkeypatch):
+    target_id = "00000000-0000-0000-0000-000000000001"
+    monkeypatch.setattr(worker, "db_pool", _FakePrincipalPool())
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    options = {
+        "run_kind": "ai_rag",
+        "ai_target_id": target_id,
+        "ai_target": {
+            "id": target_id,
+            "endpoint_url": "https://example.test/rag",
+            "credential_ref": {"ai_target_id": target_id, "configured": True},
+            "principal_refs": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000010",
+                    "label": "tenant-a-user",
+                    "role": "attacker",
+                    "credential_configured": True,
+                }
+            ],
+        },
+    }
+
+    hydrated = asyncio.run(worker._hydrate_ai_gate_options(options))
+
+    assert hydrated["ai_target"]["principals"][0]["credential"]["secret"] == "principal-runtime-secret"
+    assert hydrated["ai_target"]["principals"][0]["role"] == "attacker"
+    assert "principal_refs" not in hydrated["ai_target"]
+
+
+def test_finalize_ai_finding_retest_marks_reproduced_finding(monkeypatch):
+    pool = _FakeFinalizePool()
+    monkeypatch.setattr(worker, "db_pool", pool)
+    verification_id = "00000000-0000-0000-0000-000000000002"
+    finding_id = "00000000-0000-0000-0000-000000000003"
+
+    asyncio.run(worker.finalize_ai_finding_retest(
+        options={
+            "ai_finding_retest": {
+                "verification_id": verification_id,
+                "finding_id": finding_id,
+                "mode": "same_probe",
+                "probe_id": "smoke.prompt-leakage",
+                "probe_family": "prompt_leakage",
+            }
+        },
+        result={
+            "findings": [
+                {
+                    "confidence": 0.93,
+                    "evidence": {"probe_id": "smoke.prompt-leakage", "probe_family": "prompt_leakage"},
+                }
+            ],
+            "ai_gate": {"errors": [], "transcripts": [], "decision": {"decision": "block"}},
+        },
+        scan_id="00000000-0000-0000-0000-000000000004",
+        completed_at=datetime.now(timezone.utc),
+        error=None,
+    ))
+
+    verification_update = pool.conn.executions[0][1]
+    finding_update = pool.conn.executions[1][1]
+    assert verification_update[0] == "completed"
+    assert verification_update[1] == "still_vulnerable"
+    assert verification_update[2] == "exploited"
+    assert finding_update[1] == "exploited"
 
 
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):

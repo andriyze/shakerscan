@@ -9,6 +9,7 @@ import {
   getFinding,
   getFindingRetests,
   retestFinding,
+  retestAiFinding,
   updateFinding,
   deleteFinding,
   getSeverityBg,
@@ -142,7 +143,7 @@ function FindingDetailContent() {
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
-  const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai'>('tiered')
+  const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
 
   // Build back URL with preserved filters
@@ -221,9 +222,22 @@ function FindingDetailContent() {
     try {
       setRetestLoading(true)
       setRetestMessage(null)
-      const mode = retestMode === 'tiered' ? undefined : retestMode
-      const queued = await retestFinding(finding.id, { requested_by: 'ui' }, mode)
-      setRetestMessage(`Retest queued (${queued.retest_id.slice(0, 8)}...)`)
+      const aiFinding = getFindingSourceType(finding) === 'AI'
+      const queued = aiFinding
+        ? await retestAiFinding(finding.id, {
+            requested_by: 'ui',
+            mode: ['same_probe', 'same_family', 'strict_replay'].includes(retestMode)
+              ? retestMode as 'same_probe' | 'same_family' | 'strict_replay'
+              : 'same_probe'
+          })
+        : await retestFinding(
+            finding.id,
+            { requested_by: 'ui' },
+            retestMode === 'tiered' || ['same_probe', 'same_family', 'strict_replay'].includes(retestMode)
+              ? undefined
+              : retestMode as 'ai' | 'deterministic'
+          )
+      setRetestMessage(`${aiFinding ? 'AI Gate replay' : 'Retest'} queued (${queued.retest_id.slice(0, 8)}...)`)
       const history = await getFindingRetests(finding.id, 10)
       setRetestHistory(history.retests || [])
       await fetchFinding()
@@ -250,6 +264,20 @@ function FindingDetailContent() {
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
   const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const retestOptions = isAiFinding
+    ? [
+        { value: 'same_probe', label: 'Same probe' },
+        { value: 'same_family', label: 'Same family' },
+        { value: 'strict_replay', label: 'Strict replay' },
+      ]
+    : [
+        { value: 'tiered', label: 'Tiered' },
+        { value: 'deterministic', label: 'Deterministic only' },
+        { value: 'ai', label: 'AI only' },
+      ]
+  const selectedRetestMode = retestOptions.some((option) => option.value === retestMode)
+    ? retestMode
+    : retestOptions[0].value
   const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
   const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
   const aiProbeId = evidenceString(rawEvidenceObject, 'probe_id')
@@ -288,14 +316,14 @@ function FindingDetailContent() {
         </div>
         <div className="flex items-center gap-2">
           <select
-            value={retestMode}
-            onChange={(e) => setRetestMode(e.target.value as 'tiered' | 'deterministic' | 'ai')}
+            value={selectedRetestMode}
+            onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
             className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
             title="Retest mode"
           >
-            <option value="tiered">Tiered</option>
-            <option value="deterministic">Deterministic only</option>
-            <option value="ai">AI only</option>
+            {retestOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
           </select>
           <button
             onClick={handleRetest}

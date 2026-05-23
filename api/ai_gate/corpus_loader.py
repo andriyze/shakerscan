@@ -77,6 +77,7 @@ def _read_turns(
             ProbeTurnTemplate(
                 message=message,
                 role=_read_optional_string(turn, "role") or "attacker",
+                principal=_read_optional_string(turn, "principal"),
             )
         )
 
@@ -191,6 +192,7 @@ def _load_probe_entries_with_diagnostics(
                 requires_state=bool(entry.get("requires_state", bool(turns))),
                 requires_fresh_session=bool(entry.get("requires_fresh_session", False)),
                 safe_for_production=bool(entry.get("safe_for_production", True)),
+                principal=_read_optional_string(entry, "principal"),
             )
         )
     if isinstance(raw_entries, list) and len(raw_entries) > MAX_INLINE_PROBES:

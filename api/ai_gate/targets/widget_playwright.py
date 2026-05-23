@@ -800,6 +800,7 @@ class WidgetPlaywrightConversationTarget:
         prompt: str,
         probe_id: str,
         session_id: str,
+        principal: str | None = None,
         replacements: dict[str, str] | None = None,
     ) -> WidgetConversationExchange:
         started = time.perf_counter()

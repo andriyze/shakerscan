@@ -117,6 +117,7 @@ from retest_contract import SEVERITY_ORDER
 
 # Database pool (initialized in main)
 db_pool = None
+ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
 
 
 def get_redis():
@@ -251,6 +252,91 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     return settings
 
 
+def _runtime_ai_target_credential_from_row(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
+
+    metadata = parse_json_field(row.get("metadata_json")) or {}
+    auth_kind = row.get("auth_kind") or "none"
+    secret = row.get("secret_value")
+    if auth_kind == "multi_header":
+        try:
+            headers = json.loads(secret or "[]")
+        except json.JSONDecodeError:
+            headers = []
+        metadata = {**metadata, "headers": headers}
+        secret = None
+    elif auth_kind == "query_param":
+        metadata = {**metadata, "param_name": row.get("header_name") or metadata.get("param_name")}
+
+    return {
+        "auth_kind": auth_kind,
+        "header_name": row.get("header_name"),
+        "secret": secret,
+        "metadata_json": metadata,
+    }
+
+
+async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
+    hydrated = dict(options)
+    ai_target = dict(hydrated.get("ai_target") or {})
+    if not ai_target:
+        return hydrated
+
+    credential_ref = ai_target.get("credential_ref") if isinstance(ai_target.get("credential_ref"), dict) else {}
+    target_id = ai_target.get("id") or hydrated.get("ai_target_id") or credential_ref.get("ai_target_id")
+    if "credential" not in ai_target and target_id and db_pool is not None:
+        try:
+            credential_row = await db_pool.fetchrow(
+                "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+                uuid.UUID(str(target_id)),
+            )
+            ai_target["credential"] = _runtime_ai_target_credential_from_row(
+                dict(credential_row) if credential_row else None
+            )
+        except (ValueError, TypeError, ASYNC_PG_ERROR):
+            ai_target["credential"] = {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
+
+    ai_target.pop("credential_ref", None)
+    if "principals" not in ai_target and target_id and db_pool is not None:
+        principal_refs = ai_target.get("principal_refs")
+        try:
+            principal_rows = await db_pool.fetch(
+                """
+                SELECT * FROM ai_target_principals
+                WHERE ai_target_id = $1 AND is_active = true
+                ORDER BY role, label
+                """,
+                uuid.UUID(str(target_id)),
+            )
+            principals: list[dict[str, Any]] = []
+            for row in principal_rows:
+                principal = dict(row)
+                principals.append({
+                    "id": str(principal.get("id")),
+                    "label": principal.get("label"),
+                    "role": principal.get("role") or "attacker",
+                    "tenant_id": principal.get("tenant_id"),
+                    "metadata_json": parse_json_field(principal.get("metadata_json")) or {},
+                    "credential": _runtime_ai_target_credential_from_row(principal),
+                })
+            if principals:
+                ai_target["principals"] = principals
+        except (ValueError, TypeError, ASYNC_PG_ERROR):
+            if isinstance(principal_refs, list):
+                ai_target["principal_refs"] = principal_refs
+    ai_target.pop("principal_refs", None)
+    hydrated["ai_target"] = ai_target
+
+    ai_runtime = _load_runtime_ai_settings()
+    if ai_runtime.get("ai_url") and ai_runtime.get("ai_api_key"):
+        hydrated.setdefault("ai_url", ai_runtime.get("ai_url"))
+        hydrated.setdefault("ai_api_key", ai_runtime.get("ai_api_key"))
+        hydrated.setdefault("ai_model", ai_runtime.get("ai_model") or "gpt-4o-mini")
+        hydrated.setdefault("ai_model_fallback", ai_runtime.get("ai_model_fallback") or "")
+    return hydrated
+
+
 async def init_db():
     """Initialize database connection pool."""
     global db_pool
@@ -278,7 +364,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             await update_scan_progress(scan_id, "ai_gate", 15, job_id=job_id)
         from ai_gate_scan import run_ai_target_scan
 
-        result = await run_ai_target_scan(target, options)
+        result = await run_ai_target_scan(target, await _hydrate_ai_gate_options(options))
         if scan_id:
             await update_scan_progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
         return result
@@ -1044,6 +1130,140 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
                 saved += 1
 
     return saved
+
+
+def _ai_finding_matches_retest(finding: dict[str, Any], replay_plan: dict[str, Any]) -> bool:
+    evidence = parse_json_field(finding.get("evidence")) or {}
+    source_finding_id = str(finding.get("source_finding_id") or evidence.get("source_finding_id") or "")
+    expected_source_id = str(replay_plan.get("source_finding_id") or "")
+    if expected_source_id and source_finding_id == expected_source_id:
+        return True
+    probe_id = str(evidence.get("probe_id") or "")
+    expected_probe_id = str(replay_plan.get("probe_id") or "")
+    if expected_probe_id and probe_id == expected_probe_id:
+        return True
+    probe_family = str(evidence.get("probe_family") or evidence.get("strategy_id") or finding.get("type") or "")
+    expected_family = str(replay_plan.get("probe_family") or "")
+    return bool(replay_plan.get("mode") == "same_family" and expected_family and probe_family == expected_family)
+
+
+def _ai_retest_confidence(findings: list[dict[str, Any]]) -> float | None:
+    values: list[float] = []
+    for finding in findings:
+        value = finding.get("ai_confidence", finding.get("confidence"))
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return round(max(values), 2) if values else None
+
+
+async def finalize_ai_finding_retest(
+    *,
+    options: dict[str, Any],
+    result: dict[str, Any],
+    scan_id: str,
+    completed_at: datetime,
+    error: str | None,
+) -> None:
+    replay_plan = options.get("ai_finding_retest") if isinstance(options.get("ai_finding_retest"), dict) else None
+    if not replay_plan:
+        return
+    verification_id = replay_plan.get("verification_id")
+    finding_id = replay_plan.get("finding_id")
+    if not verification_id or not finding_id:
+        return
+
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
+    matched_findings = [
+        finding for finding in findings if isinstance(finding, dict) and _ai_finding_matches_retest(finding, replay_plan)
+    ]
+    ai_errors = ai_gate.get("errors") if isinstance(ai_gate.get("errors"), list) else []
+    if error:
+        status = "failed"
+        result_status = "error"
+        verdict = "error"
+        verdict_reason = error
+        confidence = None
+    elif matched_findings:
+        status = "completed"
+        result_status = "still_vulnerable"
+        verdict = "exploited"
+        verdict_reason = "Focused AI Gate replay reproduced the matching finding."
+        confidence = _ai_retest_confidence(matched_findings)
+    elif ai_errors:
+        status = "completed"
+        result_status = "inconclusive"
+        verdict = "inconclusive"
+        verdict_reason = "Focused AI Gate replay completed with execution errors and did not reproduce the finding."
+        confidence = None
+    else:
+        status = "completed"
+        result_status = "likely_fixed"
+        verdict = "likely_fixed"
+        verdict_reason = "Focused AI Gate replay did not reproduce the matching finding."
+        confidence = 0.80
+
+    proof = {
+        "scan_id": scan_id,
+        "probe_id": replay_plan.get("probe_id"),
+        "probe_family": replay_plan.get("probe_family"),
+        "matched_finding_count": len(matched_findings),
+        "matched_findings": matched_findings[:5],
+        "execution_errors": ai_errors[:5],
+        "decision": ai_gate.get("decision"),
+    }
+    artifacts = {
+        "transcripts": (ai_gate.get("transcripts") or [])[:5] if isinstance(ai_gate, dict) else [],
+        "coverage_matrix": ai_gate.get("coverage_matrix") if isinstance(ai_gate, dict) else None,
+    }
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE finding_verifications
+            SET status = $1,
+                result_status = $2,
+                verdict = $3,
+                verdict_reason = $4,
+                proof = $5,
+                artifacts = $6,
+                confidence = $7,
+                verification_mode = 'ai_driven',
+                ai_plan = $8,
+                ai_reasoning = $9,
+                completed_at = $10,
+                updated_at = NOW()
+            WHERE id = $11
+            """,
+            status,
+            result_status,
+            verdict,
+            verdict_reason,
+            json.dumps(proof),
+            json.dumps(artifacts),
+            confidence,
+            json.dumps(replay_plan),
+            verdict_reason,
+            completed_at,
+            uuid.UUID(str(verification_id)),
+        )
+        await conn.execute(
+            """
+            UPDATE findings
+            SET last_verification_status = $1,
+                last_verification_verdict = $2,
+                last_verification_confidence = $3,
+                last_verified_at = $4,
+                updated_at = NOW()
+            WHERE id = $5
+            """,
+            result_status,
+            verdict,
+            confidence,
+            completed_at,
+            uuid.UUID(str(finding_id)),
+        )
 
 
 def _is_internal_target(url: str) -> bool:
@@ -2821,6 +3041,17 @@ async def process_scan_job(job_data: dict):
                 saved_count = await save_ai_findings(scan_id, ai_target_id, findings)
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
+
+        try:
+            await finalize_ai_finding_retest(
+                options=options,
+                result=result,
+                scan_id=scan_id,
+                completed_at=completed_at,
+                error=error,
+            )
+        except Exception as e:
+            print(f"[{job_id[:8]}] finalize_ai_finding_retest error: {e}", flush=True)
 
         # Auto-retest severity-gated findings (separate from persistence)
         auto_retests = {"queued": 0, "skipped": 0}
