@@ -1,10 +1,7 @@
-# ShakerScan - Open Source Edition
-# Docker Compose configuration for full stack deployment
+# ShakerScan release runtime.
+# Used by scanner.sh in prebuilt mode and by https://install.shakerscan.com.
 
 services:
-  # ============================================================
-  # PostgreSQL Database
-  # ============================================================
   postgres:
     image: postgres:16-alpine
     environment:
@@ -14,8 +11,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scanner"]
       interval: 5s
@@ -23,16 +18,11 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ============================================================
-  # Redis Queue
-  # ============================================================
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
-    ports:
-      - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -40,13 +30,8 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ============================================================
-  # API Server
-  # ============================================================
   api:
-    build:
-      context: .
-      dockerfile: scanner/Dockerfile
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
@@ -54,9 +39,8 @@ services:
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
       - RESULTS_DIR=/results
       - LOCAL_ENV_FILE=/workspace/.env
-      - SCANNER_VERSION=${SCANNER_VERSION:-dev}
-      - GIT_COMMIT=${GIT_COMMIT:-dev}
-      # AI options (optional - set in .env file)
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
@@ -85,20 +69,9 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/api.py:/app/api.py:ro
-      - ./api/session_manager.py:/app/session_manager.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_demo_scenarios.py:/app/ai_demo_scenarios.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_assurance.py:/app/ai_assurance.py:ro
-      - ./scanner/constants.py:/app/constants.py:ro
       - ./results:/results
-      - ./:/workspace
-      # Docker socket for worker scaling
+      - ./.env:/workspace/.env
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./docker-compose.yml:/app/docker-compose.yml:ro
     command: ["python3", "/app/api.py"]
     depends_on:
       postgres:
@@ -107,22 +80,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ============================================================
-  # Scanner Workers (scale with --scale worker=N)
-  # ============================================================
   worker:
-    init: true  # Use tini as PID 1 to reap zombie processes
-    build:
-      context: .
-      dockerfile: scanner/Dockerfile
+    init: true
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
       - RESULTS_DIR=/results
-      - SCANNER_VERSION=${SCANNER_VERSION:-dev}
-      - GIT_COMMIT=${GIT_COMMIT:-dev}
-      # AI options (optional - set in .env file)
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
@@ -151,16 +118,6 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/worker.py:/app/worker.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
-      - ./api/ai_gate:/app/ai_gate:ro
-      - ./scanner/constants.py:/app/constants.py:ro
-      - ./scanner/scanner.py:/app/scanner.py:ro
-      - ./scanner/scanner_tools:/app/scanner_tools:ro
       - ./results:/results
     command: ["python3", "/app/worker.py"]
     deploy:
@@ -178,18 +135,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ============================================================
-  # Gungnir CT Monitor (start with --profile gungnir)
-  # ============================================================
   gungnir-worker:
-    build:
-      context: .
-      dockerfile: scanner/Dockerfile
+    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
-    volumes:
-      - ./api/gungnir_worker.py:/app/gungnir_worker.py:ro
     command: ["python3", "/app/gungnir_worker.py"]
     profiles:
       - gungnir
@@ -208,20 +158,13 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ============================================================
-  # Web UI
-  # ============================================================
   ui:
-    build:
-      context: ./ui
-      dockerfile: Dockerfile
-      args:
-        - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+    image: ${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}:${SCANNER_IMAGE_TAG:-latest}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:${SHAKERSCAN_API_PORT:-8080}
-      - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+      - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-latest}
     depends_on:
       - api
     restart: unless-stopped

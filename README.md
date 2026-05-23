@@ -25,43 +25,46 @@ Open-source Dynamic Application Security Testing (DAST) for web applications, wi
 ## Quick Start
 
 ```bash
-git clone https://github.com/andriyze/shakerscan.git
-cd shakerscan
-./scanner.sh start
+curl -fsSL https://install.shakerscan.com | sh
 ```
 
-That starts the full stack and pulls the `latest` prebuilt Docker images by default.
+That installs the `shakerscan` command into `~/.local/bin`, downloads the minimal runtime files into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
 
 - **Web UI**: http://localhost:3000
 - **API**: http://localhost:8080
 
-If your machine is missing prerequisites:
+After install:
 
 ```bash
-./scanner.sh install-deps
-./scanner.sh start
-```
-
-For a new machine, you can let the first start install missing prerequisites automatically:
-
-```bash
-./scanner.sh start -y
+shakerscan start
+shakerscan status
+shakerscan stop
 ```
 
 The installer supports macOS and common Linux package managers: apt-based hosts such as Ubuntu, Debian, Pop!_OS, Linux Mint, Zorin, and Kali; rpm-based hosts such as Fedora, RHEL, CentOS, Rocky, and AlmaLinux; plus Arch, openSUSE, and Alpine. It installs Docker Engine or Docker Desktop, Docker Compose, `curl`, and `jq`, then starts/enables Docker where the host init system allows it.
 
-To build locally instead of using prebuilt images:
+### Local Source Build
+
+Use this path when you want to edit ShakerScan, build images locally, or run from a clone:
 
 ```bash
+git clone https://github.com/andriyze/shakerscan.git
+cd shakerscan
 ./scanner.sh start --local
+```
+
+From a clone, you can still use prebuilt Docker Hub images:
+
+```bash
+./scanner.sh start
 ```
 
 ### Run a Scan
 
 ```bash
 ./scanner.sh scan https://example.com        # Quick scan
-./scanner.sh scan-full https://example.com   # Full assessment with active testing
-./scanner.sh scan-smart https://example.com  # Adaptive smart scan
+./scanner.sh scan-full https://example.com --confirm-active   # Full assessment with active testing
+./scanner.sh scan-smart https://example.com --confirm-active  # Adaptive smart scan
 ./scanner.sh status                          # Check status
 ./scanner.sh logs worker -f                  # Follow worker logs
 ./scanner.sh stop                            # Stop all services
@@ -242,6 +245,7 @@ Commands:
   scan-full <target> Full assessment scan
   scan-smart <target> Smart adaptive scan
   install-deps       Install missing prerequisites
+  doctor             Check local prerequisites and common startup issues
   gungnir <cmd>      CT monitor: start, stop, status, logs
   build              Build Docker images
   rebuild [opts]     Rebuild images (supports --no-cache, scanner, ui)
@@ -249,12 +253,13 @@ Commands:
   shell              Open shell in scanner container
 
 Options:
-  -w, --workers N    Number of workers (default: 5)
+  -w, --workers N    Number of workers (default: auto)
   -f, --follow       Follow logs in real-time
   -y, --yes          Auto-confirm dependency installation prompts
   --local            Force local Docker build instead of prebuilt images
   --prebuilt         Force prebuilt Docker Hub images (default)
   --image-tag TAG    Override Docker image tag (default: latest)
+  --confirm-active   Confirm authorization for scan-full or scan-smart
 ```
 
 ### Advanced Scan Examples
@@ -262,7 +267,7 @@ Options:
 `scanner.sh` wraps common scans. Use the REST API for authenticated scans, focused XSS/SQLi-only scans, and custom budgets.
 
 ```bash
-./scanner.sh scan-smart https://example.com --budget-profile thorough
+./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active
 ```
 
 ## API Quick Reference
@@ -473,7 +478,7 @@ docker stats                             # Check memory usage
 - 8GB+ RAM recommended
 - Linux, macOS, or Windows with WSL2
 
-`./scanner.sh install-deps` can install missing prerequisites on macOS and on Linux hosts using `apt`, `dnf`, `yum`, `pacman`, `zypper`, or `apk`. On Linux, the script starts/enables the Docker service and adds the invoking user to the `docker` group when needed; log out/in or run `newgrp docker` if group permissions were just changed.
+`curl -fsSL https://install.shakerscan.com | sh` is the easiest first-run path. In a source clone, `./scanner.sh install-deps` can install missing prerequisites on macOS and on Linux hosts using `apt`, `dnf`, `yum`, `pacman`, `zypper`, or `apk`. On Linux, the script starts/enables the Docker service and adds the invoking user to the `docker` group when needed; log out/in or run `newgrp docker` if group permissions were just changed.
 
 ## Contributing
 

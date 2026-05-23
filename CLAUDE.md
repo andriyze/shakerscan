@@ -670,11 +670,11 @@ Typical pre-scan flow: `/js-analyze` → optionally pipe into `/content-discover
 ```bash
 # Basic scans
 ./scanner.sh scan https://example.com         # Quick scan
-./scanner.sh scan-full https://example.com    # Full assessment
-./scanner.sh scan-smart https://example.com   # Smart adaptive scan
+./scanner.sh scan-full https://example.com --confirm-active    # Full assessment
+./scanner.sh scan-smart https://example.com --confirm-active   # Smart adaptive scan
 
 # Deeper smart coverage budget
-./scanner.sh scan-smart https://example.com --budget-profile thorough
+./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active
 
 # Use POST /scans for auth, focused XSS/SQLi, dual-auth BOLA, or custom budgets.
 

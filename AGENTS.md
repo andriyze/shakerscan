@@ -1200,8 +1200,8 @@ Users can also use the CLI directly:
 ```bash
 # Basic scans
 ./scanner.sh scan https://example.com       # Quick scan
-./scanner.sh scan-full https://example.com  # Full assessment
-./scanner.sh scan-smart https://example.com # Smart adaptive scan
+./scanner.sh scan-full https://example.com --confirm-active  # Full assessment
+./scanner.sh scan-smart https://example.com --confirm-active # Smart adaptive scan
 
 # Management
 ./scanner.sh status                          # Check status

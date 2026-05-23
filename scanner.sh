@@ -15,9 +15,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default workers
-WORKERS=${WORKERS:-5}
+WORKERS=${WORKERS:-auto}
 DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
 ASSUME_YES=0
+CONFIRM_ACTIVE=0
 FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
@@ -30,8 +31,9 @@ PLATFORM_ID_LIKE=""
 PLATFORM_NAME=""
 PLATFORM_CODENAME=""
 PLATFORM_UBUNTU_CODENAME=""
+PLATFORM_WSL=0
 USE_PREBUILT=1
-PREBUILT_COMPOSE_FILE="docker-compose.prebuilt.yml"
+PREBUILT_COMPOSE_FILE="docker-compose.release.yml"
 IMAGE_TAG_OVERRIDE=""
 
 command_exists() {
@@ -107,9 +109,10 @@ is_truthy() {
 }
 
 update_compose_file_args() {
-    COMPOSE_FILE_ARGS=(-f docker-compose.yml)
     if [ "$USE_PREBUILT" -eq 1 ]; then
-        COMPOSE_FILE_ARGS+=(-f "$PREBUILT_COMPOSE_FILE")
+        COMPOSE_FILE_ARGS=(-f "$PREBUILT_COMPOSE_FILE")
+    else
+        COMPOSE_FILE_ARGS=(-f docker-compose.yml)
     fi
 }
 
@@ -132,6 +135,14 @@ compose_up() {
 
 compose_run() {
     compose run "$@"
+}
+
+api_base_url() {
+    echo "http://localhost:${SHAKERSCAN_API_PORT:-8080}"
+}
+
+ui_base_url() {
+    echo "http://localhost:${SHAKERSCAN_UI_PORT:-3000}"
 }
 
 run_with_sudo() {
@@ -157,6 +168,7 @@ detect_platform() {
     PLATFORM_NAME=""
     PLATFORM_CODENAME=""
     PLATFORM_UBUNTU_CODENAME=""
+    PLATFORM_WSL=0
 
     case "$(uname -s)" in
         Darwin)
@@ -181,6 +193,9 @@ detect_platform() {
                 PLATFORM_NAME="Linux"
                 PLATFORM_VERSION="unknown"
             fi
+            if [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi "microsoft" /proc/version 2>/dev/null; then
+                PLATFORM_WSL=1
+            fi
             ;;
     esac
 }
@@ -201,7 +216,11 @@ platform_label() {
     if [ "$PLATFORM" = "macos" ]; then
         echo "macOS ${PLATFORM_VERSION:-}"
     elif [ "$PLATFORM" = "linux" ]; then
-        echo "${PLATFORM_NAME:-Linux} ${PLATFORM_VERSION:-}"
+        if [ "$PLATFORM_WSL" -eq 1 ]; then
+            echo "${PLATFORM_NAME:-Linux} ${PLATFORM_VERSION:-} (WSL)"
+        else
+            echo "${PLATFORM_NAME:-Linux} ${PLATFORM_VERSION:-}"
+        fi
     else
         echo "unsupported"
     fi
@@ -603,6 +622,30 @@ install_dependencies_linux() {
     echo "Detected: $(platform_label)"
     package_manager="$(detect_package_manager)"
 
+    if [ "$PLATFORM_WSL" -eq 1 ]; then
+        case "$package_manager" in
+            apt)
+                install_packages_if_missing_apt
+                ;;
+            dnf|yum)
+                local base_packages=()
+                command_exists curl || base_packages+=("curl")
+                command_exists jq || base_packages+=("jq")
+                if [ ${#base_packages[@]} -gt 0 ]; then
+                    run_with_sudo "$package_manager" -y install "${base_packages[@]}"
+                fi
+                ;;
+        esac
+
+        if command_exists docker && has_docker_compose && docker_info_available; then
+            return 0
+        fi
+
+        echo -e "${YELLOW}WSL detected. Use Docker Desktop for Windows with WSL integration enabled.${NC}"
+        echo "After Docker Desktop is running, re-run: ./scanner.sh start"
+        return 1
+    fi
+
     case "$package_manager" in
         apt)
             install_dependencies_apt
@@ -741,7 +784,7 @@ command_needs_curl() {
     local subcmd="$2"
 
     case "$cmd" in
-        status|scan|scan-full|scan-smart)
+        start|restart|status|scan|scan-full|scan-smart)
             return 0
             ;;
         gungnir)
@@ -824,7 +867,7 @@ ensure_command_dependencies() {
     if command_needs_docker_runtime "$cmd"; then
         if ! docker_info_available; then
             detect_platform
-            if [ "$PLATFORM" = "linux" ]; then
+            if [ "$PLATFORM" = "linux" ] && [ "$PLATFORM_WSL" -ne 1 ]; then
                 echo -e "${YELLOW}Docker daemon is not running. Attempting to start Docker...${NC}"
                 start_docker_daemon_linux
             elif [ "$PLATFORM" = "macos" ]; then
@@ -833,10 +876,12 @@ ensure_command_dependencies() {
             fi
         fi
 
-        if ! docker_info_available; then
+        if ! wait_for_docker_daemon 120; then
             echo -e "${RED}Error: Docker daemon is not running${NC}"
             if [ "$PLATFORM" = "macos" ]; then
                 echo "Open Docker Desktop and wait until it is ready."
+            elif [ "$PLATFORM" = "linux" ] && [ "$PLATFORM_WSL" -eq 1 ]; then
+                echo "Open Docker Desktop for Windows and enable integration for this WSL distro."
             elif [ "$PLATFORM" = "linux" ]; then
                 echo "Try: sudo systemctl start docker"
                 echo "If Docker was just installed, log out/in or run 'newgrp docker' for group permissions."
@@ -923,6 +968,7 @@ configure_runtime_mode() {
 
     export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
+    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
     export SCANNER_RELEASE_VERSION="$(get_release_version)"
     export SCANNER_IMAGE_TAG="${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
 
@@ -938,6 +984,144 @@ configure_runtime_mode() {
     fi
 
     update_compose_file_args
+}
+
+total_memory_gb() {
+    local kb
+    local bytes
+
+    if command_exists getconf; then
+        local pages
+        local page_size
+        pages="$(getconf _PHYS_PAGES 2>/dev/null || echo "")"
+        page_size="$(getconf PAGE_SIZE 2>/dev/null || echo "")"
+        if [[ "$pages" =~ ^[0-9]+$ ]] && [[ "$page_size" =~ ^[0-9]+$ ]]; then
+            echo $(( (pages * page_size + 1073741823) / 1073741824 ))
+            return 0
+        fi
+    fi
+
+    if [ -r /proc/meminfo ]; then
+        kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")"
+        if [[ "$kb" =~ ^[0-9]+$ ]]; then
+            echo $(( (kb + 1048575) / 1048576 ))
+            return 0
+        fi
+    fi
+
+    if command_exists sysctl; then
+        bytes="$(sysctl -n hw.memsize 2>/dev/null || echo "")"
+        if [[ "$bytes" =~ ^[0-9]+$ ]]; then
+            echo $(( (bytes + 1073741823) / 1073741824 ))
+            return 0
+        fi
+    fi
+
+    echo 0
+}
+
+resolve_start_workers() {
+    local memory_gb
+
+    if [ "$WORKERS" != "auto" ]; then
+        if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 1 ] || [ "$WORKERS" -gt 20 ]; then
+            echo -e "${RED}Error: workers must be auto or a number between 1 and 20${NC}" >&2
+            return 1
+        fi
+        echo "$WORKERS"
+        return 0
+    fi
+
+    memory_gb="$(total_memory_gb)"
+    if [ "$memory_gb" -ge 48 ]; then
+        echo 5
+    elif [ "$memory_gb" -ge 24 ]; then
+        echo 3
+    elif [ "$memory_gb" -ge 12 ]; then
+        echo 2
+    else
+        echo 1
+    fi
+}
+
+prepare_runtime_files() {
+    mkdir -p results
+
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        mkdir -p db
+        touch .env
+
+        if [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
+            echo -e "${RED}Error: $PREBUILT_COMPOSE_FILE is missing.${NC}"
+            echo "Re-run the installer or clone the repository again."
+            return 1
+        fi
+
+        if [ ! -f "$SCRIPT_DIR/db/init.sql" ]; then
+            echo -e "${RED}Error: db/init.sql is missing.${NC}"
+            echo "Re-run the installer or clone the repository again."
+            return 1
+        fi
+    elif [ ! -f "$SCRIPT_DIR/scanner/Dockerfile" ] || [ ! -f "$SCRIPT_DIR/ui/Dockerfile" ]; then
+        echo -e "${RED}Error: local build mode requires a full source checkout.${NC}"
+        echo "Run from a clone of https://github.com/andriyze/shakerscan.git or omit --local to use Docker Hub images."
+        return 1
+    fi
+}
+
+wait_for_docker_daemon() {
+    local timeout="${1:-120}"
+    local elapsed=0
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if docker_info_available; then
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+        if [ $((elapsed % 10)) -eq 0 ]; then
+            echo "Waiting for Docker daemon... ${elapsed}s"
+        fi
+    done
+
+    return 1
+}
+
+wait_for_url() {
+    local label="$1"
+    local url="$2"
+    local timeout="${3:-120}"
+    local elapsed=0
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if curl -fsS "$url" > /dev/null 2>&1; then
+            echo -e "${GREEN}$label is ready${NC}"
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    echo -e "${YELLOW}$label did not become ready within ${timeout}s.${NC}"
+    return 1
+}
+
+confirm_active_testing() {
+    local scan_name="$1"
+    local target="$2"
+
+    if [ "$CONFIRM_ACTIVE" -eq 1 ]; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}Warning: $scan_name includes active vulnerability probes against $target.${NC}"
+    if [ ! -t 0 ]; then
+        echo "Re-run with --confirm-active after confirming you own or are authorized to test this target."
+        return 1
+    fi
+
+    read -r -p "Confirm you have authorization to actively test this target? Type 'yes': " CONFIRM_SCAN
+    [ "$CONFIRM_SCAN" = "yes" ]
 }
 
 print_banner() {
@@ -963,6 +1147,7 @@ print_help() {
     echo "  scan-full <target> Full assessment scan"
     echo "  scan-smart <target> Smart adaptive scan"
     echo "  install-deps       Install missing prerequisites"
+    echo "  doctor             Check local prerequisites and common startup issues"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
@@ -979,6 +1164,7 @@ print_help() {
     echo "  --local            Force local Docker build instead of prebuilt images"
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
+    echo "  --confirm-active   Confirm authorization for scan-full or scan-smart"
     echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
     echo ""
     echo "Auto-install support:"
@@ -992,18 +1178,25 @@ print_help() {
     echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
     echo "  ./scanner.sh scan https://example.com # Quick scan"
-    echo "  ./scanner.sh scan-smart https://example.com --budget-profile thorough"
+    echo "  ./scanner.sh scan-smart https://example.com --budget-profile thorough --confirm-active"
     echo "  ./scanner.sh install-deps             # Install dependencies"
     echo "  ./scanner.sh logs worker -f           # Follow worker logs"
     echo ""
     echo "Access:"
-    echo "  UI:  http://localhost:3000"
-    echo "  API: http://localhost:8080"
+    echo "  UI:  $(ui_base_url)"
+    echo "  API: $(api_base_url)"
 }
 
 start_services() {
+    local start_workers
+
+    prepare_runtime_files
+    start_workers="$(resolve_start_workers)"
     set_build_env
-    echo -e "${GREEN}Starting ShakerScan with $WORKERS workers...${NC}"
+    echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
+    if [ "$WORKERS" = "auto" ]; then
+        echo "Worker sizing: auto ($(total_memory_gb)GB RAM detected)"
+    fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"
         echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
@@ -1011,11 +1204,13 @@ start_services() {
     else
         echo "Mode: local build"
     fi
-    compose_up -d --scale worker=$WORKERS
+    compose_up -d --scale worker=$start_workers
     echo ""
-    echo -e "${GREEN}Services started!${NC}"
-    echo "  UI:  http://localhost:3000"
-    echo "  API: http://localhost:8080"
+    wait_for_url "API" "$(api_base_url)/health" 120 || true
+    wait_for_url "UI" "$(ui_base_url)" 120 || true
+    echo -e "${GREEN}Services started.${NC}"
+    echo "  UI:  $(ui_base_url)"
+    echo "  API: $(api_base_url)"
     echo ""
     echo "Use './scanner.sh status' to check service health"
     echo "Use './scanner.sh logs -f' to follow logs"
@@ -1033,13 +1228,15 @@ restart_services() {
 }
 
 show_status() {
+    local api_url
+    api_url="$(api_base_url)"
     echo -e "${BLUE}Service Status:${NC}"
     compose ps
     echo ""
 
     # Check API health
-    if curl -s http://localhost:8080/health > /dev/null 2>&1; then
-        HEALTH=$(curl -s http://localhost:8080/health)
+    if curl -s "$api_url/health" > /dev/null 2>&1; then
+        HEALTH=$(curl -s "$api_url/health")
         echo -e "API Health: ${GREEN}$(echo $HEALTH | jq -r '.status')${NC}"
         echo "  Database: $(echo $HEALTH | jq -r '.database')"
         echo "  Redis: $(echo $HEALTH | jq -r '.redis')"
@@ -1048,8 +1245,8 @@ show_status() {
     fi
 
     # Check queue stats
-    if curl -s http://localhost:8080/queue/stats > /dev/null 2>&1; then
-        QUEUE=$(curl -s http://localhost:8080/queue/stats)
+    if curl -s "$api_url/queue/stats" > /dev/null 2>&1; then
+        QUEUE=$(curl -s "$api_url/queue/stats")
         echo ""
         echo -e "${BLUE}Queue Status:${NC}"
         echo "  Pending: $(echo $QUEUE | jq -r '.pending')"
@@ -1086,7 +1283,7 @@ quick_scan() {
     fi
 
     echo -e "${GREEN}Starting quick scan: $TARGET${NC}"
-    RESULT=$(curl -s -X POST http://localhost:8080/scans \
+    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
         -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": true}}")
 
@@ -1094,7 +1291,7 @@ quick_scan() {
     echo "Scan ID: $SCAN_ID"
     echo "Status: $(echo $RESULT | jq -r '.status')"
     echo ""
-    echo "View progress at: http://localhost:3000/scans"
+    echo "View progress at: $(ui_base_url)/scans"
 }
 
 full_scan() {
@@ -1106,10 +1303,13 @@ full_scan() {
     fi
 
     echo -e "${YELLOW}Starting full assessment: $TARGET${NC}"
-    echo -e "${YELLOW}Warning: This includes active vulnerability testing.${NC}"
+    if ! confirm_active_testing "Full assessment" "$TARGET"; then
+        echo "Cancelled"
+        exit 1
+    fi
     echo ""
 
-    RESULT=$(curl -s -X POST http://localhost:8080/scans \
+    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
         -d "{\"target\": \"$TARGET\", \"options\": {\"quick\": false, \"thorough\": true, \"active\": true}}")
 
@@ -1117,7 +1317,7 @@ full_scan() {
     echo "Scan ID: $SCAN_ID"
     echo "Status: $(echo $RESULT | jq -r '.status')"
     echo ""
-    echo "View progress at: http://localhost:3000/scans"
+    echo "View progress at: $(ui_base_url)/scans"
 }
 
 smart_scan() {
@@ -1148,7 +1348,10 @@ smart_scan() {
     done
 
     echo -e "${YELLOW}Starting smart adaptive scan: $TARGET${NC}"
-    echo -e "${YELLOW}Warning: This includes active vulnerability testing with DBMS-aware attacks.${NC}"
+    if ! confirm_active_testing "Smart adaptive scan" "$TARGET"; then
+        echo "Cancelled"
+        exit 1
+    fi
     echo ""
 
     OPTIONS="{\"scan_type\": \"smart\""
@@ -1157,7 +1360,7 @@ smart_scan() {
     fi
     OPTIONS="$OPTIONS}"
 
-    RESULT=$(curl -s -X POST http://localhost:8080/scans \
+    RESULT=$(curl -s -X POST "$(api_base_url)/scans" \
         -H "Content-Type: application/json" \
         -d "{\"target\": \"$TARGET\", \"options\": $OPTIONS}")
 
@@ -1165,10 +1368,11 @@ smart_scan() {
     echo "Scan ID: $SCAN_ID"
     echo "Status: $(echo $RESULT | jq -r '.status')"
     echo ""
-    echo "View progress at: http://localhost:3000/scans"
+    echo "View progress at: $(ui_base_url)/scans"
 }
 
 build_images() {
+    prepare_runtime_files
     set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
     compose build
@@ -1176,6 +1380,7 @@ build_images() {
 }
 
 rebuild_images() {
+    prepare_runtime_files
     set_build_env
     local NO_CACHE=""
     local SERVICES=""
@@ -1229,13 +1434,15 @@ rebuild_images() {
 }
 
 reset_database() {
+    local start_workers
+    start_workers="$(resolve_start_workers)"
     echo -e "${RED}WARNING: This will delete all scan data!${NC}"
     read -p "Are you sure? (yes/no): " CONFIRM
     if [ "$CONFIRM" = "yes" ]; then
         echo "Stopping services..."
         compose down -v
         echo "Starting fresh..."
-        compose_up -d --scale worker=$WORKERS
+        compose_up -d --scale worker=$start_workers
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"
@@ -1270,6 +1477,49 @@ open_shell() {
     compose_run --rm worker /bin/bash
 }
 
+doctor() {
+    detect_platform
+    echo -e "${BLUE}ShakerScan Doctor${NC}"
+    echo "Platform: $(platform_label)"
+    echo "Runtime mode: $([ "$USE_PREBUILT" -eq 1 ] && echo prebuilt || echo local-build)"
+    echo "Compose project: ${COMPOSE_PROJECT_NAME:-shakerscan}"
+    echo ""
+
+    for dep in bash docker curl jq; do
+        if command_exists "$dep"; then
+            echo -e "  ${GREEN}ok${NC} $dep: $(command -v "$dep")"
+        else
+            echo -e "  ${YELLOW}missing${NC} $dep"
+        fi
+    done
+
+    if has_docker_compose; then
+        if has_docker_compose_v2; then
+            echo -e "  ${GREEN}ok${NC} compose: docker compose"
+        else
+            echo -e "  ${YELLOW}legacy${NC} compose: docker-compose"
+        fi
+    else
+        echo -e "  ${YELLOW}missing${NC} compose"
+    fi
+
+    if docker_info_available; then
+        echo -e "  ${GREEN}ok${NC} Docker daemon reachable"
+    else
+        echo -e "  ${YELLOW}not ready${NC} Docker daemon is not reachable"
+    fi
+
+    echo ""
+    echo "Expected local URLs:"
+    echo "  UI:  $(ui_base_url)"
+    echo "  API: $(api_base_url)"
+
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        [ -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ] && echo -e "  ${GREEN}ok${NC} $PREBUILT_COMPOSE_FILE" || echo -e "  ${YELLOW}missing${NC} $PREBUILT_COMPOSE_FILE"
+        [ -f "$SCRIPT_DIR/db/init.sql" ] && echo -e "  ${GREEN}ok${NC} db/init.sql" || echo -e "  ${YELLOW}missing${NC} db/init.sql"
+    fi
+}
+
 gungnir_cmd() {
     SUBCMD=${1:-"status"}
 
@@ -1294,8 +1544,8 @@ gungnir_cmd() {
             echo -e "${GREEN}Gungnir stopped${NC}"
             ;;
         status)
-            if curl -s http://localhost:8080/gungnir/status > /dev/null 2>&1; then
-                STATUS=$(curl -s http://localhost:8080/gungnir/status)
+            if curl -s "$(api_base_url)/gungnir/status" > /dev/null 2>&1; then
+                STATUS=$(curl -s "$(api_base_url)/gungnir/status")
                 RUNNING=$(echo $STATUS | jq -r '.running')
                 if [ "$RUNNING" = "true" ]; then
                     echo -e "${GREEN}Gungnir CT Monitor: Running${NC}"
@@ -1368,6 +1618,10 @@ while [[ $# -gt 0 ]]; do
             IMAGE_TAG_OVERRIDE="$2"
             shift 2
             ;;
+        --confirm-active)
+            CONFIRM_ACTIVE=1
+            shift
+            ;;
         *)
             ARGS+=("$1")
             shift
@@ -1379,7 +1633,7 @@ configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
-    help|--help|-h|install-deps)
+    help|--help|-h|install-deps|doctor)
         ;;
     *)
         if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -1419,6 +1673,9 @@ case $COMMAND in
         ;;
     install-deps)
         install_dependencies
+        ;;
+    doctor)
+        doctor
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"
