@@ -161,6 +161,7 @@ try:
     from .findings import (
         normalize_finding,
         deduplicate_findings,
+        apply_dast_precision_policy,
         now_utc_iso,
     )
     from .signals import extract_signals_from_nuclei
@@ -189,6 +190,7 @@ except ImportError:
         from scanner.findings import (
             normalize_finding,
             deduplicate_findings,
+            apply_dast_precision_policy,
             now_utc_iso,
         )
         from scanner.signals import extract_signals_from_nuclei
@@ -216,6 +218,7 @@ except ImportError:
         from findings import (
             normalize_finding,
             deduplicate_findings,
+            apply_dast_precision_policy,
             now_utc_iso,
         )
         from signals import extract_signals_from_nuclei
@@ -8726,11 +8729,11 @@ async def build_report(target: str,
                 finding["verification_reason"] = f"Confidence {confidence:.0%} below 75% for {severity}-severity finding"
                 needs_verification.append(finding)
 
-        report["findings"] = validated_findings
+        report["findings"] = apply_dast_precision_policy(validated_findings)
 
         # Apply targeted dedup (CORS from multiple tools, XXE grouping, etc.)
         # Note: This is separate from the pipeline dedup which was disabled due to fingerprint issues
-        report["findings"] = deduplicate_findings(report["findings"])
+        report["findings"] = apply_dast_precision_policy(deduplicate_findings(report["findings"]))
 
         # Build noise reduction stats from pipeline stats
         total_original = pipeline_stats.get("input_count", 0) + excluded_count
@@ -8883,6 +8886,7 @@ async def build_report(target: str,
     save_checkpoint(report, "pre_finalize")
 
     if report.get("findings"):
+        report["findings"] = apply_dast_precision_policy(report["findings"])
         if analyze_attack_chains:
             try:
                 report["attack_chains"] = analyze_attack_chains(
@@ -9021,14 +9025,21 @@ async def build_report(target: str,
     if ai_verdicts["true_positive"] + ai_verdicts["false_positive"] > 0:
         quality_score += 10
 
-    # Penalize for many uncertain findings
+    # Penalize for many uncertain or low-confidence findings
     total_findings = len(findings_list)
     if total_findings > 0:
         uncertain_ratio = confidence_distribution["uncertain"] / total_findings
+        low_conf_ratio = (
+            confidence_distribution["uncertain"] + confidence_distribution["low"]
+        ) / total_findings
         if uncertain_ratio > 0.3:
             quality_score -= 15
         elif uncertain_ratio > 0.2:
             quality_score -= 10
+        if low_conf_ratio > 0.5:
+            quality_score -= 25
+        elif low_conf_ratio > 0.3:
+            quality_score -= 15
 
     # Reward for high-confidence findings
     if total_findings > 0:
@@ -9037,6 +9048,20 @@ async def build_report(target: str,
             quality_score += 10
         elif high_conf_ratio > 0.5:
             quality_score += 5
+
+    confirmed_count = sum(1 for f in findings_list if f.get("verified") is True)
+    suspected_high_count = sum(
+        1
+        for f in findings_list
+        if f.get("severity") in ("high", "critical") and f.get("verified") is not True
+    )
+    needs_verification_count = sum(1 for f in findings_list if f.get("needs_verification"))
+    if total_findings and confirmed_count == 0:
+        quality_score -= 10
+    if suspected_high_count:
+        quality_score -= min(25, suspected_high_count * 8)
+    if needs_verification_count:
+        quality_score -= min(20, needs_verification_count * 3)
 
     quality_score = max(0, min(100, quality_score))
 
@@ -9076,6 +9101,18 @@ async def build_report(target: str,
     if confidence_distribution["uncertain"] > 0:
         report["quality_metrics"]["reliability_notes"].append(
             f"{confidence_distribution['uncertain']} finding(s) have uncertain confidence - manual review recommended"
+        )
+    if confidence_distribution["low"] > 0:
+        report["quality_metrics"]["reliability_notes"].append(
+            f"{confidence_distribution['low']} finding(s) have low confidence - validate before treating as exploitable"
+        )
+    if total_findings and confirmed_count == 0:
+        report["quality_metrics"]["reliability_notes"].append(
+            "No findings were confirmed by proof or verification"
+        )
+    if suspected_high_count:
+        report["quality_metrics"]["reliability_notes"].append(
+            f"{suspected_high_count} high/critical finding(s) are suspected, not confirmed"
         )
     if ai_verdicts["false_positive"] > 0:
         report["quality_metrics"]["reliability_notes"].append(

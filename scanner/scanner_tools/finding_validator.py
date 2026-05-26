@@ -1942,11 +1942,13 @@ def validate_finding(
     # DEFAULT
     # ==========================================================================
 
-    # Default: return neutral result with moderate confidence
+    # Default: do not mark unsupported finding types as verified. The caller can
+    # still report them as leads, but they should not count as confirmed bugs.
     return ValidationResult(
-        verified=True,
-        confidence=0.6,
-        reason="No specific validation available for this finding type"
+        verified=False,
+        confidence=0.55,
+        reason="No specific validation available for this finding type",
+        downgrade_to=None,
     )
 
 

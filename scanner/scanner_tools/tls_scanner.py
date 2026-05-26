@@ -159,10 +159,16 @@ def build_crypto_inventory(tls: dict[str, Any], host: str | None = None, port: i
     legacy_versions = sorted(v for v in versions if v in {"ssl_2_0", "ssl_3_0", "tls_1_0", "tls_1_1"})
     weak_cipher_markers = ("rc4", "3des", "des-cbc", "null", "anon", "export", "md5")
     weak_ciphers = sorted(name for name in cipher_names if any(marker in name.lower() for marker in weak_cipher_markers))
-    static_rsa_key_exchange = any(
-        name.upper().startswith("TLS_RSA_") or "_RSA_WITH_" in name.upper()
-        for name in cipher_names
-    )
+    def _uses_static_rsa_key_exchange(cipher_name: str) -> bool:
+        """Return true only for TLS_RSA_* key exchange suites.
+
+        TLS_ECDHE_RSA_* uses ephemeral ECDH for key exchange and RSA only for
+        authentication, so it must not be classified as static RSA.
+        """
+        normalized = cipher_name.upper().replace("-", "_")
+        return normalized.startswith("TLS_RSA_WITH_")
+
+    static_rsa_key_exchange = any(_uses_static_rsa_key_exchange(name) for name in cipher_names)
     weak_signatures = sorted(
         algorithm
         for algorithm in cert_signature_algorithms

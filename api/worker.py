@@ -873,12 +873,20 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             finding_source = finding.get('source') or ('model_intake' if finding_tool == 'model_intake' else None)
 
             existing = await conn.fetchrow("""
-                SELECT id, status, resurfaced_count
+                SELECT id, status, resurfaced_count, title, tool, cwe, evidence
                 FROM findings
                 WHERE target_id = $1 AND fingerprint = $2
             """, target_uuid, fingerprint)
 
             if existing:
+                existing_evidence = None if existing['evidence'] is None else str(existing['evidence'])
+                new_evidence = None if evidence_json is None else str(evidence_json)
+                verification_signature_changed = (
+                    existing['title'] != finding.get('title') or
+                    existing['tool'] != finding_tool or
+                    existing['cwe'] != finding.get('cwe') or
+                    existing_evidence != new_evidence
+                )
                 if existing['status'] == 'resolved':
                     await conn.execute("""
                         UPDATE findings SET
@@ -902,8 +910,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_recommendations = $16,
                             ai_classification_source = $17,
                             source = COALESCE($18, source),
+                            last_verification_status = CASE WHEN $19 THEN NULL ELSE last_verification_status END,
+                            last_verification_verdict = CASE WHEN $19 THEN NULL ELSE last_verification_verdict END,
+                            last_verification_confidence = CASE WHEN $19 THEN NULL ELSE last_verification_confidence END,
+                            last_verified_at = CASE WHEN $19 THEN NULL ELSE last_verified_at END,
                             updated_at = NOW()
-                        WHERE id = $19
+                        WHERE id = $20
                     """,
                         existing['resurfaced_count'] + 1,
                         scan_uuid,
@@ -923,6 +935,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         ai_recommendations_json,
                         ai_classification_source,
                         finding_source,
+                        verification_signature_changed,
                         existing['id'],
                     )
                 else:
@@ -946,8 +959,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_recommendations = $15,
                             ai_classification_source = $16,
                             source = COALESCE($17, source),
+                            last_verification_status = CASE WHEN $18 THEN NULL ELSE last_verification_status END,
+                            last_verification_verdict = CASE WHEN $18 THEN NULL ELSE last_verification_verdict END,
+                            last_verification_confidence = CASE WHEN $18 THEN NULL ELSE last_verification_confidence END,
+                            last_verified_at = CASE WHEN $18 THEN NULL ELSE last_verified_at END,
                             updated_at = NOW()
-                        WHERE id = $18
+                        WHERE id = $19
                     """,
                         scan_uuid,
                         finding.get('title'),
@@ -966,6 +983,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         ai_recommendations_json,
                         ai_classification_source,
                         finding_source,
+                        verification_signature_changed,
                         existing['id'],
                     )
                 saved += 1

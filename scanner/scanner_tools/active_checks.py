@@ -2413,10 +2413,36 @@ async def ssti_test(
     payloads_to_use = payloads if params_to_test is None else payloads[:max_payloads]
     payloads_seen: set[str] = set()
 
+    def _clean_template_response(content: str) -> str:
+        clean = re.sub(r'<!--.*?-->', '', content or "", flags=re.DOTALL)
+        clean = re.sub(r'<script.*?</script>', '', clean, flags=re.DOTALL | re.IGNORECASE)
+        clean = re.sub(r'<style.*?</style>', '', clean, flags=re.DOTALL | re.IGNORECASE)
+        clean = re.sub(r'<[^>]+>', ' ', clean)
+        return re.sub(r'\s+', ' ', clean)
+
+    def _looks_like_generic_html_shell(content: str) -> bool:
+        sample = (content or "")[:2000].lower()
+        if not sample:
+            return False
+        indicators = ("<!doctype html", "<html", "/_next/static/", "__next", "webpackchunk", "data-nextjs")
+        return sum(1 for indicator in indicators if indicator in sample) >= 2
+
     for param in test_params:
         if not param:
             continue
         results["tested_params"].append(param)
+        baseline_params = dict(base_params)
+        baseline_params[param] = [f"ssti_baseline_{param}_12345"]
+        baseline_url = urllib.parse.urlunparse(
+            parsed._replace(query=urllib.parse.urlencode(baseline_params, doseq=True))
+        )
+        baseline_out = ""
+        baseline_rc = 1
+        baseline_out, _, baseline_rc = await run(
+            ["curl", "-sS", "-L", "-k", "--max-time", "5"] + auth_args + [baseline_url],
+            timeout=10
+        )
+        clean_baseline = _clean_template_response(baseline_out) if baseline_rc == 0 else ""
         for payload in payloads_to_use:
             payloads_seen.add(payload)
             params = dict(base_params)
@@ -2429,9 +2455,19 @@ async def ssti_test(
             )
             if rc == 0 and out:
                 if "7*7" in payload and "49" in out:
-                    clean_out = re.sub(r'<!--.*?-->', '', out, flags=re.DOTALL)
-                    clean_out = re.sub(r'<script.*?</script>', '', clean_out, flags=re.DOTALL)
-                    if "49" in clean_out and not re.search(r'[/\w]49[/\w]', clean_out):
+                    clean_out = _clean_template_response(out)
+                    response_changed = clean_out != clean_baseline
+                    baseline_has_49 = bool(re.search(r'(?<![\w/])49(?![\w/])', clean_baseline))
+                    output_has_standalone_49 = bool(re.search(r'(?<![\w/])49(?![\w/])', clean_out))
+                    generic_shell = _looks_like_generic_html_shell(out)
+                    literal_payload_reflected = payload in out
+                    if (
+                        response_changed
+                        and output_has_standalone_49
+                        and not baseline_has_49
+                        and not literal_payload_reflected
+                        and not generic_shell
+                    ):
                         results["vulnerable"] = True
                         results["evidence"].append({
                             "type": "math-evaluation",
@@ -2439,6 +2475,7 @@ async def ssti_test(
                             "payload": payload,
                             "url": test_url,
                             "response_snippet": out[:500],
+                            "baseline_url": baseline_url,
                         })
                 elif not ("<!DOCTYPE" in out[:100] or "<html" in out[:100]):
                     if re.search(r"(jinja2\.exceptions\.|django\.template\.TemplateDoesNotExist|Twig[_\\]Error|TemplateProcessingException)", out, re.I):
@@ -4500,14 +4537,13 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
     poison_headers = [("X-Forwarded-Host", "evil.com"), ("X-Forwarded-Port", "1337"), ("X-Forwarded-Scheme", "http"), ("X-Original-URL", "/admin"), ("X-Rewrite-URL", "/admin"), ("X-HTTP-Method-Override", "PUT")]
     for header_name, header_value in poison_headers:
         test_url = f"{url}?cachebuster={cache_buster}_{header_name}"
-        # First request WITH poison header
+        # First request WITH poison header.
         out1, err1, rc1 = await run(["curl", "-sS", "-L", "-k", "-i", "-H", f"{header_name}: {header_value}", test_url], timeout=10)
-        # Wait briefly for cache to potentially populate
+        # Wait briefly for cache to potentially populate, then request the same
+        # cache key without the poison header. A different URL only proves
+        # reflection, not cache poisoning.
         await asyncio.sleep(0.5)
-        # Second request WITHOUT poison header (different cache buster to avoid CDN issues)
-        cache_buster2 = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-        test_url2 = f"{url}?cachebuster={cache_buster2}_{header_name}"
-        out2, err2, rc2 = await run(["curl", "-sS", "-L", "-k", "-i", test_url2], timeout=10)
+        out2, err2, rc2 = await run(["curl", "-sS", "-L", "-k", "-i", test_url], timeout=10)
 
         # FIX Issue #3: Improved cache poisoning detection
         # Look for reflection in critical areas (headers, links, redirects), not just body content
@@ -4540,7 +4576,7 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
                         if hdr_match:
                             cache_headers[cache_hdr] = hdr_match.group(1).strip()
 
-                    # Determine if actually cacheable (not private/no-store/no-cache)
+                    # Determine if potentially cacheable (not private/no-store/no-cache)
                     is_cacheable = bool(cache_headers)
                     if cache_headers.get('Cache-Control'):
                         cc = cache_headers['Cache-Control'].lower()
@@ -4548,8 +4584,9 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
                         if 'no-store' in cc or 'private' in cc or 'no-cache' in cc:
                             is_cacheable = False
 
-                    results["vulnerable"] = True
-                    results["issues"].append("cache_poisoning")
+                    persisted_without_header = header_value in out2
+                    proven_cache_poison = is_cacheable and persisted_without_header
+                    results["issues"].append("cache_poisoning" if proven_cache_poison else "header_reflection")
                     results["evidence"].append({
                         "type": "header_injection",
                         "header": header_name,
@@ -4559,8 +4596,12 @@ async def cache_poisoning_test(url: str) -> dict[str, Any]:
                         "reflection_context": matched_content,
                         "cache_headers": cache_headers if cache_headers else "No cache headers detected",
                         "cacheable": is_cacheable,
-                        "note": f"Header '{header_name}: {header_value}' reflected in {context_type}." + (" Response may be cached." if is_cacheable else " Response is not cached (private/no-store).")
+                        "persisted_without_header": persisted_without_header,
+                        "poison_confirmed": proven_cache_poison,
+                        "note": f"Header '{header_name}: {header_value}' reflected in {context_type}." + (" Poison persisted for the same cache key." if proven_cache_poison else " No poisoned cache hit observed.")
                     })
+                    if proven_cache_poison:
+                        results["vulnerable"] = True
                     break  # Only report once per header
 
     for ext in [".css", ".js", ".jpg", ".png", ".gif"]:
@@ -6856,8 +6897,17 @@ def _analyze_js_content(js_content: str, source_url: str) -> list[dict]:
         "node_modules/", ".min.js",
         "chunk.", "chunks/",
     ]
+    vendor_patterns = [
+        "clerk.",
+        "stripe.com",
+        "googletagmanager.com",
+        "google-analytics.com",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "unpkg.com",
+    ]
     url_lower = source_url.lower()
-    if any(pattern in url_lower for pattern in library_patterns):
+    if any(pattern in url_lower for pattern in library_patterns + vendor_patterns):
         return []  # Skip library files
 
     findings = []

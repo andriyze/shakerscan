@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from urllib.parse import urlparse
 from datetime import datetime, UTC
 from typing import Any
 
@@ -117,6 +118,110 @@ def get_confidence_tier(confidence: float) -> str:
         return "low"
     else:
         return "uncertain"
+
+
+def _cap_severity(finding: dict[str, Any], max_severity: str) -> None:
+    order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    current = str(finding.get("severity") or "info").lower()
+    if order.get(current, 0) > order[max_severity]:
+        finding.setdefault("precision_policy", {})["original_severity"] = current
+        finding["severity"] = max_severity
+        finding["cvss_score"] = min(
+            float(finding.get("cvss_score") or 0.0),
+            {"info": 0.0, "low": 3.0, "medium": 6.0, "high": 8.0}[max_severity],
+        )
+        finding.setdefault("precision_policy", {})["severity_downgraded"] = True
+
+
+def _evidence_value(finding: dict[str, Any], key: str) -> Any:
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        return evidence.get(key)
+    return None
+
+
+def _is_vendor_or_framework_js(file_url: str) -> bool:
+    if not file_url:
+        return False
+    parsed = urlparse(file_url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    vendor_hosts = (
+        "clerk.",
+        "stripe.com",
+        "googletagmanager.com",
+        "google-analytics.com",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "unpkg.com",
+    )
+    framework_paths = (
+        "/_next/static/chunks/",
+        "/_next/static/runtime/",
+        "/static/chunks/",
+        "/webpack/",
+    )
+    return any(marker in host for marker in vendor_hosts) or any(marker in path for marker in framework_paths)
+
+
+def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Downgrade unproven DAST heuristics so reports distinguish leads from bugs.
+
+    This preserves the evidence for manual review while preventing static or
+    contradictory signals from driving high-severity findings and grades.
+    """
+    for finding in findings:
+        tool = str(finding.get("tool") or "").lower()
+        title = str(finding.get("title") or "").lower()
+        verified = finding.get("verified") is True
+
+        if verified:
+            continue
+
+        if tool == "bfla":
+            if _evidence_value(finding, "path") is None or _evidence_value(finding, "status_code") is None:
+                finding["suspected"] = True
+                finding["needs_verification"] = True
+                finding["verification_reason"] = "BFLA evidence is missing path/status; likely frontend shell or inconclusive route probe"
+                _cap_severity(finding, "low")
+
+        elif tool == "ssti":
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["verification_reason"] = "SSTI requires differential template evaluation proof"
+            _cap_severity(finding, "medium")
+
+        elif tool == "dom_xss":
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["verification_reason"] = "DOM XSS static source/sink lead without payload execution"
+            file_url = str(_evidence_value(finding, "file") or "")
+            _cap_severity(finding, "info" if _is_vendor_or_framework_js(file_url) else "low")
+
+        elif tool == "client_side":
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            if "prototype pollution" in title or _evidence_value(finding, "type") == "prototype_pollution_sink":
+                finding["verification_reason"] = "Prototype pollution heuristic lacks attacker-controlled merge proof"
+                _cap_severity(finding, "low")
+            elif "postmessage" in title:
+                finding["verification_reason"] = "postMessage static handler lead lacks exploitability proof"
+                _cap_severity(finding, "low")
+
+        elif tool == "cache_poisoning":
+            cacheable = bool(_evidence_value(finding, "cacheable"))
+            details = _evidence_value(finding, "details") or []
+            poison_confirmed = any(isinstance(item, dict) and item.get("poison_confirmed") for item in details)
+            if not poison_confirmed:
+                finding["suspected"] = True
+                finding["needs_verification"] = True
+                finding["verification_reason"] = "Header reflection observed without poisoned same-key cache hit"
+                _cap_severity(finding, "low" if cacheable else "info")
+
+        confidence = float(finding.get("confidence") or 0.5)
+        finding["confidence_tier"] = get_confidence_tier(confidence)
+
+    return findings
 
 
 def normalize_finding(

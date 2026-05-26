@@ -801,7 +801,42 @@ async def test_api_security(
         # Remove dynamic elements (nonces, timestamps, etc)
         cleaned = re.sub(r'nonce="[^"]*"', '', html[:2000])
         cleaned = re.sub(r'data-[a-z-]+="[^"]*"', '', cleaned)
+        cleaned = re.sub(r'/_next/static/[^"\']+', '/_next/static/...', cleaned)
+        cleaned = re.sub(r'\b[0-9a-f]{8,}\b', '<hash>', cleaned, flags=re.I)
         return cleaned.strip()
+
+    def _looks_like_spa_shell(html: str) -> bool:
+        sample = (html or "")[:5000].lower()
+        indicators = (
+            "<!doctype html",
+            "<html",
+            "/_next/static/",
+            "__next",
+            "webpackchunk",
+            "data-nextjs",
+            '<script type="module"',
+            '<div id="root"',
+            '<div id="app"',
+        )
+        return sum(1 for indicator in indicators if indicator in sample) >= 2
+
+    def _has_privileged_content(path: str, html: str) -> bool:
+        sample = (html or "")[:12000].lower()
+        path_lower = path.lower()
+        if path_lower.startswith(("/api/", "/graphql", "/graphiql")):
+            return True
+        privileged_markers = (
+            "admin dashboard",
+            "user management",
+            "system settings",
+            "audit log",
+            "api keys",
+            "role management",
+            "delete user",
+            "impersonate",
+            "privileged",
+        )
+        return any(marker in sample for marker in privileged_markers)
 
     homepage_fingerprint = content_fingerprint(homepage_content)
 
@@ -825,8 +860,12 @@ async def test_api_security(
                     is_accessible = status == 200
                     is_spa_false_positive = False
 
-                    # For 200 responses, validate it's not just SPA returning same shell
-                    if is_accessible and homepage_is_spa:
+                    validation_reason = None
+                    body_out = ""
+                    # For 200 responses, validate it's not just a frontend shell.
+                    # Modern Next/App Router pages often return a 200 HTML shell for
+                    # unknown or client-gated routes without exposing privileged data.
+                    if is_accessible:
                         # Fetch actual content to compare
                         body_out, _, body_rc = await run(
                             ["curl", "-sS", "-L", "-k", "--max-time", "5",
@@ -839,6 +878,7 @@ async def test_api_security(
                             if body_fingerprint and homepage_fingerprint:
                                 if body_fingerprint == homepage_fingerprint:
                                     is_spa_false_positive = True
+                                    validation_reason = "same_as_homepage_shell"
                                 # Also check if it has the same SPA shell markers
                                 elif (
                                     '<div id="root"></div>' in body_out or
@@ -848,17 +888,38 @@ async def test_api_security(
                                     # SPA shell without actual admin content
                                     if not re.search(r'admin|dashboard|management|console', body_out[500:], re.I):
                                         is_spa_false_positive = True
+                                        validation_reason = "spa_shell_without_privileged_content"
+                            if (
+                                not is_spa_false_positive
+                                and _looks_like_spa_shell(body_out)
+                                and not _has_privileged_content(path, body_out)
+                            ):
+                                is_spa_false_positive = True
+                                validation_reason = "generic_html_shell"
 
                     # Only report as accessible if not a SPA false positive
                     if not is_spa_false_positive:
                         results["bfla_endpoints"].append({
                             "url": test_url,
+                            "path": path,
                             "status": status,
+                            "status_code": status,
                             "accessible": is_accessible,
                             "risk": "high" if is_accessible else "medium"
                         })
                         if is_accessible:
                             results["vulnerable"] = True
+                    elif is_accessible:
+                        results["bfla_endpoints"].append({
+                            "url": test_url,
+                            "path": path,
+                            "status": status,
+                            "status_code": status,
+                            "accessible": False,
+                            "risk": "info",
+                            "false_positive_detected": True,
+                            "validation_reason": validation_reason or "frontend_shell",
+                        })
 
         await asyncio.sleep(0.05)
 
