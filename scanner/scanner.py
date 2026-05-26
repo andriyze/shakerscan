@@ -7617,41 +7617,22 @@ async def build_report(target: str,
 
                 # Prioritize endpoints: high-signal params and sensitive API paths first,
                 # then real discovered endpoints before synthetic/inferred.
-                def _endpoint_priority(ep: dict) -> tuple[int, int, int, int, str]:
-                    """Return a stable sort key where lower values are tested first."""
-                    source = ep.get("source", "")
-                    source_priority = _SOURCE_PRIORITY.get(source, _DEFAULT_SOURCE_PRIORITY)
-                    method = (ep.get("method") or "GET").upper()
-                    url_s = ep.get("url", "")
-                    path_l = urllib.parse.urlparse(url_s).path.lower()
-                    param_names = [
-                        str(p).lower()
-                        for p in ((ep.get("params") or []) + (ep.get("body_params") or []))
-                    ]
-                    high_signal_tokens = (
-                        "id", "user", "uid", "account", "token", "file", "path", "url",
-                        "redirect", "next", "q", "query", "search", "filter", "name",
-                        "email", "password",
-                    )
-                    sensitive_path_tokens = (
-                        "/api/", "login", "auth", "upload", "logs", "admin", "users",
-                        "orders", "payment", "checkout", "debug",
-                    )
-                    param_score = sum(
-                        1
-                        for p in param_names
-                        if any(tok == p or tok in p for tok in high_signal_tokens)
-                    )
-                    path_score = sum(1 for tok in sensitive_path_tokens if tok in path_l)
-                    post_bonus = 1 if method in ("POST", "PUT", "PATCH") else 0
-                    # Negative scores sort before lower-risk endpoints.
-                    return (-param_score, -path_score, -post_bonus, source_priority, url_s)
-
-                endpoints = sorted(endpoints, key=_endpoint_priority)
                 active_endpoint_budget = int(scan_budget.get("active_max_endpoints") or max_active or 0)
-                if active_endpoint_budget and len(endpoints) > active_endpoint_budget:
-                    before_active_endpoints = len(endpoints)
-                    endpoints = endpoints[:active_endpoint_budget]
+                before_active_endpoints = len(endpoints)
+                try:
+                    from scanner_tools.active_prioritization import prioritize_active_endpoints
+                except ImportError:
+                    try:
+                        from .scanner_tools.active_prioritization import prioritize_active_endpoints
+                    except ImportError:
+                        from scanner.scanner_tools.active_prioritization import prioritize_active_endpoints
+
+                endpoints = prioritize_active_endpoints(
+                    endpoints,
+                    budget=active_endpoint_budget,
+                    source_priority=_SOURCE_PRIORITY,
+                )
+                if active_endpoint_budget and before_active_endpoints > len(endpoints):
                     print(
                         (
                             "[scanner] Active endpoint budget cap: "
