@@ -2556,6 +2556,20 @@ def _prioritize_paths(paths: list[str], signals: dict | None = None) -> list[str
     return sorted(paths, key=score, reverse=True)
 
 
+def _limit_recursive_directories(
+    directories: list[str],
+    max_bases: int,
+    signals: dict | None = None,
+) -> list[str]:
+    """Cap recursive fuzzing seeds while keeping the highest-value paths first."""
+    if max_bases <= 0:
+        return []
+    unique_dirs = list(dict.fromkeys(d for d in directories if d))
+    if len(unique_dirs) <= max_bases:
+        return unique_dirs
+    return _prioritize_paths(unique_dirs, signals)[:max_bases]
+
+
 def _is_interesting_path(path: str) -> bool:
     """Filter for paths worth exploring further."""
     # Skip static assets
@@ -3282,6 +3296,7 @@ async def smart_discovery(
     probed_endpoints: list[dict[str, Any]] = []
     config = initial_discovery.get("config", {})
     budget = budget or {}
+    max_urls = int(budget.get("max_urls") or config.get("max_urls", 1000))
     api_probe_budget = budget.get("api_probe_limit")
     api_probe_limit = (
         int(api_probe_budget)
@@ -3316,6 +3331,17 @@ async def smart_discovery(
             signals,
             base_depth=int(budget.get("discovery_depth") or 3),
         )
+        max_recursive_bases = int(
+            budget.get("recursive_base_limit")
+            or min(max(8, max_urls // 2), 40)
+        )
+        before_dirs = len(directories)
+        directories = _limit_recursive_directories(directories, max_recursive_bases, signals)
+        if before_dirs > len(directories):
+            print(
+                f"[discovery] Capped recursive fuzzing bases: {before_dirs} -> {len(directories)}",
+                file=sys.stderr,
+            )
         print(f"[discovery] Phase 2b: Recursive directory fuzzing ({len(directories)} base directories, depth={adaptive_depth})", file=sys.stderr)
         recursive_result = await recursive_directory_discovery(
             url,
@@ -3330,7 +3356,6 @@ async def smart_discovery(
 
     # Merge results and apply URL cap from config
     config = initial_discovery.get("config", {})
-    max_urls = int(budget.get("max_urls") or config.get("max_urls", 1000))
     recursive_paths = [
         urllib.parse.urljoin(url, p) for p in (recursive_result.get("paths", []) or [])
     ]

@@ -3718,10 +3718,49 @@ async def build_report(target: str,
         if added_manual > 0:
             print(f"[scanner] Added {added_manual} manual endpoints to discovery pool (total: {len(crawl_urls)})", file=sys.stderr)
 
+    base_discovery_config = smart_discovery_data.get("config", {}) if isinstance(smart_discovery_data, dict) else {}
+    discovery_max_urls = int(scan_budget.get("max_urls") or base_discovery_config.get("max_urls") or 0)
+    manual_url_set = set(manual_urls)
+
+    def _cap_discovery_urls(urls: list[str], reason: str) -> list[str]:
+        if not discovery_max_urls or len(urls) <= discovery_max_urls:
+            return urls
+
+        def priority(item: str) -> tuple:
+            parsed_item = urllib.parse.urlparse(item)
+            path_l = parsed_item.path.lower()
+            is_manual = item in manual_url_set
+            is_api = any(p in path_l for p in ["/api/", "/rest/", "/graphql", "/v1/", "/v2/"])
+            has_params = bool(parsed_item.query)
+            is_sensitive = any(
+                p in path_l
+                for p in [
+                    "login", "auth", "user", "admin", "search", "upload",
+                    "download", "file", "product", "order", "cart", "sbom",
+                ]
+            )
+            return (
+                0 if is_manual else 1,
+                0 if is_api else 1,
+                0 if has_params else 1,
+                0 if is_sensitive else 1,
+                len(path_l),
+                item,
+            )
+
+        capped = sorted(dict.fromkeys(u for u in urls if u), key=priority)[:discovery_max_urls]
+        print(
+            f"[scanner] Discovery URL budget cap after {reason}: {len(urls)} -> {len(capped)}",
+            file=sys.stderr,
+        )
+        return capped
+
+    crawl_urls = _cap_discovery_urls(crawl_urls, "browser/HAR/manual merge")
+
     # Smart mode: Analyze JS bundles for hidden API endpoints
     # Skip if discovery already did JS parsing (smart/full/aggressive profiles have js_parsing=True)
     js_bundle_analysis = None
-    discovery_config = smart_discovery_data.get("config", {}) if isinstance(smart_discovery_data, dict) else {}
+    discovery_config = base_discovery_config
     js_already_analyzed = discovery_config.get("js_parsing", False)
     if js_already_analyzed:
         js_bundle_analysis = smart_discovery_data.get("js_bundle_analysis") if smart_discovery_data else None
@@ -3759,18 +3798,34 @@ async def build_report(target: str,
         json_seed_limit = discovery_config.get("json_link_seed_limit", 60)
         json_total_limit = discovery_config.get("json_link_total_limit", 200)
         json_depth = discovery_config.get("json_link_depth", 2)
+        if discovery_max_urls:
+            remaining_json_budget = max(0, discovery_max_urls - len(set(crawl_urls)))
+            json_total_limit = min(int(json_total_limit), remaining_json_budget)
+        else:
+            remaining_json_budget = int(json_total_limit)
 
-        json_seed_urls = list(crawl_urls)
-        json_seed_urls.extend([e.get("url") if isinstance(e, dict) else e for e in browser_api_endpoints])
-        json_seed_urls.extend(manual_urls)
-        json_link_results = await follow_json_links(
-            base_url=base_url,
-            seed_urls=json_seed_urls,
-            auth_session=auth_session,
-            max_seeds=json_seed_limit,
-            max_total=json_total_limit,
-            max_depth=json_depth,
-        )
+        if json_total_limit <= 0:
+            json_link_results = {
+                "links": [],
+                "seed_count": 0,
+                "visited": 0,
+                "depth_reached": 0,
+                "skipped": True,
+                "reason": "discovery_url_budget_exhausted",
+            }
+            print("[scanner] Skipping JSON link following: discovery URL budget exhausted", file=sys.stderr)
+        else:
+            json_seed_urls = list(crawl_urls)
+            json_seed_urls.extend([e.get("url") if isinstance(e, dict) else e for e in browser_api_endpoints])
+            json_seed_urls.extend(manual_urls)
+            json_link_results = await follow_json_links(
+                base_url=base_url,
+                seed_urls=json_seed_urls,
+                auth_session=auth_session,
+                max_seeds=json_seed_limit,
+                max_total=json_total_limit,
+                max_depth=json_depth,
+            )
 
         json_links = json_link_results.get("links", []) if json_link_results else []
         if json_links:
@@ -3783,11 +3838,18 @@ async def build_report(target: str,
                     added_json_links += 1
             if added_json_links > 0:
                 print(f"[scanner] Added {added_json_links} JSON-linked endpoints to discovery pool", file=sys.stderr)
+                crawl_urls = _cap_discovery_urls(crawl_urls, "JSON link following")
             if smart_discovery_data and isinstance(smart_discovery_data, dict):
                 api_list = smart_discovery_data.get("api_endpoints", []) or []
                 all_list = smart_discovery_data.get("all_urls", []) or []
-                smart_discovery_data["api_endpoints"] = list(set(api_list + json_links))
-                smart_discovery_data["all_urls"] = list(set(all_list + json_links))
+                smart_discovery_data["api_endpoints"] = _cap_discovery_urls(
+                    list(set(api_list + json_links)),
+                    "JSON API endpoint merge",
+                )
+                smart_discovery_data["all_urls"] = _cap_discovery_urls(
+                    list(set(all_list + json_links)),
+                    "JSON all-url merge",
+                )
 
     if crawl_urls and (focus_rules or avoid_rules):
         crawl_urls, discovered_scope = apply_scope_rules_to_urls(
@@ -4085,6 +4147,25 @@ async def build_report(target: str,
                 directories = list(set(directories))
 
                 adaptive_depth, adaptive_paths = calculate_adaptive_depth(nuclei_signals, base_depth=3)
+                refinement_url_budget = int(discovery_max_urls or config.get("max_urls", 1000))
+                max_refinement_bases = min(max(8, refinement_url_budget // 2), 40)
+                if len(directories) > max_refinement_bases:
+                    before_dirs = len(directories)
+
+                    def refinement_priority(item: str) -> tuple:
+                        path_l = urllib.parse.urlparse(item).path.lower()
+                        is_api = any(p in path_l for p in ["/api/", "/rest/", "/graphql", "/v1/", "/v2/"])
+                        is_sensitive = any(
+                            p in path_l
+                            for p in ["login", "auth", "user", "admin", "search", "upload", "download", "file", "sbom"]
+                        )
+                        return (0 if is_api else 1, 0 if is_sensitive else 1, len(path_l), item)
+
+                    directories = sorted(directories, key=refinement_priority)[:max_refinement_bases]
+                    print(
+                        f"[smart] Capped adaptive discovery bases: {before_dirs} -> {len(directories)}",
+                        file=sys.stderr,
+                    )
                 refined = await recursive_directory_discovery(
                     base_url,
                     directories,
