@@ -39,7 +39,7 @@
             "verified": true
           },
           {
-            "tool": "active_xss",
+            "tool": "smart_xss",
             "title_contains": "XSS",
             "min_severity": "high",
             "verified": true
