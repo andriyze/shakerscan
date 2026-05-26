@@ -247,6 +247,8 @@ def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
     assert captures["xss_max_seconds"] == 30
     assert result["budget"]["active_sqli_max_seconds"] == 70
     assert result["budget"]["active_xss_reserved_seconds"] == 30
+    assert result["budget"]["active_elapsed_seconds"] == 70
+    assert result["budget"]["active_remaining_seconds"] == 30
     assert result["xss"]["endpoints_tested"] == 1
 
 

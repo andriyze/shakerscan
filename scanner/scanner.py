@@ -6894,6 +6894,7 @@ async def build_report(target: str,
         if cand_synthetic:
             active_block["synthetic_targets_count"] = len(cand_synthetic)
             active_block["synthetic_targets_sample"] = list(cand_synthetic)[:10]
+        post_active_budget_exhausted = False
 
         # Smart mode: Use DBMS-aware and context-aware active tests
         if smart_mode:
@@ -7699,6 +7700,30 @@ async def build_report(target: str,
                     active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
                     max_findings_per_family=scan_budget.get("max_findings_per_family"),
                 )
+                smart_budget = smart_results.get("budget") or {}
+                active_remaining_after_smart = smart_budget.get("active_remaining_seconds")
+                try:
+                    active_remaining_after_smart = (
+                        float(active_remaining_after_smart)
+                        if active_remaining_after_smart is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    active_remaining_after_smart = None
+                post_active_budget_exhausted = (
+                    active_checks
+                    and active_remaining_after_smart is not None
+                    and active_remaining_after_smart < 15.0
+                )
+                if post_active_budget_exhausted:
+                    active_block["post_active_enrichment_skipped"] = "active_time_budget_exhausted"
+                    print(
+                        (
+                            "[active] Skipping post-active enrichment probes: "
+                            f"active budget remaining {active_remaining_after_smart:.1f}s"
+                        ),
+                        file=sys.stderr,
+                    )
 
                 smart_sqli_findings = []
                 smart_xss_findings = []
@@ -7866,6 +7891,10 @@ async def build_report(target: str,
                     if not auxiliary_injection_enabled:
                         active_block["auxiliary_injection_skipped"] = "sql_tests_only"
                         print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
+                    elif post_active_budget_exhausted:
+                        auxiliary_injection_enabled = False
+                        active_block["auxiliary_injection_skipped"] = "active_time_budget_exhausted"
+                        print("[active] Skipping auxiliary injection probes: active time budget exhausted", file=sys.stderr)
 
                     param_endpoints = []
                     if auxiliary_injection_enabled:
@@ -8693,7 +8722,7 @@ async def build_report(target: str,
 
         # DOM XSS Analysis - run in broad smart mode after smart active tests.
         # Focused manual active scans keep reporting limited to the requested family.
-        if smart_mode and smart_succeeded and not focused_manual_active_scope:
+        if smart_mode and smart_succeeded and not focused_manual_active_scope and not post_active_budget_exhausted:
             try:
                 # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
                 js_urls_for_dom_xss = []
@@ -8755,10 +8784,13 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["dom_xss_error"] = str(e)
                 print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
+        elif smart_mode and smart_succeeded and post_active_budget_exhausted:
+            active_block["dom_xss_skipped"] = "active_time_budget_exhausted"
+            print("[scanner] Skipping DOM XSS analysis: active time budget exhausted", file=sys.stderr)
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
-        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope:
+        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and not post_active_budget_exhausted:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
                 bola_urls: list[str] = []
@@ -8863,6 +8895,9 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["smart_bola_error"] = str(e)
                 print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
+        elif smart_mode and smart_succeeded and not public_only and post_active_budget_exhausted:
+            active_block["smart_bola_skipped"] = "active_time_budget_exhausted"
+            print("[scanner] Skipping BOLA/IDOR testing: active time budget exhausted", file=sys.stderr)
 
         # Run active checks with a global timeout (standard mode or smart fallback on error)
         async def run_active_checks():

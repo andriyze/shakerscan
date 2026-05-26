@@ -7514,6 +7514,8 @@ async def run_smart_active_tests(
     xss_findings = xss_results.get("findings", [])
     hash_route_findings = hash_route_results.get("findings", [])
     all_findings = sqli_findings + xss_findings + hash_route_findings
+    active_elapsed_seconds = time.monotonic() - active_started
+    active_remaining_seconds = _remaining_active_seconds()
     _emit_scan_progress("active", 89, "smart active tests complete")
 
     return {
@@ -7544,6 +7546,8 @@ async def run_smart_active_tests(
             "active_max_seconds": active_max_seconds,
             "active_sqli_max_seconds": sqli_active_max_seconds,
             "active_xss_reserved_seconds": xss_reserved_seconds,
+            "active_elapsed_seconds": active_elapsed_seconds,
+            "active_remaining_seconds": active_remaining_seconds,
             "active_max_endpoints": max(sqli_max_endpoints, xss_max_endpoints),
             "active_params_per_endpoint": max(sqli_max_params, xss_max_params),
             "max_findings_per_family": max_findings_per_family,
