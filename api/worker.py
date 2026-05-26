@@ -148,18 +148,57 @@ def run_worker_preflight() -> None:
         print(f"[preflight] scanner entrypoint missing at {SCANNER_PATH}; skipping CLI import check", flush=True)
         return
 
-    result = subprocess.run(
-        ["python3", SCANNER_PATH, "--help"],
-        capture_output=True,
-        text=True,
-        timeout=int(os.environ.get("WORKER_PREFLIGHT_TIMEOUT_SECONDS", "30")),
-        check=False,
-    )
-    if result.returncode != 0:
-        output = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
-        raise RuntimeError(f"worker preflight failed: scanner CLI import check exited {result.returncode}: {output[:2000]}")
+    timeout = int(os.environ.get("WORKER_PREFLIGHT_TIMEOUT_SECONDS", "30"))
 
-    print("[preflight] worker scanner import check passed", flush=True)
+    def _run_check(label: str, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            cmd,
+            cwd=str(scanner_path.parent),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            output = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
+            raise RuntimeError(
+                f"worker preflight failed: {label} exited {result.returncode}: {output[:2000]}"
+            )
+        return result
+
+    _run_check("scanner CLI import check", ["python3", SCANNER_PATH, "--help"])
+
+    import_check = r"""
+import hashlib
+import importlib
+import json
+from pathlib import Path
+
+required = {
+    "constants": ["NUCLEI_PROMOTE_TEMPLATES", "SMART_SCAN_BUDGETS", "resolve_scan_budget"],
+    "grading": ["grade"],
+    "findings": ["normalize_finding", "deduplicate_findings", "apply_dast_precision_policy", "now_utc_iso"],
+    "reporting": ["emit_config_findings"],
+    "signals": ["extract_signals_from_nuclei"],
+}
+report = {}
+for module_name, symbols in required.items():
+    module = importlib.import_module(module_name)
+    missing = [symbol for symbol in symbols if not hasattr(module, symbol)]
+    if missing:
+        raise RuntimeError(f"{module_name} missing symbols: {', '.join(missing)}")
+    path = Path(getattr(module, "__file__", "")).resolve()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16] if path.exists() else None
+    report[module_name] = {"file": str(path), "sha256_16": digest}
+print(json.dumps(report, sort_keys=True))
+"""
+    module_result = _run_check("scanner module symbol check", ["python3", "-c", import_check])
+    module_summary = module_result.stdout.strip()
+    if module_summary:
+        print(f"[preflight] scanner module symbols passed: {module_summary}", flush=True)
+
+    entrypoint_digest = hashlib.sha256(scanner_path.read_bytes()).hexdigest()[:16]
+    print(f"[preflight] worker scanner import check passed: scanner.py sha256_16={entrypoint_digest}", flush=True)
 
 
 def get_redis():

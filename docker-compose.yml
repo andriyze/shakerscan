@@ -94,6 +94,10 @@ services:
       - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
       - ./api/ai_assurance.py:/app/ai_assurance.py:ro
       - ./scanner/constants.py:/app/constants.py:ro
+      - ./scanner/grading.py:/app/grading.py:ro
+      - ./scanner/findings.py:/app/findings.py:ro
+      - ./scanner/reporting.py:/app/reporting.py:ro
+      - ./scanner/signals.py:/app/signals.py:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
@@ -159,6 +163,10 @@ services:
       - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
       - ./api/ai_gate:/app/ai_gate:ro
       - ./scanner/constants.py:/app/constants.py:ro
+      - ./scanner/grading.py:/app/grading.py:ro
+      - ./scanner/findings.py:/app/findings.py:ro
+      - ./scanner/reporting.py:/app/reporting.py:ro
+      - ./scanner/signals.py:/app/signals.py:ro
       - ./scanner/scanner.py:/app/scanner.py:ro
       - ./scanner/scanner_tools:/app/scanner_tools:ro
       - ./results:/results

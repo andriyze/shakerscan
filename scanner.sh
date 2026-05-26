@@ -36,6 +36,8 @@ PLATFORM_WSL=0
 USE_PREBUILT=1
 PREBUILT_COMPOSE_FILE="docker-compose.release.yml"
 IMAGE_TAG_OVERRIDE=""
+LOCAL_BUILD_MARKER="$SCRIPT_DIR/.shakerscan-local-build"
+RUNTIME_MODE_EXPLICIT=0
 
 command_exists() {
     command -v "$1" > /dev/null 2>&1
@@ -1075,6 +1077,7 @@ configure_runtime_mode() {
     local command="$1"
 
     if [ -n "${SCANNER_USE_PREBUILT:-}" ]; then
+        RUNTIME_MODE_EXPLICIT=1
         if is_truthy "${SCANNER_USE_PREBUILT}"; then
             USE_PREBUILT=1
         else
@@ -1083,6 +1086,7 @@ configure_runtime_mode() {
     fi
 
     if is_truthy "${SCANNER_LOCAL_BUILD:-0}"; then
+        RUNTIME_MODE_EXPLICIT=1
         USE_PREBUILT=0
     fi
 
@@ -1101,6 +1105,14 @@ configure_runtime_mode() {
             USE_PREBUILT=0
             ;;
     esac
+
+    if [ "$RUNTIME_MODE_EXPLICIT" -eq 0 ] && [ -f "$LOCAL_BUILD_MARKER" ]; then
+        USE_PREBUILT=0
+    fi
+
+    if [ "$RUNTIME_MODE_EXPLICIT" -eq 1 ] && [ "$USE_PREBUILT" -eq 1 ]; then
+        rm -f "$LOCAL_BUILD_MARKER"
+    fi
 
     if [ "$USE_PREBUILT" -eq 1 ] && [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
         echo -e "${YELLOW}Prebuilt override file missing ($PREBUILT_COMPOSE_FILE). Falling back to local build mode.${NC}"
@@ -1511,7 +1523,9 @@ build_images() {
     set_build_env
     echo -e "${GREEN}Building Docker images...${NC}"
     compose build
+    printf "local\n" > "$LOCAL_BUILD_MARKER"
     echo -e "${GREEN}Build complete${NC}"
+    echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
 }
 
 rebuild_images() {
@@ -1563,9 +1577,11 @@ rebuild_images() {
         compose build $NO_CACHE
     fi
 
+    printf "local\n" > "$LOCAL_BUILD_MARKER"
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
-    echo -e "${BLUE}Run './scanner.sh restart' to use the new images${NC}"
+    echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+    echo -e "${BLUE}Use './scanner.sh restart --prebuilt' only when you intentionally want Docker Hub images.${NC}"
 }
 
 reset_database() {
@@ -1830,10 +1846,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --local|--local-build)
             USE_PREBUILT=0
+            RUNTIME_MODE_EXPLICIT=1
             shift
             ;;
         --prebuilt)
             USE_PREBUILT=1
+            RUNTIME_MODE_EXPLICIT=1
             shift
             ;;
         --image-tag)
