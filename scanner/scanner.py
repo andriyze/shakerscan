@@ -5660,6 +5660,15 @@ async def build_report(target: str,
                 "endpoint": vuln.get("endpoint", "unknown"),
                 "api_type": api_sec_results.get("api_type", "unknown")
             }
+            for key in (
+                "url",
+                "verified",
+                "sensitive_markers",
+                "response_hash16",
+                "response_sample",
+            ):
+                if key in vuln:
+                    evidence[key] = vuln[key]
             # Include headers if present (for auth bypass findings)
             if "headers" in vuln:
                 evidence["headers"] = vuln["headers"]

@@ -89,3 +89,37 @@ def test_api_security_test_parses_openapi_operations(monkeypatch):
         finding["type"] == "sensitive_data_exposure" and finding["endpoint"] == "/openapi.json"
         for finding in result["vulnerabilities"]
     )
+
+
+def test_api_security_sensitive_response_includes_verification_metadata(monkeypatch):
+    sensitive_body = {
+        "users": [
+            {
+                "username": "admin",
+                "password": "admin123",
+                "api_key": "sk_live_example",
+                "mfa_secret": "JBSWY3DPEHPK3PXP",
+            }
+        ]
+    }
+
+    async def fake_run(cmd, timeout=None):
+        _ = timeout
+        url = cmd[-1]
+        if url.endswith("/api/users"):
+            return json.dumps(sensitive_body) + "\n200", "", 0
+        return '{"error":"not found"}\n404', "", 0
+
+    monkeypatch.setattr(discovery, "run", fake_run)
+
+    result = asyncio.run(discovery.api_security_test("https://honey.example"))
+
+    finding = result["vulnerabilities"][0]
+    assert finding["type"] == "sensitive_data_exposure"
+    assert finding["description"] == "Sensitive data exposed in API response"
+    assert finding["endpoint"] == "/api/users"
+    assert finding["verified"] is True
+    assert "password" in finding["sensitive_markers"]
+    assert "api_key" in finding["sensitive_markers"]
+    assert "mfa_secret" in finding["sensitive_markers"]
+    assert finding["response_hash16"]

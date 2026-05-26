@@ -2331,9 +2331,25 @@ async def api_security_test(url: str) -> dict[str, Any]:
                                     label = f"{method} {path}"
                                     if label not in results["endpoints_discovered"]:
                                         results["endpoints_discovered"].append(label)
-                    if not has_api_spec and any(sensitive in response_body.lower() for sensitive in ["password", "token", "api_key", "secret", "private"]):
-                        if not is_html:
-                            results["vulnerabilities"].append({"type": "sensitive_data_exposure", "severity": "high", "endpoint": endpoint, "description": "Potential sensitive data exposed in API response"})
+                    if not has_api_spec and not is_html:
+                        sensitive_markers = [
+                            marker
+                            for marker in ["password", "token", "api_key", "secret", "private", "mfa_secret"]
+                            if marker in response_body.lower()
+                        ]
+                        if sensitive_markers:
+                            content_hash = hashlib.sha256(response_body.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                            results["vulnerabilities"].append({
+                                "type": "sensitive_data_exposure",
+                                "severity": "high",
+                                "endpoint": endpoint,
+                                "url": test_url,
+                                "description": "Sensitive data exposed in API response",
+                                "verified": True,
+                                "sensitive_markers": sensitive_markers[:8],
+                                "response_hash16": content_hash,
+                                "response_sample": response_body[:300],
+                            })
                 elif status_code in ["401", "403"]:
                     results["authentication"]["required"] = True
                     auth_required_endpoints.append(test_url)
