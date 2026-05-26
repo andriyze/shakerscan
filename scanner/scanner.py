@@ -7710,17 +7710,36 @@ async def build_report(target: str,
                     )
                 except (TypeError, ValueError):
                     active_remaining_after_smart = None
+                primary_active_budget_exhausted = bool(
+                    (smart_results.get("sqli") or {}).get("budget_exhausted")
+                    or (smart_results.get("xss") or {}).get("budget_exhausted")
+                )
                 post_active_budget_exhausted = (
                     active_checks
-                    and active_remaining_after_smart is not None
-                    and active_remaining_after_smart < 15.0
+                    and (
+                        primary_active_budget_exhausted
+                        or (
+                            active_remaining_after_smart is not None
+                            and active_remaining_after_smart < 15.0
+                        )
+                    )
                 )
                 if post_active_budget_exhausted:
-                    active_block["post_active_enrichment_skipped"] = "active_time_budget_exhausted"
+                    skip_reason = (
+                        "primary_family_budget_exhausted"
+                        if primary_active_budget_exhausted
+                        else "active_time_budget_exhausted"
+                    )
+                    active_block["post_active_enrichment_skipped"] = skip_reason
+                    remaining_text = (
+                        f"{active_remaining_after_smart:.1f}s"
+                        if active_remaining_after_smart is not None
+                        else "unknown"
+                    )
                     print(
                         (
                             "[active] Skipping post-active enrichment probes: "
-                            f"active budget remaining {active_remaining_after_smart:.1f}s"
+                            f"{skip_reason}; active budget remaining {remaining_text}"
                         ),
                         file=sys.stderr,
                     )
@@ -7893,8 +7912,9 @@ async def build_report(target: str,
                         print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
                     elif post_active_budget_exhausted:
                         auxiliary_injection_enabled = False
-                        active_block["auxiliary_injection_skipped"] = "active_time_budget_exhausted"
-                        print("[active] Skipping auxiliary injection probes: active time budget exhausted", file=sys.stderr)
+                        aux_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
+                        active_block["auxiliary_injection_skipped"] = aux_skip_reason
+                        print(f"[active] Skipping auxiliary injection probes: {aux_skip_reason}", file=sys.stderr)
 
                     param_endpoints = []
                     if auxiliary_injection_enabled:
@@ -8785,8 +8805,9 @@ async def build_report(target: str,
                 active_block["dom_xss_error"] = str(e)
                 print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
         elif smart_mode and smart_succeeded and post_active_budget_exhausted:
-            active_block["dom_xss_skipped"] = "active_time_budget_exhausted"
-            print("[scanner] Skipping DOM XSS analysis: active time budget exhausted", file=sys.stderr)
+            dom_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
+            active_block["dom_xss_skipped"] = dom_skip_reason
+            print(f"[scanner] Skipping DOM XSS analysis: {dom_skip_reason}", file=sys.stderr)
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
@@ -8896,8 +8917,9 @@ async def build_report(target: str,
                 active_block["smart_bola_error"] = str(e)
                 print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
         elif smart_mode and smart_succeeded and not public_only and post_active_budget_exhausted:
-            active_block["smart_bola_skipped"] = "active_time_budget_exhausted"
-            print("[scanner] Skipping BOLA/IDOR testing: active time budget exhausted", file=sys.stderr)
+            bola_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
+            active_block["smart_bola_skipped"] = bola_skip_reason
+            print(f"[scanner] Skipping BOLA/IDOR testing: {bola_skip_reason}", file=sys.stderr)
 
         # Run active checks with a global timeout (standard mode or smart fallback on error)
         async def run_active_checks():
