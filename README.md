@@ -24,22 +24,28 @@ Open-source Dynamic Application Security Testing (DAST) for web applications, wi
 
 ## Quick Start
 
+### Local Laptop
+
 ```bash
 curl -fsSL https://install.shakerscan.com | sh
 ```
 
-That installs the `shakerscan` command into `~/.local/bin`, downloads the runtime files plus `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/` into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
+This installs ShakerScan, starts the scanner with the latest Docker Hub images, and keeps the UI/API private on your machine.
 
 - **Web UI**: http://localhost:3000
 - **API**: http://localhost:8080
 
-Local laptop installs bind only to `127.0.0.1` by default. For a remote VPS that you want to reach over Tailscale, use remote mode:
+### Remote VPS
+
+Use this when ShakerScan runs on a VPS and you want to open the UI from your laptop over Tailscale:
 
 ```bash
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh
 ```
 
-Remote mode binds the UI/API to the VPS Tailscale IPv4 address, persists that access mode in `~/.shakerscan/.env`, and prints URLs such as `http://100.x.y.z:3000`. For an existing install, run:
+Remote mode binds the UI/API to the VPS Tailscale IPv4 address, persists that access mode in `~/.shakerscan/.env`, and prints URLs such as `http://100.x.y.z:3000`.
+
+For an existing install:
 
 ```bash
 shakerscan start --remote
@@ -53,22 +59,42 @@ SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> shakersca
 
 Only use `0.0.0.0` behind a firewall, VPN, or reverse proxy. ShakerScan is a security tool and should not be exposed directly to the public internet.
 
-After install:
+### Run With AI
+
+After install, launch your AI coding agent inside the ShakerScan runtime so it can read the installed instructions and skills:
+
+```bash
+shakerscan agent codex
+shakerscan agent opencode
+shakerscan agent claude
+```
+
+Then ask:
+
+```text
+Start ShakerScan
+Run a quick scan on https://example.com
+Show active high and critical findings
+Run AI Gate smoke tests against my chatbot API
+```
+
+The installer creates `~/.local/bin/shakerscan`, adds `~/.local/bin` to future shell sessions when needed, and downloads the runtime workspace to `~/.shakerscan` with `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/`.
+
+Because `curl | sh` cannot modify the current parent shell, use the absolute launcher if `shakerscan` is not found until you open a new shell:
+
+```bash
+~/.local/bin/shakerscan env
+~/.local/bin/shakerscan agent codex
+```
+
+Useful CLI commands:
 
 ```bash
 shakerscan start
 shakerscan status
 shakerscan stop
+shakerscan env
 ```
-
-For AI-assisted use, start the agent inside the installed runtime so it reads ShakerScan's local instructions and skills:
-
-```bash
-shakerscan agent codex      # or: shakerscan agent claude
-shakerscan agent opencode
-```
-
-This is equivalent to `cd ~/.shakerscan && codex`, but works from whatever directory the installer left you in.
 
 To upgrade an installed runtime, re-run the same installer command. It refreshes `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/` in `~/.shakerscan`, preserves `.env`, `results`, and Docker volumes, and pulls the selected prebuilt Docker Hub images during startup. Use `curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh` to update files without starting services, or `SHAKERSCAN_PULL_IMAGES=0 shakerscan start` to skip image pulls.
 
@@ -277,6 +303,8 @@ Commands:
   scan-smart <target> Smart adaptive scan
   install-deps       Install missing prerequisites
   doctor             Check local prerequisites and common startup issues
+  env                Show PATH, launcher, and runtime guidance
+  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir
   gungnir <cmd>      CT monitor: start, stop, status, logs
   build              Build Docker images
   rebuild [opts]     Rebuild images (supports --no-cache, scanner, ui)

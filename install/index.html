@@ -102,6 +102,68 @@ download() {
     mv "$tmp" "$dst"
 }
 
+add_path_to_profile() {
+    profile="$1"
+    [ -n "$profile" ] || return 0
+
+    if [ -f "$profile" ] && grep -F "# >>> shakerscan path >>>" "$profile" >/dev/null 2>&1 && grep -F "$BIN_DIR" "$profile" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$profile")"
+    touch "$profile"
+    {
+        printf '\n'
+        printf '%s\n' '# >>> shakerscan path >>>'
+        printf '%s\n' 'case ":$PATH:" in'
+        printf '  *":%s:"*) ;;\n' "$BIN_DIR"
+        printf '  *) export PATH="%s:$PATH" ;;\n' "$BIN_DIR"
+        printf '%s\n' 'esac'
+        printf '%s\n' '# <<< shakerscan path <<<'
+    } >> "$profile"
+    say "Added $BIN_DIR to PATH in $profile"
+}
+
+install_path_profiles() {
+    shell_name=""
+    if [ -n "${SHELL:-}" ]; then
+        shell_name="$(basename "$SHELL")"
+    fi
+
+    add_path_to_profile "$HOME/.profile"
+
+    case "$shell_name" in
+        bash)
+            add_path_to_profile "$HOME/.bashrc"
+            ;;
+        zsh)
+            add_path_to_profile "$HOME/.zshrc"
+            ;;
+        fish)
+            fish_profile="$HOME/.config/fish/config.fish"
+            if [ ! -f "$fish_profile" ] || ! grep -F "# >>> shakerscan path >>>" "$fish_profile" >/dev/null 2>&1 || ! grep -F "$BIN_DIR" "$fish_profile" >/dev/null 2>&1; then
+                mkdir -p "$(dirname "$fish_profile")"
+                touch "$fish_profile"
+                {
+                    printf '\n'
+                    printf '%s\n' '# >>> shakerscan path >>>'
+                    printf 'fish_add_path "%s"\n' "$BIN_DIR"
+                    printf '%s\n' '# <<< shakerscan path <<<'
+                } >> "$fish_profile"
+                say "Added $BIN_DIR to PATH in $fish_profile"
+            fi
+            ;;
+    esac
+
+    if [ -f "$HOME/.bashrc" ] && [ "$shell_name" != "bash" ]; then
+        add_path_to_profile "$HOME/.bashrc"
+    fi
+
+    if [ -f "$HOME/.zshrc" ] && [ "$shell_name" != "zsh" ]; then
+        add_path_to_profile "$HOME/.zshrc"
+    fi
+}
+
 install_command() {
     mkdir -p "$BIN_DIR"
     launcher="$BIN_DIR/shakerscan"
@@ -115,8 +177,9 @@ EOF
         *":$BIN_DIR:"*) ;;
         *)
             say ""
-            say "Note: $BIN_DIR is not in PATH."
-            say "Add this to your shell profile if the 'shakerscan' command is not found:"
+            say "$BIN_DIR is not in the current PATH."
+            install_path_profiles
+            say "Open a new shell, or run this once in the current shell:"
             say "  export PATH=\"$BIN_DIR:\$PATH\""
             ;;
     esac
@@ -186,12 +249,17 @@ install_command
 say ""
 say "Installed ShakerScan."
 say ""
-say "Use prebuilt Docker Hub images:"
-say "  shakerscan start"
+say "Use ShakerScan now:"
+say "  \"$BIN_DIR/shakerscan\" status"
+say "  \"$BIN_DIR/shakerscan\" start"
+say "  \"$BIN_DIR/shakerscan\" env"
+say ""
+say "After opening a new shell, this shorter command should work:"
+say "  shakerscan status"
 say ""
 say "Remote VPS over Tailscale:"
 say "  curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh"
-say "  shakerscan start --remote"
+say "  \"$BIN_DIR/shakerscan\" start --remote"
 say ""
 say "Upgrade later:"
 say "  curl -fsSL https://install.shakerscan.com | sh"

@@ -1272,6 +1272,7 @@ print_help() {
     echo "  scan-smart <target> Smart adaptive scan"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
+    echo "  env                Show PATH, launcher, and runtime guidance"
     echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
@@ -1303,6 +1304,7 @@ print_help() {
     echo "  ./scanner.sh start                    # Start with latest prebuilt images"
     echo "  ./scanner.sh start -y                 # Install prerequisites if missing, then start"
     echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
+    echo "  ./scanner.sh env                      # Show PATH and agent launch commands"
     echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
@@ -1653,6 +1655,63 @@ doctor() {
     fi
 }
 
+show_env_help() {
+    local default_launcher="$HOME/.local/bin/shakerscan"
+    local launcher
+    local path_launcher
+
+    if [ -x "$default_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$default_launcher" >/dev/null 2>&1; then
+        launcher="$default_launcher"
+    fi
+
+    if [ -z "$launcher" ]; then
+        path_launcher="$(command -v shakerscan 2>/dev/null || true)"
+        if [ -n "$path_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$path_launcher" >/dev/null 2>&1; then
+            launcher="$path_launcher"
+        fi
+    fi
+
+    echo -e "${BLUE}ShakerScan Environment${NC}"
+    echo "Runtime directory: $SCRIPT_DIR"
+    echo "Current UI URL:    $(ui_base_url)"
+    echo "Current API URL:   $(api_base_url)"
+    echo ""
+
+    if [ -n "$launcher" ]; then
+        echo "Launcher:          $launcher"
+    else
+        echo "Launcher:          not found in PATH"
+        echo "Expected path:     $default_launcher"
+    fi
+
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*)
+            echo "PATH:              $HOME/.local/bin is available"
+            ;;
+        *)
+            echo "PATH:              $HOME/.local/bin is not in the current shell"
+            echo "Current shell fix:"
+            echo "  export PATH=\"$HOME/.local/bin:\$PATH\""
+            ;;
+    esac
+
+    echo ""
+    echo "AI agent launch:"
+    if [ -n "$launcher" ]; then
+        echo "  $launcher agent codex"
+        echo "  $launcher agent claude"
+        echo "  $launcher agent opencode"
+    else
+        echo "  $SCRIPT_DIR/scanner.sh agent codex"
+        echo "  $SCRIPT_DIR/scanner.sh agent claude"
+        echo "  $SCRIPT_DIR/scanner.sh agent opencode"
+    fi
+    echo ""
+    echo "Manual equivalent:"
+    echo "  cd \"$SCRIPT_DIR\""
+    echo "  codex   # or claude, or opencode"
+}
+
 start_agent() {
     local agent="${1:-}"
     local candidates=()
@@ -1826,7 +1885,7 @@ configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
-    help|--help|-h|install-deps|doctor|agent|ai)
+    help|--help|-h|install-deps|doctor|env|agent|ai)
         ;;
     *)
         if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -1869,6 +1928,9 @@ case $COMMAND in
         ;;
     doctor)
         doctor
+        ;;
+    env)
+        show_env_help
         ;;
     agent|ai)
         start_agent "${ARGS[0]}"

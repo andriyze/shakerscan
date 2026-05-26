@@ -37,7 +37,7 @@ shakerscan agent codex
 shakerscan agent opencode
 ```
 
-This is equivalent to `cd ~/.shakerscan && claude`.
+This is equivalent to `cd ~/.shakerscan && claude`. If the current shell has not picked up PATH yet, use `~/.local/bin/shakerscan env` or `~/.local/bin/shakerscan agent codex`.
 
 Available skills in this folder:
 - `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate/model intake)

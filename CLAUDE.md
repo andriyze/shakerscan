@@ -31,6 +31,12 @@ claude
 
 Using the global `shakerscan` command from any directory is fine for CLI operations, but AI agents should run from `~/.shakerscan` or a source checkout so they can read `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/`.
 
+If `shakerscan` is not found in the current shell immediately after install, use the absolute launcher or ask the user to open a new shell:
+```bash
+~/.local/bin/shakerscan env
+~/.local/bin/shakerscan agent claude
+```
+
 ## How This Works
 
 The scanner runs as Docker containers:
