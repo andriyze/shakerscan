@@ -6037,6 +6037,15 @@ SQLI_VERSION_EXTRACTION_PATTERNS = {
     "oracle": [r"\bOracle(?:\s+Database)?\b[^\n<]{0,120}(\d+(?:c|g)?|\d+(?:\.\d+)+)"],
 }
 
+SQLI_SENSITIVE_EXTRACTION_PATTERNS = {
+    "password_hash": r'"password_hash"\s*:',
+    "api_key": r'"api_key"\s*:',
+    "secret": r'"[^"]*secret[^"]*"\s*:',
+    "token": r'"[^"]*token[^"]*"\s*:',
+    "row_count": r'"row_count"\s*:\s*[1-9]\d*',
+    "vulnerable_flag": r'"vulnerable"\s*:\s*true',
+}
+
 
 async def sqli_data_extraction(
     sqli_finding: dict,
@@ -6149,6 +6158,23 @@ async def sqli_data_extraction(
                     results["extraction_successful"] = True
                     results["evidence"].append(f"Extracted version: {match.group(1)}")
                     break
+            if not results["extraction_successful"]:
+                sensitive_markers = [
+                    label
+                    for label, pattern in SQLI_SENSITIVE_EXTRACTION_PATTERNS.items()
+                    if _match_not_in_baseline(pattern, body)
+                ]
+                has_secret_marker = any(
+                    label in sensitive_markers
+                    for label in ("password_hash", "api_key", "secret", "token")
+                )
+                if has_secret_marker and len(sensitive_markers) >= 2:
+                    results["extracted_data"]["sensitive_markers"] = sensitive_markers
+                    results["dbms_confirmed"] = dbms
+                    results["extraction_successful"] = True
+                    results["evidence"].append(
+                        f"Extracted sensitive rowset markers: {', '.join(sensitive_markers)}"
+                    )
 
     # Try to extract current user
     if "user" in extraction_payloads and results["extraction_successful"]:

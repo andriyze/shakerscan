@@ -224,6 +224,39 @@ def test_sqli_data_extraction_skips_unknown_dbms(monkeypatch):
     assert result["reason"] == "unsupported_or_unknown_dbms"
 
 
+def test_sqli_data_extraction_accepts_sensitive_rowset(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+    rowset = (
+        '{"results":[{"id":1,"username":"admin","password_hash":"abc",'
+        '"api_key":"sk_live_example"}],"row_count":1,"vulnerable":true}'
+    )
+
+    async def fake_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        if "UNION" in url or "version%28%29" in url:
+            return f"{rowset}\n{marker}200", "", 0
+        return f'{{"id":1,"username":"admin","role":"admin"}}\n{marker}200', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/user?id=1",
+                "param": "id",
+                "dbms": "postgresql",
+                "method": "GET",
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is True
+    assert result["proof_of_exploitation"] is True
+    assert result["dbms_confirmed"] == "postgresql"
+    assert "password_hash" in result["extracted_data"]["sensitive_markers"]
+    assert any("sensitive rowset" in item for item in result["evidence"])
+
+
 def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
     async def fake_run(*args, **kwargs):
         body = "OpenAPI 3.1.0 examples mention MySQL 8.0.36"

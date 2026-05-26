@@ -7476,6 +7476,7 @@ async def build_report(target: str,
                     active_block["smart_total_endpoints_tested"] = smart_results.get("total_endpoints_tested", 0)
 
                     # Process smart SQLi results
+                    sqli_report_findings = {}
                     if smart_sqli_findings:
                         for f in smart_sqli_findings:
                             method = f.get("method", "GET")
@@ -7499,13 +7500,15 @@ async def build_report(target: str,
                                 evidence_dict["content_type"] = f.get("content_type")
                             if f.get("body"):
                                 evidence_dict["body"] = f.get("body")
-                            report["findings"].append(normalize_finding(
+                            normalized_sqli = normalize_finding(
                                 "smart_sqli",
                                 title,
                                 f.get("severity", "critical"),
                                 evidence_dict,
                                 "CWE-89"
-                            ))
+                            )
+                            report["findings"].append(normalized_sqli)
+                            sqli_report_findings[(f.get("url"), f.get("param"), method)] = normalized_sqli
 
                     # Store DBMS detection info
                     if smart_results.get("dbms_detected"):
@@ -7533,6 +7536,29 @@ async def build_report(target: str,
                                     sqli_finding["extracted_data"] = extraction.get("extracted_data", {})
                                     # Severity upgrade is automatic (already critical, but add flag)
                                     sqli_finding["proof_of_exploitation"] = True
+                                    report_finding = sqli_report_findings.get((
+                                        sqli_finding.get("url"),
+                                        sqli_finding.get("param"),
+                                        sqli_finding.get("method", "GET"),
+                                    ))
+                                    if report_finding:
+                                        report_evidence = report_finding.setdefault("evidence", {})
+                                        report_evidence["verified"] = True
+                                        report_evidence["proof_of_exploitation"] = True
+                                        report_evidence["extraction_evidence"] = extraction.get("evidence", [])
+                                        report_evidence["extracted_data"] = extraction.get("extracted_data", {})
+                                        report_finding["verified"] = True
+                                        report_finding["proof_of_exploitation"] = True
+                                        report_finding["severity"] = extraction.get("severity_upgrade") or "critical"
+                                        report_finding["confidence"] = max(float(report_finding.get("confidence") or 0), 0.95)
+                                        report_finding["confidence_tier"] = "verified"
+                                        report_finding["cvss_score"] = max(float(report_finding.get("cvss_score") or 0), 9.1)
+                                        report_finding["validation"] = {
+                                            "verified": True,
+                                            "poe_proven": True,
+                                            "evidence_level": "confirmed_exploit",
+                                            "reason": "SQLi data extraction succeeded",
+                                        }
                                     print(f"[scanner] SQLi data extraction successful for {sqli_finding.get('url')}", file=sys.stderr)
                             except Exception as e:
                                 print(f"[scanner] SQLi extraction error: {e}", file=sys.stderr)
