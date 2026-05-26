@@ -7781,10 +7781,26 @@ async def build_report(target: str,
                     )
                 except (TypeError, ValueError):
                     active_remaining_after_smart = None
+
+                def _active_family_time_exhausted(family_stats: dict[str, Any] | None) -> bool:
+                    family_stats = family_stats or {}
+                    if not family_stats.get("budget_exhausted"):
+                        return False
+                    reason = family_stats.get("budget_exhausted_reason")
+                    # Finding caps limit report volume; they should not suppress
+                    # downstream verification/enrichment while time remains.
+                    return reason != "finding_cap"
+
                 primary_active_budget_exhausted = bool(
-                    (smart_results.get("sqli") or {}).get("budget_exhausted")
-                    or (smart_results.get("xss") or {}).get("budget_exhausted")
+                    _active_family_time_exhausted(smart_results.get("sqli"))
+                    or _active_family_time_exhausted(smart_results.get("xss"))
                 )
+                sqli_budget_reason = (smart_results.get("sqli") or {}).get("budget_exhausted_reason")
+                xss_budget_reason = (smart_results.get("xss") or {}).get("budget_exhausted_reason")
+                if sqli_budget_reason:
+                    active_block["smart_sqli_budget_exhausted_reason"] = sqli_budget_reason
+                if xss_budget_reason:
+                    active_block["smart_xss_budget_exhausted_reason"] = xss_budget_reason
                 post_active_budget_exhausted = (
                     active_checks
                     and (

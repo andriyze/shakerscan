@@ -5723,6 +5723,7 @@ async def smart_sqli_test(
         "get_endpoints_tested": 0,
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
+        "budget_exhausted_reason": None,
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -5753,6 +5754,7 @@ async def smart_sqli_test(
         nonlocal budget_logged
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "finding_cap"
             if not budget_logged:
                 print(f"[sqli] Finding budget reached ({max_findings}); stopping SQLi probes", file=sys.stderr)
                 _emit_sqli_progress("finding budget reached", force=True)
@@ -5760,6 +5762,7 @@ async def smart_sqli_test(
             return True
         if deadline is not None and time.monotonic() >= deadline:
             results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "time_budget"
             if not budget_logged:
                 print("[sqli] Time budget exhausted; stopping SQLi probes", file=sys.stderr)
                 _emit_sqli_progress("time budget exhausted", force=True)
@@ -6627,6 +6630,7 @@ async def smart_xss_test(
         "get_endpoints_tested": 0,
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
+        "budget_exhausted_reason": None,
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -6657,6 +6661,7 @@ async def smart_xss_test(
         nonlocal budget_logged
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "finding_cap"
             if not budget_logged:
                 print(f"[xss] Finding budget reached ({max_findings}); stopping XSS probes", file=sys.stderr)
                 _emit_xss_progress("finding budget reached", force=True)
@@ -6664,6 +6669,7 @@ async def smart_xss_test(
             return True
         if deadline is not None and time.monotonic() >= deadline:
             results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "time_budget"
             if not budget_logged:
                 print("[xss] Time budget exhausted; stopping XSS probes", file=sys.stderr)
                 _emit_xss_progress("time budget exhausted", force=True)
@@ -7553,6 +7559,7 @@ async def run_smart_active_tests(
                 "skipped": True,
                 "reason": "active_time_budget_exhausted",
                 "budget_exhausted": True,
+                "budget_exhausted_reason": "time_budget",
             }
         else:
             _emit_scan_progress("active_xss", 86, "starting XSS probes")
@@ -7612,6 +7619,7 @@ async def run_smart_active_tests(
             "endpoints_tested": sqli_results.get("endpoints_tested", 0),
             "params_tested": sqli_results.get("params_tested", 0),
             "budget_exhausted": sqli_results.get("budget_exhausted", False),
+            "budget_exhausted_reason": sqli_results.get("budget_exhausted_reason"),
         },
         "xss": {
             "findings": xss_findings + hash_route_findings,  # Include hash route DOM XSS in XSS results
@@ -7622,6 +7630,7 @@ async def run_smart_active_tests(
             "get_endpoints_tested": xss_results.get("get_endpoints_tested", 0) + hash_route_results.get("endpoints_tested", 0),
             "post_endpoints_tested": xss_results.get("post_endpoints_tested", 0),
             "budget_exhausted": xss_results.get("budget_exhausted", False),
+            "budget_exhausted_reason": xss_results.get("budget_exhausted_reason"),
         },
         "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
         "dbms_detected": sqli_results.get("dbms_detected"),

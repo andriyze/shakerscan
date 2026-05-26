@@ -102,8 +102,39 @@ def test_smart_sqli_respects_time_budget_before_probe(monkeypatch):
     )
 
     assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "time_budget"
     assert result["endpoints_tested"] == 0
     assert result["params_tested"] == 0
+
+
+def test_smart_sqli_distinguishes_finding_cap_from_time_budget(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        target = command[-1]
+        if "%27" in target or "'" in target:
+            return ("You have an error in your SQL syntax near quote", "", 0)
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/search?q=test",
+                    "method": "GET",
+                    "params": ["q", "id"],
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+            max_findings=1,
+        )
+    )
+
+    assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "finding_cap"
+    assert result["vulnerabilities_found"] == 1
 
 
 def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
@@ -211,6 +242,7 @@ def test_smart_xss_respects_time_budget_before_probe(monkeypatch):
     )
 
     assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "time_budget"
     assert result["endpoints_tested"] == 0
     assert result["params_tested"] == 0
 
