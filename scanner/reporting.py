@@ -376,7 +376,13 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "cors_scanner",
             "CORS misconfiguration",
             "high" if any("*" in i or "Reflects" in i for i in issues) else "medium",
-            {"issues": issues[:5], "reproduction": _reproCurlCors(base_url)},
+            {
+                "url": base_url,
+                "issues": issues[:5],
+                "access-control-allow-origin": cors.get("access-control-allow-origin"),
+                "access-control-allow-credentials": cors.get("access-control-allow-credentials"),
+                "reproduction": _reproCurlCors(base_url),
+            },
             "CWE-942"
         ))
 

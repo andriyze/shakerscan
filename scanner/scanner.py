@@ -5492,9 +5492,12 @@ async def build_report(target: str,
             report["findings"].append(normalize_finding(
                 "cors_check", title, "high",
                 {
+                    "url": base_url,
                     "issues": unique_issues,
                     "occurrences": len(cors_results.get("issues", [])),
-                    "details": cors_results
+                    "details": cors_results,
+                    "access-control-allow-origin": cors_results.get("access-control-allow-origin"),
+                    "access-control-allow-credentials": cors_results.get("access-control-allow-credentials"),
                 }, "CWE-942"
             ))
 

@@ -1273,13 +1273,16 @@ def validate_cors(
 
     # Check for dangerous CORS configurations
 
-    # 1. Wildcard with credentials (most dangerous but rare)
+    # 1. Wildcard with credentials is invalid for browser credentialed reads.
+    # Browsers reject ACAO:* when ACAC:true, so treat it as hardening noise
+    # unless another response proves origin reflection.
     if acao == "*" and acac.lower() == "true":
         return ValidationResult(
-            verified=True,
-            confidence=0.95,
+            verified=False,
+            confidence=0.35,
             evidence="ACAO: * with credentials",
-            reason="Critical CORS - wildcard with credentials (browsers block this)"
+            reason="Wildcard CORS with credentials is browser-blocked, not a proven credentialed read",
+            downgrade_to="info",
         )
 
     # 2. Reflecting arbitrary origin with credentials

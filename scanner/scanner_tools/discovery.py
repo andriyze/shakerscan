@@ -2006,21 +2006,56 @@ async def deep_discovery_scan(base_url: str) -> dict[str, Any]:
     return results
 
 
+def _header_value(raw_headers: str, header_name: str) -> str:
+    header_name = header_name.lower()
+    for line in raw_headers.splitlines():
+        if line.lower().startswith(f"{header_name}:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 async def check_cors(url: str) -> dict[str, Any]:
-    results = {"vulnerable": False, "issues": []}
+    results = {
+        "vulnerable": False,
+        "issues": [],
+        "weak_issues": [],
+        "evidence": [],
+        "url": url,
+    }
     test_origins = ["https://evil.com", "null"]
     for origin in test_origins:
         out, err, rc = await run(["curl", "-sS", "-I", "-H", f"Origin: {origin}", "-H", "Access-Control-Request-Method: GET", url], timeout=30)
         if rc == 0 and out:
-            if f"access-control-allow-origin: {origin}" in out.lower():
+            acao = _header_value(out, "access-control-allow-origin")
+            acac = _header_value(out, "access-control-allow-credentials").lower()
+            if acao:
+                results["evidence"].append({
+                    "origin": origin,
+                    "access-control-allow-origin": acao,
+                    "access-control-allow-credentials": acac,
+                })
+                results.setdefault("access-control-allow-origin", acao)
+                if acac:
+                    results.setdefault("access-control-allow-credentials", acac)
+
+            if acao == origin and acac == "true":
                 results["vulnerable"] = True
-                results["issues"].append(f"Reflects origin: {origin}")
-            elif "access-control-allow-origin: *" in out.lower():
-                results["vulnerable"] = True
-                results["issues"].append("Wildcard CORS (Access-Control-Allow-Origin: *)")
+                if origin == "null":
+                    results["issues"].append("Allows null Origin with credentials")
+                else:
+                    results["issues"].append(f"Reflects arbitrary Origin with credentials: {origin}")
+            elif acao == origin:
+                results["weak_issues"].append(f"Reflects Origin without credentials: {origin}")
+            elif acao == "*":
+                if acac == "true":
+                    results["weak_issues"].append("Wildcard CORS with credentials is browser-blocked")
+                else:
+                    results["weak_issues"].append("Wildcard CORS without credentials")
     # De-duplicate repeated issues
     if results["issues"]:
         results["issues"] = sorted(list(set(results["issues"])))
+    if results["weak_issues"]:
+        results["weak_issues"] = sorted(list(set(results["weak_issues"])))
     return results
 
 
