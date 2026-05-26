@@ -97,8 +97,13 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
 
     assert adjusted[0]["severity"] == "low"
     assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["confidence"] == 0.49
+    assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "missing_path_or_status"
     assert adjusted[1]["severity"] == "low"
+    assert adjusted[1]["confidence"] == 0.49
     assert adjusted[2]["severity"] == "info"
+    assert adjusted[2]["confidence"] == 0.34
+    assert adjusted[2]["precision_policy"]["confidence_cap_reason"] == "vendor_or_framework_static_sink"
     assert all(item["suspected"] is True for item in adjusted)
 
 
@@ -127,6 +132,31 @@ def test_precision_policy_accepts_verified_evidence_flag():
     assert adjusted[0]["severity"] == "high"
 
 
+def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
+    findings = [
+        {
+            "tool": "dom_xss",
+            "title": "DOM-Based XSS with payload execution",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.7,
+            "verified": True,
+            "evidence": {
+                "file": "https://cdn.jsdelivr.net/npm/example/widget.js",
+                "verified": True,
+                "payload_executed": True,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["severity"] == "high"
+    assert adjusted[0]["confidence"] >= 0.9
+    assert "precision_policy" not in adjusted[0]
+
+
 def test_precision_policy_caps_2fa_rate_limit_lead_to_medium():
     findings = [
         {
@@ -147,6 +177,7 @@ def test_precision_policy_caps_2fa_rate_limit_lead_to_medium():
     adjusted = apply_dast_precision_policy(findings)
 
     assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["confidence"] == 0.55
     assert adjusted[0]["needs_verification"] is True
     assert "not a confirmed 2FA bypass" in adjusted[0]["verification_reason"]
 

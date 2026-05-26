@@ -120,6 +120,22 @@ def get_confidence_tier(confidence: float) -> str:
         return "uncertain"
 
 
+SEVERITY_CONFIDENCE_THRESHOLDS = {
+    "critical": 0.85,
+    "high": 0.75,
+    "medium": 0.50,
+    "low": 0.35,
+    "info": 0.0,
+}
+
+
+def _max_severity_for_confidence(confidence: float) -> str:
+    for severity in ("critical", "high", "medium", "low"):
+        if confidence >= SEVERITY_CONFIDENCE_THRESHOLDS[severity]:
+            return severity
+    return "info"
+
+
 def _cap_severity(finding: dict[str, Any], max_severity: str) -> None:
     order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
     current = str(finding.get("severity") or "info").lower()
@@ -131,6 +147,24 @@ def _cap_severity(finding: dict[str, Any], max_severity: str) -> None:
             {"info": 0.0, "low": 3.0, "medium": 6.0, "high": 8.0}[max_severity],
         )
         finding.setdefault("precision_policy", {})["severity_downgraded"] = True
+
+
+def _cap_confidence_for_precision(
+    finding: dict[str, Any],
+    max_confidence: float,
+    reason: str,
+) -> None:
+    policy = finding.setdefault("precision_policy", {})
+    current_confidence = float(finding.get("confidence") or 0.5)
+    if current_confidence > max_confidence:
+        policy.setdefault("original_confidence", current_confidence)
+        finding["confidence"] = round(max_confidence, 2)
+        policy["confidence_capped"] = True
+    else:
+        finding["confidence"] = round(current_confidence, 2)
+    policy["confidence_cap_reason"] = reason
+    finding["confidence_tier"] = get_confidence_tier(float(finding["confidence"]))
+    _cap_severity(finding, _max_severity_for_confidence(float(finding["confidence"])))
 
 
 def _evidence_value(finding: dict[str, Any], key: str) -> Any:
@@ -212,30 +246,35 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
                 finding["suspected"] = True
                 finding["needs_verification"] = True
                 finding["verification_reason"] = "BFLA evidence is missing path/status; likely frontend shell or inconclusive route probe"
-                _cap_severity(finding, "low")
+                _cap_confidence_for_precision(finding, 0.49, "missing_path_or_status")
 
         elif tool == "ssti":
             finding["suspected"] = True
             finding["needs_verification"] = True
             finding["verification_reason"] = "SSTI requires differential template evaluation proof"
-            _cap_severity(finding, "medium")
+            _cap_confidence_for_precision(finding, 0.64, "missing_differential_template_proof")
 
         elif tool == "dom_xss":
             finding["suspected"] = True
             finding["needs_verification"] = True
             finding["verification_reason"] = "DOM XSS static source/sink lead without payload execution"
             file_url = str(_evidence_value(finding, "file") or "")
-            _cap_severity(finding, "info" if _is_vendor_or_framework_js(file_url) else "low")
+            vendor_static_sink = _is_vendor_or_framework_js(file_url)
+            _cap_confidence_for_precision(
+                finding,
+                0.34 if vendor_static_sink else 0.49,
+                "vendor_or_framework_static_sink" if vendor_static_sink else "static_sink_without_execution",
+            )
 
         elif tool == "client_side":
             finding["suspected"] = True
             finding["needs_verification"] = True
             if "prototype pollution" in title or _evidence_value(finding, "type") == "prototype_pollution_sink":
                 finding["verification_reason"] = "Prototype pollution heuristic lacks attacker-controlled merge proof"
-                _cap_severity(finding, "low")
+                _cap_confidence_for_precision(finding, 0.49, "missing_attacker_controlled_merge_proof")
             elif "postmessage" in title:
                 finding["verification_reason"] = "postMessage static handler lead lacks exploitability proof"
-                _cap_severity(finding, "low")
+                _cap_confidence_for_precision(finding, 0.49, "missing_postmessage_exploitability_proof")
 
         elif tool == "cache_poisoning":
             cacheable = bool(_evidence_value(finding, "cacheable"))
@@ -245,14 +284,18 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
                 finding["suspected"] = True
                 finding["needs_verification"] = True
                 finding["verification_reason"] = "Header reflection observed without poisoned same-key cache hit"
-                _cap_severity(finding, "low" if cacheable else "info")
+                _cap_confidence_for_precision(
+                    finding,
+                    0.49 if cacheable else 0.34,
+                    "missing_poisoned_same_key_cache_hit",
+                )
 
         elif tool == "2fa_bypass":
             method = str(_evidence_value(finding, "method") or "").lower()
             if method == "no_rate_limiting":
                 finding["needs_verification"] = True
                 finding["verification_reason"] = "Missing OTP throttling is a brute-force hardening gap, not a confirmed 2FA bypass"
-                _cap_severity(finding, "medium")
+                _cap_confidence_for_precision(finding, 0.64, "otp_rate_limit_gap_not_bypass")
 
         confidence = float(finding.get("confidence") or 0.5)
         finding["confidence_tier"] = get_confidence_tier(confidence)
