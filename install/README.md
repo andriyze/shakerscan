@@ -18,8 +18,11 @@ The hosted root path should serve `index.sh` as plain text or shell script conte
 - `docker-compose.release.yml`
 - `db/init.sql`
 - `VERSION`
+- `README.md`
+- `AGENTS.md`
+- `CLAUDE.md`
 
-It then creates a `shakerscan` launcher in `~/.local/bin` and runs `shakerscan start -y`, which uses the latest Docker Hub images by default.
+It then creates a `shakerscan` launcher in `~/.local/bin` and runs `shakerscan start -y`, which uses the latest Docker Hub images by default. Users can also `cd ~/.shakerscan` and start Codex or Claude there so the agent reads the installed `AGENTS.md` or `CLAUDE.md`.
 
 Useful environment overrides:
 

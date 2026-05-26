@@ -28,7 +28,7 @@ Open-source Dynamic Application Security Testing (DAST) for web applications, wi
 curl -fsSL https://install.shakerscan.com | sh
 ```
 
-That installs the `shakerscan` command into `~/.local/bin`, downloads the minimal runtime files into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
+That installs the `shakerscan` command into `~/.local/bin`, downloads the runtime files plus `README.md`, `AGENTS.md`, and `CLAUDE.md` into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
 
 - **Web UI**: http://localhost:3000
 - **API**: http://localhost:8080
@@ -330,7 +330,15 @@ Full API documentation including authenticated scanning, custom endpoints, AI Ga
 
 ## AI Agent Integration
 
-This project is designed to work well with coding agents. Clone the repo, open it in your agent, and ask it to operate ShakerScan through the documented CLI and API.
+This project is designed to work well with coding agents. After the curl installer, open the runtime directory in your agent so it can read the local `AGENTS.md` or `CLAUDE.md` instructions:
+
+```bash
+cd ~/.shakerscan
+codex     # reads AGENTS.md
+claude    # reads CLAUDE.md
+```
+
+For source changes, clone the repo and open the clone in your agent:
 
 ```bash
 cd shakerscan
