@@ -59,6 +59,7 @@ SCAN_BUDGET_FIELDS = {
     "api_probe_limit",
     "param_discovery_url_limit",
     "param_discovery_max_params",
+    "phase4_max_seconds",
     "nuclei_max_targets",
     "nuclei_early_stop",
     "active_max_seconds",
@@ -128,6 +129,38 @@ def _coerce_budget_value(key: str, value: Any) -> Any:
     if key == "max_findings_per_family" and number < 0:
         return None
     return max(0, number)
+
+
+def resolve_phase4_max_seconds(
+    scan_budget: dict[str, Any] | None,
+    *,
+    smart_mode: bool,
+    active_checks: bool,
+    default_seconds: int = 360,
+) -> int | None:
+    """Resolve the smart-scan phase 4 watchdog budget.
+
+    Phase 4 contains useful generic web checks, but it should not consume most
+    of an active XSS/SQLi calibration run before the active engine starts.
+    """
+    if not smart_mode:
+        return None
+
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    raw_phase4 = budget.get("phase4_max_seconds")
+    phase4_max = _coerce_budget_value("phase4_max_seconds", raw_phase4)
+    if phase4_max is None:
+        phase4_max = default_seconds
+    phase4_max = max(0, int(phase4_max))
+
+    active_max = _coerce_budget_value("active_max_seconds", budget.get("active_max_seconds"))
+    if active_checks and isinstance(active_max, int) and active_max > 0:
+        active_relative_cap = max(30, min(180, int(active_max / 3)))
+        if phase4_max == 0:
+            return 0
+        phase4_max = min(phase4_max, active_relative_cap)
+
+    return phase4_max
 
 
 def normalize_budget_profile(value: Any) -> str:

@@ -22,9 +22,9 @@ from typing import Any
 
 from scanner_tools.common import is_in_scope_url, run
 try:
-    from constants import resolve_scan_budget
+    from constants import resolve_phase4_max_seconds, resolve_scan_budget
 except ImportError:
-    from scanner.constants import resolve_scan_budget
+    from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.har_discovery import (
     extract_discovery_from_har,
@@ -4535,12 +4535,29 @@ async def build_report(target: str,
     phase4_deadline = None
     if smart_mode:
         try:
-            phase4_max_seconds = int(os.environ.get("SCAN_PHASE4_MAX_SECONDS", "360"))
+            phase4_default_seconds = int(os.environ.get("SCAN_PHASE4_MAX_SECONDS", "360"))
         except Exception:
-            phase4_max_seconds = 360
-        phase4_max_seconds = max(30, phase4_max_seconds)
+            phase4_default_seconds = 360
+        phase4_max_seconds = resolve_phase4_max_seconds(
+            scan_budget,
+            smart_mode=smart_mode,
+            active_checks=active_checks and not public_only,
+            default_seconds=phase4_default_seconds,
+        )
+        phase4_max_seconds = 0 if phase4_max_seconds is None else phase4_max_seconds
         phase4_deadline = time.monotonic() + phase4_max_seconds
         print(f"[phase_4] Enforcing max duration {phase4_max_seconds}s for smart scan", file=sys.stderr, flush=True)
+        if active_checks and not public_only and phase4_max_seconds < phase4_default_seconds:
+            active_budget_for_log = scan_budget.get("active_max_seconds") if isinstance(scan_budget, dict) else None
+            print(
+                (
+                    "[phase_4] Active scan budget cap applied: "
+                    f"{phase4_default_seconds}s -> {phase4_max_seconds}s "
+                    f"(active_max_seconds={active_budget_for_log})"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
     phase4_trace = os.environ.get("SCAN_PHASE4_TRACE")
     phase4_logs_env = os.environ.get("SCAN_PHASE4_LOGS")
     if phase4_logs_env is None:
@@ -10278,6 +10295,7 @@ async def cli_main():
     ap.add_argument("--budget-api-probe-limit", type=int, dest="budget_api_probe_limit")
     ap.add_argument("--budget-param-discovery-url-limit", type=int, dest="budget_param_discovery_url_limit")
     ap.add_argument("--budget-param-discovery-max-params", type=int, dest="budget_param_discovery_max_params")
+    ap.add_argument("--budget-phase4-max-seconds", type=int, dest="budget_phase4_max_seconds")
     ap.add_argument("--budget-nuclei-max-targets", type=int, dest="budget_nuclei_max_targets")
     ap.add_argument("--budget-disable-nuclei-early-stop", action="store_true", dest="budget_disable_nuclei_early_stop")
     ap.add_argument("--budget-active-max-seconds", type=int, dest="budget_active_max_seconds")
@@ -11158,6 +11176,7 @@ async def cli_main():
             "api_probe_limit": getattr(args, "budget_api_probe_limit", None),
             "param_discovery_url_limit": getattr(args, "budget_param_discovery_url_limit", None),
             "param_discovery_max_params": getattr(args, "budget_param_discovery_max_params", None),
+            "phase4_max_seconds": getattr(args, "budget_phase4_max_seconds", None),
             "nuclei_max_targets": getattr(args, "budget_nuclei_max_targets", None),
             "active_max_seconds": getattr(args, "budget_active_max_seconds", None),
             "active_max_endpoints": getattr(args, "budget_active_max_endpoints", None),

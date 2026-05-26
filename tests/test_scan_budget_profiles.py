@@ -1,4 +1,4 @@
-from scanner.constants import resolve_scan_budget
+from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
 
 
 def test_resolve_scan_budget_applies_profile_defaults():
@@ -41,6 +41,38 @@ def test_resolve_scan_budget_accepts_parameter_discovery_overrides():
 
     assert budget["param_discovery_url_limit"] == 4
     assert budget["param_discovery_max_params"] == 6
+
+
+def test_resolve_scan_budget_accepts_phase4_override():
+    budget = resolve_scan_budget("smart", "balanced", {"phase4_max_seconds": 45})
+
+    assert budget["phase4_max_seconds"] == 45
+
+
+def test_phase4_budget_is_capped_for_active_smart_scans():
+    budget = {"active_max_seconds": 180}
+
+    phase4_max = resolve_phase4_max_seconds(
+        budget,
+        smart_mode=True,
+        active_checks=True,
+        default_seconds=360,
+    )
+
+    assert phase4_max == 60
+
+
+def test_phase4_budget_uses_explicit_lower_override():
+    budget = {"active_max_seconds": 180, "phase4_max_seconds": 30}
+
+    phase4_max = resolve_phase4_max_seconds(
+        budget,
+        smart_mode=True,
+        active_checks=True,
+        default_seconds=360,
+    )
+
+    assert phase4_max == 30
 
 
 def test_custom_budget_cannot_disable_watchdog_timeout():
