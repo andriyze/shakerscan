@@ -3199,7 +3199,7 @@ async def build_report(target: str,
         "max_pages": int(scan_budget.get("browser_max_pages") if scan_budget.get("browser_max_pages") is not None else crawl_limits["max_pages"]),
         "max_depth": int(scan_budget.get("browser_max_depth") if scan_budget.get("browser_max_depth") is not None else crawl_limits["max_depth"]),
     }
-    enable_browser_crawl = smart_mode or complete_mode or bool(auth_session)
+    enable_browser_crawl = (smart_mode or complete_mode or bool(auth_session)) and not focused_manual_active_scope
 
     # For smart mode: Quick JS route discovery to seed browser crawl
     # This helps SPAs by finding routes before the browser crawl starts
@@ -3334,7 +3334,7 @@ async def build_report(target: str,
     browser_task= asyncio.create_task(browser_fetch(
         base_url,
         "/tmp",
-        no_browser,
+        no_browser or focused_manual_active_scope,
         auth_session=auth_session,
         crawl=enable_browser_crawl,
         max_pages=crawl_limits["max_pages"],
