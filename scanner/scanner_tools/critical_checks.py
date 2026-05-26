@@ -215,6 +215,101 @@ def _looks_like_spa_shell(body: str) -> bool:
     return any(ind.lower() in body_lower for ind in SPA_FRAMEWORK_INDICATORS)
 
 
+def _response_content_kind(headers: str, body: str) -> str:
+    content_type = _get_header_value(headers, "content-type").lower()
+    body_stripped = (body or "").lstrip()
+    if "application/json" in content_type or _looks_like_json(body):
+        return "json"
+    if "text/html" in content_type or body_stripped.startswith(("<!doctype", "<html")):
+        return "html"
+    if not (body or "").strip():
+        return "empty"
+    if "text/plain" in content_type:
+        return "text"
+    return "other"
+
+
+def _json_shape(body: str) -> tuple[str, tuple[str, ...]]:
+    try:
+        data = json.loads(_strip_xssi_prefix(body or ""))
+    except Exception:
+        return ("invalid", ())
+    if isinstance(data, dict):
+        return ("object", tuple(sorted(str(key).lower() for key in data.keys())))
+    if isinstance(data, list):
+        if not data:
+            return ("array_empty", ())
+        sample = data[0]
+        if isinstance(sample, dict):
+            return ("array_object", tuple(sorted(str(key).lower() for key in sample.keys())))
+        return ("array_scalar", (type(sample).__name__,))
+    return (type(data).__name__, ())
+
+
+def _http_response_shape(status_code: int | None, headers: str, body: str) -> dict[str, Any]:
+    body_text = body or ""
+    kind = _response_content_kind(headers, body_text)
+    shape: dict[str, Any] = {
+        "status_code": status_code,
+        "status_family": status_code // 100 if status_code is not None else None,
+        "content_kind": kind,
+        "body_length": len(body_text.strip()),
+        "has_location": bool(_get_header_value(headers, "location")),
+    }
+    if kind == "json":
+        json_kind, json_keys = _json_shape(body_text)
+        shape["json_kind"] = json_kind
+        shape["json_keys"] = json_keys
+    return shape
+
+
+def _processed_probe_status(status_code: int | None) -> bool:
+    return status_code is not None and 100 <= status_code < 500 and status_code not in {404, 405, 410}
+
+
+def _response_shape_confirmation_reason(
+    first_status: int | None,
+    first_headers: str,
+    first_body: str,
+    second_status: int | None,
+    second_headers: str,
+    second_body: str,
+) -> str | None:
+    if not (_processed_probe_status(first_status) and _processed_probe_status(second_status)):
+        return None
+
+    first_shape = _http_response_shape(first_status, first_headers, first_body)
+    second_shape = _http_response_shape(second_status, second_headers, second_body)
+
+    if first_shape["content_kind"] == "html" or second_shape["content_kind"] == "html":
+        if _looks_like_spa_shell(first_body) or _looks_like_spa_shell(second_body):
+            return None
+
+    if first_shape["status_code"] != second_shape["status_code"]:
+        return "response_shape_status_diff"
+
+    if first_shape["content_kind"] != second_shape["content_kind"]:
+        return "response_shape_content_diff"
+
+    if first_shape["has_location"] != second_shape["has_location"]:
+        return "response_shape_redirect_diff"
+
+    if first_shape["content_kind"] == "json":
+        if first_shape.get("json_kind") != second_shape.get("json_kind"):
+            return "response_shape_json_type_diff"
+        if first_shape.get("json_keys") != second_shape.get("json_keys"):
+            return "response_shape_json_keys_diff"
+
+    first_len = first_shape["body_length"]
+    second_len = second_shape["body_length"]
+    length_delta = abs(first_len - second_len)
+    larger_len = max(first_len, second_len, 1)
+    if first_shape["content_kind"] != "html" and length_delta >= 80 and length_delta / larger_len >= 0.30:
+        return "response_shape_body_size_diff"
+
+    return None
+
+
 def _is_valid_json_auth_success(resp: AuthResponse) -> tuple[bool, str]:
     """
     Validate JSON authentication response.
@@ -1429,7 +1524,8 @@ async def test_rate_limiting(
 
     auth_path_markers = {
         "login", "signin", "sign-in", "authenticate", "auth", "token", "session",
-        "register", "signup", "password-reset", "forgot-password", "2fa", "mfa", "otp",
+        "signon", "sign-on", "register", "signup", "password-reset", "forgot-password",
+        "2fa", "mfa", "otp",
     }
     auth_response_markers = {
         "invalid", "unauthorized", "unauthorised", "bad credentials", "credential",
@@ -1507,6 +1603,52 @@ async def test_rate_limiting(
             return True, "auth_marker"
         return False, "not_auth_like"
 
+    async def _probe_auth_attempt(endpoint: str, payload: str) -> tuple[int | None, str, str] | None:
+        out, err, rc = await run([
+            "curl", "-sS", "-k", "--max-time", "3",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+            "-i",
+            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+        ] + auth_args + [endpoint], timeout=5)
+        if rc != 0 or not out:
+            return None
+        body_part, http_code = _parse_http_meta(out)
+        response_headers, response_body = _split_headers_body(body_part or "")
+        return http_code, response_headers, response_body
+
+    async def _confirm_auth_by_shape(
+        endpoint: str,
+        first_code: int | None,
+        first_headers: str,
+        first_body: str,
+    ) -> tuple[bool, str]:
+        if not _auth_path_likely(endpoint) or not _processed_probe_status(first_code):
+            return False, "shape_not_eligible"
+        first_kind = _response_content_kind(first_headers, first_body)
+        if first_kind == "html":
+            return False, "shape_html_not_eligible"
+        second = await _probe_auth_attempt(
+            endpoint,
+            '{"username":"shakerscan-shape-probe","password":"different-invalid-secret"}',
+        )
+        results["total_requests_sent"] += 1
+        if second is None:
+            return False, "shape_probe_failed"
+        second_code, second_headers, second_body = second
+        shape_reason = _response_shape_confirmation_reason(
+            first_code,
+            first_headers,
+            first_body,
+            second_code,
+            second_headers,
+            second_body,
+        )
+        if shape_reason:
+            return True, shape_reason
+        return False, "shape_no_diff"
+
     # Auto-detect sensitive endpoints if not provided
     if not sensitive_endpoints:
         sensitive_endpoints = [
@@ -1538,19 +1680,12 @@ async def test_rate_limiting(
         # reliable here because many real auth APIs reject HEAD while accepting POST.
         start_time = time.time()
         request_start = time.time()
-        out, err, rc = await run([
-            "curl", "-sS", "-k", "--max-time", "3",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", '{"username":"test","password":"test"}',
-            "-i",
-            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
-        ] + auth_args + [endpoint], timeout=5)
+        initial_probe = await _probe_auth_attempt(endpoint, '{"username":"test","password":"test"}')
         request_end = time.time()
         response_times.append(request_end - request_start)
         results["total_requests_sent"] += 1
 
-        if rc != 0 or not out:
+        if initial_probe is None:
             results["evidence"].append({
                 "endpoint": endpoint,
                 "status": "skipped",
@@ -1558,16 +1693,20 @@ async def test_rate_limiting(
             })
             continue
 
-        body_part, first_code = _parse_http_meta(out)
-        headers, body = _split_headers_body(body_part or "")
+        first_code, headers, body = initial_probe
         confirmed, reason = _auth_probe_confirmed(endpoint, first_code, headers, body)
         if not confirmed:
-            results["evidence"].append({
-                "endpoint": endpoint,
-                "status": "skipped",
-                "message": f"Auth endpoint not confirmed ({reason})"
-            })
-            continue
+            shape_confirmed, shape_reason = await _confirm_auth_by_shape(endpoint, first_code, headers, body)
+            if shape_confirmed:
+                confirmed = True
+                reason = shape_reason
+            else:
+                results["evidence"].append({
+                    "endpoint": endpoint,
+                    "status": "skipped",
+                    "message": f"Auth endpoint not confirmed ({reason})"
+                })
+                continue
 
         if first_code is not None:
             response_codes.append(first_code)
@@ -1633,6 +1772,7 @@ async def test_rate_limiting(
                     "total_time_seconds": total_time,
                     "rate_limit_detected": False,
                     "rate_limit_header_observed": limit_header_observed,
+                    "endpoint_confirmation_reason": reason,
                 })
                 results["evidence"].append({
                     "endpoint": endpoint,
@@ -1891,6 +2031,13 @@ async def test_2fa_bypass(
         urljoin(url, "/verify-otp"),
     ]
 
+    def _twofa_path_likely(endpoint: str) -> bool:
+        path = urllib.parse.urlparse(endpoint).path.lower()
+        return any(
+            marker in path
+            for marker in ("2fa", "mfa", "otp", "totp", "two-factor", "twofactor", "verify")
+        )
+
     def _is_confirmed_twofa_verify_endpoint(
         status_code: int | None,
         headers: str,
@@ -1934,21 +2081,59 @@ async def test_2fa_bypass(
             return True, "2fa_marker"
         return False, "not_2fa_like"
 
+    async def _probe_twofa_attempt(verify_endpoint: str, payload: str) -> tuple[int | None, str, str] | None:
+        out, err, rc = await run([
+            "curl", "-sS", "-k", "--max-time", "3",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+            "-i",
+            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+        ] + auth_args + [verify_endpoint], timeout=5)
+        if rc != 0 or not out:
+            return None
+        body_part, http_code = _parse_http_meta(out)
+        response_headers, response_body = _split_headers_body(body_part or "")
+        return http_code, response_headers, response_body
+
+    async def _confirm_twofa_by_shape(
+        verify_endpoint: str,
+        first_code: int | None,
+        first_headers: str,
+        first_body: str,
+    ) -> tuple[bool, str]:
+        if not _twofa_path_likely(verify_endpoint) or not _processed_probe_status(first_code):
+            return False, "shape_not_eligible"
+        first_kind = _response_content_kind(first_headers, first_body)
+        if first_kind == "html":
+            return False, "shape_html_not_eligible"
+        second = await _probe_twofa_attempt(
+            verify_endpoint,
+            '{"otp":"654321","challenge":"shakerscan-shape-probe"}',
+        )
+        if second is None:
+            return False, "shape_probe_failed"
+        second_code, second_headers, second_body = second
+        shape_reason = _response_shape_confirmation_reason(
+            first_code,
+            first_headers,
+            first_body,
+            second_code,
+            second_headers,
+            second_body,
+        )
+        if shape_reason:
+            return True, shape_reason
+        return False, "shape_no_diff"
+
     for verify_endpoint in twofa_verify_endpoints[:2]:  # Test first 2
         # First POST validates that the endpoint actually handles OTP attempts.
         # HEAD is unreliable for APIs and caused 405/OPTIONS-only routes to be
         # misclassified as unthrottled OTP verification endpoints.
         response_codes = []
-        out, err, rc = await run([
-            "curl", "-sS", "-k", "--max-time", "3",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", '{"otp":"123456"}',
-            "-i",
-            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
-        ] + auth_args + [verify_endpoint], timeout=5)
+        initial_probe = await _probe_twofa_attempt(verify_endpoint, '{"otp":"123456"}')
 
-        if rc != 0 or not out:
+        if initial_probe is None:
             results["evidence"].append({
                 "method": "2fa_rate_limit_check",
                 "endpoint": verify_endpoint,
@@ -1957,17 +2142,26 @@ async def test_2fa_bypass(
             })
             continue
 
-        body_part, first_code = _parse_http_meta(out)
-        headers, body = _split_headers_body(body_part or "")
+        first_code, headers, body = initial_probe
         confirmed, reason = _is_confirmed_twofa_verify_endpoint(first_code, headers, body)
         if not confirmed:
-            results["evidence"].append({
-                "method": "2fa_rate_limit_check",
-                "endpoint": verify_endpoint,
-                "status": "skipped",
-                "message": f"2FA verification endpoint not confirmed ({reason})"
-            })
-            continue
+            shape_confirmed, shape_reason = await _confirm_twofa_by_shape(
+                verify_endpoint,
+                first_code,
+                headers,
+                body,
+            )
+            if shape_confirmed:
+                confirmed = True
+                reason = shape_reason
+            else:
+                results["evidence"].append({
+                    "method": "2fa_rate_limit_check",
+                    "endpoint": verify_endpoint,
+                    "status": "skipped",
+                    "message": f"2FA verification endpoint not confirmed ({reason})"
+                })
+                continue
 
         if first_code is not None:
             response_codes.append(first_code)
@@ -2006,6 +2200,7 @@ async def test_2fa_bypass(
                     "endpoint": verify_endpoint,
                     "requests_sent": len(response_codes),
                     "requests_processed": requests_processed,
+                    "endpoint_confirmation_reason": reason,
                     "description": "No rate limiting on 2FA verification - brute force possible"
                 })
                 results["evidence"].append({
