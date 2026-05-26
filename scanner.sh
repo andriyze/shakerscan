@@ -133,6 +133,22 @@ compose_up() {
     fi
 }
 
+pull_prebuilt_images() {
+    if [ "$USE_PREBUILT" -ne 1 ]; then
+        return 0
+    fi
+
+    if ! is_truthy "${SHAKERSCAN_PULL_IMAGES:-1}"; then
+        echo "Skipping prebuilt image pull because SHAKERSCAN_PULL_IMAGES=0"
+        return 0
+    fi
+
+    echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
+    if ! compose pull api worker ui; then
+        echo -e "${YELLOW}Warning: could not pull prebuilt images; continuing with local cache if available.${NC}"
+    fi
+}
+
 compose_run() {
     compose run "$@"
 }
@@ -1166,6 +1182,7 @@ print_help() {
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --confirm-active   Confirm authorization for scan-full or scan-smart"
     echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
+    echo "  SHAKERSCAN_PULL_IMAGES=0 skips Docker Hub pulls in prebuilt mode"
     echo ""
     echo "Auto-install support:"
     echo "  macOS; Linux with apt, dnf/yum, pacman, zypper, or apk"
@@ -1201,6 +1218,7 @@ start_services() {
         echo "Mode: prebuilt images"
         echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
         echo "  ui:      ${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
+        pull_prebuilt_images
     else
         echo "Mode: local build"
     fi
