@@ -3568,10 +3568,10 @@ async def build_report(target: str,
     emit_progress("baseline", 20, "dns/tls/http complete")
 
     # Virtual host enumeration (post-DNS, safe)
-    if not public_only and dns.get("A"):
+    if not public_only and dns.get("A") and not focused_manual_active_scope:
         vhost_task = asyncio.create_task(enumerate_virtual_hosts(base_url, host, dns.get("A")))
     else:
-        async def dummy_vhost(): return {"hosts_tested": 0, "potential_vhosts": [], "baseline": {}}
+        async def dummy_vhost(): return {"hosts_tested": 0, "potential_vhosts": [], "baseline": {}, "skipped": bool(focused_manual_active_scope), "reason": "focused_manual_active_scope" if focused_manual_active_scope else None}
         vhost_task = asyncio.create_task(dummy_vhost())
 
     httpx_meta = await httpx_task
