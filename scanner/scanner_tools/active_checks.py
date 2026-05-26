@@ -5559,6 +5559,7 @@ async def smart_sqli_test(
                     status_code=status_code,
                     baseline_status=baseline_status,
                     baseline_elapsed=baseline_elapsed,
+                    baseline_body=baseline_body,
                 )
 
                 if is_vulnerable:
@@ -6180,19 +6181,28 @@ def _check_sqli_response(
             if size_diff is not None and size_diff > 0.5:
                 strong_signal = True
 
-    # 7. Data extraction indicators
+    # 7. Data extraction indicators. Reflected payload tokens like @@version
+    # are not proof; only DB/banner/schema output counts here.
     if "schema" in technique or "version" in technique or "user" in technique or "database" in technique:
-        extraction_patterns = [
-            r"sqlite_version\(\)",
-            r"@@version",
-            r"CREATE TABLE",
-            r"information_schema",
-            r"sqlite_master",
-            r"pg_catalog",
-            r"sys\.tables",
-        ]
+        extraction_patterns: list[str] = []
+        if "version" in technique:
+            extraction_patterns.extend([
+                r"\b(?:MySQL|MariaDB)\s+\d+(?:\.\d+)+",
+                r"\bPostgreSQL\s+\d+(?:\.\d+)+",
+                r"\bMicrosoft SQL Server\b[^\n]{0,80}\d{4}",
+                r"\bSQLite\s+\d+(?:\.\d+)+",
+                r"\bOracle Database\b[^\n]{0,80}\d+(?:c|g)?\b",
+            ])
+        if "schema" in technique:
+            extraction_patterns.extend([
+                r"\bCREATE\s+TABLE\b",
+                r"\binformation_schema\b",
+                r"\bsqlite_master\b",
+                r"\bpg_catalog\b",
+                r"\bsys\.tables\b",
+            ])
         for pattern in extraction_patterns:
-            if re.search(pattern, out or "", re.I):
+            if re.search(pattern, out or "", re.I) and not re.search(pattern, baseline_body or "", re.I):
                 strong_signal = True
                 evidence.append(f"Data extraction indicator: {pattern}")
                 break
