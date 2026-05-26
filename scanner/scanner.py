@@ -5352,7 +5352,9 @@ async def build_report(target: str,
             if any(m in path_l for m in ["database.yml", "database.yaml", "db.yml", "db.yaml"]):
                 verify_cmds.append(f"curl -sL {shlex.quote(url)} | grep -Ei '(^|[:\"'\\s])(password|username|adapter|database)[:=]' -m1")
 
-            title = f"Exposed file: {path_raw} (confidence: {confidence})"
+            duplicate_count = int(file_info.get("duplicate_count") or 0)
+            duplicate_suffix = f" (+{duplicate_count} duplicate paths)" if duplicate_count else ""
+            title = f"Exposed file: {path_raw}{duplicate_suffix} (confidence: {confidence})"
             evidence = {
                 "path": path_raw,
                 "url": url,
@@ -5364,6 +5366,8 @@ async def build_report(target: str,
                 "preview_hash16": file_info.get("preview_hash16"),
                 "has_html": file_info.get("has_html"),
                 "subentries": file_info.get("subentries"),
+                "duplicate_count": duplicate_count,
+                "duplicate_paths": file_info.get("duplicate_paths"),
                 "verify_commands": verify_cmds,
                 "remediation": remediation,
             }

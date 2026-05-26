@@ -28,6 +28,47 @@ def test_public_discovery_files_with_sensitive_file_references_are_kept():
     assert active_checks._is_public_discovery_noise("robots.txt", robots, markers) is False
 
 
+def test_duplicate_exposed_file_bodies_are_collapsed():
+    entries = [
+        {
+            "path": ".env.local",
+            "url": "https://example.test/.env.local",
+            "confidence": "medium",
+            "markers": ["dotenv_format", "credential_like"],
+            "preview_hash16": "same-secret-hash",
+            "preview_first_line": "DATABASE_URL=postgres://example",
+            "content_type": "text/plain",
+        },
+        {
+            "path": ".env",
+            "url": "https://example.test/.env",
+            "confidence": "high",
+            "markers": ["credential_like", "dotenv_format"],
+            "preview_hash16": "same-secret-hash",
+            "preview_first_line": "DATABASE_URL=postgres://example",
+            "content_type": "text/plain",
+        },
+        {
+            "path": "database.yml",
+            "url": "https://example.test/database.yml",
+            "confidence": "high",
+            "markers": ["credential_like"],
+            "preview_hash16": "other-secret-hash",
+            "preview_first_line": "production:",
+            "content_type": "text/plain",
+        },
+    ]
+
+    collapsed = active_checks._collapse_duplicate_exposed_file_entries(entries)
+
+    assert len(collapsed) == 2
+    env_entry = next(entry for entry in collapsed if entry["preview_hash16"] == "same-secret-hash")
+    assert env_entry["path"] == ".env"
+    assert env_entry["duplicate_count"] == 1
+    assert env_entry["duplicate_paths"] == [".env.local"]
+    assert len(env_entry["subentries"]) == 2
+
+
 def test_smart_sqli_respects_time_budget_before_probe(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("curl should not run after the SQLi time budget is exhausted")

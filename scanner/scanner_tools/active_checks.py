@@ -1449,6 +1449,53 @@ async def check_subdomain_takeover(host: str) -> dict[str, Any]:
     return results
 
 
+def _collapse_duplicate_exposed_file_entries(exposed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse identical exposed-file bodies into one finding with alternate paths."""
+    groups: dict[tuple[str, tuple[str, ...]], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+
+    for entry in exposed:
+        fingerprint = entry.get("preview_hash16")
+        if not fingerprint or entry.get("group"):
+            passthrough.append(entry)
+            continue
+        markers = tuple(sorted(str(marker) for marker in (entry.get("markers") or []) if marker))
+        groups.setdefault((str(fingerprint), markers), []).append(entry)
+
+    confidence_rank = {"high": 0, "medium": 1, "low": 2}
+
+    def entry_sort_key(entry: dict[str, Any]) -> tuple[int, int, str]:
+        path = str(entry.get("path") or "")
+        confidence = str(entry.get("confidence") or "low").lower()
+        return (confidence_rank.get(confidence, 3), len(path), path)
+
+    collapsed: list[dict[str, Any]] = []
+    for entries in groups.values():
+        if len(entries) == 1:
+            collapsed.append(entries[0])
+            continue
+
+        ordered = sorted(entries, key=entry_sort_key)
+        representative = dict(ordered[0])
+        representative["duplicate_count"] = len(ordered) - 1
+        representative["duplicate_paths"] = [entry.get("path") for entry in ordered[1:] if entry.get("path")]
+        representative["subentries"] = [
+            {
+                "path": entry.get("path"),
+                "url": entry.get("url"),
+                "content_type": entry.get("content_type"),
+                "confidence": entry.get("confidence"),
+                "preview_hash16": entry.get("preview_hash16"),
+                "preview_first_line": entry.get("preview_first_line"),
+                "has_html": entry.get("has_html"),
+            }
+            for entry in ordered
+        ]
+        collapsed.append(representative)
+
+    return collapsed + passthrough
+
+
 async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[str, Any]:
     import hashlib
     exposed: list[dict[str, Any]] = []
@@ -1750,6 +1797,8 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             "preview_hash16": None,
             "has_html": any(ge.get("has_html") for ge in git_entries),
         })
+
+    exposed = _collapse_duplicate_exposed_file_entries(exposed)
 
     return {"exposed_files": exposed[:20]}
 
