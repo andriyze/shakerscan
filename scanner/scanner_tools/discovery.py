@@ -2019,6 +2019,7 @@ async def check_cors(url: str) -> dict[str, Any]:
         "vulnerable": False,
         "issues": [],
         "weak_issues": [],
+        "reportable_weak_issues": [],
         "evidence": [],
         "url": url,
     }
@@ -2045,7 +2046,16 @@ async def check_cors(url: str) -> dict[str, Any]:
                 else:
                     results["issues"].append(f"Reflects arbitrary Origin with credentials: {origin}")
             elif acao == origin:
-                results["weak_issues"].append(f"Reflects Origin without credentials: {origin}")
+                issue = f"Reflects Origin without credentials: {origin}"
+                results["weak_issues"].append(issue)
+                results["reportable_weak_issues"].append({
+                    "issue": issue,
+                    "origin": origin,
+                    "evidence_type": "origin_reflection_without_credentials",
+                    "access-control-allow-origin": acao,
+                    "access-control-allow-credentials": acac,
+                    "browser_credentials_read": False,
+                })
             elif acao == "*":
                 if acac == "true":
                     results["weak_issues"].append("Wildcard CORS with credentials is browser-blocked")
@@ -2056,6 +2066,16 @@ async def check_cors(url: str) -> dict[str, Any]:
         results["issues"] = sorted(list(set(results["issues"])))
     if results["weak_issues"]:
         results["weak_issues"] = sorted(list(set(results["weak_issues"])))
+    if results["reportable_weak_issues"]:
+        seen_weak = set()
+        deduped_weak = []
+        for item in results["reportable_weak_issues"]:
+            key = (item.get("issue"), item.get("origin"))
+            if key in seen_weak:
+                continue
+            seen_weak.add(key)
+            deduped_weak.append(item)
+        results["reportable_weak_issues"] = sorted(deduped_weak, key=lambda item: item.get("issue", ""))
     return results
 
 

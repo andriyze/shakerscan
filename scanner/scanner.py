@@ -5536,6 +5536,34 @@ async def build_report(target: str,
                     "access-control-allow-credentials": cors_results.get("access-control-allow-credentials"),
                 }, "CWE-942"
             ))
+    cors_reportable_weak = cors_results.get("reportable_weak_issues") or []
+    if cors_reportable_weak:
+        weak_items = [
+            item for item in cors_reportable_weak
+            if isinstance(item, dict) and item.get("evidence_type") == "origin_reflection_without_credentials"
+        ]
+        if weak_items:
+            first_weak = weak_items[0]
+            title = "CORS origin reflection without credentials"
+            if len(weak_items) > 1:
+                title = f"{title} (+{len(weak_items) - 1} more)"
+            report["findings"].append(normalize_finding(
+                "cors_check", title, "info",
+                {
+                    "url": base_url,
+                    "issues": [item.get("issue") for item in weak_items if item.get("issue")],
+                    "occurrences": len(weak_items),
+                    "details": cors_results,
+                    "evidence_type": "origin_reflection_without_credentials",
+                    "access-control-allow-origin": first_weak.get("access-control-allow-origin"),
+                    "access-control-allow-credentials": first_weak.get("access-control-allow-credentials"),
+                    "browser_credentials_read": False,
+                    "analyst_note": (
+                        "Origin reflection without Access-Control-Allow-Credentials is not a proven "
+                        "credentialed browser read; review response sensitivity before escalating."
+                    ),
+                }, "CWE-942"
+            ))
 
     if takeover_results.get("vulnerable"):
         for issue in takeover_results.get("issues", []):

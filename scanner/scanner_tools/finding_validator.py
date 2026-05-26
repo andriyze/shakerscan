@@ -1272,6 +1272,14 @@ def validate_cors(
         acac = acac or response_headers.get("access-control-allow-credentials", "")
 
     # Check for dangerous CORS configurations
+    if evidence.get("evidence_type") == "origin_reflection_without_credentials":
+        return ValidationResult(
+            verified=False,
+            confidence=0.45,
+            evidence="Origin reflection without Access-Control-Allow-Credentials",
+            reason="Origin reflection is present but browsers cannot perform credentialed reads without ACAC:true",
+            downgrade_to="info",
+        )
 
     # 1. Wildcard with credentials is invalid for browser credentialed reads.
     # Browsers reject ACAO:* when ACAC:true, so treat it as hardening noise

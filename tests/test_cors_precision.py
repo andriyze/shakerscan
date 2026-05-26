@@ -37,11 +37,45 @@ def test_cors_reflection_with_credentials_is_reported(monkeypatch):
     assert "Allows null Origin with credentials" in result["issues"]
 
 
+def test_cors_reflection_without_credentials_is_reportable_info(monkeypatch):
+    async def fake_run(cmd, timeout=30):
+        origin = next(value.split(":", 1)[1].strip() for value in cmd if value.startswith("Origin:"))
+        return (
+            "HTTP/1.1 200 OK\n"
+            f"Access-Control-Allow-Origin: {origin}\n\n",
+            "",
+            0,
+        )
+
+    monkeypatch.setattr(discovery, "run", fake_run)
+
+    result = asyncio.run(discovery.check_cors("https://example.test"))
+
+    assert result["vulnerable"] is False
+    assert "Reflects Origin without credentials: https://evil.com" in result["weak_issues"]
+    assert result["reportable_weak_issues"][0]["evidence_type"] == "origin_reflection_without_credentials"
+    assert result["reportable_weak_issues"][0]["browser_credentials_read"] is False
+
+
 def test_cors_validator_does_not_verify_browser_blocked_wildcard_credentials():
     result = validate_cors({
         "evidence": {
             "access-control-allow-origin": "*",
             "access-control-allow-credentials": "true",
+        }
+    })
+
+    assert result.verified is False
+    assert result.downgrade_to == "info"
+    assert result.confidence < 0.5
+
+
+def test_cors_validator_downgrades_origin_reflection_without_credentials():
+    result = validate_cors({
+        "evidence": {
+            "evidence_type": "origin_reflection_without_credentials",
+            "access-control-allow-origin": "https://evil.com",
+            "access-control-allow-credentials": "",
         }
     })
 

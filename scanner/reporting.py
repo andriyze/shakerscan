@@ -385,6 +385,27 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             },
             "CWE-942"
         ))
+    cors_reportable_weak = [
+        item for item in (cors.get("reportable_weak_issues") or [])
+        if isinstance(item, dict) and item.get("evidence_type") == "origin_reflection_without_credentials"
+    ]
+    if cors_reportable_weak:
+        first_weak = cors_reportable_weak[0]
+        report["findings"].append(normalize_finding(
+            "cors_scanner",
+            "CORS origin reflection without credentials",
+            "info",
+            {
+                "url": base_url,
+                "issues": [item.get("issue") for item in cors_reportable_weak if item.get("issue")],
+                "evidence_type": "origin_reflection_without_credentials",
+                "access-control-allow-origin": first_weak.get("access-control-allow-origin"),
+                "access-control-allow-credentials": first_weak.get("access-control-allow-credentials"),
+                "browser_credentials_read": False,
+                "reproduction": _reproCurlCors(base_url),
+            },
+            "CWE-942"
+        ))
 
     # ---- Security.txt ----
     sec_txt = (http.get("security_txt") or {})
