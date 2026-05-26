@@ -7640,6 +7640,17 @@ async def build_report(target: str,
                     return (-param_score, -path_score, -post_bonus, source_priority, url_s)
 
                 endpoints = sorted(endpoints, key=_endpoint_priority)
+                active_endpoint_budget = int(scan_budget.get("active_max_endpoints") or max_active or 0)
+                if active_endpoint_budget and len(endpoints) > active_endpoint_budget:
+                    before_active_endpoints = len(endpoints)
+                    endpoints = endpoints[:active_endpoint_budget]
+                    print(
+                        (
+                            "[scanner] Active endpoint budget cap: "
+                            f"{before_active_endpoints} -> {len(endpoints)}"
+                        ),
+                        file=sys.stderr,
+                    )
 
                 # Log prioritization stats
                 source_counts = {}

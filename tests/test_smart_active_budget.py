@@ -248,3 +248,58 @@ def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
     assert result["budget"]["active_sqli_max_seconds"] == 70
     assert result["budget"]["active_xss_reserved_seconds"] == 30
     assert result["xss"]["endpoints_tested"] == 1
+
+
+def test_thorough_params_honors_explicit_active_caps(monkeypatch):
+    captures = {}
+
+    async def fake_sqli(*args, **kwargs):
+        captures["sqli_max_endpoints"] = kwargs["max_endpoints"]
+        captures["sqli_max_params"] = kwargs["max_params_per_endpoint"]
+        return {
+            "findings": [],
+            "dbms_detected": None,
+            "vulnerabilities_found": 0,
+            "get_endpoints_tested": 0,
+            "post_endpoints_tested": 0,
+            "endpoints_tested": 0,
+            "params_tested": 0,
+        }
+
+    async def fake_xss(*args, **kwargs):
+        captures["xss_max_endpoints"] = kwargs["max_endpoints"]
+        captures["xss_max_params"] = kwargs["max_params_per_endpoint"]
+        return {
+            "findings": [],
+            "reflections_found": 0,
+            "vulnerabilities_found": 0,
+            "endpoints_tested": 0,
+            "params_tested": 0,
+        }
+
+    async def fake_hash_route_dom_xss(*args, **kwargs):
+        return {
+            "findings": [],
+            "endpoints_tested": 0,
+            "params_tested": 0,
+            "vulnerabilities_found": 0,
+        }
+
+    monkeypatch.setattr(active_checks, "smart_sqli_test", fake_sqli)
+    monkeypatch.setattr(active_checks, "smart_xss_test", fake_xss)
+    monkeypatch.setattr(active_checks, "hash_route_dom_xss_test", fake_hash_route_dom_xss)
+
+    asyncio.run(
+        active_checks.run_smart_active_tests(
+            "https://example.test",
+            [{"url": f"https://example.test/api/{i}", "method": "GET", "params": ["id"]} for i in range(10)],
+            thorough_params=True,
+            active_max_endpoints=2,
+            active_params_per_endpoint=3,
+        )
+    )
+
+    assert captures["sqli_max_endpoints"] == 2
+    assert captures["sqli_max_params"] == 3
+    assert captures["xss_max_endpoints"] == 2
+    assert captures["xss_max_params"] == 3

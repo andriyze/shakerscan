@@ -7356,7 +7356,6 @@ async def run_smart_active_tests(
         xss_max_params = 10
         default_active_max_seconds = 1200.0
         default_max_findings_per_family = None
-        print(f"[active] Thorough mode: testing up to {sqli_max_endpoints} endpoints x {sqli_max_params} params", file=sys.stderr)
     else:
         sqli_max_endpoints = 35
         sqli_max_params = 5
@@ -7379,6 +7378,16 @@ async def run_smart_active_tests(
         max_findings_per_family = default_max_findings_per_family
     elif max_findings_per_family is not None:
         max_findings_per_family = max(0, int(max_findings_per_family))
+
+    if thorough_params:
+        print(
+            (
+                "[active] Thorough parameter mode enabled; effective budget "
+                f"SQLi {sqli_max_endpoints} endpoints x {sqli_max_params} params, "
+                f"XSS {xss_max_endpoints} endpoints x {xss_max_params} params"
+            ),
+            file=sys.stderr,
+        )
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
     _emit_scan_progress("active", 58, f"starting smart active tests on {len(endpoints)} endpoints")
