@@ -1952,6 +1952,69 @@ async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dic
     return results
 
 
+WAF_BLOCK_STATUS_CODES = {"403", "406", "409", "418", "419", "429", "451", "503"}
+WAF_BLOCK_BODY_SIGNATURES = (
+    "access denied",
+    "request denied",
+    "request blocked",
+    "blocked by",
+    "blocked request",
+    "web application firewall",
+    "waf",
+    "security rule",
+    "security policy",
+    "firewall rule",
+    "attack detected",
+    "malicious request",
+    "suspicious request",
+    "mod_security",
+    "modsecurity",
+    "not acceptable",
+)
+
+
+def _append_query_param(url: str, key: str, value: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query.append((key, value))
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urllib.parse.urlencode(query),
+        parsed.fragment,
+    ))
+
+
+def _split_curl_body_status(output: str) -> tuple[str, str]:
+    body, separator, status_code = output.rpartition("\n")
+    if not separator:
+        return output, ""
+    return body, status_code.strip()
+
+
+def _normalize_block_body(body: str) -> str:
+    return re.sub(r"\s+", " ", body.lower()).strip()
+
+
+def _contains_payload_block_signature(response_body: str, baseline_body: str) -> str | None:
+    response_text = _normalize_block_body(response_body)
+    baseline_text = _normalize_block_body(baseline_body)
+
+    for signature in WAF_BLOCK_BODY_SIGNATURES:
+        if signature == "waf":
+            response_match = re.search(r"\bwaf\b", response_text)
+            baseline_match = re.search(r"\bwaf\b", baseline_text)
+            if response_match and not baseline_match:
+                return signature
+            continue
+
+        if signature in response_text and signature not in baseline_text:
+            return signature
+
+    return None
+
+
 async def detect_waf(url: str, headers: dict[str, list[str]]) -> dict[str, Any]:
     results: dict[str, Any] = {"waf_detected": False, "waf_products": [], "confidence": "none", "bypass_techniques": []}
     waf_signatures = {
@@ -1984,29 +2047,35 @@ async def detect_waf(url: str, headers: dict[str, list[str]]) -> dict[str, Any]:
         ("Path Traversal", "../../../etc/passwd"),
         ("RCE", "<?php system('id'); ?>")
     ]
+    baseline_body = ""
+    baseline_status = ""
+    baseline_out, _, baseline_rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "5", "-w", "\n%{http_code}", url], timeout=10)
+    if baseline_rc == 0:
+        baseline_body, baseline_status = _split_curl_body_status(baseline_out)
+
     blocked_responses = 0
     blocked_details = []
     for payload_type, payload in waf_test_payloads:
-        test_url = f"{url}?test={urllib.parse.quote(payload)}"
+        test_url = _append_query_param(url, "test", payload)
         out, err, rc = await run(["curl", "-sS", "-L", "-k", "--max-time", "5", "-w", "\n%{http_code}", test_url], timeout=10)
         if rc == 0:
-            lines = out.strip().split("\n")
-            if lines:
-                status_code = lines[-1]
-                response_body = "\n".join(lines[:-1]).lower()
+            response_body, status_code = _split_curl_body_status(out)
+            if status_code:
                 blocked = False
                 block_reason = None
 
-                if status_code in ["403", "406", "419", "429", "503"]:
+                if status_code in WAF_BLOCK_STATUS_CODES and (
+                    baseline_status not in WAF_BLOCK_STATUS_CODES or status_code != baseline_status or
+                    _normalize_block_body(response_body) != _normalize_block_body(baseline_body)
+                ):
                     blocked = True
                     block_reason = f"HTTP {status_code}"
 
-                blocking_sigs = ["access denied", "forbidden", "blocked", "security", "firewall", "protection", "suspicious", "malicious"]
-                for sig in blocking_sigs:
-                    if sig in response_body:
+                if not blocked:
+                    signature = _contains_payload_block_signature(response_body, baseline_body)
+                    if signature:
                         blocked = True
-                        block_reason = f"Response contains '{sig}'"
-                        break
+                        block_reason = f"Response contains payload-specific block phrase '{signature}'"
 
                 if blocked:
                     blocked_responses += 1

@@ -14,6 +14,45 @@ from typing import Any
 
 from .common import get_auth_curl_args, get_auth_sqlmap_context, run
 
+PUBLIC_DISCOVERY_FILES = {"robots.txt", "sitemap.xml"}
+PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
+    ".aws/",
+    ".env",
+    ".git",
+    ".ssh/",
+    "backup.sql",
+    "database.sql",
+    "db.sql",
+    "dump.sql",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "private.key",
+    "privatekey",
+    "server.key",
+    "wp-config",
+)
+
+
+def _public_discovery_markers(path: str, content: str) -> list[str]:
+    normalized_path = (path or "").lstrip("/").lower()
+    if normalized_path not in PUBLIC_DISCOVERY_FILES:
+        return []
+    content_lower = (content or "").lower()
+    if any(token in content_lower for token in PUBLIC_DISCOVERY_SENSITIVE_REFERENCES):
+        return ["sensitive_path_reference"]
+    return []
+
+
+def _is_public_discovery_noise(path: str, content: str, markers: list[str] | None = None) -> bool:
+    normalized_path = (path or "").lstrip("/").lower()
+    if normalized_path not in PUBLIC_DISCOVERY_FILES:
+        return False
+    if markers:
+        return False
+    return not _public_discovery_markers(path, content)
+
 try:
     from .oauth_auth import oidc_discover
 except ImportError:
@@ -1630,6 +1669,12 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
                     return None  # Reject without valid markers
                 break  # Passed validation
 
+        markers = derive_markers(path, content_out)
+        public_markers = _public_discovery_markers(path, content_out)
+        markers.extend(m for m in public_markers if m not in markers)
+        if _is_public_discovery_noise(path, content_out, markers):
+            return None
+
         return {
             "path": path,
             "status": "200",
@@ -1641,7 +1686,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             "preview_first_line": response_fp["first_line"],
             "preview_hash16": response_fp["hash"],
             "has_html": response_fp["has_html"],
-            "markers": derive_markers(path, content_out),
+            "markers": markers,
         }
     canary_result = await test_canary()
     canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in canary_result.get("responses", [])]
