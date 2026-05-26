@@ -2271,6 +2271,50 @@ async def build_report(target: str,
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
+    focused_active_family = bool(active_checks and (bool(active_xss) != bool(active_sqli)))
+    if smart_mode and focused_active_family:
+        focused_family = "xss" if active_xss else "sqli"
+        print(f"[smart] Focused active mode enabled for {focused_family}; disabling unrelated active modules", file=sys.stderr)
+        csrf_testing = False
+        idor_testing = False
+        path_traversal_testing = False
+        default_creds_testing = False
+        deserialization_testing = False
+        rate_limiting_testing = False
+        twofa_bypass_testing = False
+        password_reset_testing = False
+        session_mgmt_testing = False
+        cicd_exposure_testing = False
+        package_exposure_testing = False
+        cloud_bucket_testing = False
+        backup_file_testing = False
+        file_upload_testing = False
+        open_redirect_testing = False
+        host_header_testing = False
+        business_logic_testing = False
+        api_security_testing = False
+        websocket_testing = False
+        forced_browsing_testing = False
+        mass_assignment_testing = False
+        bola_testing = False
+        ip_reputation = False
+        typosquatting = False
+        dkim_enumeration = False
+        zone_transfer_test = False
+        domain_intelligence = False
+        ct_monitoring = False
+        smtp_security = False
+        asn_discovery = False
+        network_services = False
+        cloud_ssrf = False
+        kubernetes_exposure = False
+        terraform_exposure = False
+        registry_exposure = False
+        vendor_risk = False
+        if active_sqli and not active_xss:
+            js_dependency_scanning = False
+            js_secret_scanning = False
+        scan_budget["nuclei_max_targets"] = 0
     if scan_budget.get("active_max_endpoints"):
         max_active = int(scan_budget["active_max_endpoints"])
     smart_bola_max_endpoints = int(scan_budget.get("smart_bola_max_endpoints") or smart_bola_max_endpoints)
@@ -3342,7 +3386,7 @@ async def build_report(target: str,
     schemathesis_schema_url: str | None = None
 
     # New advanced vulnerability checks (smart/full/aggressive only)
-    advanced_scan = smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))
+    advanced_scan = (smart_mode or (complete_mode and complete_tier in ("full", "aggressive"))) and not focused_active_family
     if advanced_scan and not public_only:
         nosql_task = asyncio.create_task(nosql_injection_test(base_url))
         ldap_task = asyncio.create_task(ldap_injection_test(base_url))
@@ -3834,12 +3878,22 @@ async def build_report(target: str,
             "aggressive": 1800,
             "smart": 1000,
         }
-        nuclei_target_limit = int(scan_budget.get("nuclei_max_targets") or nuclei_target_limits.get(discovery_scan_type, 400))
+        nuclei_budget_value = scan_budget.get("nuclei_max_targets")
+        nuclei_target_limit = (
+            int(nuclei_budget_value)
+            if nuclei_budget_value is not None
+            else int(nuclei_target_limits.get(discovery_scan_type, 400))
+        )
 
         if auth_session:
             await auth_session.refresh_if_needed()
 
-        if smart_mode:
+        if nuclei_target_limit <= 0:
+            print("[nuclei] Skipping nuclei: target budget is 0", file=sys.stderr)
+
+            async def dummy_nuclei_budget(): return {"vulnerabilities": [], "info": [], "scan_completed": False, "templates_used": 0, "skipped": True, "reason": "nuclei_target_budget_zero"}
+            nuclei_task = asyncio.create_task(dummy_nuclei_budget())
+        elif smart_mode:
             print(
                 f"[scanner] Smart mode: Starting staged nuclei with {len(early_techs)} detected technologies"
                 f"{' (early stopping disabled)' if no_early_stop else ''}",
