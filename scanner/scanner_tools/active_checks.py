@@ -2057,6 +2057,7 @@ async def nosql_injection_test_json_body(
     ]
 
     auth_args = get_auth_curl_args(auth_session)
+    debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
 
     base_body: dict[str, Any] = {}
     if isinstance(body_template, dict):
@@ -2068,9 +2069,9 @@ async def nosql_injection_test_json_body(
         if not _has_nested_key(base_body, name):
             _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
 
-    import sys
-    print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
-    print(f"[DEBUG NoSQL Test] base_body={base_body}", file=sys.stderr)
+    if debug_nosql:
+        print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
+        print(f"[DEBUG NoSQL Test] base_body={base_body}", file=sys.stderr)
 
     for param in params[:5]:  # Limit to first 5 params
         results["params_tested"] += 1
@@ -2088,9 +2089,18 @@ async def nosql_injection_test_json_body(
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
         baseline_len = len(baseline_out) if baseline_out else 0
-        print(f"[DEBUG NoSQL Test] param={param} baseline_body={baseline_body}", file=sys.stderr)
-        print(f"[DEBUG NoSQL Test] baseline_out={baseline_out[:200] if baseline_out else 'None'}...", file=sys.stderr)
-        print(f"[DEBUG NoSQL Test] baseline_len={baseline_len}", file=sys.stderr)
+        if debug_nosql:
+            print(f"[DEBUG NoSQL Test] param={param} baseline_body={baseline_body}", file=sys.stderr)
+            print(f"[DEBUG NoSQL Test] baseline_out={baseline_out[:200] if baseline_out else 'None'}...", file=sys.stderr)
+            print(f"[DEBUG NoSQL Test] baseline_len={baseline_len}", file=sys.stderr)
+
+        if baseline_rc != 0:
+            continue
+        if baseline_code in (405, 415, 501):
+            results["skipped"] = True
+            results["reason"] = "method_or_content_type_not_supported"
+            results["baseline_status"] = baseline_code
+            return results
 
         # Test each NoSQLi payload
         for payload in nosql_payloads:
@@ -2110,9 +2120,11 @@ async def nosql_injection_test_json_body(
 
             test_out, test_code = _parse_meta(test_raw or "")
             test_len = len(test_out) if test_out else 0
+            if test_code in (405, 415, 501):
+                continue
 
             # DEBUG: Log the first payload test result
-            if payload == nosql_payloads[0]:
+            if debug_nosql and payload == nosql_payloads[0]:
                 print(f"[DEBUG NoSQL Test] First payload test_body={test_body}", file=sys.stderr)
                 print(f"[DEBUG NoSQL Test] First payload test_out={test_out[:200] if test_out else 'None'}...", file=sys.stderr)
                 print(f"[DEBUG NoSQL Test] First payload test_len={test_len}", file=sys.stderr)
@@ -2170,27 +2182,30 @@ async def nosql_injection_test_json_body(
             if baseline_is_error and test_is_success and test_len > baseline_len * 1.5 and test_len > baseline_len + min_diff:
                 is_vulnerable = True
                 evidence_type = "length_difference"
-                print(f"[DEBUG NoSQL Test] LENGTH DIFFERENCE DETECTED: baseline={baseline_len} test={test_len}", file=sys.stderr)
+                if debug_nosql:
+                    print(f"[DEBUG NoSQL Test] LENGTH DIFFERENCE DETECTED: baseline={baseline_len} test={test_len}", file=sys.stderr)
 
             # Empty/minimal baseline with substantial response (catches {} -> data)
             baseline_minimal = baseline_len <= 10 or baseline_out in ('{}', '[]', 'null', '')
             if baseline_minimal and test_len > 30 and test_is_success:
                 is_vulnerable = True
                 evidence_type = "empty_baseline_bypass"
-                print(f"[DEBUG NoSQL Test] EMPTY BASELINE BYPASS DETECTED!", file=sys.stderr)
+                if debug_nosql:
+                    print(f"[DEBUG NoSQL Test] EMPTY BASELINE BYPASS DETECTED!", file=sys.stderr)
 
             # Response looks like success when baseline was error
             if baseline_out and test_out:
                 baseline_looks_error = baseline_is_error
 
                 # DEBUG: Log the heuristic evaluation
-                if payload == nosql_payloads[0]:
+                if debug_nosql and payload == nosql_payloads[0]:
                     print(f"[DEBUG NoSQL Test] baseline_looks_error={baseline_looks_error} test_looks_success={test_is_success}", file=sys.stderr)
 
                 if baseline_looks_error and test_is_success and test_len > 50:
                     is_vulnerable = True
                     evidence_type = "bypass_error"
-                    print(f"[DEBUG NoSQL Test] BYPASS ERROR DETECTED!", file=sys.stderr)
+                    if debug_nosql:
+                        print(f"[DEBUG NoSQL Test] BYPASS ERROR DETECTED!", file=sys.stderr)
 
             # Response contains unexpected data fields
             data_indicators = ['"id"', '"_id"', '"email"', '"user', '"token"', '"coupon"', '"code"', '"amount"']
@@ -2199,7 +2214,8 @@ async def nosql_injection_test_json_body(
             if test_has_data and not baseline_has_data and test_is_success:
                 is_vulnerable = True
                 evidence_type = "data_leak"
-                print(f"[DEBUG NoSQL Test] DATA LEAK DETECTED!", file=sys.stderr)
+                if debug_nosql:
+                    print(f"[DEBUG NoSQL Test] DATA LEAK DETECTED!", file=sys.stderr)
 
             if is_vulnerable:
                 results["vulnerable"] = True
@@ -5603,6 +5619,7 @@ async def smart_sqli_test(
         if e.get("method", "GET").upper() == "GET"
         and e.get("params")
         and _method_allowed(e, "GET")
+        and not _is_hash_route(e.get("url", ""))
         and not _is_sqli_documentation_endpoint(e.get("url", ""))
     ]
     post_endpoints = [
@@ -5966,7 +5983,7 @@ async def sqli_data_extraction(
 
     url = sqli_finding.get("url", "")
     param = sqli_finding.get("param", "")
-    dbms = sqli_finding.get("dbms", "mysql")  # Default to MySQL
+    dbms = str(sqli_finding.get("dbms") or "").lower()
     method = sqli_finding.get("method", "GET")
 
     if not url or not param:
@@ -5975,9 +5992,13 @@ async def sqli_data_extraction(
         results["skipped"] = True
         results["reason"] = "documentation_endpoint"
         return results
+    if dbms not in SQLI_EXTRACTION_PAYLOADS:
+        results["skipped"] = True
+        results["reason"] = "unsupported_or_unknown_dbms"
+        return results
 
     auth_args = get_auth_curl_args(auth_session)
-    extraction_payloads = SQLI_EXTRACTION_PAYLOADS.get(dbms, SQLI_EXTRACTION_PAYLOADS["mysql"])
+    extraction_payloads = SQLI_EXTRACTION_PAYLOADS[dbms]
 
     print(f"[sqli-extract] Attempting data extraction from {url} param={param} dbms={dbms}", file=sys.stderr)
 
@@ -6484,6 +6505,7 @@ async def smart_xss_test(
         e for e in endpoints
         if e.get("method", "GET").upper() == "GET"
         and _method_allowed(e, "GET")
+        and not _is_hash_route(e.get("url", ""))
     ]
     post_endpoints = [
         e for e in endpoints
@@ -7167,6 +7189,19 @@ def _analyze_js_content(js_content: str, source_url: str) -> list[dict]:
     return findings
 
 
+def _split_active_family_budget(active_max_seconds: float, run_sqli: bool, run_xss: bool) -> tuple[float, float]:
+    """Reserve active-test time for both SQLi and XSS when both families run."""
+    active_max_seconds = max(0.0, float(active_max_seconds))
+    if not (run_sqli and run_xss) or active_max_seconds <= 1.0:
+        return active_max_seconds, 0.0
+
+    xss_reserved_seconds = max(30.0, active_max_seconds * 0.30)
+    xss_reserved_seconds = min(xss_reserved_seconds, active_max_seconds * 0.45)
+    xss_reserved_seconds = min(xss_reserved_seconds, max(0.0, active_max_seconds - 1.0))
+    sqli_max_seconds = max(1.0, active_max_seconds - xss_reserved_seconds)
+    return sqli_max_seconds, xss_reserved_seconds
+
+
 async def run_smart_active_tests(
     url: str,
     endpoints: list[dict],
@@ -7266,13 +7301,29 @@ async def run_smart_active_tests(
     def _remaining_active_seconds() -> float:
         return max(0.0, active_max_seconds - (time.monotonic() - active_started))
 
+    sqli_active_max_seconds, xss_reserved_seconds = _split_active_family_budget(
+        active_max_seconds,
+        run_sqli,
+        run_xss,
+    )
+    if run_sqli and run_xss:
+        print(
+            (
+                "[active] Split active budget: "
+                f"SQLi <= {sqli_active_max_seconds:.0f}s, "
+                f"XSS reserve >= {xss_reserved_seconds:.0f}s"
+            ),
+            file=sys.stderr,
+        )
+
     if run_sqli:
         _emit_scan_progress("active_sqli", 60, "starting SQLi probes")
+        sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
         sqli_results = await smart_sqli_test(
             url, prioritized_endpoints, dbms, auth_session,
             max_endpoints=sqli_max_endpoints,
             max_params_per_endpoint=sqli_max_params,
-            max_seconds=_remaining_active_seconds(),
+            max_seconds=sqli_remaining,
             max_findings=max_findings_per_family,
         )
     else:
@@ -7372,6 +7423,8 @@ async def run_smart_active_tests(
         "dbms_detected": sqli_results.get("dbms_detected"),
         "budget": {
             "active_max_seconds": active_max_seconds,
+            "active_sqli_max_seconds": sqli_active_max_seconds,
+            "active_xss_reserved_seconds": xss_reserved_seconds,
             "active_max_endpoints": max(sqli_max_endpoints, xss_max_endpoints),
             "active_params_per_endpoint": max(sqli_max_params, xss_max_params),
             "max_findings_per_family": max_findings_per_family,

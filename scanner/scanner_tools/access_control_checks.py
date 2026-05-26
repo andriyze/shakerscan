@@ -885,6 +885,16 @@ def format_findings_for_scanner(
                 "category": category,
                 "content_type": fb_finding.get("content_type"),
                 "content_length": fb_finding.get("content_length"),
+                "accessible": fb_finding.get("accessible", False),
+                "verified": bool(
+                    fb_finding.get("accessible")
+                    and not fb_finding.get("false_positive_detected")
+                    and not fb_finding.get("content_validation_failed")
+                ),
+                "validation_reason": (
+                    fb_finding.get("validation_reason")
+                    or "Forced browsing content validation accepted this response"
+                ),
             },
             "remediation": "Implement proper authentication and authorization controls. Consider using role-based access control (RBAC) and ensure all administrative endpoints require authentication.",
             "references": [

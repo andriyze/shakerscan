@@ -173,10 +173,13 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
     for finding in findings:
         tool = str(finding.get("tool") or "").lower()
         title = str(finding.get("title") or "").lower()
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
         poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
         verified = (
             finding.get("verified") is True
+            or evidence.get("verified") is True
+            or evidence.get("confirmed") is True
             or validation.get("verified") is True
             or validation.get("poe_proven") is True
             or poe_result.get("proven") is True

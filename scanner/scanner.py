@@ -6382,7 +6382,17 @@ async def build_report(target: str,
                         "status_code": status,
                         "category": category,
                         "content_type": fb_finding.get("content_type"),
+                        "content_length": fb_finding.get("content_length"),
                         "accessible": fb_finding.get("accessible", False),
+                        "verified": bool(
+                            fb_finding.get("accessible")
+                            and not fb_finding.get("false_positive_detected")
+                            and not fb_finding.get("content_validation_failed")
+                        ),
+                        "validation_reason": (
+                            fb_finding.get("validation_reason")
+                            or "Forced browsing content validation accepted this response"
+                        ),
                     },
                     "CWE-425"  # Direct Request (Forced Browsing)
                 ))
@@ -6732,7 +6742,8 @@ async def build_report(target: str,
                         ]
                         if filtered:
                             options_methods_by_url[normalized] = filtered
-                if options_methods_by_url:
+                debug_endpoint_discovery = os.environ.get("SCANNER_DEBUG_ENDPOINTS", "").lower() in ("1", "true", "yes")
+                if debug_endpoint_discovery and options_methods_by_url:
                     print(
                         f"[DEBUG OPTIONS] methods_by_url={len(options_methods_by_url)}",
                         file=sys.stderr
@@ -7342,12 +7353,13 @@ async def build_report(target: str,
                     get_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() == "GET")
                     post_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() in ("POST", "PUT", "PATCH"))
                     allowed_count = sum(1 for ep in endpoints if ep.get("allowed_methods"))
-                    print(
-                        f"[DEBUG SMART] endpoints={len(endpoints)} get={get_count} post={post_count} "
-                        f"allowed_methods={allowed_count}",
-                        file=sys.stderr
-                    )
-                    if allowed_count:
+                    if debug_endpoint_discovery:
+                        print(
+                            f"[DEBUG SMART] endpoints={len(endpoints)} get={get_count} post={post_count} "
+                            f"allowed_methods={allowed_count}",
+                            file=sys.stderr
+                        )
+                    if debug_endpoint_discovery and allowed_count:
                         for i, ep in enumerate([e for e in endpoints if e.get("allowed_methods")][:5]):
                             print(
                                 f"[DEBUG SMART]   {i}: {ep.get('method')} {ep.get('url')} "
@@ -8123,6 +8135,7 @@ async def build_report(target: str,
 
                         # Build index of captured Playwright requests for SQLmap replay
                         # This allows us to use real headers/CSRF/body from browser traffic
+                        debug_sqlmap = os.environ.get("SCANNER_DEBUG_SQLMAP", "").lower() in ("1", "true", "yes")
                         captured_index: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
                         if browser_res:
                             captured_requests = browser_res.get("captured_requests", [])
@@ -8170,22 +8183,23 @@ async def build_report(target: str,
                                 if existing is None or _is_better_capture(cap_req, existing):
                                     captured_index[cap_key] = cap_req
 
-                            if captured_index:
+                            if debug_sqlmap and captured_index:
                                 print(f"[DEBUG SQLMAP] indexed {len(captured_index)} captured requests for replay", file=sys.stderr)
 
                         if sqlmap_candidates:
-                            print(
-                                f"[DEBUG SQLMAP] candidates={len(sqlmap_candidates)}",
-                                file=sys.stderr
-                            )
-                            for i, candidate in enumerate(sqlmap_candidates[:5]):
-                                ep = candidate.get("endpoint", {}) or {}
+                            if debug_sqlmap:
                                 print(
-                                    f"[DEBUG SQLMAP]   {i}: {ep.get('method', 'GET')} "
-                                    f"{ep.get('url')} param={candidate.get('param')} "
-                                    f"reason={candidate.get('reason')}",
+                                    f"[DEBUG SQLMAP] candidates={len(sqlmap_candidates)}",
                                     file=sys.stderr
                                 )
+                                for i, candidate in enumerate(sqlmap_candidates[:5]):
+                                    ep = candidate.get("endpoint", {}) or {}
+                                    print(
+                                        f"[DEBUG SQLMAP]   {i}: {ep.get('method', 'GET')} "
+                                        f"{ep.get('url')} param={candidate.get('param')} "
+                                        f"reason={candidate.get('reason')}",
+                                        file=sys.stderr,
+                                    )
                             # Only use aggressive SQLmap for aggressive exploit level
                             aggressive_sqlmap = exploit_level == "aggressive"
                             # Get detected DBMS from smart_sqli for DBMS-aware SQLmap tuning
@@ -8194,6 +8208,11 @@ async def build_report(target: str,
                             # Build tasks with replay matching
                             tasks: list[asyncio.Task[dict[str, Any]]] = []
                             replay_flags: list[bool] = []  # Track which candidates use replay
+                            emit_progress(
+                                "active_sqlmap",
+                                90,
+                                f"starting SQLMap verification on {len(sqlmap_candidates)} candidates",
+                            )
 
                             for c in sqlmap_candidates:
                                 ep = c["endpoint"]
@@ -8219,10 +8238,11 @@ async def build_report(target: str,
                                 )
 
                                 if use_replay:
-                                    print(
-                                        f"[DEBUG SQLMAP] using replay for {ep_method} {ep_path}",
-                                        file=sys.stderr
-                                    )
+                                    if debug_sqlmap:
+                                        print(
+                                            f"[DEBUG SQLMAP] using replay for {ep_method} {ep_path}",
+                                            file=sys.stderr,
+                                        )
                                     tasks.append(
                                         asyncio.create_task(
                                             sqlmap_replay_request(
@@ -8252,6 +8272,7 @@ async def build_report(target: str,
                                     replay_flags.append(False)
 
                             sqlmap_results = await asyncio.gather(*tasks, return_exceptions=True)
+                            emit_progress("active_sqlmap", 91, "SQLMap verification complete")
 
                             for candidate, srep, used_replay in zip(sqlmap_candidates, sqlmap_results, replay_flags):
                                 if isinstance(srep, Exception):
@@ -8308,26 +8329,37 @@ async def build_report(target: str,
                 # NoSQL is an injection attack and should run when SQLi testing is enabled
                 if run_sqli:
                     try:
-                        # DEBUG: Log all POST endpoints to see what's available
+                        debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
                         post_endpoints = [ep for ep in endpoints if ep.get("method") in ("POST", "PUT", "PATCH")]
-                        print(f"[DEBUG NoSQL] Total POST endpoints: {len(post_endpoints)}", file=sys.stderr)
-                        for i, ep in enumerate(post_endpoints[:5]):
-                            print(f"[DEBUG NoSQL]   {i}: {ep.get('url')} body_params={ep.get('body_params')} content_type={ep.get('content_type')}", file=sys.stderr)
+                        if debug_nosql:
+                            print(f"[DEBUG NoSQL] Total POST endpoints: {len(post_endpoints)}", file=sys.stderr)
+                            for i, ep in enumerate(post_endpoints[:5]):
+                                print(f"[DEBUG NoSQL]   {i}: {ep.get('url')} body_params={ep.get('body_params')} content_type={ep.get('content_type')}", file=sys.stderr)
 
                         nosql_candidates = [
                             ep for ep in endpoints
                             if ep.get("method") in ("POST", "PUT", "PATCH")
                             and ep.get("body_params")
+                            and (
+                                not ep.get("allowed_methods")
+                                or ep.get("method", "").upper() in [m.upper() for m in ep.get("allowed_methods", [])]
+                            )
                             # Test if content_type is JSON or not specified (assume JSON for API endpoints)
                             and (not ep.get("content_type") or "json" in ep.get("content_type", "").lower())
                         ]
-                        print(f"[DEBUG NoSQL] NoSQL candidates after filter: {len(nosql_candidates)}", file=sys.stderr)
-                        for i, ep in enumerate(nosql_candidates[:5]):
-                            print(f"[DEBUG NoSQL]   candidate {i}: {ep.get('url')} params={ep.get('body_params')}", file=sys.stderr)
+                        if debug_nosql:
+                            print(f"[DEBUG NoSQL] NoSQL candidates after filter: {len(nosql_candidates)}", file=sys.stderr)
+                            for i, ep in enumerate(nosql_candidates[:5]):
+                                print(f"[DEBUG NoSQL]   candidate {i}: {ep.get('url')} params={ep.get('body_params')}", file=sys.stderr)
 
                         if nosql_candidates:
                             active_block["nosql_injection"] = []
                             nosql_limit = 3 if quick_mode else 8
+                            emit_progress(
+                                "active_nosql",
+                                91,
+                                f"starting NoSQL JSON body checks on {min(len(nosql_candidates), nosql_limit)} candidates",
+                            )
                             for ep in nosql_candidates[:nosql_limit]:
                                 nosql_result = await nosql_injection_test_json_body(
                                     url=ep["url"],
@@ -8354,6 +8386,7 @@ async def build_report(target: str,
                                             },
                                             "CWE-943"
                                         ))
+                            emit_progress("active_nosql", 91, "NoSQL JSON body checks complete")
                     except Exception as e:
                         active_block.setdefault("nosql_errors", []).append({"error": str(e)})
 
@@ -8391,6 +8424,7 @@ async def build_report(target: str,
                     print(f"[scanner] Smart mode: Running DOM XSS analysis on {min(len(js_urls_for_dom_xss), dom_xss_max_files)} JS files (max: {dom_xss_max_files})", file=sys.stderr)
                 else:
                     print(f"[scanner] Smart mode: Running DOM XSS analysis (self-discovering JS files, max: {dom_xss_max_files})", file=sys.stderr)
+                emit_progress("active_dom_analysis", 91, "starting DOM XSS static analysis")
 
                 dom_xss_results = await dom_xss_analysis(
                     url=base_url,
@@ -8400,6 +8434,7 @@ async def build_report(target: str,
                 )
 
                 active_block["dom_xss"] = dom_xss_results
+                emit_progress("active_dom_analysis", 91, "DOM XSS static analysis complete")
 
                 # Add normalized findings for DOM XSS vulnerabilities
                 if dom_xss_results.get("findings"):
@@ -8498,6 +8533,7 @@ async def build_report(target: str,
                         print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
                     else:
                         print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
+                    emit_progress("active_bola", 91, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
 
                     bola_results = await smart_bola_test(
                         base_url=base_url,
@@ -8510,6 +8546,7 @@ async def build_report(target: str,
                     )
 
                     active_block["smart_bola"] = bola_results
+                    emit_progress("active_bola", 91, "BOLA/IDOR testing complete")
 
                     # Add findings to report
                     if bola_results.get("findings"):

@@ -71,6 +71,30 @@ def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
     assert result["params_tested"] == 0
 
 
+def test_smart_sqli_skips_hash_route_endpoints(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("SPA hash routes should not be probed for server-side SQLi")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/#/users/search?q=test",
+                    "method": "GET",
+                    "params": ["q"],
+                }
+            ],
+            max_seconds=10,
+        )
+    )
+
+    assert result["endpoints_tested"] == 0
+    assert result["params_tested"] == 0
+
+
 def test_detect_dbms_requires_fingerprint_absent_from_baseline(monkeypatch):
     async def fake_run(*args, **kwargs):
         return "OpenAPI examples mention Oracle Error ORA-00933", "", 0
@@ -99,3 +123,87 @@ def test_smart_xss_respects_time_budget_before_probe(monkeypatch):
     assert result["budget_exhausted"] is True
     assert result["endpoints_tested"] == 0
     assert result["params_tested"] == 0
+
+
+def test_smart_xss_skips_hash_route_endpoints(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("SPA hash routes should be handled by DOM XSS checks")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_xss_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/#/search?q=test",
+                    "method": "GET",
+                    "params": ["q"],
+                }
+            ],
+            max_seconds=10,
+        )
+    )
+
+    assert result["endpoints_tested"] == 0
+    assert result["params_tested"] == 0
+
+
+def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
+    captures = {}
+    now = {"value": 1000.0}
+
+    monkeypatch.setattr(active_checks.time, "monotonic", lambda: now["value"])
+
+    async def fake_sqli(*args, **kwargs):
+        captures["sqli_max_seconds"] = kwargs["max_seconds"]
+        now["value"] += kwargs["max_seconds"]
+        return {
+            "findings": [],
+            "dbms_detected": None,
+            "vulnerabilities_found": 0,
+            "get_endpoints_tested": 0,
+            "post_endpoints_tested": 0,
+            "endpoints_tested": 1,
+            "params_tested": 1,
+            "budget_exhausted": True,
+        }
+
+    async def fake_xss(*args, **kwargs):
+        captures["xss_max_seconds"] = kwargs["max_seconds"]
+        return {
+            "findings": [],
+            "reflections_found": 0,
+            "vulnerabilities_found": 0,
+            "endpoints_tested": 1,
+            "params_tested": 1,
+            "get_endpoints_tested": 1,
+            "post_endpoints_tested": 0,
+            "budget_exhausted": False,
+        }
+
+    async def fake_hash_route_dom_xss(*args, **kwargs):
+        return {
+            "findings": [],
+            "endpoints_tested": 0,
+            "params_tested": 0,
+            "vulnerabilities_found": 0,
+        }
+
+    monkeypatch.setattr(active_checks, "smart_sqli_test", fake_sqli)
+    monkeypatch.setattr(active_checks, "smart_xss_test", fake_xss)
+    monkeypatch.setattr(active_checks, "hash_route_dom_xss_test", fake_hash_route_dom_xss)
+
+    result = asyncio.run(
+        active_checks.run_smart_active_tests(
+            "https://example.test",
+            [{"url": "https://example.test/search?q=test", "method": "GET", "params": ["q"]}],
+            active_max_seconds=100,
+        )
+    )
+
+    assert captures["sqli_max_seconds"] == 70
+    assert captures["xss_max_seconds"] == 30
+    assert result["budget"]["active_sqli_max_seconds"] == 70
+    assert result["budget"]["active_xss_reserved_seconds"] == 30
+    assert result["xss"]["endpoints_tested"] == 1

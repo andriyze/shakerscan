@@ -101,6 +101,31 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
     assert all(item["suspected"] is True for item in adjusted)
 
 
+def test_precision_policy_accepts_verified_evidence_flag():
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /.env",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "evidence": {
+                "url": "https://example.test/.env",
+                "path": "/.env",
+                "status_code": 200,
+                "content_type": "text/plain",
+                "verified": True,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["validation"]["evidence_level"] == "confirmed_exploit"
+    assert adjusted[0]["severity"] == "high"
+
+
 def test_grade_discounts_unverified_suspected_high_findings():
     suspected = {
         "tool": "bfla",

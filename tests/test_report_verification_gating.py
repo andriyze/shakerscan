@@ -61,6 +61,25 @@ def test_validate_exposed_file_uses_high_confidence_metadata_when_body_redacted(
     assert "High-confidence exposed file" in (result.reason or "")
 
 
+def test_validate_exposed_file_uses_medium_confidence_sensitive_markers():
+    finding = {
+        "title": "Exposed file: .env (confidence: medium)",
+        "evidence": {
+            "path": ".env",
+            "confidence": "medium",
+            "has_html": False,
+            "markers": ["dotenv_format"],
+            "preview_first_line": "FEATURE_FLAG=true",
+        },
+    }
+
+    result = finding_validator.validate_exposed_file(finding, response_body=None, response_headers=None)
+
+    assert result.verified is True
+    assert result.confidence == 0.75
+    assert "Medium-confidence exposed file" in (result.reason or "")
+
+
 def test_validate_exposed_file_without_body_stays_unverified_for_weak_signal():
     finding = {
         "title": "Exposed file: robots.txt (confidence: low)",

@@ -840,7 +840,7 @@ def build_attack_chain(
         "supporting_findings": [],
     }
 
-    def summarize_finding(finding: dict) -> dict:
+    def summarize_finding(finding: dict, matched_type: str | None = None) -> dict:
         validation = finding.get("validation", {}) if isinstance(finding.get("validation"), dict) else {}
         return {
             "id": finding.get("id") or finding.get("fingerprint"),
@@ -849,8 +849,9 @@ def build_attack_chain(
             "url": finding.get("url", finding.get("location")),
             "confidence": finding.get("confidence"),
             "confidence_tier": finding.get("confidence_tier"),
-            "verified": validation.get("verified"),
+            "verified": finding.get("verified") is True or validation.get("verified") is True,
             "tool": finding.get("tool"),
+            "matched_type": matched_type,
         }
 
     def dedupe_findings(items: list[dict]) -> list[dict]:
@@ -868,7 +869,7 @@ def build_attack_chain(
         collected = []
         for t in sorted(set(matched_required + matched_optional)):
             for finding in type_to_findings.get(t, []):
-                collected.append(summarize_finding(finding))
+                collected.append(summarize_finding(finding, matched_type=t))
         evidence["supporting_findings"] = dedupe_findings(collected)
     else:
         for finding in findings:
@@ -949,6 +950,23 @@ def calculate_chain_confidence(supporting_findings: list[dict]) -> float:
 
     return min(base, 1.0)
 
+
+def _chain_has_verified_supporting_evidence(chain: AttackChain) -> bool:
+    supporting = chain.evidence.get("supporting_findings", [])
+    return any(isinstance(item, dict) and item.get("verified") is True for item in supporting)
+
+
+def _mark_chain_partial_for_unverified_evidence(chain: AttackChain) -> None:
+    chain.status = "partial"
+    chain.severity = _downgrade_severity(chain.severity)
+    chain.missing_required.append("verified_exploit_evidence")
+    chain.missing_required_all.append("verified_exploit_evidence")
+    chain.evidence["chain_quality"] = "unverified_supporting_evidence"
+    chain.evidence["quality_reason"] = (
+        "Complete attack-chain reporting requires at least one verified supporting finding."
+    )
+
+
 def _identify_attack_chains_internal(findings: list[dict]) -> tuple[list[AttackChain], list[AttackChain]]:
     """
     Identify possible attack chains from a list of findings.
@@ -1004,7 +1022,11 @@ def _identify_attack_chains_internal(findings: list[dict]) -> tuple[list[AttackC
             )
             chain.completeness = completeness
             if is_complete:
-                chains.append(chain)
+                if _chain_has_verified_supporting_evidence(chain):
+                    chains.append(chain)
+                else:
+                    _mark_chain_partial_for_unverified_evidence(chain)
+                    partial_chains.append(chain)
             else:
                 chain.severity = _downgrade_severity(chain.severity)
                 partial_chains.append(chain)

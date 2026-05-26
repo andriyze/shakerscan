@@ -512,6 +512,14 @@ def validate_exposed_file(
                 reason="High-confidence exposed file with sensitive markers",
             )
 
+        if confidence_label == "medium" and not has_html and looks_sensitive and has_sensitive_marker:
+            return ValidationResult(
+                verified=True,
+                confidence=0.75,
+                evidence="Validated from detector metadata (body redacted)",
+                reason="Medium-confidence exposed file with sensitive path and markers",
+            )
+
         return ValidationResult(
             verified=False,
             confidence=0.4,

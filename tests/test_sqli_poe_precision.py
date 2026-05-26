@@ -123,6 +123,28 @@ def test_sqli_data_extraction_skips_documentation_endpoint(monkeypatch):
     assert result["reason"] == "documentation_endpoint"
 
 
+def test_sqli_data_extraction_skips_unknown_dbms(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("unknown DBMS should not use default extraction payloads")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/user",
+                "param": "id",
+                "dbms": None,
+                "method": "GET",
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is False
+    assert result["skipped"] is True
+    assert result["reason"] == "unsupported_or_unknown_dbms"
+
+
 def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
     async def fake_run(*args, **kwargs):
         body = "OpenAPI 3.1.0 examples mention MySQL 8.0.36"
