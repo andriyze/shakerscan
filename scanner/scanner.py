@@ -26,6 +26,7 @@ try:
 except ImportError:
     from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
 from scanner_tools.coverage_tracker import CoverageTracker
+from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.har_discovery import (
     extract_discovery_from_har,
     get_testable_endpoints,
@@ -2275,9 +2276,9 @@ async def build_report(target: str,
         effective_budget_profile = "thorough"
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
     focused_active_family = bool(active_checks and (bool(active_xss) != bool(active_sqli)))
+    focused_active_family_name = "xss" if focused_active_family and active_xss else ("sqli" if focused_active_family else None)
     if smart_mode and focused_active_family:
-        focused_family = "xss" if active_xss else "sqli"
-        print(f"[smart] Focused active mode enabled for {focused_family}; disabling unrelated active modules", file=sys.stderr)
+        print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
         csrf_testing = False
         idor_testing = False
         path_traversal_testing = False
@@ -2500,6 +2501,7 @@ async def build_report(target: str,
                     "thorough_params": thorough_params,
                     "budget_profile": scan_budget.get("budget_profile"),
                     "resolved_budget": scan_budget,
+                    "focused_active_family": focused_active_family_name,
                     "verified_findings_only": verified_findings_only,
                     "focus_rules": len(focus_rules),
                     "avoid_rules": len(avoid_rules),
@@ -2600,6 +2602,25 @@ async def build_report(target: str,
                     "check": "js_secret_scanning",
                     "reason": "JS secret scanning disabled in public-only mode"
                 })
+            if smart_mode and focused_active_family_name:
+                checks_skipped.append({
+                    "check": "non_focused_active_modules",
+                    "reason": f"Focused active mode limited probes to {focused_active_family_name.upper()}",
+                    "impact": "Unrelated active modules were intentionally skipped",
+                    "configured": True,
+                })
+                if scan_budget.get("nuclei_max_targets") == 0:
+                    checks_skipped.append({
+                        "check": "nuclei",
+                        "reason": "Nuclei disabled by focused active mode",
+                        "impact": "Template findings were not tested",
+                        "configured": True,
+                    })
+
+            report["scan_completion_status"] = build_scan_completion_status(
+                coverage_status=coverage["status"],
+                checks_skipped=checks_skipped,
+            )
 
             report["scan_metadata"] = {
                 "scan_id": scan_session_id,
@@ -2617,6 +2638,7 @@ async def build_report(target: str,
                     "ai_verify_min_severity": verify_min_severity,
                 },
                 "checks_skipped": checks_skipped,
+                "scan_completion_status": report["scan_completion_status"],
                 "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
             }
 
@@ -3724,6 +3746,7 @@ async def build_report(target: str,
     base_discovery_config = smart_discovery_data.get("config", {}) if isinstance(smart_discovery_data, dict) else {}
     discovery_max_urls = int(scan_budget.get("max_urls") or base_discovery_config.get("max_urls") or 0)
     manual_url_set = set(manual_urls)
+    discovery_url_budget_caps: list[dict[str, Any]] = []
 
     def _cap_discovery_urls(urls: list[str], reason: str) -> list[str]:
         if not discovery_max_urls or len(urls) <= discovery_max_urls:
@@ -3752,6 +3775,13 @@ async def build_report(target: str,
             )
 
         capped = sorted(dict.fromkeys(u for u in urls if u), key=priority)[:discovery_max_urls]
+        discovery_url_budget_caps.append({
+            "reason": reason,
+            "discovered": len(dict.fromkeys(u for u in urls if u)),
+            "selected": len(capped),
+            "budget": discovery_max_urls,
+            "capped": True,
+        })
         print(
             f"[scanner] Discovery URL budget cap after {reason}: {len(urls)} -> {len(capped)}",
             file=sys.stderr,
@@ -4989,6 +5019,8 @@ async def build_report(target: str,
         "methods_used": [],
         "warnings": [],
     }
+    if discovery_url_budget_caps:
+        discovery_summary["url_budget_caps"] = discovery_url_budget_caps
 
     if crawl_urls:
         discovery_summary["methods_used"].append("url_crawl")
@@ -5043,6 +5075,7 @@ async def build_report(target: str,
             "thorough_params": thorough_params,
             "budget_profile": scan_budget.get("budget_profile"),
             "resolved_budget": scan_budget,
+            "focused_active_family": focused_active_family_name,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -7632,6 +7665,12 @@ async def build_report(target: str,
                     budget=active_endpoint_budget,
                     source_priority=_SOURCE_PRIORITY,
                 )
+                active_block["active_endpoint_budget"] = active_endpoint_budget
+                active_block["active_endpoints_discovered"] = before_active_endpoints
+                active_block["active_endpoints_selected"] = len(endpoints)
+                active_block["active_endpoint_budget_capped"] = bool(
+                    active_endpoint_budget and before_active_endpoints > len(endpoints)
+                )
                 if active_endpoint_budget and before_active_endpoints > len(endpoints):
                     print(
                         (
@@ -9477,6 +9516,20 @@ async def build_report(target: str,
             "check": "js_secret_scanning",
             "reason": "JS secret scanning disabled in public-only mode"
         })
+    if smart_mode and focused_active_family_name:
+        checks_skipped.append({
+            "check": "non_focused_active_modules",
+            "reason": f"Focused active mode limited probes to {focused_active_family_name.upper()}",
+            "impact": "Unrelated active modules were intentionally skipped",
+            "configured": True,
+        })
+        if scan_budget.get("nuclei_max_targets") == 0:
+            checks_skipped.append({
+                "check": "nuclei",
+                "reason": "Nuclei disabled by focused active mode",
+                "impact": "Template findings were not tested",
+                "configured": True,
+            })
 
     report["scan_metadata"] = {
         "scan_id": scan_session_id,
@@ -9747,6 +9800,15 @@ async def build_report(target: str,
     # report["smart_coverage"] contains endpoints/params discovered/tested from CoverageTracker
     if coverage_tracker:
         report["smart_coverage"] = coverage_tracker.to_dict()
+
+    report["scan_completion_status"] = build_scan_completion_status(
+        coverage_status=coverage.get("status"),
+        checks_skipped=checks_skipped,
+        active_block=report.get("active_checks"),
+        discovery_summary=discovery_summary,
+    )
+    if isinstance(report.get("scan_metadata"), dict):
+        report["scan_metadata"]["scan_completion_status"] = report["scan_completion_status"]
 
     # Cleanup PoE session to prevent memory leaks in long-lived workers
     try:

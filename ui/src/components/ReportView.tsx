@@ -7,7 +7,7 @@ import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
 import { getApiUrl } from '@/lib/api'
-import { CheckCircle2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle2 } from 'lucide-react'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -106,6 +106,12 @@ function formatBytes(value: any): string {
   if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
   if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`
   return `${bytes} B`
+}
+
+function formatScanToken(value: any): string {
+  return String(value || 'unknown')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function getAIDeployRecommendation(decision: string) {
@@ -433,6 +439,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const kubernetes_exposure = scanData.kubernetes_exposure || {}
   const container_registry = scanData.container_registry || {}
   const scan_metadata = scanData.scan_metadata || {}
+  const scanCompletionStatus = scanData.scan_completion_status || scan_metadata.scan_completion_status || {}
+  const completionSkippedModules = Array.isArray(scanCompletionStatus.skipped_modules)
+    ? scanCompletionStatus.skipped_modules
+    : []
+  const completionCappedEntries = Object.entries(asRecord(scanCompletionStatus.capped_lists))
+    .filter(([, cap]: [string, any]) => cap && typeof cap === 'object' && cap.capped)
   const scan_config = scanData.scan_config || {}
   const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
@@ -490,6 +502,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       : 'bg-slate-700 text-slate-300'
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
+  const showCompletionBanner = !isAIScan && !isModelIntakeScan && (
+    scanCompletionStatus.complete === false ||
+    scanCompletionStatus.limited === true ||
+    completionSkippedModules.length > 0 ||
+    completionCappedEntries.length > 0
+  )
   const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const modelIntakeDecision = String(result?.decision || '').toLowerCase()
   const modelIntakeDecisionClass =
@@ -717,6 +735,73 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>
+
+      {showCompletionBanner && (
+        <div className={`mb-8 rounded-lg border p-4 ${
+          scanCompletionStatus.complete === false
+            ? 'border-yellow-500/40 bg-yellow-950/20'
+            : 'border-blue-500/40 bg-blue-950/20'
+        }`}>
+          <div className="flex items-start gap-3">
+            <AlertTriangle className={`mt-0.5 h-5 w-5 shrink-0 ${
+              scanCompletionStatus.complete === false ? 'text-yellow-300' : 'text-blue-300'
+            }`} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-semibold text-white">
+                  {scanCompletionStatus.complete === false ? 'Scan Coverage Incomplete' : 'Scan Coverage Limited'}
+                </h2>
+                {scanCompletionStatus.coverage_status && (
+                  <span className="rounded bg-gray-900 px-2 py-0.5 text-xs text-gray-300">
+                    Module coverage: {formatScanToken(scanCompletionStatus.coverage_status)}
+                  </span>
+                )}
+                {scanCompletionStatus.budget_exhausted && (
+                  <span className="rounded bg-yellow-900 px-2 py-0.5 text-xs text-yellow-100">
+                    Budget exhausted{scanCompletionStatus.budget_exhausted_at ? `: ${formatScanToken(scanCompletionStatus.budget_exhausted_at)}` : ''}
+                  </span>
+                )}
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                {completionCappedEntries.length > 0 && (
+                  <div className="rounded border border-gray-800 bg-black/20 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Capped Coverage</div>
+                    <div className="space-y-1">
+                      {completionCappedEntries.map(([name, cap]: [string, any]) => (
+                        <div key={name} className="text-sm text-gray-300">
+                          <span className="font-medium text-gray-100">{formatScanToken(name)}</span>
+                          <span className="ml-2 text-gray-400">
+                            {cap.selected ?? cap.tested ?? 0}/{cap.discovered ?? '?'} selected
+                            {cap.budget ? ` (budget ${cap.budget})` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {completionSkippedModules.length > 0 && (
+                  <div className="rounded border border-gray-800 bg-black/20 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Skipped Modules</div>
+                    <div className="flex flex-wrap gap-2">
+                      {completionSkippedModules.slice(0, 8).map((skip: any, index: number) => (
+                        <span key={`${skip.module || skip.check || index}-${index}`} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
+                          {formatScanToken(skip.module || skip.check || skip)}
+                          {skip.reason ? `: ${formatScanToken(skip.reason)}` : ''}
+                        </span>
+                      ))}
+                      {completionSkippedModules.length > 8 && (
+                        <span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-500">
+                          +{completionSkippedModules.length - 8} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* AI Gate */}
       {ai_gate && (
@@ -3283,7 +3368,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="space-y-1">
                 {scan_metadata.checks_skipped.map((skip: any, i: number) => (
                   <div key={i} className="text-sm text-gray-500">
-                    <span className="text-gray-400">{typeof skip === 'string' ? skip : skip.name}</span>
+                    <span className="text-gray-400">{typeof skip === 'string' ? skip : skip.name || skip.check || skip.module}</span>
                     {skip.reason && <span className="ml-2 text-gray-600">({skip.reason})</span>}
                   </div>
                 ))}
