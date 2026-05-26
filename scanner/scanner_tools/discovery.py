@@ -1229,8 +1229,8 @@ async def enhanced_url_discovery(
     depth = int(budget.get("discovery_depth") or config["katana_depth"])
     max_urls = int(budget.get("max_urls") or config["max_urls"])
     use_browser = config["browser_fallback"]
-    do_param_discovery = config["parameter_discovery"]
-    do_js_parsing = config.get("js_parsing", False)
+    do_param_discovery = config["parameter_discovery"] and not bool(budget.get("disable_parameter_discovery"))
+    do_js_parsing = config.get("js_parsing", False) and not bool(budget.get("disable_js_parsing"))
     ffuf_wordlist = config.get("ffuf_wordlist", "common")
     do_recursive_fuzzing = config.get("recursive_fuzzing", False) and not bool(budget.get("disable_recursive_fuzzing"))
     api_probe_budget = budget.get("api_probe_limit")
@@ -1243,6 +1243,8 @@ async def enhanced_url_discovery(
     api_root_resource_limit = config.get("api_root_resource_limit", 0)
     if budget.get("disable_browser_fallback"):
         use_browser = False
+    if budget.get("disable_ffuf"):
+        ffuf_wordlist = None
 
     # Detect SPA catch-all routing before fuzzing
     spa_result = await detect_spa_catch_all(url, timeout=10)

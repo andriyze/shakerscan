@@ -2445,9 +2445,12 @@ async def build_report(target: str,
         discovery_budget = dict(scan_budget)
         discovery_budget["api_probe_limit"] = 0
         discovery_budget["disable_browser_fallback"] = True
+        discovery_budget["disable_ffuf"] = True
+        discovery_budget["disable_js_parsing"] = True
+        discovery_budget["disable_parameter_discovery"] = True
         discovery_budget["disable_recursive_fuzzing"] = True
         discovery_budget["discovery_depth"] = min(int(discovery_budget.get("discovery_depth") or 1), 1)
-        print("[smart] Focused manual active scope: disabling discovery API probes and recursive fuzzing", file=sys.stderr)
+        print("[smart] Focused manual active scope: disabling generic discovery expansion", file=sys.stderr)
 
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
