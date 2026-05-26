@@ -29,9 +29,9 @@ Re-running the install command upgrades the installed runtime files in place. It
 Useful environment overrides:
 
 ```bash
-SHAKERSCAN_HOME="$HOME/.shakerscan-dev" curl -fsSL https://install.shakerscan.com | sh
-SHAKERSCAN_START=0 curl -fsSL https://install.shakerscan.com | sh
-SHAKERSCAN_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main" curl -fsSL https://install.shakerscan.com | sh
+curl -fsSL https://install.shakerscan.com | SHAKERSCAN_HOME="$HOME/.shakerscan-dev" sh
+curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh
+curl -fsSL https://install.shakerscan.com | SHAKERSCAN_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main" sh
 ```
 
 Hosting options:
