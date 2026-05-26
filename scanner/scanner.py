@@ -2990,12 +2990,17 @@ async def build_report(target: str,
     tlsx_task   = asyncio.create_task(tlsx_probe(host, port))
     ocsp_task   = asyncio.create_task(openssl_ocsp(host, port))
 
-    # Skip slow TLS scans in public+quick mode for speed
-    if public_only and quick_mode:
+    # Skip slow TLS scans when the scan intent is speed or exact active verification.
+    skip_slow_tls_analysis = (public_only and quick_mode) or focused_manual_active_scope
+    if skip_slow_tls_analysis:
+        if focused_manual_active_scope:
+            print("[smart] Focused manual active scope: skipping slow TLS analyzers", file=sys.stderr)
         # Basic TLS info only - skip deep cipher analysis
-        async def dummy_nmap(): return {"raw": "", "weak_indicators": [], "ciphers_by_protocol": {}}
-        async def dummy_testssl(): return {"supports_tls13": None, "issues": [], "raw_present": False}
-        async def dummy_sslyze(): return {"certificate_chain": [], "cipher_suites": {}, "vulnerabilities": [], "tls_versions": {}, "ocsp_stapling": False, "session_resumption": {}, "scan_completed": False}
+        skip_reason = "focused_manual_active_scope" if focused_manual_active_scope else "public_quick_mode"
+
+        async def dummy_nmap(): return {"raw": "", "weak_indicators": [], "ciphers_by_protocol": {}, "skipped": True, "reason": skip_reason}
+        async def dummy_testssl(): return {"supports_tls13": None, "issues": [], "raw_present": False, "skipped": True, "reason": skip_reason}
+        async def dummy_sslyze(): return {"certificate_chain": [], "cipher_suites": {}, "vulnerabilities": [], "tls_versions": {}, "ocsp_stapling": False, "session_resumption": {}, "scan_completed": False, "skipped": True, "reason": skip_reason}
         nmap_task   = asyncio.create_task(dummy_nmap())
         testssl_task= asyncio.create_task(dummy_testssl())
         sslyze_task = asyncio.create_task(dummy_sslyze())
