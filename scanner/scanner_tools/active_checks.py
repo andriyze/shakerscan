@@ -57,6 +57,14 @@ SQLI_DOCUMENTATION_PATHS = {
     "/swagger.json",
     "/swagger.yaml",
 }
+SQLI_DOCUMENTATION_TRUSTED_SOURCES = {
+    "browser_api_capture",
+    "har_network_capture",
+    "manual",
+    "authenticated_browser",
+    "form_submission",
+    "api_schema_operation",
+}
 
 
 def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
@@ -69,6 +77,24 @@ def _is_sqli_documentation_endpoint(url: str) -> bool:
     parsed = urllib.parse.urlparse(url or "")
     path = parsed.path.rstrip("/").lower() or "/"
     return path in SQLI_DOCUMENTATION_PATHS
+
+
+def _endpoint_sources(endpoint: dict[str, Any]) -> set[str]:
+    sources: set[str] = set()
+    for key in ("source", "sources", "discovery_source", "discovery_sources", "method_source"):
+        value = endpoint.get(key)
+        if isinstance(value, str):
+            sources.add(value.strip().lower())
+        elif isinstance(value, (list, tuple, set)):
+            sources.update(str(item).strip().lower() for item in value if item)
+    return {source for source in sources if source}
+
+
+def _is_sqli_documentation_noise_endpoint(endpoint: dict[str, Any]) -> bool:
+    """Skip static docs URLs unless a runtime source proved this exact request exists."""
+    if not _is_sqli_documentation_endpoint(endpoint.get("url", "")):
+        return False
+    return not bool(_endpoint_sources(endpoint).intersection(SQLI_DOCUMENTATION_TRUSTED_SOURCES))
 
 
 def _public_discovery_markers(path: str, content: str) -> list[str]:
@@ -5757,14 +5783,14 @@ async def smart_sqli_test(
         and e.get("params")
         and _method_allowed(e, "GET")
         and not _is_hash_route(e.get("url", ""))
-        and not _is_sqli_documentation_endpoint(e.get("url", ""))
+        and not _is_sqli_documentation_noise_endpoint(e)
     ]
     post_endpoints = [
         e for e in endpoints
         if e.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
         and e.get("body_params")
         and _method_allowed(e, e.get("method", "GET").upper())
-        and not _is_sqli_documentation_endpoint(e.get("url", ""))
+        and not _is_sqli_documentation_noise_endpoint(e)
     ]
 
     # Test GET endpoints

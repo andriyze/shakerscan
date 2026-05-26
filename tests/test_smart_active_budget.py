@@ -130,6 +130,37 @@ def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
     assert result["params_tested"] == 0
 
 
+def test_smart_sqli_tests_documentation_path_when_seen_in_runtime_capture(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if "%27" in url or "'" in url:
+            return ("You have an error in your SQL syntax near quote", "", 0)
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/openapi.json?id=test",
+                    "method": "GET",
+                    "params": ["id"],
+                    "source": "har_network_capture",
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+        )
+    )
+
+    assert result["endpoints_tested"] == 1
+    assert result["params_tested"] == 1
+    assert result["vulnerabilities_found"] == 1
+    assert result["findings"][0]["url"] == "https://example.test/openapi.json?id=test"
+
+
 def test_smart_sqli_skips_hash_route_endpoints(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("SPA hash routes should not be probed for server-side SQLi")
