@@ -233,6 +233,13 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
                 finding["verification_reason"] = "Header reflection observed without poisoned same-key cache hit"
                 _cap_severity(finding, "low" if cacheable else "info")
 
+        elif tool == "2fa_bypass":
+            method = str(_evidence_value(finding, "method") or "").lower()
+            if method == "no_rate_limiting":
+                finding["needs_verification"] = True
+                finding["verification_reason"] = "Missing OTP throttling is a brute-force hardening gap, not a confirmed 2FA bypass"
+                _cap_severity(finding, "medium")
+
         confidence = float(finding.get("confidence") or 0.5)
         finding["confidence_tier"] = get_confidence_tier(confidence)
 

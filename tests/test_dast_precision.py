@@ -126,6 +126,30 @@ def test_precision_policy_accepts_verified_evidence_flag():
     assert adjusted[0]["severity"] == "high"
 
 
+def test_precision_policy_caps_2fa_rate_limit_lead_to_medium():
+    findings = [
+        {
+            "tool": "2fa_bypass",
+            "title": "2FA bypass possible via no_rate_limiting",
+            "severity": "high",
+            "cvss_score": 8.5,
+            "confidence": 0.55,
+            "evidence": {
+                "method": "no_rate_limiting",
+                "endpoint": "https://example.test/api/2fa/verify",
+                "requests_sent": 10,
+                "requests_processed": 10,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["severity"] == "medium"
+    assert adjusted[0]["needs_verification"] is True
+    assert "not a confirmed 2FA bypass" in adjusted[0]["verification_reason"]
+
+
 def test_grade_discounts_unverified_suspected_high_findings():
     suspected = {
         "tool": "bfla",

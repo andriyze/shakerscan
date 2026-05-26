@@ -5794,12 +5794,20 @@ async def build_report(target: str,
             ))
 
     if twofa_bypass_results.get("vulnerable"):
-        # 2FA bypass findings - critical severity
+        # Direct post-2FA access is a bypass; missing OTP throttling is a
+        # brute-force hardening gap and should not be labeled as bypass.
         for bypass_method in twofa_bypass_results.get("bypass_methods_detected", []):
+            method = bypass_method.get("method")
+            if method == "no_rate_limiting":
+                title = f"2FA rate limiting missing on {bypass_method.get('endpoint')}"
+                severity = "medium"
+            else:
+                title = f"2FA bypass possible via {method}"
+                severity = "critical"
             report["findings"].append(normalize_finding(
                 "2fa_bypass",
-                f"2FA bypass possible via {bypass_method.get('method')}",
-                "critical",
+                title,
+                severity,
                 bypass_method,
                 "CWE-287"
             ))
