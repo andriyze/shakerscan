@@ -8266,44 +8266,52 @@ async def build_report(target: str,
 
                     # Stored XSS workflow
                     try:
-                        stored_urls = []
-                        if smart_discovery_data and isinstance(smart_discovery_data, dict):
-                            stored_urls.extend(smart_discovery_data.get("all_urls", []) or [])
-                        stored_urls.extend(crawl_urls or [])
-                        if browser_api_endpoints:
-                            for ep in browser_api_endpoints:
-                                if isinstance(ep, dict) and ep.get("url"):
-                                    stored_urls.append(ep["url"])
-                                elif isinstance(ep, str):
-                                    stored_urls.append(ep)
-                        stored_urls = list({u for u in stored_urls if isinstance(u, str)})
+                        if post_active_budget_exhausted:
+                            stored_skip_reason = (
+                                active_block.get("post_active_enrichment_skipped")
+                                or "active_time_budget_exhausted"
+                            )
+                            active_block["stored_xss_skipped"] = stored_skip_reason
+                            print(f"[active] Skipping stored XSS workflow: {stored_skip_reason}", file=sys.stderr)
+                        else:
+                            stored_urls = []
+                            if smart_discovery_data and isinstance(smart_discovery_data, dict):
+                                stored_urls.extend(smart_discovery_data.get("all_urls", []) or [])
+                            stored_urls.extend(crawl_urls or [])
+                            if browser_api_endpoints:
+                                for ep in browser_api_endpoints:
+                                    if isinstance(ep, dict) and ep.get("url"):
+                                        stored_urls.append(ep["url"])
+                                    elif isinstance(ep, str):
+                                        stored_urls.append(ep)
+                            stored_urls = list({u for u in stored_urls if isinstance(u, str)})
 
-                        stored_res = await stored_xss_workflow(
-                            base_url=base_url,
-                            endpoints=endpoints,
-                            discovered_urls=stored_urls,
-                            auth_session=auth_session,
-                            max_forms=8 if thorough_params else 5,
-                            max_pages=25 if thorough_params else 12,
-                        )
-                        active_block["stored_xss"] = stored_res
-                        if stored_res.get("vulnerable"):
-                            for finding in stored_res.get("findings", [])[:5]:
-                                report["findings"].append(normalize_finding(
-                                    "stored_xss",
-                                    "Stored XSS (workflow)",
-                                    finding.get("severity", "high"),
-                                    {
-                                        "injection_url": finding.get("injection_url"),
-                                        "stored_url": finding.get("stored_url"),
-                                        "param": finding.get("param"),
-                                        "payload": finding.get("payload"),
-                                        "payload_reflected": finding.get("payload_reflected"),
-                                        "snippet": finding.get("snippet"),
-                                        "method": finding.get("method"),
-                                    },
-                                    "CWE-79"
-                                ))
+                            stored_res = await stored_xss_workflow(
+                                base_url=base_url,
+                                endpoints=endpoints,
+                                discovered_urls=stored_urls,
+                                auth_session=auth_session,
+                                max_forms=8 if thorough_params else 5,
+                                max_pages=25 if thorough_params else 12,
+                            )
+                            active_block["stored_xss"] = stored_res
+                            if stored_res.get("vulnerable"):
+                                for finding in stored_res.get("findings", [])[:5]:
+                                    report["findings"].append(normalize_finding(
+                                        "stored_xss",
+                                        "Stored XSS (workflow)",
+                                        finding.get("severity", "high"),
+                                        {
+                                            "injection_url": finding.get("injection_url"),
+                                            "stored_url": finding.get("stored_url"),
+                                            "param": finding.get("param"),
+                                            "payload": finding.get("payload"),
+                                            "payload_reflected": finding.get("payload_reflected"),
+                                            "snippet": finding.get("snippet"),
+                                            "method": finding.get("method"),
+                                        },
+                                        "CWE-79"
+                                    ))
                     except Exception as e:
                         active_block["stored_xss_error"] = str(e)
                 except Exception as e:
