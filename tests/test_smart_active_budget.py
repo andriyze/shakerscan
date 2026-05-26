@@ -12,7 +12,7 @@ def test_sqli_payload_selection_keeps_cross_dbms_fallbacks():
 
 
 def test_public_discovery_files_are_noise_without_sensitive_references():
-    robots = "User-Agent: *\nDisallow: /admin\nSitemap: https://example.test/sitemap.xml\n"
+    robots = "User-Agent: *\nDisallow: /search\nSitemap: https://example.test/sitemap.xml\n"
     sitemap = "<?xml version=\"1.0\"?><urlset><url><loc>https://example.test/</loc></url></urlset>"
 
     assert active_checks._is_public_discovery_noise("robots.txt", robots, []) is True
@@ -26,6 +26,24 @@ def test_public_discovery_files_with_sensitive_file_references_are_kept():
 
     assert markers == ["sensitive_path_reference"]
     assert active_checks._is_public_discovery_noise("robots.txt", robots, markers) is False
+
+
+def test_public_discovery_files_with_private_path_references_are_kept_as_context():
+    robots = "User-Agent: *\nDisallow: /admin\nDisallow: /internal/staging\n"
+    sitemap = (
+        "<?xml version=\"1.0\"?><urlset>"
+        "<url><loc>https://example.test/private/reports</loc></url>"
+        "</urlset>"
+    )
+
+    assert active_checks._public_discovery_markers("robots.txt", robots) == ["non_public_path_reference"]
+    assert active_checks._public_discovery_non_public_references("robots.txt", robots) == [
+        "/admin",
+        "/internal/staging",
+    ]
+    assert active_checks._is_public_discovery_noise("robots.txt", robots, ["non_public_path_reference"]) is False
+    assert active_checks._public_discovery_markers("sitemap.xml", sitemap) == ["non_public_path_reference"]
+    assert active_checks._public_discovery_non_public_references("sitemap.xml", sitemap) == ["/private/reports"]
 
 
 def test_duplicate_exposed_file_bodies_are_collapsed():

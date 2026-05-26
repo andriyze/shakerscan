@@ -34,6 +34,16 @@ PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
     "server.key",
     "wp-config",
 )
+PUBLIC_DISCOVERY_NON_PUBLIC_PATTERNS = tuple(
+    re.compile(pattern, re.I)
+    for pattern in (
+        r"(^|/)(admin|administrator|manage|manager|dashboard|console|cpanel|wp-admin)(/|$|[?#])",
+        r"(^|/)(internal|private|staff|employee|backoffice|intranet)(/|$|[?#])",
+        r"(^|/)(staging|stage|dev|debug|test|qa|uat|beta|preview)(/|$|[?#])",
+        r"(^|/)(backup|backups|old|archive|tmp|temp)(/|$|[?#])",
+        r"(^|/)(api/admin|api/internal|api/private)(/|$|[?#])",
+    )
+)
 
 SQLI_DOCUMENTATION_PATHS = {
     "/api/docs",
@@ -66,9 +76,54 @@ def _public_discovery_markers(path: str, content: str) -> list[str]:
     if normalized_path not in PUBLIC_DISCOVERY_FILES:
         return []
     content_lower = (content or "").lower()
+    markers: list[str] = []
     if any(token in content_lower for token in PUBLIC_DISCOVERY_SENSITIVE_REFERENCES):
-        return ["sensitive_path_reference"]
-    return []
+        markers.append("sensitive_path_reference")
+    if _public_discovery_non_public_references(path, content):
+        markers.append("non_public_path_reference")
+    return markers
+
+
+def _public_discovery_candidate_refs(path: str, content: str) -> list[str]:
+    normalized_path = (path or "").lstrip("/").lower()
+    if normalized_path not in PUBLIC_DISCOVERY_FILES:
+        return []
+
+    refs: list[str] = []
+    body = content or ""
+    if normalized_path == "robots.txt":
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            if key.strip().lower() not in {"allow", "disallow", "sitemap"}:
+                continue
+            value = value.strip()
+            if value:
+                refs.append(value)
+    else:
+        refs.extend(match.group(1).strip() for match in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", body, re.I))
+
+    normalized_refs: list[str] = []
+    for ref in refs:
+        parsed = urllib.parse.urlparse(ref)
+        ref_path = parsed.path if parsed.scheme or parsed.netloc else ref
+        if not ref_path or ref_path in {"/", "*"}:
+            continue
+        if not ref_path.startswith("/"):
+            ref_path = "/" + ref_path
+        normalized_refs.append(ref_path[:200])
+    return normalized_refs
+
+
+def _public_discovery_non_public_references(path: str, content: str) -> list[str]:
+    refs = _public_discovery_candidate_refs(path, content)
+    flagged: list[str] = []
+    for ref in refs:
+        if any(pattern.search(ref) for pattern in PUBLIC_DISCOVERY_NON_PUBLIC_PATTERNS):
+            flagged.append(ref)
+    return flagged[:10]
 
 
 def _is_public_discovery_noise(path: str, content: str, markers: list[str] | None = None) -> bool:
@@ -1745,6 +1800,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         markers = derive_markers(path, content_out)
         public_markers = _public_discovery_markers(path, content_out)
         markers.extend(m for m in public_markers if m not in markers)
+        public_referenced_paths = _public_discovery_non_public_references(path, content_out)
         if _is_public_discovery_noise(path, content_out, markers):
             return None
 
@@ -1760,6 +1816,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
             "preview_hash16": response_fp["hash"],
             "has_html": response_fp["has_html"],
             "markers": markers,
+            "referenced_paths": public_referenced_paths,
         }
     canary_result = await test_canary()
     canary_fps = [{"hash": c["content_hash"], "length": c["content_length"], "content_sample": c["content_sample"]} for c in canary_result.get("responses", [])]

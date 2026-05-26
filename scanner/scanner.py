@@ -5583,8 +5583,16 @@ async def build_report(target: str,
             path_raw = file_info.get("path") or "?"
             path_l = path_raw.lower()
             confidence = (file_info.get("confidence") or "low").lower()
+            markers = file_info.get("markers") or []
+            public_discovery_private_refs = (
+                path_l.lstrip("/") in ("robots.txt", "sitemap.xml")
+                and "non_public_path_reference" in markers
+                and "sensitive_path_reference" not in markers
+            )
             # Severity mapping
-            if any(m in path_l for m in critical_key_markers):
+            if public_discovery_private_refs:
+                severity = "info"
+            elif any(m in path_l for m in critical_key_markers):
                 severity = "critical" if confidence in ("high", "medium") else "high"
             elif any(m in path_l for m in high_markers):
                 severity = "high" if confidence != "low" else "medium"
@@ -5627,6 +5635,12 @@ async def build_report(target: str,
                     "Rotate DB credentials and restrict DB network exposure to trusted hosts only.",
                     "Add deny rules for database config files (e.g., location ~* (database|db)\\.(ya?ml)$ { deny all; }).",
                 ]
+            elif public_discovery_private_refs:
+                remediation = [
+                    "Review whether the referenced paths expose sensitive or unauthenticated functionality.",
+                    "Avoid advertising private, staging, or administrative paths in public discovery files when not needed.",
+                    "Ensure every referenced path is protected server-side, not only hidden from navigation.",
+                ]
 
             # Manual verify commands embedded in evidence (safe)
             url = file_info.get("url", urllib.parse.urljoin(base_url + "/", (file_info.get("path") or "").lstrip("/")))
@@ -5644,14 +5658,18 @@ async def build_report(target: str,
 
             duplicate_count = int(file_info.get("duplicate_count") or 0)
             duplicate_suffix = f" (+{duplicate_count} duplicate paths)" if duplicate_count else ""
-            title = f"Exposed file: {path_raw}{duplicate_suffix} (confidence: {confidence})"
+            if public_discovery_private_refs:
+                title = f"Public discovery file references private-looking paths: {path_raw}{duplicate_suffix}"
+            else:
+                title = f"Exposed file: {path_raw}{duplicate_suffix} (confidence: {confidence})"
             evidence = {
                 "path": path_raw,
                 "url": url,
                 "confidence": confidence,
                 "content_type": file_info.get("content_type", "unknown"),
                 "size": file_info.get("size", file_info.get("content_length", 0)),
-                "markers": file_info.get("markers"),
+                "markers": markers,
+                "referenced_paths": file_info.get("referenced_paths"),
                 "preview_first_line": file_info.get("preview_first_line"),
                 "preview_hash16": file_info.get("preview_hash16"),
                 "has_html": file_info.get("has_html"),
