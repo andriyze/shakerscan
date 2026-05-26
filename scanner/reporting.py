@@ -424,6 +424,51 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
 
 
+def emit_http_method_findings(report: dict[str, Any], http_methods_results: dict[str, Any]) -> None:
+    """Emit HTTP method findings with advertised-method noise collapsed."""
+    if not http_methods_results.get("vulnerable"):
+        return
+
+    if http_methods_results.get("trace_enabled"):
+        report["findings"].append(normalize_finding(
+            "http_methods",
+            "HTTP TRACE echo enabled",
+            "medium",
+            http_methods_results.get("trace_evidence", {}),
+            "CWE-200",
+        ))
+
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    for risky in http_methods_results.get("risky_methods", []):
+        methods = tuple(sorted(str(method).upper() for method in risky.get("methods", []) if method))
+        if not methods:
+            continue
+        group = grouped.setdefault(methods, {"methods": list(methods), "urls": [], "details": []})
+        url = risky.get("url")
+        if url and url not in group["urls"]:
+            group["urls"].append(url)
+        group["details"].append(risky)
+
+    for methods, group in grouped.items():
+        urls = group["urls"]
+        count = len(urls)
+        suffix = f" ({count} endpoints)" if count > 1 else ""
+        report["findings"].append(normalize_finding(
+            "http_methods",
+            f"Risky HTTP methods advertised: {', '.join(methods)}{suffix}",
+            "info",
+            {
+                "url": urls[0] if urls else None,
+                "methods": list(methods),
+                "all_urls": urls,
+                "occurrences": count,
+                "detail": "Potentially dangerous methods advertised via OPTIONS; no method execution proof attempted",
+                "details": group["details"][:10],
+            },
+            "CWE-650",
+        ))
+
+
 # ---------- AI review helpers ----------
 
 def _ai_safe_commands_for_finding(f: dict, base_url: str, host: str) -> list[str]:

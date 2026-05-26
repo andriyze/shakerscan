@@ -167,6 +167,7 @@ try:
     from .signals import extract_signals_from_nuclei
     from .reporting import (
         emit_config_findings,
+        emit_http_method_findings,
         _reproCurlHost,
         _reproCurlCors,
         _reproDig,
@@ -196,6 +197,7 @@ except ImportError:
         from scanner.signals import extract_signals_from_nuclei
         from scanner.reporting import (
             emit_config_findings,
+            emit_http_method_findings,
             _reproCurlHost,
             _reproCurlCors,
             _reproDig,
@@ -224,6 +226,7 @@ except ImportError:
         from signals import extract_signals_from_nuclei
         from reporting import (
             emit_config_findings,
+            emit_http_method_findings,
             _reproCurlHost,
             _reproCurlCors,
             _reproDig,
@@ -6102,23 +6105,7 @@ async def build_report(target: str,
                 "CWE-307"
             ))
 
-    if http_methods_results.get("vulnerable"):
-        if http_methods_results.get("trace_enabled"):
-            report["findings"].append(normalize_finding(
-                "http_methods",
-                "HTTP TRACE method enabled",
-                "high",
-                http_methods_results.get("trace_evidence", {}),
-                "CWE-200"
-            ))
-        for risky in http_methods_results.get("risky_methods", []):
-            report["findings"].append(normalize_finding(
-                "http_methods",
-                f"Risky HTTP methods advertised: {', '.join(risky.get('methods', []))}",
-                "medium",
-                risky,
-                "CWE-650"
-            ))
+    emit_http_method_findings(report, http_methods_results)
 
     # Phase 3a Client-Side Security Findings
     if js_deps_results.get("vulnerable"):
