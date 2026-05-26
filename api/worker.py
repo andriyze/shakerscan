@@ -803,6 +803,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             if phase != last_phase or pct != last_pct:
                 await update_scan_progress(scan_id, phase, pct, job_id=job_id)
                 last_progress = (phase, pct)
+            elif job_id:
+                try:
+                    get_redis().hset(f"job:{job_id}", "heartbeat", datetime.utcnow().isoformat())
+                except Exception:
+                    pass
 
     async def _read_stream_lines(stream: asyncio.StreamReader, handler) -> None:
         """Read stream line-by-line (for stderr progress messages)."""

@@ -47,6 +47,41 @@ def test_smart_sqli_respects_time_budget_before_probe(monkeypatch):
     assert result["params_tested"] == 0
 
 
+def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("documentation endpoints should not be probed for SQLi")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/openapi.json?id=test",
+                    "method": "GET",
+                    "params": ["id"],
+                }
+            ],
+            max_seconds=10,
+        )
+    )
+
+    assert result["endpoints_tested"] == 0
+    assert result["params_tested"] == 0
+
+
+def test_detect_dbms_requires_fingerprint_absent_from_baseline(monkeypatch):
+    async def fake_run(*args, **kwargs):
+        return "OpenAPI examples mention Oracle Error ORA-00933", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.detect_dbms("https://example.test/search?q=test", "q"))
+
+    assert result["detected"] is None
+
+
 def test_smart_xss_respects_time_budget_before_probe(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("curl should not run after the XSS time budget is exhausted")

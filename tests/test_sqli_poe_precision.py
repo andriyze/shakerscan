@@ -1,7 +1,10 @@
+import asyncio
+
 from scanner.scanner_tools.proof_of_exploit import (
     _is_valid_sqli_extraction,
     _split_curl_response,
 )
+from scanner.scanner_tools import active_checks
 from scanner.scanner_tools.active_checks import _check_sqli_response
 
 
@@ -79,3 +82,64 @@ def test_sqli_active_check_accepts_actual_database_banner():
 
     assert vulnerable is True
     assert any("Data extraction indicator" in item for item in evidence)
+
+
+def test_sqli_active_check_rejects_baseline_sql_error_banner():
+    out = "OpenAPI examples mention Oracle Error ORA-00933"
+    baseline = "OpenAPI examples mention Oracle Error ORA-00933"
+
+    vulnerable, evidence = _check_sqli_response(
+        out=out,
+        baseline_len=len(baseline),
+        elapsed=0.1,
+        technique="error",
+        dbms_detected=None,
+        baseline_body=baseline,
+    )
+
+    assert vulnerable is False
+    assert not any("SQL error detected" in item for item in evidence)
+
+
+def test_sqli_data_extraction_skips_documentation_endpoint(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("documentation endpoints should not be used for SQLi extraction")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/api/openapi.json",
+                "param": "id",
+                "dbms": "mysql",
+                "method": "GET",
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is False
+    assert result["skipped"] is True
+    assert result["reason"] == "documentation_endpoint"
+
+
+def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
+    async def fake_run(*args, **kwargs):
+        body = "OpenAPI 3.1.0 examples mention MySQL 8.0.36"
+        return f"{body}\n__CURL_STATUS__:200", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.sqli_data_extraction(
+            {
+                "url": "https://example.test/search",
+                "param": "q",
+                "dbms": "mysql",
+                "method": "GET",
+            }
+        )
+    )
+
+    assert result["extraction_successful"] is False
+    assert "version" not in result["extracted_data"]

@@ -34,6 +34,31 @@ PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
     "wp-config",
 )
 
+SQLI_DOCUMENTATION_PATHS = {
+    "/api/docs",
+    "/api/openapi.json",
+    "/api/swagger.json",
+    "/api/swagger.yaml",
+    "/api-docs.json",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/swagger.json",
+    "/swagger.yaml",
+}
+
+
+def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
+    pct = max(0, min(100, int(pct)))
+    safe_message = re.sub(r"\s+", " ", str(message or "")).strip()[:160]
+    print(f"[progress] phase={phase} pct={pct} message={safe_message}", file=sys.stderr, flush=True)
+
+
+def _is_sqli_documentation_endpoint(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url or "")
+    path = parsed.path.rstrip("/").lower() or "/"
+    return path in SQLI_DOCUMENTATION_PATHS
+
 
 def _public_discovery_markers(path: str, content: str) -> list[str]:
     normalized_path = (path or "").lstrip("/").lower()
@@ -4993,21 +5018,34 @@ async def detect_dbms(url: str, param: str | None = None) -> dict:
         "evidence": [],
     }
 
+    if _is_sqli_documentation_endpoint(url):
+        return result
+
+    def _url_with_payload(value: str) -> str:
+        if param:
+            parsed = urllib.parse.urlparse(url)
+            query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            query_params[param] = [value]
+            new_query = urllib.parse.urlencode(query_params, doseq=True)
+            return urllib.parse.urlunparse(parsed._replace(query=new_query))
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}test={urllib.parse.quote(value)}"
+
+    baseline_body = ""
+    baseline_url = _url_with_payload("shakerscan_dbms_baseline")
+    baseline_out, _, baseline_rc = await run([
+        "curl", "-sS", "-L", "-k", "--max-time", "8",
+        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        baseline_url
+    ], timeout=10)
+    if baseline_rc == 0 and baseline_out:
+        baseline_body = baseline_out
+
     # Error-inducing payloads
     test_payloads = ["'", "''", '"', "\\", "1'1", "1 AND 1=1", "1'"]
 
     for payload in test_payloads:
-        if param:
-            # Inject into specific parameter
-            parsed = urllib.parse.urlparse(url)
-            query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            query_params[param] = [payload]
-            new_query = urllib.parse.urlencode(query_params, doseq=True)
-            test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-        else:
-            # Append to URL
-            separator = "&" if "?" in url else "?"
-            test_url = f"{url}{separator}test={urllib.parse.quote(payload)}"
+        test_url = _url_with_payload(payload)
 
         out, err, rc = await run([
             "curl", "-sS", "-L", "-k", "--max-time", "8",
@@ -5020,7 +5058,8 @@ async def detect_dbms(url: str, param: str | None = None) -> dict:
             for dbms, patterns in DBMS_FINGERPRINTS.items():
                 for pattern in patterns:
                     match = re.search(pattern, out, re.I)
-                    if match:
+                    baseline_match = re.search(pattern, baseline_body, re.I) if baseline_body else None
+                    if match and not baseline_match:
                         result["detected"] = dbms
                         result["confidence"] = 0.9
                         result["evidence"].append({
@@ -5405,6 +5444,32 @@ async def _detect_dbms_post(
         method: HTTP method (POST, PUT, PATCH)
         base_body: Other params to include with benign values
     """
+    if _is_sqli_documentation_endpoint(endpoint_url):
+        return {"detected": None}
+
+    if isinstance(base_body, list):
+        if "json" not in content_type.lower():
+            return {"detected": None}
+        baseline_body = copy.deepcopy(base_body)
+        if not baseline_body:
+            baseline_body = [{}] if param != "__item__" else ["shakerscan_dbms_baseline"]
+        if isinstance(baseline_body[0], dict):
+            baseline_body[0][param] = "shakerscan_dbms_baseline"
+        else:
+            baseline_body[0] = "shakerscan_dbms_baseline"
+    else:
+        baseline_body = dict(base_body) if base_body else {}
+        baseline_body[param] = "shakerscan_dbms_baseline"
+
+    baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
+    baseline_cmd = [
+        "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+        "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+    ] + baseline_header_args + auth_args + baseline_body_args + [endpoint_url]
+
+    baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
+    baseline_text = baseline_out if baseline_rc == 0 and baseline_out else ""
+
     # Build body with all params (benign values) + injected param
     if isinstance(base_body, list):
         if "json" not in content_type.lower():
@@ -5434,7 +5499,7 @@ async def _detect_dbms_post(
     # Check for DBMS-specific error patterns
     for dbms_name, patterns in DBMS_FINGERPRINTS.items():
         for pattern in patterns:
-            if re.search(pattern, out, re.I):
+            if re.search(pattern, out, re.I) and not re.search(pattern, baseline_text, re.I):
                 return {"detected": dbms_name}
 
     return {"detected": None}
@@ -5482,6 +5547,28 @@ async def smart_sqli_test(
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
+    progress_started = time.monotonic()
+    last_progress_emit = 0.0
+
+    def _emit_sqli_progress(message: str, force: bool = False) -> None:
+        nonlocal last_progress_emit
+        now = time.monotonic()
+        if not force and now - last_progress_emit < 30.0:
+            return
+        elapsed = now - progress_started
+        if max_seconds and max_seconds > 0:
+            pct = 60 + int(24 * min(1.0, elapsed / max_seconds))
+        else:
+            pct = min(84, 60 + int(elapsed // 120))
+        _emit_scan_progress(
+            "active_sqli",
+            pct,
+            (
+                f"{message}; endpoints={results['endpoints_tested']} "
+                f"params={results['params_tested']} findings={results['vulnerabilities_found']}"
+            ),
+        )
+        last_progress_emit = now
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
@@ -5489,17 +5576,20 @@ async def smart_sqli_test(
             results["budget_exhausted"] = True
             if not budget_logged:
                 print(f"[sqli] Finding budget reached ({max_findings}); stopping SQLi probes", file=sys.stderr)
+                _emit_sqli_progress("finding budget reached", force=True)
                 budget_logged = True
             return True
         if deadline is not None and time.monotonic() >= deadline:
             results["budget_exhausted"] = True
             if not budget_logged:
                 print("[sqli] Time budget exhausted; stopping SQLi probes", file=sys.stderr)
+                _emit_sqli_progress("time budget exhausted", force=True)
                 budget_logged = True
             return True
         return False
 
     auth_args = get_auth_curl_args(auth_session)
+    _emit_sqli_progress("starting SQLi probes", force=True)
 
     # Separate GET and POST endpoints to ensure both get tested
     def _method_allowed(endpoint: dict[str, Any], method: str) -> bool:
@@ -5513,12 +5603,14 @@ async def smart_sqli_test(
         if e.get("method", "GET").upper() == "GET"
         and e.get("params")
         and _method_allowed(e, "GET")
+        and not _is_sqli_documentation_endpoint(e.get("url", ""))
     ]
     post_endpoints = [
         e for e in endpoints
         if e.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
         and e.get("body_params")
         and _method_allowed(e, e.get("method", "GET").upper())
+        and not _is_sqli_documentation_endpoint(e.get("url", ""))
     ]
 
     # Test GET endpoints
@@ -5534,6 +5626,7 @@ async def smart_sqli_test(
 
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
+        _emit_sqli_progress(f"testing GET endpoint {endpoint_url}")
 
         # Detect DBMS if not known
         if not results["dbms_detected"] and params:
@@ -5550,6 +5643,7 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            _emit_sqli_progress(f"testing GET param {param}")
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
             baseline_params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
@@ -5641,6 +5735,7 @@ async def smart_sqli_test(
 
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
+        _emit_sqli_progress(f"testing {method} endpoint {endpoint_url}")
 
         base_body = _build_body_template(endpoint)
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
@@ -5672,6 +5767,7 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            _emit_sqli_progress(f"testing {method} param {param}")
             # Build baseline for THIS param
             if is_array_body:
                 baseline_body = copy.deepcopy(base_body)
@@ -5789,6 +5885,7 @@ async def smart_sqli_test(
                     print(f"[sqli] {method} SQLi FOUND in {endpoint_url} param={param}", file=sys.stderr)
                     break  # One confirmed SQLi per param is enough
 
+    _emit_sqli_progress("SQLi probes complete", force=True)
     return results
 
 
@@ -5819,6 +5916,20 @@ SQLI_EXTRACTION_PAYLOADS = {
         "database": "' UNION SELECT NULL,DB_NAME(),NULL--",
         "tables": "' UNION SELECT NULL,STRING_AGG(name,','),NULL FROM sysobjects WHERE xtype='U'--",
     },
+    "oracle": {
+        "version": "' UNION SELECT NULL,banner,NULL FROM v$version--",
+        "user": "' UNION SELECT NULL,USER,NULL FROM dual--",
+        "database": "' UNION SELECT NULL,GLOBAL_NAME,NULL FROM global_name--",
+        "tables": "' UNION SELECT NULL,LISTAGG(table_name, ',') WITHIN GROUP (ORDER BY table_name),NULL FROM user_tables--",
+    },
+}
+
+SQLI_VERSION_EXTRACTION_PATTERNS = {
+    "mysql": [r"\b(?:MySQL|MariaDB)\s+(\d+(?:\.\d+)+[^\s<]*)"],
+    "postgresql": [r"\bPostgreSQL\s+(\d+(?:\.\d+)+[^\s<]*)"],
+    "mssql": [r"\bMicrosoft\s+SQL\s+Server\b[^\n<]{0,120}(\d{4}|\d+(?:\.\d+)+)"],
+    "sqlite": [r"\bSQLite\s+(\d+(?:\.\d+)+[^\s<]*)"],
+    "oracle": [r"\bOracle(?:\s+Database)?\b[^\n<]{0,120}(\d+(?:c|g)?|\d+(?:\.\d+)+)"],
 }
 
 
@@ -5860,6 +5971,10 @@ async def sqli_data_extraction(
 
     if not url or not param:
         return results
+    if _is_sqli_documentation_endpoint(url):
+        results["skipped"] = True
+        results["reason"] = "documentation_endpoint"
+        return results
 
     auth_args = get_auth_curl_args(auth_session)
     extraction_payloads = SQLI_EXTRACTION_PAYLOADS.get(dbms, SQLI_EXTRACTION_PAYLOADS["mysql"])
@@ -5898,20 +6013,27 @@ async def sqli_data_extraction(
         body, status = _parse_curl_body_status(out)
         return body or "", status or 0
 
+    baseline_body, baseline_status = await send_payload(_stringify_body_value(_fallback_value_for_param(param)))
+
+    def _match_not_in_baseline(pattern: str, body: str) -> re.Match[str] | None:
+        match = re.search(pattern, body or "", re.I)
+        if not match:
+            return None
+        matched_text = match.group(0)
+        baseline_match = re.search(pattern, baseline_body or "", re.I)
+        if baseline_match:
+            return None
+        if matched_text and matched_text in (baseline_body or ""):
+            return None
+        return match
+
     # Try to extract database version
     if "version" in extraction_payloads:
         body, status = await send_payload(extraction_payloads["version"])
         if status == 200 and body:
-            # Look for version patterns in response
-            version_patterns = [
-                r"(\d+\.\d+\.\d+[-\w]*)",  # Generic version pattern
-                r"MySQL\s+(\d+\.\d+\.\d+)",
-                r"PostgreSQL\s+(\d+\.\d+)",
-                r"Microsoft\s+SQL\s+Server\s+(\d+)",
-                r"SQLite\s+(\d+\.\d+\.\d+)",
-            ]
+            version_patterns = SQLI_VERSION_EXTRACTION_PATTERNS.get(str(dbms).lower(), [])
             for pattern in version_patterns:
-                match = re.search(pattern, body, re.I)
+                match = _match_not_in_baseline(pattern, body)
                 if match:
                     results["extracted_data"]["version"] = match.group(1)
                     results["dbms_confirmed"] = dbms
@@ -5930,7 +6052,7 @@ async def sqli_data_extraction(
                 r"(?:user|admin|dbo|postgres)(?:@[\w.-]+)?",
             ]
             for pattern in user_patterns:
-                match = re.search(pattern, body, re.I)
+                match = _match_not_in_baseline(pattern, body)
                 if match:
                     results["extracted_data"]["user"] = match.group(0)
                     results["evidence"].append(f"Extracted user: {match.group(0)}")
@@ -5944,7 +6066,8 @@ async def sqli_data_extraction(
             db_match = re.search(r'[\w_-]{2,30}', body)
             if db_match:
                 db_name = db_match.group(0)
-                if db_name not in ["null", "NULL", "undefined", "error", "Error"]:
+                baseline_tokens = set(re.findall(r"[\w_-]{2,30}", baseline_body or "", re.I))
+                if db_name not in ["null", "NULL", "undefined", "error", "Error"] and db_name not in baseline_tokens:
                     results["extracted_data"]["database"] = db_name
                     results["evidence"].append(f"Extracted database: {db_name}")
 
@@ -5956,7 +6079,8 @@ async def sqli_data_extraction(
             # Filter out common words that aren't table names
             exclude_words = {"error", "null", "undefined", "true", "false", "type", "message"}
             potential_tables = re.findall(r'\b([a-z_][a-z0-9_]{2,30})\b', body, re.I)
-            tables = [t for t in potential_tables if t.lower() not in exclude_words]
+            baseline_tokens = {token.lower() for token in re.findall(r'\b([a-z_][a-z0-9_]{2,30})\b', baseline_body or "", re.I)}
+            tables = [t for t in potential_tables if t.lower() not in exclude_words and t.lower() not in baseline_tokens]
 
             if tables:
                 # Deduplicate and limit
@@ -6139,7 +6263,7 @@ def _check_sqli_response(
     # 1. Check for SQL errors
     for dbms_name, patterns in DBMS_FINGERPRINTS.items():
         for pattern in patterns:
-            if re.search(pattern, out or "", re.I):
+            if re.search(pattern, out or "", re.I) and not re.search(pattern, baseline_body or "", re.I):
                 strong_signal = True
                 evidence.append(f"SQL error detected: {pattern}")
                 break
@@ -6292,6 +6416,28 @@ async def smart_xss_test(
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
+    progress_started = time.monotonic()
+    last_progress_emit = 0.0
+
+    def _emit_xss_progress(message: str, force: bool = False) -> None:
+        nonlocal last_progress_emit
+        now = time.monotonic()
+        if not force and now - last_progress_emit < 30.0:
+            return
+        elapsed = now - progress_started
+        if max_seconds and max_seconds > 0:
+            pct = 86 + int(2 * min(1.0, elapsed / max_seconds))
+        else:
+            pct = min(88, 86 + int(elapsed // 180))
+        _emit_scan_progress(
+            "active_xss",
+            pct,
+            (
+                f"{message}; endpoints={results['endpoints_tested']} "
+                f"params={results['params_tested']} findings={results['vulnerabilities_found']}"
+            ),
+        )
+        last_progress_emit = now
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
@@ -6299,17 +6445,20 @@ async def smart_xss_test(
             results["budget_exhausted"] = True
             if not budget_logged:
                 print(f"[xss] Finding budget reached ({max_findings}); stopping XSS probes", file=sys.stderr)
+                _emit_xss_progress("finding budget reached", force=True)
                 budget_logged = True
             return True
         if deadline is not None and time.monotonic() >= deadline:
             results["budget_exhausted"] = True
             if not budget_logged:
                 print("[xss] Time budget exhausted; stopping XSS probes", file=sys.stderr)
+                _emit_xss_progress("time budget exhausted", force=True)
                 budget_logged = True
             return True
         return False
 
     auth_args = get_auth_curl_args(auth_session)
+    _emit_xss_progress("starting XSS probes", force=True)
 
     def _coerce_param_list(raw: Any) -> list[str]:
         if isinstance(raw, dict):
@@ -6360,11 +6509,13 @@ async def smart_xss_test(
 
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
+        _emit_xss_progress(f"testing GET endpoint {endpoint_url}")
 
         for param in params[:max_params_per_endpoint]:
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            _emit_xss_progress(f"testing GET param {param}")
             # Send canary to detect reflection
             canary = f"xss{random.randint(10000, 99999)}test"
 
@@ -6514,6 +6665,7 @@ async def smart_xss_test(
 
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
+        _emit_xss_progress(f"testing {method} endpoint {endpoint_url}")
 
         base_body = _build_body_template(endpoint)
         is_array_body = isinstance(base_body, list)
@@ -6528,6 +6680,7 @@ async def smart_xss_test(
             if "multipart/form-data" in content_type.lower() and _is_file_param(param):
                 continue
             results["params_tested"] += 1
+            _emit_xss_progress(f"testing {method} param {param}")
 
             canary = f"xss{random.randint(10000, 99999)}test"
             test_body = _apply_body_param(base_body, param, canary)
@@ -6620,6 +6773,7 @@ async def smart_xss_test(
     # Note: Hash route DOM XSS is tested separately via hash_route_dom_xss_test()
     # which is called unconditionally in smart scans (not gated by run_xss flag)
 
+    _emit_xss_progress("XSS probes complete", force=True)
     return results
 
 
@@ -7082,6 +7236,7 @@ async def run_smart_active_tests(
         max_findings_per_family = max(0, int(max_findings_per_family))
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
+    _emit_scan_progress("active", 58, f"starting smart active tests on {len(endpoints)} endpoints")
     if signals:
         active_signals = [k for k, v in signals.items() if v]
         if active_signals:
@@ -7112,6 +7267,7 @@ async def run_smart_active_tests(
         return max(0.0, active_max_seconds - (time.monotonic() - active_started))
 
     if run_sqli:
+        _emit_scan_progress("active_sqli", 60, "starting SQLi probes")
         sqli_results = await smart_sqli_test(
             url, prioritized_endpoints, dbms, auth_session,
             max_endpoints=sqli_max_endpoints,
@@ -7135,6 +7291,7 @@ async def run_smart_active_tests(
         remaining = _remaining_active_seconds()
         if remaining <= 1.0:
             print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
+            _emit_scan_progress("active_xss", 86, "skipping XSS probes; active time budget exhausted")
             xss_results = {
                 "findings": [],
                 "reflections_found": 0,
@@ -7145,6 +7302,7 @@ async def run_smart_active_tests(
                 "budget_exhausted": True,
             }
         else:
+            _emit_scan_progress("active_xss", 86, "starting XSS probes")
             xss_results = await smart_xss_test(
                 url, endpoints, auth_session=auth_session,
                 max_endpoints=xss_max_endpoints,
@@ -7165,6 +7323,7 @@ async def run_smart_active_tests(
     # Hash-route DOM XSS is part of XSS coverage. Keep it in default smart
     # scans, but honor focused SQLi-only scans.
     if run_xss:
+        _emit_scan_progress("active_dom_xss", 88, "starting DOM XSS probes")
         hash_route_results = await hash_route_dom_xss_test(
             endpoints,
             max_endpoints=xss_max_endpoints,
@@ -7185,6 +7344,7 @@ async def run_smart_active_tests(
     xss_findings = xss_results.get("findings", [])
     hash_route_findings = hash_route_results.get("findings", [])
     all_findings = sqli_findings + xss_findings + hash_route_findings
+    _emit_scan_progress("active", 89, "smart active tests complete")
 
     return {
         "findings": all_findings,
