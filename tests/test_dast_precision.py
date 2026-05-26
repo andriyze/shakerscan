@@ -150,6 +150,28 @@ def test_precision_policy_caps_2fa_rate_limit_lead_to_medium():
     assert "not a confirmed 2FA bypass" in adjusted[0]["verification_reason"]
 
 
+def test_precision_policy_accepts_graphql_verified_evidence_flag():
+    findings = [
+        {
+            "tool": "graphql_vulnerability",
+            "title": "GraphQL Vulnerability: introspection_enabled",
+            "severity": "medium",
+            "cvss_score": 5.0,
+            "confidence": 0.85,
+            "evidence": {
+                "issue": "introspection_enabled",
+                "verified": True,
+                "evidence": [{"type": "introspection_enabled", "verified": True}],
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["severity"] == "medium"
+
+
 def test_grade_discounts_unverified_suspected_high_findings():
     suspected = {
         "tool": "bfla",

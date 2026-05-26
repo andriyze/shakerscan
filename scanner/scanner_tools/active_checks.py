@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import base64
+import hashlib
 import json
 import os
 import random
@@ -3787,7 +3788,18 @@ async def graphql_vulnerability_test(url: str) -> dict[str, Any]:
             try:
                 response = json.loads(out)
                 if "data" in response and "__schema" in response.get("data", {}):
-                    results["vulnerable"] = True; results["issues"].append("introspection_enabled"); results["evidence"].append({"type": "introspection_enabled", "endpoint": endpoint})
+                    schema_types = response.get("data", {}).get("__schema", {}).get("types", [])
+                    response_hash = hashlib.sha256(out.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                    results["vulnerable"] = True
+                    if "introspection_enabled" not in results["issues"]:
+                        results["issues"].append("introspection_enabled")
+                    results["evidence"].append({
+                        "type": "introspection_enabled",
+                        "endpoint": endpoint,
+                        "verified": True,
+                        "schema_type_count": len(schema_types) if isinstance(schema_types, list) else None,
+                        "response_hash16": response_hash,
+                    })
             except Exception:
                 pass
     return results

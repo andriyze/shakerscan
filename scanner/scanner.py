@@ -5466,10 +5466,19 @@ async def build_report(target: str,
 
     if graphql_results.get("vulnerable"):
         for issue in graphql_results.get("issues", []):
-            severity = "high" if "introspection" in issue else "medium"
+            severity = "medium" if issue == "introspection_enabled" else "high"
+            issue_evidence = [
+                item
+                for item in graphql_results.get("evidence", [])
+                if isinstance(item, dict) and item.get("type") == issue
+            ]
             report["findings"].append(normalize_finding(
                 "graphql_vulnerability", f"GraphQL Vulnerability: {issue}", severity,
-                {"issue": issue, "evidence": graphql_results["evidence"]},
+                {
+                    "issue": issue,
+                    "evidence": issue_evidence or graphql_results["evidence"],
+                    "verified": any(item.get("verified") for item in issue_evidence),
+                },
                 "CWE-200"
             ))
 
