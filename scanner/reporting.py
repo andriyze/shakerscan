@@ -486,7 +486,19 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
     title = (f.get("title") or "").lower()
     tool = (f.get("tool") or "").lower()
     ev = f.get("evidence") or {}
+    validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
     rationale = []
+    if (
+        f.get("verified") is True
+        or f.get("proof_of_exploitation") is True
+        or ev.get("verified") is True
+        or ev.get("proof_of_exploitation") is True
+        or validation.get("verified") is True
+        or validation.get("poe_proven") is True
+    ):
+        rationale.append("Finding includes verified exploitation evidence")
+        return "true_positive", 0.95, "; ".join(rationale)
+
     # Strong true-positives: header/config absences
     if tool in ("http_headers","csp_evaluator","cookies_analyzer","dns_policy","tls_config","cors_scanner","redirect_check","security_txt"):
         rationale.append("Static misconfiguration derived from observed headers/records")
@@ -648,6 +660,13 @@ def _generate_fallback_executive_summary(
     high = sum(1 for f in findings if f.get("severity") == "high")
     medium = sum(1 for f in findings if f.get("severity") == "medium")
     low = sum(1 for f in findings if f.get("severity") == "low")
+    confirmed = sum(1 for f in findings if f.get("verified") is True)
+    review_needed = sum(
+        1
+        for f in findings
+        if f.get("needs_verification") is True
+        or f.get("confidence_tier") in ("low", "uncertain")
+    )
 
     # Determine risk level
     if critical > 0:
@@ -672,16 +691,33 @@ def _generate_fallback_executive_summary(
 
     # Build recommendations
     recommendations = []
-    if critical > 0:
-        recommendations.append("Address critical vulnerabilities immediately - these represent exploitable attack vectors.")
-    if high > 0:
-        recommendations.append("Prioritize high-severity issues in your next sprint or maintenance window.")
-    if not report.get("http", {}).get("security_headers", {}).get("hsts"):
-        recommendations.append("Enable HTTP Strict Transport Security (HSTS) to protect against protocol downgrade attacks.")
-    if report.get("http", {}).get("csp_evaluation", {}).get("grade") in ["D", "F"]:
-        recommendations.append("Strengthen your Content Security Policy to mitigate XSS risks.")
-    if not report.get("dns", {}).get("dmarc", {}).get("record"):
-        recommendations.append("Implement DMARC to protect your domain from email spoofing.")
+    if result.get("focused_active_scope"):
+        recommendations.extend(str(item) for item in (result.get("remediation") or []) if item)
+        if not recommendations and critical > 0:
+            recommendations.append("Address the confirmed critical vulnerability shown in the focused scan evidence.")
+    else:
+        if critical > 0:
+            recommendations.append("Address critical vulnerabilities immediately - these represent exploitable attack vectors.")
+        if high > 0:
+            recommendations.append("Prioritize high-severity issues in your next sprint or maintenance window.")
+        if not report.get("http", {}).get("security_headers", {}).get("hsts"):
+            recommendations.append("Enable HTTP Strict Transport Security (HSTS) to protect against protocol downgrade attacks.")
+        if report.get("http", {}).get("csp_evaluation", {}).get("grade") in ["D", "F"]:
+            recommendations.append("Strengthen your Content Security Policy to mitigate XSS risks.")
+        if not report.get("dns", {}).get("dmarc", {}).get("record"):
+            recommendations.append("Implement DMARC to protect your domain from email spoofing.")
+
+    confidence_summary = (
+        f"{confirmed} confirmed finding(s), {fp_count} likely false positives, "
+        f"{review_needed} require verification."
+    )
+    next_steps = ["Review critical and high-severity findings first."]
+    if review_needed:
+        next_steps.append("Validate findings marked as 'unclear' manually.")
+    next_steps.extend([
+        "Implement recommended security controls.",
+        "Schedule a follow-up scan after remediation.",
+    ])
 
     return {
         "generated_by": "template_fallback",
@@ -695,12 +731,7 @@ def _generate_fallback_executive_summary(
             "low": low,
             "total": len(findings)
         },
-        "confidence_summary": f"{tp_count} likely true positives, {fp_count} likely false positives, {unclear_count} require verification.",
+        "confidence_summary": confidence_summary,
         "recommendations": recommendations[:5],  # Top 5 recommendations
-        "next_steps": [
-            "Review critical and high-severity findings first.",
-            "Validate findings marked as 'unclear' manually.",
-            "Implement recommended security controls.",
-            "Schedule a follow-up scan after remediation."
-        ]
+        "next_steps": next_steps[:4]
     }

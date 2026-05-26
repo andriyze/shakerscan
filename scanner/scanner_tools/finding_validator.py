@@ -369,7 +369,34 @@ def validate_sqli(
         ValidationResult with confidence score
     """
     evidence = finding.get("evidence", {})
+    validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     summary = evidence.get("summary", "")
+
+    extraction_evidence = evidence.get("extraction_evidence") or finding.get("extraction_evidence")
+    extracted_data = evidence.get("extracted_data") or finding.get("extracted_data")
+    proof_of_exploitation = (
+        finding.get("proof_of_exploitation") is True
+        or evidence.get("proof_of_exploitation") is True
+        or validation.get("poe_proven") is True
+    )
+
+    if proof_of_exploitation and (extraction_evidence or extracted_data):
+        return ValidationResult(
+            verified=True,
+            confidence=ConfidenceTier.CONFIRMED,
+            evidence="SQL injection data extraction proof present",
+            reason="Confirmed SQL injection with extraction proof",
+            evidence_level="confirmed_exploit",
+        )
+
+    if finding.get("verified") is True or evidence.get("verified") is True or validation.get("verified") is True:
+        return ValidationResult(
+            verified=True,
+            confidence=ConfidenceTier.VERIFIED,
+            evidence="SQL injection finding marked verified by scanner evidence",
+            reason="SQL injection verified by scanner evidence",
+            evidence_level="confirmed_exploit",
+        )
 
     # SQLMap says "possible SQLi" vs confirmed
     if "possible" in summary.lower():

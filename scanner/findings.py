@@ -189,6 +189,20 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
             validation["evidence_level"] = validation.get("evidence_level") or "confirmed_exploit"
             if validation:
                 finding["validation"] = validation
+            finding["suspected"] = False
+            finding["needs_verification"] = False
+            finding.pop("verification_reason", None)
+            proof_present = (
+                finding.get("proof_of_exploitation") is True
+                or evidence.get("proof_of_exploitation") is True
+                or validation.get("poe_proven") is True
+                or bool(evidence.get("extraction_evidence"))
+                or bool(finding.get("extraction_evidence"))
+            )
+            min_confidence = 0.95 if proof_present else 0.90
+            current_confidence = float(finding.get("confidence") or 0)
+            finding["confidence"] = max(current_confidence, min_confidence)
+            finding["confidence_tier"] = get_confidence_tier(finding["confidence"])
 
         if verified:
             continue

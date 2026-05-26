@@ -8,6 +8,7 @@ sys.path.insert(0, SCANNER_DIR)
 
 from findings import apply_dast_precision_policy  # noqa: E402
 from grading import grade  # noqa: E402
+from reporting import _ai_rule_verdict, _generate_fallback_executive_summary  # noqa: E402
 from scanner_tools import active_checks  # noqa: E402
 from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
@@ -245,6 +246,87 @@ def test_sqli_error_indicator_is_strong_but_not_verified():
     assert validation.verified is False
     assert validation.confidence == 0.75
     assert validation.evidence_level == "strong_indicator"
+
+
+def test_sqli_extraction_proof_survives_validation_pipeline():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL Injection (postgresql - boolean)",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.5,
+        "verified": True,
+        "proof_of_exploitation": True,
+        "needs_verification": True,
+        "suspected": True,
+        "evidence": {
+            "verified": True,
+            "proof_of_exploitation": True,
+            "extraction_evidence": ["Extracted sensitive rowset markers: password_hash, api_key"],
+            "extracted_data": {"sensitive_markers": ["password_hash", "api_key"]},
+        },
+    }
+
+    validation = validate_sqli(finding)
+    updated = apply_validation_to_finding(finding, validation)
+    adjusted = apply_dast_precision_policy([updated])[0]
+
+    assert validation.verified is True
+    assert validation.confidence >= 0.95
+    assert adjusted["verified"] is True
+    assert adjusted["confidence_tier"] == "verified"
+    assert adjusted["needs_verification"] is False
+    assert adjusted["suspected"] is False
+
+
+def test_ai_rule_verdict_trusts_verified_exploitation_evidence():
+    verdict, confidence, rationale = _ai_rule_verdict(
+        {
+            "tool": "smart_sqli",
+            "title": "SQL Injection (postgresql - boolean)",
+            "verified": True,
+            "proof_of_exploitation": True,
+            "evidence": {"proof_of_exploitation": True},
+        },
+        http_status="HTTP/2 200",
+        target_host="honey.shakerscan.com",
+    )
+
+    assert verdict == "true_positive"
+    assert confidence >= 0.95
+    assert "verified exploitation evidence" in rationale
+
+
+def test_focused_fallback_summary_uses_focused_remediation_only():
+    report = {
+        "input": {"normalized_host": "honey.shakerscan.com"},
+        "result": {
+            "score": 85,
+            "grade": "D",
+            "focused_active_scope": True,
+            "remediation": [
+                "Use parameterized queries/prepared statements for database access.",
+                "Validate and type-check request parameters before using them in queries.",
+            ],
+        },
+        "http": {"csp_evaluation": {"grade": "F"}, "security_headers": {}},
+        "dns": {"dmarc": {"record": None}},
+    }
+    findings = [
+        {
+            "title": "SQL Injection (postgresql - boolean)",
+            "severity": "critical",
+            "verified": True,
+            "confidence_tier": "verified",
+        }
+    ]
+
+    summary = _generate_fallback_executive_summary(report, findings, 0, 0, 1)
+
+    assert summary["confidence_summary"] == "1 confirmed finding(s), 0 likely false positives, 0 require verification."
+    assert summary["recommendations"] == report["result"]["remediation"]
+    assert all("DMARC" not in item and "Content Security Policy" not in item for item in summary["recommendations"])
+    assert all("unclear" not in item for item in summary["next_steps"])
 
 
 def test_deterministic_hygiene_finding_is_not_suspected_lead():
