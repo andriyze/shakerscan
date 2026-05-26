@@ -8,6 +8,15 @@ from scanner.scanner_tools import active_checks
 from scanner.scanner_tools.active_checks import _check_sqli_response
 
 
+HONEY_POSTGRES_ERROR = """ERROR: syntax error at or near "' OR 1=1--"
+  LINE 1: SELECT id, username, role FROM users WHERE id = '' OR 1=1--'
+                                                  ^
+  Position: 48
+  SQLSTATE: 42601
+  PG_VERSION: PostgreSQL 14.7 on x86_64-pc-linux-gnu, compiled by gcc 11.3.0
+  HINT: Check escaping of single quotes in the WHERE clause."""
+
+
 def test_curl_response_parser_uses_final_redirect_response_body():
     stdout = (
         "HTTP/1.1 308 Permanent Redirect\r\n"
@@ -99,6 +108,76 @@ def test_sqli_active_check_rejects_baseline_sql_error_banner():
 
     assert vulnerable is False
     assert not any("SQL error detected" in item for item in evidence)
+
+
+def test_sqli_active_check_accepts_honey_postgresql_error_banner():
+    vulnerable, evidence = _check_sqli_response(
+        out=HONEY_POSTGRES_ERROR,
+        baseline_len=len('{"id":1,"username":"admin","role":"admin"}'),
+        elapsed=0.1,
+        technique="boolean",
+        dbms_detected=None,
+        status_code=500,
+        baseline_status=200,
+        baseline_body='{"id":1,"username":"admin","role":"admin"}',
+    )
+
+    assert vulnerable is True
+    assert any("postgresql" in item.lower() for item in evidence)
+    assert any("SQL error detected" in item for item in evidence)
+
+
+def test_detect_dbms_accepts_honey_postgresql_error(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        if "shakerscan_dbms_baseline" in url:
+            return '{"id":1,"username":"admin","role":"admin"}', "", 0
+        if "%27" in url:
+            return HONEY_POSTGRES_ERROR, "", 0
+        return '{"id":1,"username":"admin","role":"admin"}', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(active_checks.detect_dbms("https://example.test/user?id=1", "id"))
+
+    assert result["detected"] == "postgresql"
+    assert result["confidence"] == 0.9
+    assert result["evidence"][0]["match"]
+
+
+def test_smart_sqli_sets_dbms_from_postgresql_error_finding(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        has_status_marker = marker in " ".join(cmd)
+        if "shakerscan_dbms_baseline" in url:
+            return '{"id":1,"username":"admin","role":"admin"}', "", 0
+        if "%27" in url:
+            body = HONEY_POSTGRES_ERROR
+            return (f"{body}\n{marker}500" if has_status_marker else body), "", 0
+        return f'{{"id":1,"username":"admin","role":"admin"}}\n{marker}200', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/user?id=1",
+                    "method": "GET",
+                    "params": ["id"],
+                }
+            ],
+            max_seconds=10,
+        )
+    )
+
+    assert result["dbms_detected"] == "postgresql"
+    assert result["vulnerabilities_found"] == 1
+    assert result["findings"][0]["dbms"] == "postgresql"
+    assert any("postgresql" in item.lower() for item in result["findings"][0]["evidence"])
 
 
 def test_sqli_data_extraction_skips_documentation_endpoint(monkeypatch):

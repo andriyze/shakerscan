@@ -4760,10 +4760,14 @@ DBMS_FINGERPRINTS = {
     ],
     "postgresql": [
         r"PostgreSQL.*ERROR",
+        r"\bPostgreSQL\s+\d+(?:\.\d+)+",
+        r"\bPG_VERSION\b",
         r"pg_query",
         r"PG::Error",
         r"PSQLException",
         r"syntax error at or near",
+        r"syntax error at or near[\s\S]{0,300}SQLSTATE:\s*42601",
+        r"SQLSTATE:\s*42601[\s\S]{0,300}syntax error at or near",
         r"ERROR:\s+column",
     ],
     "mssql": [
@@ -4780,6 +4784,27 @@ DBMS_FINGERPRINTS = {
         r"PLS-\d{5}",
     ],
 }
+
+
+def _match_dbms_fingerprint(body: str | None, baseline_body: str | None = None) -> dict | None:
+    """Return the first DBMS fingerprint that appears only in the probe body."""
+    if not body:
+        return None
+
+    baseline_text = baseline_body or ""
+    for dbms_name, patterns in DBMS_FINGERPRINTS.items():
+        for pattern in patterns:
+            match = re.search(pattern, body, re.I)
+            if not match:
+                continue
+            if baseline_text and re.search(pattern, baseline_text, re.I):
+                continue
+            return {
+                "dbms": dbms_name,
+                "pattern": pattern,
+                "match": match.group(0)[:100],
+            }
+    return None
 
 # DBMS-specific SQLi payloads with WAF bypass techniques
 # Each payload is (payload, technique_name, description)
@@ -5082,20 +5107,16 @@ async def detect_dbms(url: str, param: str | None = None) -> dict:
         ], timeout=10)
 
         if rc == 0 and out:
-            # Check fingerprints
-            for dbms, patterns in DBMS_FINGERPRINTS.items():
-                for pattern in patterns:
-                    match = re.search(pattern, out, re.I)
-                    baseline_match = re.search(pattern, baseline_body, re.I) if baseline_body else None
-                    if match and not baseline_match:
-                        result["detected"] = dbms
-                        result["confidence"] = 0.9
-                        result["evidence"].append({
-                            "payload": payload,
-                            "pattern": pattern,
-                            "match": match.group(0)[:100],
-                        })
-                        return result
+            fingerprint = _match_dbms_fingerprint(out, baseline_body)
+            if fingerprint:
+                result["detected"] = fingerprint["dbms"]
+                result["confidence"] = 0.9
+                result["evidence"].append({
+                    "payload": payload,
+                    "pattern": fingerprint["pattern"],
+                    "match": fingerprint["match"],
+                })
+                return result
 
     return result
 
@@ -5524,11 +5545,9 @@ async def _detect_dbms_post(
     if rc != 0 or not out:
         return {"detected": None}
 
-    # Check for DBMS-specific error patterns
-    for dbms_name, patterns in DBMS_FINGERPRINTS.items():
-        for pattern in patterns:
-            if re.search(pattern, out, re.I) and not re.search(pattern, baseline_text, re.I):
-                return {"detected": dbms_name}
+    fingerprint = _match_dbms_fingerprint(out, baseline_text)
+    if fingerprint:
+        return {"detected": fingerprint["dbms"]}
 
     return {"detected": None}
 
@@ -5731,6 +5750,10 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if not results["dbms_detected"]:
+                        fingerprint = _match_dbms_fingerprint(body_out, baseline_body)
+                        if fingerprint:
+                            results["dbms_detected"] = fingerprint["dbms"]
                     finding_dict = {
                         "type": "SQLi",
                         "method": "GET",
@@ -5886,6 +5909,10 @@ async def smart_sqli_test(
                 )
 
                 if is_vulnerable:
+                    if not results["dbms_detected"]:
+                        fingerprint = _match_dbms_fingerprint(body_out, baseline_body_out)
+                        if fingerprint:
+                            results["dbms_detected"] = fingerprint["dbms"]
                     request_headers = _headers_from_curl_args(auth_args)
                     if method in ("POST", "PUT", "PATCH") and content_type:
                         request_headers.setdefault("Content-Type", content_type)
@@ -6294,14 +6321,10 @@ def _check_sqli_response(
     size_diff = None
 
     # 1. Check for SQL errors
-    for dbms_name, patterns in DBMS_FINGERPRINTS.items():
-        for pattern in patterns:
-            if re.search(pattern, out or "", re.I) and not re.search(pattern, baseline_body or "", re.I):
-                strong_signal = True
-                evidence.append(f"SQL error detected: {pattern}")
-                break
-        if strong_signal:
-            break
+    fingerprint = _match_dbms_fingerprint(out, baseline_body)
+    if fingerprint:
+        strong_signal = True
+        evidence.append(f"SQL error detected ({fingerprint['dbms']}): {fingerprint['pattern']}")
 
     # 2. Check for time-based injection (enhanced with adaptive tolerance)
     if "time" in technique:
