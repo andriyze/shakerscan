@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 
@@ -141,3 +143,54 @@ def test_benchmark_fails_expected_recall_regression():
     assert ok is False
     assert metrics["expected_recall"] == 0.0
     assert any("expected_recall" in failure for failure in failures)
+
+
+def test_benchmark_cli_filters_by_name(tmp_path, monkeypatch, capsys):
+    report = {
+        "findings": [
+            {
+                "tool": "smart_sqli",
+                "title": "SQL Injection",
+                "severity": "high",
+                "verified": True,
+            }
+        ],
+        "quality_metrics": {"quality_score": 80},
+    }
+    one_result = tmp_path / "one.json"
+    two_result = tmp_path / "two.json"
+    one_result.write_text(json.dumps(report))
+    two_result.write_text(json.dumps({"findings": []}))
+    config = {
+        "benchmarks": [
+            {
+                "name": "one",
+                "result_path": str(one_result),
+                "assertions": {"min_total_findings": 1},
+            },
+            {
+                "name": "two",
+                "result_path": str(two_result),
+                "assertions": {"min_total_findings": 1},
+            },
+        ]
+    }
+    config_path = tmp_path / "benchmarks.json"
+    config_path.write_text(json.dumps(config))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_benchmarks.py",
+            "--benchmarks",
+            str(config_path),
+            "--benchmark",
+            "one",
+        ],
+    )
+
+    assert run_benchmarks.main() == 0
+    captured = capsys.readouterr()
+    assert "[one] PASS" in captured.out
+    assert "[two]" not in captured.out

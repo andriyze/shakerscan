@@ -532,8 +532,12 @@ def _check_benchmark(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run scan benchmark assertions")
+    parser = argparse.ArgumentParser(
+        description="Run scan benchmark assertions",
+        allow_abbrev=False,
+    )
     parser.add_argument("--benchmarks", default="tests/benchmark/benchmarks.json", help="Path to benchmarks JSON")
+    parser.add_argument("--benchmark", action="append", default=[], help="Benchmark name to run from config.")
     parser.add_argument("--results-dir", default=None, help="Base directory to resolve relative result paths")
     parser.add_argument("--result", action="append", default=[], help="Override result path: name=path")
     parser.add_argument("--baseline-results-dir", default=None, help="Base directory to resolve baseline result paths")
@@ -565,6 +569,17 @@ def main() -> int:
         return 2
 
     known_benchmark_names = set(benchmark_names)
+    selected_names = set(args.benchmark)
+    unknown_selected = sorted(selected_names - known_benchmark_names)
+    if unknown_selected:
+        print(f"Unknown benchmark name(s): {unknown_selected}", file=sys.stderr)
+        return 2
+    if selected_names:
+        benchmarks = [
+            bench
+            for bench in benchmarks
+            if (bench.get("name") or "unnamed") in selected_names
+        ]
 
     try:
         overrides = _parse_overrides(args.result, "--result")
