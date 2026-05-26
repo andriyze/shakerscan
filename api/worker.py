@@ -536,6 +536,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             "browser_max_pages": "--budget-browser-max-pages",
             "browser_max_depth": "--budget-browser-max-depth",
             "api_probe_limit": "--budget-api-probe-limit",
+            "param_discovery_url_limit": "--budget-param-discovery-url-limit",
+            "param_discovery_max_params": "--budget-param-discovery-max-params",
             "nuclei_max_targets": "--budget-nuclei-max-targets",
             "active_max_seconds": "--budget-active-max-seconds",
             "active_max_endpoints": "--budget-active-max-endpoints",

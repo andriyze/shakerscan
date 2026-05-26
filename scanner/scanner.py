@@ -10276,6 +10276,8 @@ async def cli_main():
     ap.add_argument("--budget-browser-max-pages", type=int, dest="budget_browser_max_pages")
     ap.add_argument("--budget-browser-max-depth", type=int, dest="budget_browser_max_depth")
     ap.add_argument("--budget-api-probe-limit", type=int, dest="budget_api_probe_limit")
+    ap.add_argument("--budget-param-discovery-url-limit", type=int, dest="budget_param_discovery_url_limit")
+    ap.add_argument("--budget-param-discovery-max-params", type=int, dest="budget_param_discovery_max_params")
     ap.add_argument("--budget-nuclei-max-targets", type=int, dest="budget_nuclei_max_targets")
     ap.add_argument("--budget-disable-nuclei-early-stop", action="store_true", dest="budget_disable_nuclei_early_stop")
     ap.add_argument("--budget-active-max-seconds", type=int, dest="budget_active_max_seconds")
@@ -11154,6 +11156,8 @@ async def cli_main():
             "browser_max_pages": getattr(args, "budget_browser_max_pages", None),
             "browser_max_depth": getattr(args, "budget_browser_max_depth", None),
             "api_probe_limit": getattr(args, "budget_api_probe_limit", None),
+            "param_discovery_url_limit": getattr(args, "budget_param_discovery_url_limit", None),
+            "param_discovery_max_params": getattr(args, "budget_param_discovery_max_params", None),
             "nuclei_max_targets": getattr(args, "budget_nuclei_max_targets", None),
             "active_max_seconds": getattr(args, "budget_active_max_seconds", None),
             "active_max_endpoints": getattr(args, "budget_active_max_endpoints", None),

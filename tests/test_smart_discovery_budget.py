@@ -5,7 +5,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
 from scanner_tools.discovery import (  # noqa: E402
     _limit_api_probe_candidates,
+    _limit_parameter_discovery_candidates,
     _limit_recursive_directories,
+    _parameter_discovery_limits,
     _plan_api_base_probe_budget,
     calculate_adaptive_depth,
 )
@@ -63,3 +65,40 @@ def test_recursive_directory_limit_prioritizes_api_and_sensitive_paths():
 
 def test_recursive_directory_limit_zero_disables_fuzzing_bases():
     assert _limit_recursive_directories(["/api/", "/admin/"], max_bases=0) == []
+
+
+def test_parameter_discovery_uses_profile_budget_defaults():
+    url_limit, max_params = _parameter_discovery_limits(
+        "smart",
+        {"max_urls": 30},
+        {},
+        max_urls=30,
+    )
+
+    assert url_limit == 8
+    assert max_params == 8
+
+
+def test_parameter_discovery_custom_budget_caps_to_url_budget():
+    url_limit, max_params = _parameter_discovery_limits(
+        "smart",
+        {"param_discovery_url_limit": 50, "param_discovery_max_params": 12},
+        {},
+        max_urls=10,
+    )
+
+    assert url_limit == 10
+    assert max_params == 12
+
+
+def test_parameter_discovery_candidate_limit_prioritizes_api_routes():
+    candidates = [
+        "https://example.com/marketing",
+        "https://example.com/api/users",
+        "https://example.com/rest/orders",
+        "https://example.com/api/users",
+    ]
+
+    limited = _limit_parameter_discovery_candidates(candidates, url_limit=2)
+
+    assert limited == ["https://example.com/api/users", "https://example.com/rest/orders"]

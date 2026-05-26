@@ -32,6 +32,17 @@ def test_resolve_scan_budget_accepts_safe_custom_overrides():
     assert "ignored" not in budget
 
 
+def test_resolve_scan_budget_accepts_parameter_discovery_overrides():
+    budget = resolve_scan_budget(
+        "smart",
+        "balanced",
+        {"param_discovery_url_limit": 4, "param_discovery_max_params": 6},
+    )
+
+    assert budget["param_discovery_url_limit"] == 4
+    assert budget["param_discovery_max_params"] == 6
+
+
 def test_custom_budget_cannot_disable_watchdog_timeout():
     budget = resolve_scan_budget("standard", "balanced", {"max_duration_minutes": 0})
 

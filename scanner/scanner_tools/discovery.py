@@ -129,6 +129,13 @@ DISCOVERY_CONFIG = {
     },
 }
 
+PARAM_DISCOVERY_DEFAULTS = {
+    "deep": {"url_limit": 10, "max_params": 10},
+    "full": {"url_limit": 15, "max_params": 12},
+    "aggressive": {"url_limit": 20, "max_params": 14},
+    "smart": {"url_limit": 8, "max_params": 8},
+}
+
 # Common parameters to try on endpoints (for parameter discovery)
 COMMON_PARAMS = [
     "id", "q", "query", "search", "page", "limit", "offset",
@@ -186,6 +193,59 @@ def _unique_preserve_order(items: list[str]) -> list[str]:
             seen.add(item)
             ordered.append(item)
     return ordered
+
+
+def _safe_nonnegative_int(value: Any, default: int) -> int:
+    try:
+        number = int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, number)
+
+
+def _parameter_discovery_limits(
+    scan_type: str,
+    budget: dict[str, Any] | None,
+    config: dict[str, Any],
+    max_urls: int,
+) -> tuple[int, int]:
+    defaults = PARAM_DISCOVERY_DEFAULTS.get(scan_type, {"url_limit": 0, "max_params": 0})
+    budget = budget or {}
+    default_url_limit = int(config.get("param_discovery_url_limit") or defaults["url_limit"])
+    default_max_params = int(config.get("param_discovery_max_params") or defaults["max_params"])
+    url_limit = _safe_nonnegative_int(
+        budget.get("param_discovery_url_limit"),
+        default_url_limit,
+    )
+    max_params = _safe_nonnegative_int(
+        budget.get("param_discovery_max_params"),
+        default_max_params,
+    )
+    return min(max_urls, url_limit), max_params
+
+
+def _limit_parameter_discovery_candidates(
+    candidate_urls: list[str],
+    url_limit: int,
+) -> list[str]:
+    if url_limit <= 0:
+        return []
+
+    def candidate_priority(candidate_url: str) -> tuple[int, int, str]:
+        parsed = urllib.parse.urlparse(candidate_url)
+        path = (parsed.path or "").lower()
+        high_signal = any(
+            marker in path
+            for marker in [
+                "/graphql", "/api/", "/api", "/rest/", "/v1/", "/v2/",
+                "/user", "/account", "/auth", "/token", "/search",
+            ]
+        )
+        short_path = len([segment for segment in path.split("/") if segment])
+        return (0 if high_signal else 1, short_path, candidate_url)
+
+    ordered = _unique_preserve_order(candidate_urls)
+    return sorted(ordered, key=candidate_priority)[:url_limit]
 
 
 def _normalize_candidate_path(path: str) -> str | None:
@@ -1516,12 +1576,26 @@ async def enhanced_url_discovery(
 
     # Parameter discovery for endpoints without parameters (full/aggressive scans)
     if do_param_discovery:
-        print(f"[discovery] Running parameter discovery on {len(unique_urls)} URLs", file=sys.stderr)
         # Find URLs without query params that might accept them
         # Fixed: Added parentheses to fix precedence - must not have "?" AND must be API/REST endpoint
-        candidate_urls = [u for u in unique_urls if "?" not in u and ("/api" in u.lower() or "/rest" in u.lower())][:50]
-        for candidate_url in candidate_urls:
-            found_params = await discover_endpoint_parameters(candidate_url)
+        candidate_urls = [
+            u
+            for u in unique_urls
+            if "?" not in u and ("/api" in u.lower() or "/rest" in u.lower())
+        ]
+        param_url_limit, param_max_params = _parameter_discovery_limits(scan_type, budget, config, max_urls)
+        limited_candidates = (
+            _limit_parameter_discovery_candidates(candidate_urls, param_url_limit)
+            if param_max_params > 0
+            else []
+        )
+        print(
+            f"[discovery] Running parameter discovery on {len(limited_candidates)}/{len(candidate_urls)} "
+            f"candidate URLs (max_params={param_max_params})",
+            file=sys.stderr,
+        )
+        for candidate_url in limited_candidates:
+            found_params = await discover_endpoint_parameters(candidate_url, max_params=param_max_params)
             if found_params:
                 discovered_params[candidate_url] = found_params
                 # Add parameterized versions to the URL list
