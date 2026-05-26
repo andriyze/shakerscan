@@ -216,6 +216,26 @@ async def verify_high_severity_findings(
             verified_findings.append(finding)
             continue
 
+        if finding_type == "sqli":
+            try:
+                from .finding_validator import validate_sqli
+
+                validation = validate_sqli(finding)
+                if validation.verified:
+                    finding = dict(finding)
+                    finding["verified"] = True
+                    finding["verification_verdict"] = "exploited"
+                    finding["confidence"] = max(
+                        float(finding.get("confidence") or 0),
+                        float(validation.confidence or 0),
+                    )
+                    if validation.evidence:
+                        finding["verification_evidence"] = validation.evidence
+                    verified_findings.append(finding)
+                    continue
+            except Exception:
+                pass
+
         if finding_type == "xss" and verify_xss:
             xss_prover = provers.get("prove_xss_headless") or legacy_prove_xss_headless
             if xss_prover is None:

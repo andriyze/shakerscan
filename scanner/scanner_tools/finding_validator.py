@@ -346,6 +346,10 @@ SQL_DATA_PATTERNS = [
 # Patterns indicating CONFIRMED data extraction (high confidence)
 SQL_CONFIRMED_PATTERNS = [
     r'information_schema',  # Schema access
+    r'sqlite_master',  # SQLite schema access
+    r'CREATE\s+TABLE',  # Extracted schema DDL
+    r'pg_catalog',  # PostgreSQL catalog access
+    r'sys\.tables',  # MSSQL catalog access
     r'table_name\s*[=:]\s*[\'"]?\w+',  # Table name extracted
     r'column_name\s*[=:]\s*[\'"]?\w+',  # Column name extracted
     r'@@version',  # Version extraction
@@ -413,6 +417,25 @@ def validate_sqli(
             confidence=0.9,
             reason="SQLMap confirmed vulnerability"
         )
+
+    evidence_items = evidence.get("evidence") if isinstance(evidence, dict) else None
+    if isinstance(evidence_items, list):
+        extraction_indicators = [
+            str(item)
+            for item in evidence_items
+            if "data extraction indicator" in str(item).lower()
+        ]
+        if extraction_indicators:
+            indicator_text = "\n".join(extraction_indicators)
+            for pattern in SQL_CONFIRMED_PATTERNS:
+                if re.search(pattern, indicator_text, re.I):
+                    return ValidationResult(
+                        verified=True,
+                        confidence=0.95,
+                        evidence=f"SQL extraction indicator: {pattern}",
+                        reason="Confirmed SQL injection with baseline-aware extraction evidence",
+                        evidence_level="confirmed_exploit",
+                    )
 
     # If we have response body, check for SQL indicators
     if response_body:

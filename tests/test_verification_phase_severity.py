@@ -77,3 +77,40 @@ def test_verify_findings_can_return_summary():
     assert summary["verified"] == 0
     assert summary["downgraded"] == 0
     assert summary["skipped"] == 0
+
+
+def test_verify_findings_trusts_sqli_extraction_indicator():
+    findings = [
+        {
+            "id": "sqli-schema",
+            "tool": "smart_sqli",
+            "type": "SQLi",
+            "title": "SQL Injection (None - schema_dump)",
+            "severity": "high",
+            "confidence": 0.5,
+            "url": "https://example.test/api/search/",
+            "param": "keyword",
+            "payload": "')) UNION SELECT sql,2,3 FROM sqlite_master--",
+            "evidence": {
+                "technique": "schema_dump",
+                "evidence": ["Data extraction indicator: \\bsqlite_master\\b"],
+            },
+        }
+    ]
+
+    updated, summary = asyncio.run(
+        vp.verify_high_severity_findings(
+            findings=findings,
+            verify_xss=False,
+            verify_sqli=True,
+            min_severity="high",
+            include_summary=True,
+        )
+    )
+
+    assert updated[0]["verified"] is True
+    assert updated[0]["verification_verdict"] == "exploited"
+    assert updated[0]["confidence"] >= 0.95
+    assert summary["eligible_findings"] == 1
+    assert summary["verified"] == 1
+    assert summary["downgraded"] == 0

@@ -287,6 +287,28 @@ def test_sqli_error_indicator_is_strong_but_not_verified():
     assert validation.evidence_level == "strong_indicator"
 
 
+def test_sqli_schema_extraction_indicator_is_verified():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL Injection (None - schema_dump)",
+        "severity": "high",
+        "evidence": {
+            "url": "https://example.test/api/search/",
+            "type": "SQLi",
+            "param": "keyword",
+            "payload": "')) UNION SELECT sql,2,3 FROM sqlite_master--",
+            "technique": "schema_dump",
+            "evidence": ["Data extraction indicator: \\bsqlite_master\\b"],
+        },
+    }
+
+    validation = validate_sqli(finding)
+
+    assert validation.verified is True
+    assert validation.confidence >= 0.95
+    assert validation.evidence_level == "confirmed_exploit"
+
+
 def test_sqli_extraction_proof_survives_validation_pipeline():
     finding = {
         "tool": "smart_sqli",
