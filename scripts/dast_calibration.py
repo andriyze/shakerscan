@@ -181,18 +181,23 @@ def main() -> int:
         return 2
 
     queued: list[dict[str, Any]] = []
+    queue_errors: list[str] = []
     for bench in entries:
         options = merged_options(bench, args)
         scan_type = str(options.get("scan_type") or "").lower()
         if scan_type in ACTIVE_SCAN_TYPES and not args.allow_active:
-            print(f"[{bench['name']}] skipped: {scan_type} requires --allow-active", file=sys.stderr)
+            error = f"[{bench['name']}] skipped: {scan_type} requires --allow-active"
+            queue_errors.append(error)
+            print(error, file=sys.stderr)
             continue
         try:
             item = queue_scan(args.api, bench, options)
             queued.append(item)
             print(f"[{item['name']}] queued scan_id={item['scan_id']} target={item['target_url']}")
         except Exception as exc:  # noqa: BLE001
-            print(f"[{bench['name']}] queue failed: {exc}", file=sys.stderr)
+            error = f"[{bench['name']}] queue failed: {exc}"
+            queue_errors.append(error)
+            print(error, file=sys.stderr)
 
     completed = wait_for_scans(args.api, queued, args.timeout, args.poll_interval) if args.wait else queued
     export_errors: list[str] = []
@@ -210,14 +215,21 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 export_errors.append(f"{item['name']} export failed: {exc}")
 
-    summary = {"queued": queued, "completed": completed, "export_errors": export_errors}
+    summary = {
+        "queued": queued,
+        "completed": completed,
+        "queue_errors": queue_errors,
+        "export_errors": export_errors,
+    }
     if args.summary_out:
         out_path = resolve_path(args.summary_out, repo_root)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
         print(f"[summary] wrote {out_path}")
 
-    if export_errors:
+    if queue_errors or export_errors:
+        for error in queue_errors:
+            print(f"ERROR: {error}", file=sys.stderr)
         for error in export_errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1

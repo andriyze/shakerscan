@@ -13,8 +13,7 @@
       "allow_missing_har": true,
       "scan_options": {
         "scan_type": "smart",
-        "budget_profile": "fast",
-        "public": true
+        "budget_profile": "fast"
       },
       "assertions": {
         "min_total_findings": 12,
