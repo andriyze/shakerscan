@@ -154,6 +154,16 @@ def resolve_scan_budget(
             value = _coerce_budget_value(key, raw_value)
             if value is None and key != "max_findings_per_family":
                 continue
+            if key == "max_duration_minutes" and isinstance(value, int) and value <= 0:
+                value = 1
+            ceiling = SCAN_BUDGET_DEFAULTS[normalized_scan_type]["exhaustive"].get(key)
+            if (
+                key != "max_findings_per_family"
+                and isinstance(value, int)
+                and isinstance(ceiling, int)
+                and value > ceiling
+            ):
+                value = ceiling
             budget[key] = value
 
     return budget

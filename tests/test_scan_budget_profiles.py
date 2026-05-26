@@ -32,6 +32,19 @@ def test_resolve_scan_budget_accepts_safe_custom_overrides():
     assert "ignored" not in budget
 
 
+def test_custom_budget_cannot_disable_watchdog_timeout():
+    budget = resolve_scan_budget("standard", "balanced", {"max_duration_minutes": 0})
+
+    assert budget["max_duration_minutes"] == 1
+
+
+def test_custom_budget_is_capped_to_scan_type_exhaustive_profile():
+    budget = resolve_scan_budget("quick", "balanced", {"max_urls": 999999, "max_duration_minutes": 999999})
+
+    assert budget["max_urls"] == 400
+    assert budget["max_duration_minutes"] == 45
+
+
 def test_invalid_budget_profile_falls_back_to_balanced():
     budget = resolve_scan_budget("standard", "whatever")
 

@@ -126,13 +126,22 @@ class ValidationResult:
         confidence: float = 0.5,
         evidence: str | None = None,
         reason: str | None = None,
-        downgrade_to: str | None = None
+        downgrade_to: str | None = None,
+        evidence_level: str | None = None,
     ):
         self.verified = verified
         self.confidence = confidence
         self.evidence = evidence
         self.reason = reason
         self.downgrade_to = downgrade_to  # Severity to downgrade to, if any
+        if evidence_level:
+            self.evidence_level = evidence_level
+        elif verified:
+            self.evidence_level = "confirmed_exploit"
+        elif confidence >= ConfidenceTier.MEDIUM:
+            self.evidence_level = "strong_indicator"
+        else:
+            self.evidence_level = "weak_indicator"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,7 +149,8 @@ class ValidationResult:
             "confidence": self.confidence,
             "evidence": self.evidence,
             "reason": self.reason,
-            "downgrade_to": self.downgrade_to
+            "downgrade_to": self.downgrade_to,
+            "evidence_level": self.evidence_level,
         }
 
 
@@ -169,6 +179,25 @@ EXECUTABLE_CONTEXTS = [
     r'<[^>]+\s+src\s*=\s*["\'][^"\']*{payload}',  # In src attribute
     r'<[^>]+\s+href\s*=\s*["\'][^"\']*{payload}',  # In href attribute
 ]
+
+
+def _finding_has_execution_proof(finding: dict[str, Any]) -> bool:
+    """Return True when XSS evidence includes execution proof, not just reflection."""
+    if finding.get("poe_result", {}).get("proven") is True:
+        return True
+    if finding.get("browser_proof"):
+        return True
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    evidence_text = str(evidence).lower()
+    proof_markers = (
+        "browser proof",
+        "payload executed",
+        "dialog",
+        "console proof",
+        "dom proof",
+        "execution proof",
+    )
+    return any(marker in evidence_text for marker in proof_markers)
 
 
 def validate_xss(
@@ -234,18 +263,26 @@ def validate_xss(
     if not response_body:
         # Check if tool reported as verified
         detail = evidence.get("detail", {})
-        if detail.get("type") == "Verified" or "verified" in str(detail).lower():
+        if (
+            detail.get("type") == "Verified"
+            or "verified" in str(detail).lower()
+            or (finding.get("verified") is True and _finding_has_execution_proof(finding))
+        ):
             return ValidationResult(
                 verified=True,
                 confidence=0.85,
-                reason="Tool reported as verified XSS"
+                evidence=payload[:100] if payload else "xss execution proof",
+                reason="Tool reported execution-verified XSS",
+                evidence_level="confirmed_exploit",
             )
-        # Has payload but no response - moderate confidence
+        # Has payload but no response/context proof. This is a lead, not verified XSS.
         return ValidationResult(
-            verified=True,
-            confidence=0.75,
+            verified=False,
+            confidence=0.55,
             evidence=payload[:100],
-            reason="XSS payload detected, response not available for context verification"
+            reason="XSS payload detected, response not available for context verification",
+            downgrade_to="medium",
+            evidence_level="weak_indicator",
         )
 
     # Check if payload is present in response
@@ -279,9 +316,11 @@ def validate_xss(
 
     # Payload reflected but context unclear
     return ValidationResult(
-        verified=True,
-        confidence=0.7,
-        reason="Payload reflected, context unclear - manual verification recommended"
+        verified=False,
+        confidence=0.65,
+        reason="Payload reflected, context unclear - manual verification recommended",
+        downgrade_to="medium",
+        evidence_level="strong_indicator",
     )
 
 
@@ -364,10 +403,11 @@ def validate_sqli(
         for pattern in SQL_DATA_PATTERNS:
             if re.search(pattern, response_body, re.I):
                 return ValidationResult(
-                    verified=True,
+                    verified=False,
                     confidence=0.75,
                     evidence=f"SQL error/indicator: {pattern}",
-                    reason="SQL error indicates potential injection"
+                    reason="SQL error indicates potential injection but does not prove exploitability",
+                    evidence_level="strong_indicator",
                 )
 
     # Default: can't verify
@@ -1968,6 +2008,20 @@ def apply_validation_to_finding(
     """
     finding["validation"] = validation.to_dict()
     finding["confidence"] = validation.confidence
+    finding["confidence_tier"] = _confidence_tier(validation.confidence)
+
+    if validation.verified:
+        finding["verified"] = True
+        finding["needs_verification"] = False
+        finding["suspected"] = False
+    else:
+        finding["verified"] = False
+        if validation.evidence_level in {"weak_indicator", "strong_indicator"}:
+            finding["needs_verification"] = True
+        if validation.evidence_level == "weak_indicator":
+            finding["suspected"] = True
+        if validation.reason:
+            finding["verification_reason"] = validation.reason
 
     # Downgrade severity if validation failed
     if validation.downgrade_to and not validation.verified:
@@ -1991,6 +2045,18 @@ def apply_validation_to_finding(
             )
 
     return finding
+
+
+def _confidence_tier(confidence: float) -> str:
+    if confidence >= 0.90:
+        return "verified"
+    if confidence >= 0.80:
+        return "high"
+    if confidence >= 0.65:
+        return "medium"
+    if confidence >= 0.50:
+        return "low"
+    return "uncertain"
 
 
 def should_report_finding(finding: dict[str, Any]) -> tuple[bool, str]:
@@ -2094,11 +2160,17 @@ async def validate_with_poe(
         if poe_result.proven:
             # PoE succeeded - upgrade confidence
             finding["confidence"] = poe_result.confidence
+            finding["confidence_tier"] = _confidence_tier(poe_result.confidence)
+            finding["verified"] = True
+            finding["needs_verification"] = False
+            finding["suspected"] = False
             finding["poe_result"] = poe_result.to_dict()
             finding["validation"] = finding.get("validation", {})
+            finding["validation"]["verified"] = True
             finding["validation"]["poe_proven"] = True
             finding["validation"]["poe_technique"] = poe_result.technique
             finding["validation"]["poe_evidence"] = poe_result.extracted_data
+            finding["validation"]["evidence_level"] = "confirmed_exploit"
 
             logger.info(f"PoE succeeded for {finding.get('id')}: {poe_result.technique}")
         else:

@@ -34,6 +34,13 @@ def request_json(url: str, *, method: str = "GET", payload: Any = None, timeout:
         raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {body}") from exc
 
 
+def try_request_json(url: str, *, timeout: int = 15) -> dict[str, Any] | None:
+    try:
+        return request_json(url, timeout=timeout)
+    except Exception:
+        return None
+
+
 def docker_url(url: str, docker_base: str, run_id: str, scenario_id: str | None = None) -> str:
     parsed = urllib.parse.urlparse(url)
     base = urllib.parse.urlparse(docker_base)
@@ -42,6 +49,14 @@ def docker_url(url: str, docker_base: str, run_id: str, scenario_id: str | None 
     if scenario_id:
         query["calibration_scenario"] = scenario_id
     return urllib.parse.urlunparse((base.scheme, base.netloc, parsed.path, "", urllib.parse.urlencode(query), ""))
+
+
+def scanner_reachable_url(url: str, docker_base: str, run_id: str, scenario_id: str | None = None) -> str:
+    """Map local Honey URLs to a scanner-container-reachable URL."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return docker_url(url, docker_base, run_id, scenario_id)
+    return url
 
 
 def request_template_with_prompt(template: Any, surface: str) -> dict[str, Any]:
@@ -78,6 +93,85 @@ def queue_error_item(
         "ui_url": None,
         "queue_error": str(error),
     }
+
+
+def queue_dast(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
+    registry = try_request_json(f"{args.honey_local}/api/dast/scenarios")
+    scenarios = registry.get("scenarios", []) if isinstance(registry, dict) else []
+    if not scenarios and args.dast_target:
+        scenarios = [
+            {
+                "id": "honey-dast-smoke",
+                "target_url": args.dast_target,
+                "scan_type": args.dast_scan_type,
+                "safe_fixture": False,
+                "expected_shakerscan_findings": [],
+                "options": {},
+            }
+        ]
+
+    queued = []
+    active_scan_types = {"smart", "full", "aggressive"}
+    for scenario in scenarios:
+        scenario_id = scenario["id"]
+        if args.scenario and args.scenario != scenario_id:
+            continue
+
+        scan_type = str(scenario.get("scan_type") or args.dast_scan_type).strip().lower()
+        expected = scenario.get("expected_shakerscan_findings", [])
+        safe = scenario.get("safe_fixture") is True
+        if scan_type in active_scan_types and not args.allow_active_dast:
+            queued.append({
+                "kind": "dast",
+                "scenario_id": scenario_id,
+                "safe": safe,
+                "expected": expected,
+                "scan_id": None,
+                "ui_url": None,
+                "skipped": f"{scan_type} requires --allow-active-dast",
+            })
+            continue
+
+        target_url = scanner_reachable_url(
+            scenario["target_url"],
+            args.honey_docker,
+            run_id,
+            scenario_id,
+        )
+        options = dict(scenario.get("options") or {})
+        options.update({
+            "scan_type": scan_type,
+            "budget_profile": scenario.get("budget_profile") or args.dast_budget_profile,
+        })
+        if scan_type in {"quick", "standard", "deep"}:
+            options.setdefault("public", True)
+
+        try:
+            scan = request_json(
+                f"{args.api}/scans",
+                method="POST",
+                payload={"target": target_url, "options": options},
+            )
+            queued.append({
+                "kind": "dast",
+                "scenario_id": scenario_id,
+                "safe": safe,
+                "expected": expected,
+                "scan_id": scan["scan_id"],
+                "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
+                "target_url": target_url,
+                "scan_type": scan_type,
+            })
+        except Exception as exc:  # noqa: BLE001
+            print(f"dast queue error for {scenario_id}: {exc}", file=sys.stderr)
+            queued.append(queue_error_item(
+                kind="dast",
+                scenario_id=scenario_id,
+                safe=safe,
+                expected=expected,
+                error=exc,
+            ))
+    return queued
 
 
 def queue_ai_gate(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
@@ -245,7 +339,9 @@ def validate(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[di
         errors = []
         if item.get("queue_error"):
             errors.append(f"queue error: {item['queue_error']}")
-        if detail.get("status") != "completed":
+        if item.get("skipped"):
+            errors.append(f"skipped: {item['skipped']}")
+        if not item.get("skipped") and detail.get("status") != "completed":
             errors.append(f"scan status is {detail.get('status')}")
         if item.get("safe") and raw_ids:
             errors.append(f"safe fixture produced findings: {sorted(raw_ids)}")
@@ -273,17 +369,23 @@ def main() -> int:
     parser.add_argument("--api", default="http://localhost:8080")
     parser.add_argument("--honey-local", default="http://localhost:18080")
     parser.add_argument("--honey-docker", default="http://host.docker.internal:18080")
-    parser.add_argument("--suite", choices=["all", "ai-gate", "model-intake"], default="all")
+    parser.add_argument("--suite", choices=["all", "dast", "ai-gate", "model-intake"], default="all")
     parser.add_argument("--scenario", help="Run only one Honey scenario id.")
     parser.add_argument("--wait", action="store_true", help="Wait for scans and validate results.")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument("--dast-target", default="https://honey.shakerscan.com/")
+    parser.add_argument("--dast-scan-type", default="quick", choices=["quick", "standard", "deep", "full", "aggressive", "smart"])
+    parser.add_argument("--dast-budget-profile", default="fast", choices=["fast", "balanced", "thorough", "exhaustive"])
+    parser.add_argument("--allow-active-dast", action="store_true", help="Allow full/aggressive/smart Honey DAST scenarios.")
     parser.add_argument("--ai-profile", default="smoke", choices=["smoke", "trace", "standard", "deep"])
     parser.add_argument("--ai-request-budget", type=int, default=1)
     args = parser.parse_args()
 
     run_id = f"local-honey-{int(time.time())}"
     queued: list[dict[str, Any]] = []
+    if args.suite in {"all", "dast"}:
+        queued.extend(queue_dast(args, run_id))
     if args.suite in {"all", "ai-gate"}:
         queued.extend(queue_ai_gate(args, run_id))
     if args.suite in {"all", "model-intake"}:

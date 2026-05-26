@@ -36,6 +36,9 @@ except ModuleNotFoundError as exc:
         raise
     from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget
 
+VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
@@ -4984,6 +4987,38 @@ async def exposure_graph(
 # SCANS
 # ============================================================
 
+def normalize_dast_scan_options(options: ScanOptions) -> str:
+    """Resolve scan_type from explicit or legacy options and mutate options consistently."""
+    raw_scan_type = (options.scan_type or "").strip().lower()
+    if raw_scan_type:
+        if raw_scan_type not in VALID_DAST_SCAN_TYPES:
+            allowed = ", ".join(sorted(VALID_DAST_SCAN_TYPES))
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_scan_type",
+                    "message": f"scan_type must be one of: {allowed}",
+                    "scan_type": raw_scan_type,
+                },
+            )
+        options.scan_type = raw_scan_type
+        return raw_scan_type
+
+    if options.thorough and options.active:
+        scan_type = "full"
+    elif options.thorough:
+        scan_type = "deep"
+    elif options.active:
+        scan_type = "full"
+    elif options.quick:
+        scan_type = "quick"
+    else:
+        scan_type = "quick"
+
+    options.scan_type = scan_type
+    return scan_type
+
+
 @app.post("/scans")
 async def submit_scan(request: ScanRequest):
     """Submit a new scan job."""
@@ -5004,36 +5039,12 @@ async def submit_scan(request: ScanRequest):
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
-    # Determine scan type
-    # Priority: explicit scan_type > legacy boolean flags > default (quick)
-    if request.options.scan_type:
-        # Use explicit scan_type if provided
-        scan_type = request.options.scan_type
-        if scan_type not in ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']:
-            scan_type = 'quick'  # Fallback to quick for invalid types
-    elif request.options.thorough and request.options.active:
-        # Legacy: thorough + active = full
-        scan_type = 'full'
-        request.options.scan_type = 'full'
-    elif request.options.thorough:
-        # Legacy: thorough = deep
-        scan_type = 'deep'
-        request.options.scan_type = 'deep'
-    elif request.options.active:
-        # Legacy: just active = standard + active tests
-        scan_type = 'full'
-        request.options.scan_type = 'full'
-    elif request.options.quick:
-        scan_type = 'quick'
-        request.options.scan_type = 'quick'
-    else:
-        # Default to quick scan
-        scan_type = 'quick'
-        request.options.scan_type = 'quick'
+    # Determine scan type.
+    # Priority: explicit scan_type > legacy boolean flags > default quick.
+    scan_type = normalize_dast_scan_options(request.options)
 
     # Validate: public option is incompatible with active-enforced scan types
-    active_enforced_types = {'smart', 'full', 'aggressive'}
-    if scan_type in active_enforced_types and request.options.public:
+    if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and request.options.public:
         raise HTTPException(
             status_code=400,
             detail={

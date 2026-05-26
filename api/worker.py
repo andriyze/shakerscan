@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
 import threading
 import urllib.parse
 import uuid
@@ -64,6 +65,8 @@ MAX_SCAN_DURATION = {
     'aggressive': 600,  # 10 hours
     'smart': 360,
 }
+VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 RETEST_MAX_PARALLEL = max(1, int(os.environ.get("RETEST_MAX_PARALLEL", "2")))
@@ -118,6 +121,45 @@ from retest_contract import SEVERITY_ORDER
 # Database pool (initialized in main)
 db_pool = None
 ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
+
+
+def run_worker_preflight() -> None:
+    """Fail fast when the container has an inconsistent scanner import graph."""
+    if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        print("[preflight] worker preflight disabled", flush=True)
+        return
+
+    try:
+        try:
+            from findings import apply_dast_precision_policy  # noqa: F401
+        except ModuleNotFoundError as exc:
+            if exc.name != "findings":
+                raise
+            from scanner.findings import apply_dast_precision_policy  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "worker preflight failed: findings.apply_dast_precision_policy is unavailable"
+        ) from exc
+
+    scanner_path = Path(SCANNER_PATH)
+    if not scanner_path.exists():
+        if os.environ.get("WORKER_PREFLIGHT_REQUIRE_SCANNER", "true").lower() in {"1", "true", "yes", "on"}:
+            raise RuntimeError(f"worker preflight failed: scanner entrypoint missing at {SCANNER_PATH}")
+        print(f"[preflight] scanner entrypoint missing at {SCANNER_PATH}; skipping CLI import check", flush=True)
+        return
+
+    result = subprocess.run(
+        ["python3", SCANNER_PATH, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=int(os.environ.get("WORKER_PREFLIGHT_TIMEOUT_SECONDS", "30")),
+        check=False,
+    )
+    if result.returncode != 0:
+        output = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
+        raise RuntimeError(f"worker preflight failed: scanner CLI import check exited {result.returncode}: {output[:2000]}")
+
+    print("[preflight] worker scanner import check passed", flush=True)
 
 
 def get_redis():
@@ -373,13 +415,13 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
 
     # Map scan_type to CLI flags (mutually exclusive presets)
     # Scan types: quick, standard, deep, full, aggressive, smart
-    scan_type = (options.get('scan_type') or '').lower()
-
-    # Scan types that require active testing (XSS/SQLi probes)
-    active_enforced_types = {'smart', 'full', 'aggressive'}
+    scan_type = (options.get('scan_type') or '').strip().lower()
+    if scan_type and scan_type not in VALID_DAST_SCAN_TYPES:
+        allowed = ", ".join(sorted(VALID_DAST_SCAN_TYPES))
+        raise ValueError(f"scan_type must be one of: {allowed}")
 
     # Validate: public mode is incompatible with active-enforced scan types
-    if scan_type in active_enforced_types and options.get('public'):
+    if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and options.get('public'):
         raise ValueError(
             f"public option is incompatible with '{scan_type}' scan type. "
             f"{scan_type.capitalize()} scans require active testing. "
@@ -3189,6 +3231,7 @@ async def process_job(job_data: dict):
 async def async_main():
     """Async main worker loop - uses single event loop for database pool."""
     print("Initializing worker...", flush=True)
+    run_worker_preflight()
 
     # Initialize database pool (bound to this event loop)
     await init_db()

@@ -132,6 +132,10 @@ COPY api/ai_gate /app/ai_gate
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists
 
+# Fail image builds where the scanner/import graph is inconsistent.
+RUN python3 /app/scanner.py --help >/dev/null && \
+    python3 -c "from findings import apply_dast_precision_policy; from constants import resolve_scan_budget"
+
 # Add tools to PATH
 ENV PATH="/opt/tools:/usr/local/bin:${PATH}"
 

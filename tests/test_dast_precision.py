@@ -9,9 +9,37 @@ sys.path.insert(0, SCANNER_DIR)
 from findings import apply_dast_precision_policy  # noqa: E402
 from grading import grade  # noqa: E402
 from scanner_tools import active_checks  # noqa: E402
+from scanner_tools.finding_validator import apply_validation_to_finding, validate_sqli, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
 sys.path.pop(0)
+
+
+def _healthy_grade_report(findings):
+    return {
+        "tls": {
+            "endpoints": [{"tlsversion": "TLSv1.3"}],
+            "certificate": {"not_after": "2099-01-01T00:00:00+00:00"},
+            "ocsp": {"stapled": True},
+        },
+        "http": {
+            "security_headers": {
+                "hsts": "max-age=31536000; includeSubDomains; preload",
+                "x_frame_options": "DENY",
+                "x_content_type_options": "nosniff",
+                "referrer_policy": "no-referrer",
+            },
+            "csp_evaluation": {
+                "present": True,
+                "score": 100,
+                "directives": {"default-src": ["'self'"], "script-src": ["'self'"]},
+            },
+            "cookies": {"issues": []},
+            "http2": True,
+        },
+        "dns": {"mx": [], "spf": True, "dmarc": {"fields": {"p": "reject"}}},
+        "findings": findings,
+    }
 
 
 def test_ecdhe_rsa_is_not_static_rsa_key_exchange():
@@ -92,10 +120,60 @@ def test_grade_discounts_unverified_suspected_high_findings():
         "verified": True,
     }
 
-    suspected_grade = grade({"findings": [suspected]})
-    confirmed_grade = grade({"findings": [confirmed]})
+    suspected_grade = grade(_healthy_grade_report([suspected]))
+    confirmed_grade = grade(_healthy_grade_report([confirmed]))
 
     assert suspected_grade["score"] > confirmed_grade["score"]
+
+
+def test_grade_ceiling_ignores_unverified_suspected_high_findings():
+    suspected = {
+        "tool": "bfla",
+        "title": "Broken Function Level Authorization",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "confidence": 0.55,
+        "suspected": True,
+        "needs_verification": True,
+    }
+
+    result = grade(_healthy_grade_report([suspected]))
+
+    assert result["grade"] in {"A", "B"}
+
+
+def test_xss_payload_without_response_is_not_verified():
+    finding = {
+        "tool": "active_xss",
+        "title": "Reflected XSS",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "evidence": {"payload": "<script>alert(1)</script>"},
+    }
+
+    validation = validate_xss(finding, response_body=None)
+    updated = apply_validation_to_finding(finding, validation)
+
+    assert validation.verified is False
+    assert updated["verified"] is False
+    assert updated["needs_verification"] is True
+    assert updated["severity"] == "medium"
+
+
+def test_sqli_error_indicator_is_strong_but_not_verified():
+    finding = {
+        "tool": "active_sqli",
+        "title": "SQL injection",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "evidence": {},
+    }
+
+    validation = validate_sqli(finding, response_body="syntax error near SQL statement")
+
+    assert validation.verified is False
+    assert validation.confidence == 0.75
+    assert validation.evidence_level == "strong_indicator"
 
 
 def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):

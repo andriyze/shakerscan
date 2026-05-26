@@ -18,21 +18,21 @@ export const SCAN_TYPES: ScanTypeOption[] = [
     label: 'Quick',
     description: 'DNS, TLS, headers',
     duration: '1-2 min',
-    options: { quick: true, public: true }
+    options: { scan_type: 'quick', quick: true, public: true }
   },
   {
     value: 'standard',
     label: 'Standard',
     description: '+ Nuclei, cookies, CORS',
     duration: '5-10 min',
-    options: { quick: false, public: false }
+    options: { scan_type: 'standard', quick: false, public: false }
   },
   {
     value: 'deep',
     label: 'Deep',
     description: '+ Full Nuclei, ports',
     duration: '30-60 min',
-    options: { quick: false, thorough: true }
+    options: { scan_type: 'deep', quick: false, thorough: true }
   },
   {
     value: 'full',
@@ -40,7 +40,7 @@ export const SCAN_TYPES: ScanTypeOption[] = [
     description: '+ Active XSS/SQLi',
     duration: '1-2 hrs',
     requiresPermission: true,
-    options: { quick: false, thorough: true, active: true }
+    options: { scan_type: 'full', quick: false, thorough: true, active: true }
   },
   {
     value: 'aggressive',
@@ -122,7 +122,7 @@ export const CLEANUP_AGE_OPTIONS = [
 // Helper to get scan type options for API calls
 export function getScanOptions(scanType: ScanType): Record<string, boolean | string> {
   const type = SCAN_TYPES.find(t => t.value === scanType)
-  return type?.options || {}
+  return type ? { ...type.options } : {}
 }
 
 // Get scan type description with duration

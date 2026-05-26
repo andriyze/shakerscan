@@ -560,10 +560,33 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
 
     total_fp_count = sum(1 for f in findings if f.get("ai_verdict") == "false_positive")
 
-    # Track max severity (excluding false positives)
-    non_fp_critical = [f for f in critical_findings if f.get("ai_verdict") != "false_positive"]
-    non_fp_high = [f for f in high_findings if f.get("ai_verdict") != "false_positive"]
-    non_fp_medium = [f for f in medium_findings if f.get("ai_verdict") != "false_positive"]
+    def _has_grade_ceiling_evidence(finding: dict[str, Any]) -> bool:
+        """Return True when evidence is strong enough to cap the letter grade."""
+        if finding.get("ai_verdict") == "false_positive":
+            return False
+        validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
+        poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
+        if (
+            finding.get("verified") is True
+            or validation.get("verified") is True
+            or validation.get("poe_proven") is True
+            or poe_result.get("proven") is True
+        ):
+            return True
+        if finding.get("suspected") or finding.get("needs_verification"):
+            return False
+        try:
+            confidence = float(finding.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence_level = str(validation.get("evidence_level") or "").lower()
+        return confidence >= 0.80 or evidence_level == "strong_indicator"
+
+    # Track max severity for letter ceilings. Weak/suspected leads still affect
+    # score via weighted penalties but do not cap the entire grade.
+    non_fp_critical = [f for f in critical_findings if _has_grade_ceiling_evidence(f)]
+    non_fp_high = [f for f in high_findings if _has_grade_ceiling_evidence(f)]
+    non_fp_medium = [f for f in medium_findings if _has_grade_ceiling_evidence(f)]
 
     if non_fp_critical:
         max_severity = "critical"

@@ -183,6 +183,32 @@ def test_finalize_ai_finding_retest_marks_reproduced_finding(monkeypatch):
     assert finding_update[1] == "exploited"
 
 
+def test_run_scan_rejects_invalid_explicit_scan_type():
+    try:
+        asyncio.run(worker.run_scan("https://example.com", {"scan_type": "standard-ish"}))
+    except ValueError as exc:
+        assert "scan_type must be one of" in str(exc)
+    else:
+        raise AssertionError("invalid scan_type should be rejected before scanner subprocess starts")
+
+
+def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan("https://example.com", {"scan_type": "standard"}))
+
+    assert result.get("ok") is True
+    assert "--standard" in captured["cmd"]
+    assert "--quick" not in captured["cmd"]
+
+
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):
     captured = {}
 

@@ -4,6 +4,8 @@ import sys
 import types
 import uuid
 
+import pytest
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace())
@@ -105,6 +107,34 @@ def test_sanitize_scan_options_decodes_json_string():
     sanitized = api_module._sanitize_scan_options(raw)
     assert sanitized["scan_type"] == "smart"
     assert sanitized["auth_header"] == "***"
+
+
+def test_normalize_dast_scan_options_keeps_explicit_standard():
+    options = api_module.ScanOptions(scan_type="STANDARD", quick=False)
+
+    scan_type = api_module.normalize_dast_scan_options(options)
+
+    assert scan_type == "standard"
+    assert options.scan_type == "standard"
+
+
+def test_normalize_dast_scan_options_maps_legacy_thorough_to_deep():
+    options = api_module.ScanOptions(thorough=True)
+
+    scan_type = api_module.normalize_dast_scan_options(options)
+
+    assert scan_type == "deep"
+    assert options.scan_type == "deep"
+
+
+def test_normalize_dast_scan_options_rejects_invalid_explicit_type():
+    options = api_module.ScanOptions(scan_type="standard-ish")
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module.normalize_dast_scan_options(options)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"] == "invalid_scan_type"
 
 
 def test_build_ai_worker_options_records_production_confirmation():
