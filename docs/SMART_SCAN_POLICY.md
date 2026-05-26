@@ -82,6 +82,7 @@ Severity-level precision targets:
 Coverage and confidence targets:
 - `unverified_high_ratio`: `<= 0.10`
 - `uncertain_ratio`: `<= 0.20`
+- `expected_recall`: benchmark-specific known-vulnerability recall, normally `>= 0.50` for broad vulnerable corpora and `1.00` for small Honey fixtures
 - `smart_endpoint_coverage`: `>= 0.50` on authenticated test apps
 - `benchmark_quality_score`: `>= 60` for reference corpora
 
@@ -114,6 +115,16 @@ python3 scripts/dast_calibration.py \
   --wait \
   --export-results
 python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/honey_benchmarks.json
+
+# Queue a local vulnerable-corpus run (example: Juice Shop on host port 3001)
+docker run -d --rm --name shakerscan-juice-shop -p 3001:3000 bkimminich/juice-shop
+python3 scripts/dast_calibration.py \
+  --benchmarks tests/benchmark/benchmarks.json \
+  --benchmark juice-shop \
+  --allow-active \
+  --wait \
+  --export-results
+python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmarks.json
 ```
 
 ## Upgrade Policy

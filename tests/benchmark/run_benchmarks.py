@@ -346,6 +346,30 @@ def _apply_assertions(
             if actual > max_count:
                 fail(f"findings_by_tool[{tool}] {actual} > {max_count}")
 
+    expected_findings = assertions.get("expected_findings") or assertions.get("known_vulnerabilities") or []
+    if expected_findings:
+        expected_total = len(expected_findings)
+        expected_found = sum(
+            1
+            for spec in expected_findings
+            if any(_finding_matches(finding, spec) for finding in findings)
+        )
+        expected_recall = expected_found / expected_total if expected_total else None
+        metrics["expected_findings_found"] = expected_found
+        metrics["expected_findings_total"] = expected_total
+        metrics["expected_recall"] = expected_recall
+
+        if "min_expected_findings_found" in assertions:
+            if expected_found < assertions["min_expected_findings_found"]:
+                fail(
+                    "expected_findings_found "
+                    f"{expected_found} < {assertions['min_expected_findings_found']}"
+                )
+
+        if "min_expected_recall" in assertions and expected_recall is not None:
+            if expected_recall < assertions["min_expected_recall"]:
+                fail(f"expected_recall {expected_recall:.2f} < {assertions['min_expected_recall']}")
+
 
 def _apply_regression_assertions(
     assertions: dict[str, Any],

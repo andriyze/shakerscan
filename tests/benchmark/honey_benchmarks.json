@@ -24,7 +24,27 @@
         "min_endpoint_coverage": 0.1,
         "max_unverified_high_ratio": 0.0,
         "max_low_confidence_ratio": 0.35,
+        "min_expected_recall": 1.0,
         "require_findings": [
+          {
+            "tool": "exposed_files",
+            "title_contains": "id_rsa",
+            "min_severity": "critical",
+            "verified": true
+          },
+          {
+            "tool": "api_security",
+            "title_contains": "Sensitive data exposed",
+            "min_severity": "high",
+            "verified": true
+          },
+          {
+            "tool": "graphql_vulnerability",
+            "title_contains": "introspection_enabled",
+            "verified": true
+          }
+        ],
+        "expected_findings": [
           {
             "tool": "exposed_files",
             "title_contains": "id_rsa",

@@ -85,3 +85,59 @@ def test_benchmark_fails_missing_required_and_forbidden_findings():
     assert ok is False
     assert any("required finding missing" in failure for failure in failures)
     assert any("forbidden finding present" in failure for failure in failures)
+
+
+def test_benchmark_tracks_expected_recall():
+    report = {
+        "findings": [
+            {
+                "tool": "smart_sqli",
+                "title": "SQL Injection (postgresql - boolean)",
+                "severity": "critical",
+                "verified": True,
+            },
+            {
+                "tool": "exposed_files",
+                "title": "Exposed file: .env",
+                "severity": "high",
+                "verified": True,
+            },
+        ]
+    }
+    config = {
+        "assertions": {
+            "expected_findings": [
+                {"tool": "smart_sqli", "title_contains": "SQL Injection", "verified": True},
+                {"tool": "active_xss", "title_contains": "XSS", "verified": True},
+            ],
+            "min_expected_recall": 0.5,
+            "min_expected_findings_found": 1,
+        }
+    }
+
+    ok, failures, _, metrics = run_benchmarks._check_benchmark("unit", report, config, strict=True)
+
+    assert ok is True
+    assert failures == []
+    assert metrics["expected_findings_found"] == 1
+    assert metrics["expected_findings_total"] == 2
+    assert metrics["expected_recall"] == 0.5
+
+
+def test_benchmark_fails_expected_recall_regression():
+    report = {"findings": []}
+    config = {
+        "assertions": {
+            "expected_findings": [
+                {"tool": "smart_sqli", "title_contains": "SQL Injection"},
+                {"tool": "active_xss", "title_contains": "XSS"},
+            ],
+            "min_expected_recall": 0.5,
+        }
+    }
+
+    ok, failures, _, metrics = run_benchmarks._check_benchmark("unit", report, config, strict=True)
+
+    assert ok is False
+    assert metrics["expected_recall"] == 0.0
+    assert any("expected_recall" in failure for failure in failures)
