@@ -92,3 +92,78 @@ def test_rate_limiting_skips_spa_shell_login_guess(monkeypatch):
     assert result["vulnerable"] is False
     assert result["vulnerable_endpoints"] == []
     assert result["evidence"][0]["message"] == "Auth endpoint not confirmed (spa_shell)"
+
+
+def test_2fa_rate_limit_skips_method_not_allowed_verify_guess(monkeypatch):
+    calls_by_endpoint = {}
+
+    async def fake_run(command, *args, **kwargs):
+        endpoint = command[-1]
+        calls_by_endpoint[endpoint] = calls_by_endpoint.get(endpoint, 0) + 1
+        if endpoint.endswith("/login"):
+            return ("<html>login</html>", "", 0)
+        if endpoint.endswith(("/dashboard", "/account", "/profile")):
+            return ("not found\n---HTTP_CODE---404", "", 0)
+        if endpoint.endswith("/api/2fa/verify"):
+            return (_http(404, "Content-Type: application/json", '{"detail":"Not Found"}'), "", 0)
+        if endpoint.endswith("/api/auth/2fa"):
+            return (
+                _http(
+                    405,
+                    "Content-Type: application/json\r\nX-RateLimit-Limit: 100",
+                    '{"detail":"Method Not Allowed"}',
+                ),
+                "",
+                0,
+            )
+        return ("", "", 1)
+
+    monkeypatch.setattr(critical_checks, "detect_spa_catch_all", _no_spa)
+    monkeypatch.setattr(critical_checks, "run", fake_run)
+
+    result = asyncio.run(critical_checks.test_2fa_bypass("https://example.test"))
+
+    assert result["vulnerable"] is False
+    assert result["bypass_methods_detected"] == []
+    assert calls_by_endpoint["https://example.test/api/auth/2fa"] == 1
+    assert any(
+        e.get("message") == "2FA verification endpoint not confirmed (status_405)"
+        for e in result["evidence"]
+    )
+
+
+def test_2fa_rate_limit_flags_confirmed_verify_endpoint(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        endpoint = command[-1]
+        if endpoint.endswith("/login"):
+            return ("<html>login</html>", "", 0)
+        if endpoint.endswith(("/dashboard", "/account", "/profile")):
+            return ("not found\n---HTTP_CODE---404", "", 0)
+        if endpoint.endswith("/api/2fa/verify"):
+            return (
+                _http(
+                    200,
+                    "Content-Type: application/json",
+                    '{"verified":false,"predictable_bypass":true}',
+                ),
+                "",
+                0,
+            )
+        if endpoint.endswith("/api/auth/2fa"):
+            return (_http(404, "Content-Type: application/json", '{"detail":"Not Found"}'), "", 0)
+        return ("", "", 1)
+
+    monkeypatch.setattr(critical_checks, "detect_spa_catch_all", _no_spa)
+    monkeypatch.setattr(critical_checks, "run", fake_run)
+
+    result = asyncio.run(critical_checks.test_2fa_bypass("https://example.test"))
+
+    assert result["vulnerable"] is True
+    no_limit = [
+        item
+        for item in result["bypass_methods_detected"]
+        if item.get("method") == "no_rate_limiting"
+    ]
+    assert len(no_limit) == 1
+    assert no_limit[0]["endpoint"] == "https://example.test/api/2fa/verify"
+    assert no_limit[0]["requests_processed"] == 10

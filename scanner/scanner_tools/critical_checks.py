@@ -1891,54 +1891,114 @@ async def test_2fa_bypass(
         urljoin(url, "/verify-otp"),
     ]
 
-    for verify_endpoint in twofa_verify_endpoints[:2]:  # Test first 2
-        # Preflight check - skip non-existent endpoints
-        preflight_out, _, preflight_rc = await run([
-            "curl", "-sS", "-k", "--max-time", "5",
-            "-X", "HEAD",
-            "-w", "%{http_code}",
-            "-o", "/dev/null"
-        ] + auth_args + [verify_endpoint], timeout=8)
+    def _is_confirmed_twofa_verify_endpoint(
+        status_code: int | None,
+        headers: str,
+        body: str,
+    ) -> tuple[bool, str]:
+        if status_code is None:
+            return False, "missing_status"
+        if status_code in {404, 405, 410, 501}:
+            return False, f"status_{status_code}"
+        if status_code >= 500:
+            return False, f"status_{status_code}"
 
-        if preflight_rc == 0 and preflight_out:
+        content_type = _get_header_value(headers, "content-type")
+        body_lower = (body or "").lower()
+        if "text/html" in content_type.lower() and _looks_like_spa_shell(body):
+            return False, "spa_shell"
+        if "method not allowed" in body_lower or "unsupported method" in body_lower:
+            return False, "method_not_allowed_body"
+
+        twofa_markers = {
+            "otp", "totp", "mfa", "2fa", "two-factor", "verification code",
+            "verified", "invalid code", "invalid otp", "predictable_bypass",
+            "race_condition",
+        }
+        if "application/json" in content_type.lower() or _looks_like_json(body):
             try:
-                preflight_code = int(preflight_out.strip())
-                if preflight_code in [404, 410]:
-                    results["evidence"].append({
-                        "method": "2fa_rate_limit_check",
-                        "endpoint": verify_endpoint,
-                        "status": "skipped",
-                        "message": f"Endpoint returned {preflight_code} - does not exist"
-                    })
-                    continue  # Skip to next endpoint
-            except ValueError:
-                pass
+                data = json.loads(_strip_xssi_prefix(body or ""))
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                if any(str(key).lower() in twofa_markers for key in data.keys()):
+                    return True, "json_2fa_keys"
+                text = " ".join(str(v) for v in data.values()).lower()
+                if any(marker in text for marker in twofa_markers):
+                    return True, "json_2fa_marker"
+            if any(marker in body_lower for marker in twofa_markers):
+                return True, "json_2fa_marker"
+            return False, "json_not_2fa_like"
 
-        # Send 10 rapid requests to check for rate limiting
+        if any(marker in body_lower for marker in twofa_markers):
+            return True, "2fa_marker"
+        return False, "not_2fa_like"
+
+    for verify_endpoint in twofa_verify_endpoints[:2]:  # Test first 2
+        # First POST validates that the endpoint actually handles OTP attempts.
+        # HEAD is unreliable for APIs and caused 405/OPTIONS-only routes to be
+        # misclassified as unthrottled OTP verification endpoints.
         response_codes = []
-        for i in range(10):
+        out, err, rc = await run([
+            "curl", "-sS", "-k", "--max-time", "3",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", '{"otp":"123456"}',
+            "-i",
+            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+        ] + auth_args + [verify_endpoint], timeout=5)
+
+        if rc != 0 or not out:
+            results["evidence"].append({
+                "method": "2fa_rate_limit_check",
+                "endpoint": verify_endpoint,
+                "status": "skipped",
+                "message": "Initial OTP probe failed"
+            })
+            continue
+
+        body_part, first_code = _parse_http_meta(out)
+        headers, body = _split_headers_body(body_part or "")
+        confirmed, reason = _is_confirmed_twofa_verify_endpoint(first_code, headers, body)
+        if not confirmed:
+            results["evidence"].append({
+                "method": "2fa_rate_limit_check",
+                "endpoint": verify_endpoint,
+                "status": "skipped",
+                "message": f"2FA verification endpoint not confirmed ({reason})"
+            })
+            continue
+
+        if first_code is not None:
+            response_codes.append(first_code)
+        rate_limited = first_code in [429, 423, 503] or bool(_get_header_value(headers, "retry-after"))
+
+        # Send remaining rapid requests to check for rate limiting
+        for i in range(9):
             out, err, rc = await run([
                 "curl", "-sS", "-k", "--max-time", "3",
                 "-X", "POST",
                 "-H", "Content-Type: application/json",
                 "-d", '{"otp":"123456"}',
-                "-w", "%{http_code}",
-                "-o", "/dev/null"
+                "-i",
+                "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
             ] + auth_args + [verify_endpoint], timeout=5)
 
             if rc == 0 and out:
-                try:
-                    http_code = int(out.strip())
+                body_part, http_code = _parse_http_meta(out)
+                headers, _ = _split_headers_body(body_part or "")
+                if http_code is not None:
                     response_codes.append(http_code)
-                except ValueError:
-                    pass
+                if http_code in [429, 423, 503] or _get_header_value(headers, "retry-after"):
+                    rate_limited = True
+                    break
 
         # Check if rate limiting is present
-        if response_codes and 429 not in response_codes and 503 not in response_codes:
+        if response_codes and not rate_limited and 429 not in response_codes and 503 not in response_codes:
             # No rate limiting detected - count requests that were processed (not rate-limited, not non-existent)
             # Exclude: 429/503 (rate limited), 404/410 (endpoint doesn't exist)
             # 401/403 on OTP endpoint still means the server accepted the request for processing
-            requests_processed = sum(1 for code in response_codes if code not in [429, 503, 404, 410])
+            requests_processed = sum(1 for code in response_codes if code not in [429, 423, 503, 404, 405, 410, 501])
             if requests_processed >= 8:  # 80%+ requests went through without rate limiting
                 results["vulnerable"] = True
                 results["bypass_methods_detected"].append({
