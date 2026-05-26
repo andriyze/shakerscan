@@ -3344,9 +3344,20 @@ async def build_report(target: str,
 
     # Additional security checks
     if not public_only:
-        cors_task = asyncio.create_task(check_cors(base_url))
-        takeover_task = asyncio.create_task(check_subdomain_takeover(host))
-        exposed_task = asyncio.create_task(check_exposed_files(base_url, quick_mode=quick_mode))
+        if focused_manual_active_scope:
+            print("[smart] Focused manual active scope: skipping unrelated passive exposure probes", file=sys.stderr)
+
+            async def dummy_cors(): return {"vulnerable": False, "issues": [], "skipped": True, "reason": "focused_manual_active_scope"}
+            async def dummy_takeover(): return {"vulnerable": False, "cname": None, "issues": [], "skipped": True, "reason": "focused_manual_active_scope"}
+            async def dummy_exposed(): return {"exposed_files": [], "skipped": True, "reason": "focused_manual_active_scope"}
+
+            cors_task = asyncio.create_task(dummy_cors())
+            takeover_task = asyncio.create_task(dummy_takeover())
+            exposed_task = asyncio.create_task(dummy_exposed())
+        else:
+            cors_task = asyncio.create_task(check_cors(base_url))
+            takeover_task = asyncio.create_task(check_subdomain_takeover(host))
+            exposed_task = asyncio.create_task(check_exposed_files(base_url, quick_mode=quick_mode))
         # Delay nuclei start until discovery yields target URLs and auth context
         nuclei_task = None
 
@@ -3358,8 +3369,9 @@ async def build_report(target: str,
         nmap_kwargs: dict[str, Any] | None = None
         if quick_mode:
             nmap_kwargs = {"quick_mode": True}
-        elif smart_mode and not focused_manual_active_scope:
-            nmap_kwargs = {"top_ports": 33, "scripts": False}
+        elif smart_mode:
+            if not focused_manual_active_scope:
+                nmap_kwargs = {"top_ports": 33, "scripts": False}
         elif complete_mode:
             nmap_kwargs = {"top_ports": 1000, "scripts": exploit_level == "aggressive"}
         elif grpc_discovery:
