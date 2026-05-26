@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import os
 import sys
 
@@ -14,6 +15,13 @@ from scanner_tools.finding_validator import apply_validation_to_finding, validat
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
 sys.path.pop(0)
+
+SCANNER_MAIN_PATH = os.path.join(os.path.dirname(__file__), "..", "scanner", "scanner.py")
+SCANNER_MAIN_SPEC = importlib.util.spec_from_file_location("scanner_main_for_tests", SCANNER_MAIN_PATH)
+scanner_main = importlib.util.module_from_spec(SCANNER_MAIN_SPEC)
+assert SCANNER_MAIN_SPEC and SCANNER_MAIN_SPEC.loader
+SCANNER_MAIN_SPEC.loader.exec_module(scanner_main)
+_refresh_ai_quality_metrics = scanner_main._refresh_ai_quality_metrics
 
 
 def _healthy_grade_report(findings):
@@ -326,6 +334,44 @@ def test_ai_rule_verdict_trusts_verified_exploitation_evidence():
     assert verdict == "true_positive"
     assert confidence >= 0.95
     assert "verified exploitation evidence" in rationale
+
+
+def test_ai_quality_metrics_refresh_after_ai_review():
+    report = {
+        "findings": [
+            {"id": "f1", "ai_verdict": "true_positive"},
+            {"id": "f2", "ai_verdict": "false_positive"},
+        ],
+        "quality_metrics": {
+            "ai_validation": {
+                "enabled": False,
+                "verdicts": {"true_positive": 0, "false_positive": 0, "unclear": 0},
+            },
+            "reliability_notes": [],
+        },
+    }
+    summary = {
+        "classification_enabled": True,
+        "used_provider": True,
+        "provider_attempted": True,
+        "provider_models_used": ["mock-model"],
+        "provider_partial": True,
+        "classification_source_counts": {"provider": 1, "heuristic_fallback": 1},
+        "classification_min_severity": "medium",
+        "classification_eligible_findings": 2,
+        "classification_skipped_disabled": 0,
+        "classification_skipped_by_min_severity": 3,
+    }
+
+    _refresh_ai_quality_metrics(report, summary)
+
+    ai_quality = report["quality_metrics"]["ai_validation"]
+    assert ai_quality["enabled"] is True
+    assert ai_quality["used_provider"] is True
+    assert ai_quality["provider_models_used"] == ["mock-model"]
+    assert ai_quality["verdicts"] == {"true_positive": 1, "false_positive": 1, "unclear": 0}
+    assert ai_quality["classification_source_counts"] == {"provider": 1, "heuristic_fallback": 1}
+    assert "1 AI-eligible finding(s) used heuristic fallback classification" in report["quality_metrics"]["reliability_notes"]
 
 
 def test_focused_fallback_summary_uses_focused_remediation_only():

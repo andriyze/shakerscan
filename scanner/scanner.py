@@ -9951,6 +9951,66 @@ def _normalize_ai_classification_min_severity(value: str | None, default: str = 
     return severity
 
 
+def _refresh_ai_quality_metrics(report: dict[str, Any], ai_summary: dict[str, Any]) -> None:
+    """Reflect post-scan AI classification coverage in quality metrics."""
+    quality = report.setdefault("quality_metrics", {})
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+
+    verdicts = {"true_positive": 0, "false_positive": 0, "unclear": 0}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        verdict = str(finding.get("ai_verdict") or "")
+        if verdict in verdicts:
+            verdicts[verdict] += 1
+
+    if not any(verdicts.values()):
+        summary_counts = ai_summary.get("counts") if isinstance(ai_summary.get("counts"), dict) else {}
+        for key in verdicts:
+            try:
+                verdicts[key] = int(summary_counts.get(key) or 0)
+            except Exception:
+                verdicts[key] = 0
+
+    source_counts = ai_summary.get("classification_source_counts")
+    if not isinstance(source_counts, dict):
+        source_counts = {}
+
+    ai_quality = quality.setdefault("ai_validation", {})
+    ai_quality.update({
+        "enabled": bool(ai_summary.get("classification_enabled")),
+        "verdicts": verdicts,
+        "used_provider": bool(ai_summary.get("used_provider")),
+        "provider_attempted": bool(ai_summary.get("provider_attempted")),
+        "provider_models_used": ai_summary.get("provider_models_used") or [],
+        "provider_partial": bool(ai_summary.get("provider_partial")),
+        "provider_error": ai_summary.get("provider_error"),
+        "classification_source_counts": source_counts,
+        "classification_min_severity": ai_summary.get("classification_min_severity"),
+        "classification_eligible_findings": int(ai_summary.get("classification_eligible_findings") or 0),
+        "classification_skipped_disabled": int(ai_summary.get("classification_skipped_disabled") or 0),
+        "classification_skipped_by_min_severity": int(ai_summary.get("classification_skipped_by_min_severity") or 0),
+    })
+
+    notes = quality.setdefault("reliability_notes", [])
+    if not isinstance(notes, list):
+        notes = []
+        quality["reliability_notes"] = notes
+
+    def add_note(note: str) -> None:
+        if note not in notes:
+            notes.append(note)
+
+    eligible = int(ai_quality.get("classification_eligible_findings") or 0)
+    if ai_quality["enabled"] and eligible and not ai_quality["used_provider"]:
+        add_note("AI classification was enabled, but no provider-backed verdicts were produced")
+    if ai_quality.get("provider_error"):
+        add_note(f"AI classification provider error: {str(ai_quality['provider_error'])[:120]}")
+    fallback_count = int(source_counts.get("heuristic_fallback") or 0)
+    if ai_quality["enabled"] and fallback_count:
+        add_note(f"{fallback_count} AI-eligible finding(s) used heuristic fallback classification")
+
+
 async def ai_review_findings(
     report: dict[str, Any],
     model: str | None,
@@ -10277,6 +10337,7 @@ async def ai_review_findings(
         "cross_finding_correlations": cross_correlations,
         "overall_risk_assessment": overall_risk_assessment,
     }
+    _refresh_ai_quality_metrics(report, summary)
     return {"summary": summary, "entries": ai_logs}
 
 # ---------- CLI & API ----------
