@@ -81,6 +81,18 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _int_count_dict(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    counts: dict[str, int] = {}
+    for key, count in value.items():
+        int_count = _int_or_none(count)
+        if int_count is None:
+            continue
+        counts[str(key)] = int_count
+    return counts or None
+
+
 def _reason_is_budget_limited(reason: str | None) -> bool:
     reason_l = (reason or "").lower()
     return any(token in reason_l for token in BUDGET_REASON_TOKENS)
@@ -177,6 +189,10 @@ def _active_endpoint_cap(active_block: dict[str, Any] | None) -> dict[str, Any] 
         "budget": budget,
         "capped": capped,
         "tested_note": tested_note,
+        "discovered_by_source": _int_count_dict(active_block.get("active_endpoints_discovered_by_source")),
+        "selected_by_source": _int_count_dict(active_block.get("active_endpoints_selected_by_source")),
+        "discovered_by_method": _int_count_dict(active_block.get("active_endpoints_discovered_by_method")),
+        "selected_by_method": _int_count_dict(active_block.get("active_endpoints_selected_by_method")),
     }
     return {k: v for k, v in entry.items() if v is not None}
 

@@ -7702,6 +7702,18 @@ async def build_report(target: str,
                 # then real discovered endpoints before synthetic/inferred.
                 active_endpoint_budget = int(scan_budget.get("active_max_endpoints") or max_active or 0)
                 before_active_endpoints = len(endpoints)
+
+                def _endpoint_distribution(items: list[dict[str, Any]], field: str) -> dict[str, int]:
+                    counts: dict[str, int] = {}
+                    for item in items:
+                        key = str(item.get(field) or "unknown")
+                        if field == "method":
+                            key = key.upper()
+                        counts[key] = counts.get(key, 0) + 1
+                    return dict(sorted(counts.items()))
+
+                active_block["active_endpoints_discovered_by_source"] = _endpoint_distribution(endpoints, "source")
+                active_block["active_endpoints_discovered_by_method"] = _endpoint_distribution(endpoints, "method")
                 try:
                     from scanner_tools.active_prioritization import prioritize_active_endpoints
                 except ImportError:
@@ -7718,6 +7730,8 @@ async def build_report(target: str,
                 active_block["active_endpoint_budget"] = active_endpoint_budget
                 active_block["active_endpoints_discovered"] = before_active_endpoints
                 active_block["active_endpoints_selected"] = len(endpoints)
+                active_block["active_endpoints_selected_by_source"] = _endpoint_distribution(endpoints, "source")
+                active_block["active_endpoints_selected_by_method"] = _endpoint_distribution(endpoints, "method")
                 active_block["active_endpoint_budget_capped"] = bool(
                     active_endpoint_budget and before_active_endpoints > len(endpoints)
                 )
@@ -7731,12 +7745,9 @@ async def build_report(target: str,
                     )
 
                 # Log prioritization stats
-                source_counts = {}
-                for ep in endpoints[:100]:  # Sample first 100
-                    src = ep.get("source", "unknown")
-                    source_counts[src] = source_counts.get(src, 0) + 1
+                source_counts = active_block.get("active_endpoints_selected_by_source") or {}
                 if source_counts:
-                    print(f"[scanner] Endpoint prioritization (first 100): {source_counts}", file=sys.stderr)
+                    print(f"[scanner] Endpoint prioritization selected sources: {source_counts}", file=sys.stderr)
 
                 # Run smart active tests with DBMS detection and context-aware payloads
                 if auth_session:

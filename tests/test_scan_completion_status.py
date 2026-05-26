@@ -103,6 +103,54 @@ def test_completion_status_bounds_family_attempts_to_selected_endpoints():
     assert active_cap["tested_note"].startswith("bounded_by_selected_endpoints")
 
 
+def test_completion_status_includes_active_endpoint_distributions():
+    status = build_scan_completion_status(
+        coverage_status="complete",
+        active_block={
+            "active_endpoint_budget": 3,
+            "active_endpoints_discovered": 10,
+            "active_endpoints_selected": 3,
+            "active_endpoint_budget_capped": True,
+            "active_endpoints_discovered_by_source": {
+                "har_discovery": 5,
+                "openapi": 4,
+                "options": 1,
+            },
+            "active_endpoints_selected_by_source": {
+                "har_discovery": 2,
+                "openapi": 1,
+            },
+            "active_endpoints_discovered_by_method": {
+                "GET": 6,
+                "POST": 4,
+            },
+            "active_endpoints_selected_by_method": {
+                "GET": 1,
+                "POST": 2,
+            },
+        },
+    )
+
+    active_cap = status["capped_lists"]["active_endpoints"]
+    assert active_cap["discovered_by_source"] == {
+        "har_discovery": 5,
+        "openapi": 4,
+        "options": 1,
+    }
+    assert active_cap["selected_by_source"] == {
+        "har_discovery": 2,
+        "openapi": 1,
+    }
+    assert active_cap["discovered_by_method"] == {
+        "GET": 6,
+        "POST": 4,
+    }
+    assert active_cap["selected_by_method"] == {
+        "GET": 1,
+        "POST": 2,
+    }
+
+
 def test_completion_status_records_discovery_url_caps():
     status = build_scan_completion_status(
         coverage_status="complete",
