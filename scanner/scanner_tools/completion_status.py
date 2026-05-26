@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from .active_enrichment_policy import ACTIVE_ENRICHMENT_SKIP_KEYS
 
 ACTIVE_SKIP_FIELDS: dict[str, str] = {
-    "auxiliary_injection_skipped": "auxiliary_injection",
-    "stored_xss_skipped": "stored_xss",
-    "sqlmap_skipped": "sqlmap",
-    "nosql_skipped": "nosql_injection",
-    "dom_xss_skipped": "dom_xss",
-    "smart_bola_skipped": "bola_idor",
+    skip_key: module
+    for module, skip_key in ACTIVE_ENRICHMENT_SKIP_KEYS.items()
 }
 
 BUDGET_REASON_TOKENS = ("budget", "exhausted", "time_budget")

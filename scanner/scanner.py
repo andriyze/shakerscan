@@ -25,6 +25,10 @@ try:
     from constants import resolve_phase4_max_seconds, resolve_scan_budget
 except ImportError:
     from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
+from scanner_tools.active_enrichment_policy import (
+    record_active_enrichment_skip,
+    should_run_active_enrichment,
+)
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.har_discovery import (
@@ -7946,13 +7950,25 @@ async def build_report(target: str,
 
                     auxiliary_injection_enabled = not (run_sqli and not run_xss)
                     if not auxiliary_injection_enabled:
-                        active_block["auxiliary_injection_skipped"] = "sql_tests_only"
+                        record_active_enrichment_skip(active_block, "auxiliary_injection", "sql_tests_only")
                         print("[active] Skipping auxiliary injection probes for SQLi-only scan", file=sys.stderr)
-                    elif post_active_budget_exhausted:
-                        auxiliary_injection_enabled = False
-                        aux_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
-                        active_block["auxiliary_injection_skipped"] = aux_skip_reason
-                        print(f"[active] Skipping auxiliary injection probes: {aux_skip_reason}", file=sys.stderr)
+                    else:
+                        auxiliary_decision = should_run_active_enrichment(
+                            "auxiliary_injection",
+                            post_active_budget_exhausted=post_active_budget_exhausted,
+                            active_block=active_block,
+                        )
+                        if not auxiliary_decision.run:
+                            auxiliary_injection_enabled = False
+                            record_active_enrichment_skip(
+                                active_block,
+                                "auxiliary_injection",
+                                auxiliary_decision.reason or "active_time_budget_exhausted",
+                            )
+                            print(
+                                f"[active] Skipping auxiliary injection probes: {auxiliary_decision.reason}",
+                                file=sys.stderr,
+                            )
 
                     param_endpoints = []
                     if auxiliary_injection_enabled:
@@ -8304,13 +8320,18 @@ async def build_report(target: str,
 
                     # Stored XSS workflow
                     try:
-                        if post_active_budget_exhausted:
-                            stored_skip_reason = (
-                                active_block.get("post_active_enrichment_skipped")
-                                or "active_time_budget_exhausted"
+                        stored_xss_decision = should_run_active_enrichment(
+                            "stored_xss",
+                            post_active_budget_exhausted=post_active_budget_exhausted,
+                            active_block=active_block,
+                        )
+                        if not stored_xss_decision.run:
+                            record_active_enrichment_skip(
+                                active_block,
+                                "stored_xss",
+                                stored_xss_decision.reason or "active_time_budget_exhausted",
                             )
-                            active_block["stored_xss_skipped"] = stored_skip_reason
-                            print(f"[active] Skipping stored XSS workflow: {stored_skip_reason}", file=sys.stderr)
+                            print(f"[active] Skipping stored XSS workflow: {stored_xss_decision.reason}", file=sys.stderr)
                         else:
                             stored_urls = []
                             if smart_discovery_data and isinstance(smart_discovery_data, dict):
@@ -8420,13 +8441,19 @@ async def build_report(target: str,
                     if total_params > 0:
                         coverage_tracker.record_param_tested(count=total_params)
 
-                if run_sqli and post_active_budget_exhausted:
-                    sqlmap_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
-                    active_block.setdefault("sqlmap_skipped", []).append({
-                        "skip_reason": sqlmap_skip_reason,
-                        "candidate_reason": "post_active_budget",
-                    })
-                    print(f"[sqlmap] Skipping SQLMap verification: {sqlmap_skip_reason}", file=sys.stderr)
+                sqlmap_decision = should_run_active_enrichment(
+                    "sqlmap",
+                    post_active_budget_exhausted=post_active_budget_exhausted,
+                    active_block=active_block,
+                )
+                if run_sqli and not sqlmap_decision.run:
+                    record_active_enrichment_skip(
+                        active_block,
+                        "sqlmap",
+                        sqlmap_decision.reason or "active_time_budget_exhausted",
+                        candidate_reason="post_active_budget",
+                    )
+                    print(f"[sqlmap] Skipping SQLMap verification: {sqlmap_decision.reason}", file=sys.stderr)
                 elif run_sqli:
                     # Heuristic sqlmap verification on high-signal endpoints
                     try:
@@ -8723,7 +8750,12 @@ async def build_report(target: str,
 
                 # NoSQL Injection testing for JSON body endpoints
                 # NoSQL is an injection attack and should run when SQLi testing is enabled
-                if run_sqli and not post_active_budget_exhausted:
+                nosql_decision = should_run_active_enrichment(
+                    "nosql_injection",
+                    post_active_budget_exhausted=post_active_budget_exhausted,
+                    active_block=active_block,
+                )
+                if run_sqli and nosql_decision.run:
                     try:
                         debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
                         post_endpoints = [ep for ep in endpoints if ep.get("method") in ("POST", "PUT", "PATCH")]
@@ -8785,10 +8817,13 @@ async def build_report(target: str,
                             emit_progress("active_nosql", 91, "NoSQL JSON body checks complete")
                     except Exception as e:
                         active_block.setdefault("nosql_errors", []).append({"error": str(e)})
-                elif run_sqli and post_active_budget_exhausted:
-                    nosql_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
-                    active_block["nosql_skipped"] = nosql_skip_reason
-                    print(f"[active] Skipping NoSQL injection probes: {nosql_skip_reason}", file=sys.stderr)
+                elif run_sqli and not nosql_decision.run:
+                    record_active_enrichment_skip(
+                        active_block,
+                        "nosql_injection",
+                        nosql_decision.reason or "active_time_budget_exhausted",
+                    )
+                    print(f"[active] Skipping NoSQL injection probes: {nosql_decision.reason}", file=sys.stderr)
 
             except Exception as e:
                 active_block["smart_error"] = str(e)
@@ -8799,7 +8834,12 @@ async def build_report(target: str,
 
         # DOM XSS Analysis - run in broad smart mode after smart active tests.
         # Focused manual active scans keep reporting limited to the requested family.
-        if smart_mode and smart_succeeded and not focused_manual_active_scope and not post_active_budget_exhausted:
+        dom_xss_decision = should_run_active_enrichment(
+            "dom_xss",
+            post_active_budget_exhausted=post_active_budget_exhausted,
+            active_block=active_block,
+        )
+        if smart_mode and smart_succeeded and not focused_manual_active_scope and dom_xss_decision.run:
             try:
                 # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
                 js_urls_for_dom_xss = []
@@ -8861,14 +8901,22 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["dom_xss_error"] = str(e)
                 print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and post_active_budget_exhausted:
-            dom_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
-            active_block["dom_xss_skipped"] = dom_skip_reason
-            print(f"[scanner] Skipping DOM XSS analysis: {dom_skip_reason}", file=sys.stderr)
+        elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_decision.run:
+            record_active_enrichment_skip(
+                active_block,
+                "dom_xss",
+                dom_xss_decision.reason or "active_time_budget_exhausted",
+            )
+            print(f"[scanner] Skipping DOM XSS analysis: {dom_xss_decision.reason}", file=sys.stderr)
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
-        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and not post_active_budget_exhausted:
+        bola_decision = should_run_active_enrichment(
+            "bola_idor",
+            post_active_budget_exhausted=post_active_budget_exhausted,
+            active_block=active_block,
+        )
+        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and bola_decision.run:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
                 bola_urls: list[str] = []
@@ -8973,10 +9021,13 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["smart_bola_error"] = str(e)
                 print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not public_only and post_active_budget_exhausted:
-            bola_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
-            active_block["smart_bola_skipped"] = bola_skip_reason
-            print(f"[scanner] Skipping BOLA/IDOR testing: {bola_skip_reason}", file=sys.stderr)
+        elif smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and not bola_decision.run:
+            record_active_enrichment_skip(
+                active_block,
+                "bola_idor",
+                bola_decision.reason or "active_time_budget_exhausted",
+            )
+            print(f"[scanner] Skipping BOLA/IDOR testing: {bola_decision.reason}", file=sys.stderr)
 
         # Run active checks with a global timeout (standard mode or smart fallback on error)
         async def run_active_checks():
