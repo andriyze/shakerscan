@@ -2439,6 +2439,16 @@ async def build_report(target: str,
                 file=sys.stderr
             )
 
+    focused_manual_active_scope = bool(smart_mode and focused_active_family and manual_endpoints_norm)
+    discovery_budget = scan_budget
+    if focused_manual_active_scope:
+        discovery_budget = dict(scan_budget)
+        discovery_budget["api_probe_limit"] = 0
+        discovery_budget["disable_browser_fallback"] = True
+        discovery_budget["disable_recursive_fuzzing"] = True
+        discovery_budget["discovery_depth"] = min(int(discovery_budget.get("discovery_depth") or 1), 1)
+        print("[smart] Focused manual active scope: disabling discovery API probes and recursive fuzzing", file=sys.stderr)
+
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
     scan_session_id = str(_uuid.uuid4())
@@ -3166,9 +3176,9 @@ async def build_report(target: str,
         # Smart mode: Use recursive discovery
         # Note: signals=None because discovery runs before nuclei; nuclei signals are used
         # later in run_smart_active_tests for adaptive XSS/SQLi testing
-        katana_task = asyncio.create_task(smart_discovery(base_url, signals=None, scan_type="smart", budget=scan_budget))
+        katana_task = asyncio.create_task(smart_discovery(base_url, signals=None, scan_type="smart", budget=discovery_budget))
     else:
-        katana_task = asyncio.create_task(katana_crawl(base_url, scan_type=discovery_scan_type, budget=scan_budget))
+        katana_task = asyncio.create_task(katana_crawl(base_url, scan_type=discovery_scan_type, budget=discovery_budget))
 
     if auth_session:
         await auth_session.refresh_if_needed()
@@ -3191,7 +3201,7 @@ async def build_report(target: str,
     # For smart mode: Quick JS route discovery to seed browser crawl
     # This helps SPAs by finding routes before the browser crawl starts
     browser_seed_urls: list[str] = list(seed_entry_urls)
-    if smart_mode and not no_browser:
+    if smart_mode and not no_browser and not focused_manual_active_scope:
         try:
             import re
             import httpx as _httpx
@@ -6942,15 +6952,16 @@ async def build_report(target: str,
                         file=sys.stderr
                     )
 
-                for u in cand:
-                    parsed = urllib.parse.urlparse(u)
-                    params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
-                    # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
-                    source = "inferred" if u in cand_synthetic else "har_discovery"
-                    _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
+                if not focused_manual_active_scope:
+                    for u in cand:
+                        parsed = urllib.parse.urlparse(u)
+                        params = list(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).keys())
+                        # Real discovered endpoints get har_discovery priority; synthetic fallbacks get inferred
+                        source = "inferred" if u in cand_synthetic else "har_discovery"
+                        _merge_endpoint({"url": u, "method": "GET", "params": params, "source": source})
 
                 # Add inferred parameter endpoints from smart discovery (even if no query string)
-                if smart_discovery_data:
+                if smart_discovery_data and not focused_manual_active_scope:
                     for endpoint in smart_discovery_data.get("endpoints_with_params", []) or []:
                         if not isinstance(endpoint, dict):
                             continue
@@ -7058,7 +7069,7 @@ async def build_report(target: str,
                         body_params = list(defaults.keys())
                     return _dedupe_list(body_params), _dedupe_list(required_params), defaults
 
-                if smart_discovery_data:
+                if smart_discovery_data and not focused_manual_active_scope:
                     forms = smart_discovery_data.get("forms", []) or []
                     form_post_count = 0
                     form_get_count = 0
@@ -7093,85 +7104,89 @@ async def build_report(target: str,
                         )
 
                 # Discover OpenAPI/Swagger schema endpoints for smart testing
-                try:
-                    openapi_sources = []
-                    if openapi_url:
-                        explicit_schema = await fetch_openapi_schema(openapi_url, auth_session=auth_session)
-                        if explicit_schema:
-                            openapi_sources.append(explicit_schema)
-                    auto_schema = await discover_openapi_schema(base_url, auth_session=auth_session)
-                    if auto_schema:
-                        openapi_sources.append(auto_schema)
+                if focused_manual_active_scope:
+                    print("[smart] Focused manual active scope: skipping OpenAPI and inferred endpoint expansion", file=sys.stderr)
+                else:
+                    try:
+                        openapi_sources = []
+                        if openapi_url:
+                            explicit_schema = await fetch_openapi_schema(openapi_url, auth_session=auth_session)
+                            if explicit_schema:
+                                openapi_sources.append(explicit_schema)
+                        auto_schema = await discover_openapi_schema(base_url, auth_session=auth_session)
+                        if auto_schema:
+                            openapi_sources.append(auto_schema)
 
-                    if openapi_sources:
-                        import re as path_re
-                        post_count = 0
-                        get_count = 0
-                        seen_specs = set()
-                        for schema in openapi_sources:
-                            schema_url = schema.get("url")
-                            if schema_url in seen_specs:
-                                continue
-                            seen_specs.add(schema_url)
-                            for ep in schema.get("endpoints", []) or []:
-                                method = ep.get("method")
-                                path = ep.get("path", "")
-                                if not method or not path:
+                        if openapi_sources:
+                            import re as path_re
+                            post_count = 0
+                            get_count = 0
+                            seen_specs = set()
+                            for schema in openapi_sources:
+                                schema_url = schema.get("url")
+                                if schema_url in seen_specs:
                                     continue
-                                if "{" in path:
-                                    path = path_re.sub(r'\{[^}]+\}', '1', path)
-                                full_url = urllib.parse.urljoin(base_url, path)
-                                if method in ("POST", "PUT", "PATCH") and ep.get("body_params"):
-                                    if _merge_endpoint({
-                                        "url": full_url,
-                                        "method": method,
-                                        "body_params": ep["body_params"],
-                                        "body_required_params": ep.get("body_required_params", []),
-                                        "body_param_defaults": ep.get("body_param_defaults", {}),
-                                        "content_type": ep.get("content_type", "application/json"),
-                                        "source": "openapi",
-                                    }):
-                                        post_count += 1
-                                elif method in ("GET", "DELETE", "HEAD", "OPTIONS") and ep.get("query_params"):
-                                    if _merge_endpoint({
-                                        "url": full_url,
-                                        "method": method,
-                                        "params": ep.get("query_params", []),
-                                        "source": "openapi",
-                                    }):
-                                        get_count += 1
-                        if post_count or get_count:
-                            print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
+                                seen_specs.add(schema_url)
+                                for ep in schema.get("endpoints", []) or []:
+                                    method = ep.get("method")
+                                    path = ep.get("path", "")
+                                    if not method or not path:
+                                        continue
+                                    if "{" in path:
+                                        path = path_re.sub(r'\{[^}]+\}', '1', path)
+                                    full_url = urllib.parse.urljoin(base_url, path)
+                                    if method in ("POST", "PUT", "PATCH") and ep.get("body_params"):
+                                        if _merge_endpoint({
+                                            "url": full_url,
+                                            "method": method,
+                                            "body_params": ep["body_params"],
+                                            "body_required_params": ep.get("body_required_params", []),
+                                            "body_param_defaults": ep.get("body_param_defaults", {}),
+                                            "content_type": ep.get("content_type", "application/json"),
+                                            "source": "openapi",
+                                        }):
+                                            post_count += 1
+                                    elif method in ("GET", "DELETE", "HEAD", "OPTIONS") and ep.get("query_params"):
+                                        if _merge_endpoint({
+                                            "url": full_url,
+                                            "method": method,
+                                            "params": ep.get("query_params", []),
+                                            "source": "openapi",
+                                        }):
+                                            get_count += 1
+                            if post_count or get_count:
+                                print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
 
-                        # Smart mode: optionally kick off Schemathesis when OpenAPI is found
-                        if schemathesis_task is None and not public_only:
-                            schema_url = openapi_url
-                            if not schema_url:
-                                for schema in openapi_sources:
-                                    candidate_url = schema.get("url")
-                                    if candidate_url:
-                                        schema_url = candidate_url
-                                        break
-                            if schema_url:
-                                schemathesis_schema_url = schema_url
-                                schemathesis_task = asyncio.create_task(
-                                    schemathesis_run(
-                                        schema_url,
-                                        api_token,
-                                        base_url=base_url,
-                                        auth_session=auth_session,
+                            # Smart mode: optionally kick off Schemathesis when OpenAPI is found
+                            if schemathesis_task is None and not public_only:
+                                schema_url = openapi_url
+                                if not schema_url:
+                                    for schema in openapi_sources:
+                                        candidate_url = schema.get("url")
+                                        if candidate_url:
+                                            schema_url = candidate_url
+                                            break
+                                if schema_url:
+                                    schemathesis_schema_url = schema_url
+                                    schemathesis_task = asyncio.create_task(
+                                        schemathesis_run(
+                                            schema_url,
+                                            api_token,
+                                            base_url=base_url,
+                                            auth_session=auth_session,
+                                        )
                                     )
-                                )
-                except Exception as e:
-                    print(f"[scanner] OpenAPI discovery failed: {e}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[scanner] OpenAPI discovery failed: {e}", file=sys.stderr)
 
                 # Infer POST endpoints from discovered URLs (katana crawl results)
                 # This converts API paths like /api/auth/login, /workshop/api/shop/apply_coupon
                 # into POST endpoint candidates with inferred body parameters
                 # Skip when SPA catch-all detected — discovered URLs are phantom paths
-                _skip_post_inference = smart_discovery_data and smart_discovery_data.get("spa_catch_all")
+                _skip_post_inference = focused_manual_active_scope or (smart_discovery_data and smart_discovery_data.get("spa_catch_all"))
                 if _skip_post_inference:
-                    print("[scanner] POST inference: skipped (SPA catch-all detected)", file=sys.stderr)
+                    reason = "focused manual active scope" if focused_manual_active_scope else "SPA catch-all detected"
+                    print(f"[scanner] POST inference: skipped ({reason})", file=sys.stderr)
                 try:
                     # Patterns that suggest POST/mutation operations
                     POST_INDICATORS = [
@@ -7299,7 +7314,7 @@ async def build_report(target: str,
                 # Add common POST endpoint patterns for apps without OpenAPI
                 # Enabled in complete_mode (full/aggressive) and smart_mode since these
                 # are active scan types that should test POST body injection
-                if complete_mode or smart_mode:
+                if (complete_mode or smart_mode) and not focused_manual_active_scope:
                     COMMON_POST_ENDPOINTS = [
                         ("/api/auth/login", ["email", "username", "password"]),
                         ("/api/login", ["email", "username", "password"]),
@@ -7329,7 +7344,7 @@ async def build_report(target: str,
                         print(f"[scanner] Added {added_common} common POST endpoints (active scan mode)", file=sys.stderr)
 
                 # OPTIONS-based method discovery expansion
-                if options_method_results and options_method_results.get("methods_by_url"):
+                if options_method_results and options_method_results.get("methods_by_url") and not focused_manual_active_scope:
                     def _infer_params_from_path(path: str, method: str) -> list[str]:
                         path_lower = path.lower()
                         if method in ("POST", "PUT", "PATCH"):
@@ -7389,7 +7404,7 @@ async def build_report(target: str,
                         print(f"[scanner] Added {options_added} endpoints from OPTIONS method discovery", file=sys.stderr)
 
                 # Add HAR-discovered endpoints with method/body params preserved
-                if har_test_targets:
+                if har_test_targets and not focused_manual_active_scope:
                     har_get_count = 0
                     har_post_count = 0
                     for har_target in har_test_targets:

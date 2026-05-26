@@ -691,6 +691,39 @@ def _build_api_probe_candidates(
     return candidates
 
 
+def _limit_api_probe_candidates(candidates: list[str], api_probe_limit: int) -> list[str]:
+    """Apply the caller's total API probe budget after all candidate sources are merged."""
+    if api_probe_limit <= 0:
+        return []
+    candidates = [_normalize_candidate_path(c) for c in candidates]
+    candidates = [c for c in candidates if c]
+    candidates = _unique_preserve_order(candidates)
+    return candidates[:api_probe_limit]
+
+
+def _plan_api_base_probe_budget(
+    api_bases: set[str],
+    api_probe_limit: int,
+    max_bases: int = 5,
+) -> list[tuple[str, int]]:
+    """Split a total API probe budget across API base paths without exceeding the cap."""
+    if api_probe_limit <= 0 or not api_bases:
+        return []
+    sorted_bases = sorted(api_bases)
+    base_count = min(len(sorted_bases), max_bases, api_probe_limit)
+    selected_bases = sorted_bases[:base_count]
+    remaining = api_probe_limit
+    plan: list[tuple[str, int]] = []
+    for index, api_base in enumerate(selected_bases):
+        slots_left = len(selected_bases) - index
+        per_base_limit = max(1, remaining // slots_left)
+        plan.append((api_base, per_base_limit))
+        remaining -= per_base_limit
+        if remaining <= 0:
+            break
+    return plan
+
+
 async def _probe_api_candidates(
     base_url: str,
     candidates: list[str],
@@ -1199,10 +1232,17 @@ async def enhanced_url_discovery(
     do_param_discovery = config["parameter_discovery"]
     do_js_parsing = config.get("js_parsing", False)
     ffuf_wordlist = config.get("ffuf_wordlist", "common")
-    do_recursive_fuzzing = config.get("recursive_fuzzing", False)
-    api_probe_limit = int(budget.get("api_probe_limit") or config.get("api_probe_limit", 0))
+    do_recursive_fuzzing = config.get("recursive_fuzzing", False) and not bool(budget.get("disable_recursive_fuzzing"))
+    api_probe_budget = budget.get("api_probe_limit")
+    api_probe_limit = (
+        int(api_probe_budget)
+        if api_probe_budget is not None
+        else int(config.get("api_probe_limit", 0))
+    )
     common_probe_limit = config.get("common_probe_limit", 0)
     api_root_resource_limit = config.get("api_root_resource_limit", 0)
+    if budget.get("disable_browser_fallback"):
+        use_browser = False
 
     # Detect SPA catch-all routing before fuzzing
     spa_result = await detect_spa_catch_all(url, timeout=10)
@@ -1369,6 +1409,7 @@ async def enhanced_url_discovery(
                 api_root_resource_limit=api_root_resource_limit
             )
         )
+        api_candidates = _limit_api_probe_candidates(api_candidates, api_probe_limit)
         probed_endpoints = await _probe_api_candidates(url, api_candidates, timeout=5.0, concurrency=12)
         if probed_endpoints:
             discovered_urls.extend(probed_endpoints)
@@ -3239,14 +3280,22 @@ async def smart_discovery(
     probed_endpoints: list[dict[str, Any]] = []
     config = initial_discovery.get("config", {})
     budget = budget or {}
-    api_probe_limit = int(budget.get("api_probe_limit") or config.get("api_probe_limit", 600))
+    api_probe_budget = budget.get("api_probe_limit")
+    api_probe_limit = (
+        int(api_probe_budget)
+        if api_probe_budget is not None
+        else int(config.get("api_probe_limit", 600))
+    )
+    base_probe_plan = _plan_api_base_probe_budget(api_bases, api_probe_limit)
 
-    if api_bases and not spa_catch_all:
-        print(f"[discovery] Phase 2a: Probing {len(api_bases)} API bases for common resources", file=sys.stderr)
-        per_base_limit = max(20, api_probe_limit // max(len(api_bases), 1))
-        for api_base in list(api_bases)[:5]:  # Limit to 5 bases
+    if base_probe_plan and not spa_catch_all:
+        print(f"[discovery] Phase 2a: Probing {len(base_probe_plan)} API bases for common resources", file=sys.stderr)
+        for api_base, per_base_limit in base_probe_plan:
             probed = await probe_api_base(url, api_base, limit=per_base_limit)
             probed_endpoints.extend(probed)
+            if len(probed_endpoints) >= api_probe_limit:
+                probed_endpoints = probed_endpoints[:api_probe_limit]
+                break
             # Add probed paths to directories for recursive fuzzing
             for p in probed:
                 path = p.get("path", "")
@@ -3258,7 +3307,9 @@ async def smart_discovery(
 
     # Phase 2b: Recursive fuzzing with adaptive depth (P1-1 fix)
     recursive_result: dict[str, Any] = {}
-    if not spa_catch_all:
+    if budget.get("disable_recursive_fuzzing"):
+        print(f"[discovery] Phase 2b: Skipped recursive fuzzing (focused active budget)", file=sys.stderr)
+    elif not spa_catch_all:
         adaptive_depth, adaptive_paths_per_level = calculate_adaptive_depth(
             signals,
             base_depth=int(budget.get("discovery_depth") or 3),
