@@ -11227,6 +11227,11 @@ async def cli_main():
 
             # Recompute grade now that AI has set ai_verdict on findings
             # This ensures false positives identified by AI don't penalize the score
+            prior_focused_result = (
+                dict(report.get("result") or {})
+                if (report.get("result") or {}).get("focused_active_scope")
+                else None
+            )
             grade_result = grade(report)
             # Preserve coverage reliability info from original assessment
             coverage = report.get("coverage", {})
@@ -11239,6 +11244,18 @@ async def cli_main():
                 grade_result["summary"] = f"[INCOMPLETE] {grade_result['summary']}"
             else:
                 grade_result["grade_reliable"] = True
+            if prior_focused_result:
+                for key in (
+                    "score",
+                    "grade",
+                    "notes",
+                    "remediation",
+                    "summary",
+                    "focused_active_scope",
+                    "focused_family",
+                ):
+                    if key in prior_focused_result:
+                        grade_result[key] = prior_focused_result[key]
             report["result"] = grade_result
         except Exception as e:
             report.setdefault("ai_logs", {})
