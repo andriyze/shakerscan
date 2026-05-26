@@ -8374,7 +8374,14 @@ async def build_report(target: str,
                     if total_params > 0:
                         coverage_tracker.record_param_tested(count=total_params)
 
-                if run_sqli:
+                if run_sqli and post_active_budget_exhausted:
+                    sqlmap_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
+                    active_block.setdefault("sqlmap_skipped", []).append({
+                        "skip_reason": sqlmap_skip_reason,
+                        "candidate_reason": "post_active_budget",
+                    })
+                    print(f"[sqlmap] Skipping SQLMap verification: {sqlmap_skip_reason}", file=sys.stderr)
+                elif run_sqli:
                     # Heuristic sqlmap verification on high-signal endpoints
                     try:
                         sqlmap_candidates: list[dict[str, Any]] = []
@@ -8670,7 +8677,7 @@ async def build_report(target: str,
 
                 # NoSQL Injection testing for JSON body endpoints
                 # NoSQL is an injection attack and should run when SQLi testing is enabled
-                if run_sqli:
+                if run_sqli and not post_active_budget_exhausted:
                     try:
                         debug_nosql = os.environ.get("SCANNER_DEBUG_NOSQL", "").lower() in ("1", "true", "yes")
                         post_endpoints = [ep for ep in endpoints if ep.get("method") in ("POST", "PUT", "PATCH")]
@@ -8732,6 +8739,10 @@ async def build_report(target: str,
                             emit_progress("active_nosql", 91, "NoSQL JSON body checks complete")
                     except Exception as e:
                         active_block.setdefault("nosql_errors", []).append({"error": str(e)})
+                elif run_sqli and post_active_budget_exhausted:
+                    nosql_skip_reason = active_block.get("post_active_enrichment_skipped") or "active_time_budget_exhausted"
+                    active_block["nosql_skipped"] = nosql_skip_reason
+                    print(f"[active] Skipping NoSQL injection probes: {nosql_skip_reason}", file=sys.stderr)
 
             except Exception as e:
                 active_block["smart_error"] = str(e)
