@@ -4004,7 +4004,13 @@ async def build_report(target: str,
 
     # Adaptive smart discovery refinement using nuclei signals (post-nuclei)
     # Skip when SPA catch-all detected — recursive fuzzing on SPA sites produces false paths
-    if smart_mode and smart_discovery_data and nuclei_signals and not smart_discovery_data.get("spa_catch_all"):
+    if (
+        smart_mode
+        and smart_discovery_data
+        and nuclei_signals
+        and not focused_manual_active_scope
+        and not smart_discovery_data.get("spa_catch_all")
+    ):
         try:
             signals_used = smart_discovery_data.get("signals_used")
             if not signals_used:
