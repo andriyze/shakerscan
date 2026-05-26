@@ -2985,8 +2985,17 @@ async def build_report(target: str,
 
     # parallel tasks (infra)
     dns_task    = asyncio.create_task(resolve_dns(host))
-    dmarc_task  = asyncio.create_task(fetch_dmarc(host))
-    dnssec_task = asyncio.create_task(check_dnssec(host))
+    if focused_manual_active_scope:
+        print("[smart] Focused manual active scope: skipping DNS/email hardening probes", file=sys.stderr)
+
+        async def dummy_dmarc(): return {"record": None, "fields": {}, "skipped": True, "reason": "focused_manual_active_scope"}
+        async def dummy_dnssec(): return {"status": "skipped", "algorithm": None, "skipped": True, "reason": "focused_manual_active_scope"}
+
+        dmarc_task  = asyncio.create_task(dummy_dmarc())
+        dnssec_task = asyncio.create_task(dummy_dnssec())
+    else:
+        dmarc_task  = asyncio.create_task(fetch_dmarc(host))
+        dnssec_task = asyncio.create_task(check_dnssec(host))
     tlsx_task   = asyncio.create_task(tlsx_probe(host, port))
     ocsp_task   = asyncio.create_task(openssl_ocsp(host, port))
 
@@ -3011,16 +3020,36 @@ async def build_report(target: str,
     head_task   = asyncio.create_task(curl_headers(base_url))
     # Check HTTP->HTTPS redirect explicitly when scanning HTTPS
     http_redirect_task = None
-    if scheme == "https":
+    if scheme == "https" and not focused_manual_active_scope:
         http_redirect_task = asyncio.create_task(curl_headers(f"http://{host}"))
-    h2_task     = asyncio.create_task(supports_http2(base_url))
-    h3_task     = asyncio.create_task(supports_http3(base_url))
-    sec_txt_task= asyncio.create_task(fetch_security_txt(base_url))
+    if focused_manual_active_scope:
+        print("[smart] Focused manual active scope: skipping HTTP capability and security.txt probes", file=sys.stderr)
+
+        async def dummy_http2(): return False
+        async def dummy_http3(): return None
+        async def dummy_sec_txt(): return {"present": False, "url": base_url.rstrip("/") + "/.well-known/security.txt", "sample": None, "skipped": True, "reason": "focused_manual_active_scope"}
+
+        h2_task     = asyncio.create_task(dummy_http2())
+        h3_task     = asyncio.create_task(dummy_http3())
+        sec_txt_task= asyncio.create_task(dummy_sec_txt())
+    else:
+        h2_task     = asyncio.create_task(supports_http2(base_url))
+        h3_task     = asyncio.create_task(supports_http3(base_url))
+        sec_txt_task= asyncio.create_task(fetch_security_txt(base_url))
 
     # Email/DNS security extras (best-effort)
-    caa_task    = asyncio.create_task(fetch_caa(host))
-    mta_task    = asyncio.create_task(fetch_mta_sts(host))
-    tlsrpt_task = asyncio.create_task(fetch_tls_rpt(host))
+    if focused_manual_active_scope:
+        async def dummy_caa(): return {"records": [], "skipped": True, "reason": "focused_manual_active_scope"}
+        async def dummy_mta(): return {"record": None, "policy_url": f"https://{host}/.well-known/mta-sts.txt", "policy_present": False, "policy_sample": None, "skipped": True, "reason": "focused_manual_active_scope"}
+        async def dummy_tlsrpt(): return {"record": None, "rua": None, "skipped": True, "reason": "focused_manual_active_scope"}
+
+        caa_task    = asyncio.create_task(dummy_caa())
+        mta_task    = asyncio.create_task(dummy_mta())
+        tlsrpt_task = asyncio.create_task(dummy_tlsrpt())
+    else:
+        caa_task    = asyncio.create_task(fetch_caa(host))
+        mta_task    = asyncio.create_task(fetch_mta_sts(host))
+        tlsrpt_task = asyncio.create_task(fetch_tls_rpt(host))
 
     # New: IP Reputation & Threat Intelligence (opt-in)
     if ip_reputation and not public_only:
