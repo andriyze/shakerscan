@@ -9200,6 +9200,83 @@ async def build_report(target: str,
     grade_result = grade(report)
     await asyncio.sleep(0)  # yield to heartbeat
 
+    if focused_manual_active_scope:
+        family = "xss" if active_xss else "sqli"
+        focused_findings = report.get("findings") or []
+        severity_counts_for_grade = {
+            "critical": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "critical"),
+            "high": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "high"),
+            "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
+            "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
+        }
+        focused_score = 100
+        focused_score -= min(severity_counts_for_grade["critical"] * 15, 45)
+        focused_score -= min(severity_counts_for_grade["high"] * 10, 30)
+        focused_score -= min(severity_counts_for_grade["medium"] * 4, 20)
+        focused_score -= min(severity_counts_for_grade["low"] * 1, 10)
+        focused_score = max(0, min(100, focused_score))
+        max_severity = "info"
+        for sev in ("critical", "high", "medium", "low"):
+            if severity_counts_for_grade[sev]:
+                max_severity = sev
+                break
+        if max_severity == "critical":
+            focused_grade = "D" if focused_score >= 55 else "F"
+        elif max_severity == "high":
+            focused_grade = "C" if focused_score >= 70 else "D" if focused_score >= 55 else "F"
+        else:
+            focused_grade = (
+                "A" if focused_score >= 90 else
+                "B" if focused_score >= 80 else
+                "C" if focused_score >= 70 else
+                "D" if focused_score >= 55 else
+                "F"
+            )
+
+        focused_notes = []
+        if severity_counts_for_grade["critical"]:
+            max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_findings] or [0])
+            focused_notes.append(
+                f"{severity_counts_for_grade['critical']} critical vulnerability(ies) found "
+                f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts_for_grade['critical'] * 15, 45)})."
+            )
+        if severity_counts_for_grade["high"]:
+            focused_notes.append(
+                f"{severity_counts_for_grade['high']} high severity issue(s) found "
+                f"(penalty: -{min(severity_counts_for_grade['high'] * 10, 30)})."
+            )
+        if severity_counts_for_grade["medium"]:
+            focused_notes.append(
+                f"{severity_counts_for_grade['medium']} medium severity issue(s) found "
+                f"(penalty: -{min(severity_counts_for_grade['medium'] * 4, 20)})."
+            )
+
+        focused_remediation = (
+            [
+                "Use parameterized queries/prepared statements for database access.",
+                "Validate and type-check request parameters before using them in queries.",
+                "Run database accounts with least privilege and monitor anomalous query behavior.",
+            ]
+            if family == "sqli"
+            else [
+                "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
+                "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
+                "Add regression tests for the confirmed XSS payload and affected parameter.",
+            ]
+        )
+        grade_result.update({
+            "score": focused_score,
+            "grade": focused_grade,
+            "notes": focused_notes,
+            "remediation": focused_remediation,
+            "summary": (
+                f"Focused {family.upper()} Scan Grade: {focused_grade} "
+                f"({focused_score}/100) - {len(focused_findings)} issue(s) found"
+            ),
+            "focused_active_scope": True,
+            "focused_family": family,
+        })
+
     # If required modules failed, mark grade as unreliable
     if not coverage["grade_reliable"]:
         grade_result["grade_reliable"] = False
@@ -9487,11 +9564,11 @@ async def build_report(target: str,
             )
 
     nuclei_cov = smart_cov.get("nuclei_templates") or {}
-    if nuclei_cov.get("run") == 0 and not public_only:
+    if nuclei_cov.get("run") == 0 and not public_only and not focused_manual_active_scope:
         coverage_gaps.append("Nuclei templates not executed - check nuclei configuration or timeouts")
 
     auth_states = smart_cov.get("auth_states_tested") or []
-    if auth_states == ["anonymous"]:
+    if auth_states == ["anonymous"] and not focused_manual_active_scope:
         coverage_gaps.append("Only anonymous auth state tested - authenticated coverage may be missing")
 
     report["coverage_gaps"] = {
