@@ -5,7 +5,11 @@ description: DAST security scanner. USE WHEN scan, security, vulnerability, XSS,
 
 # ShakerScan Skill
 
-You have access to a local DAST (Dynamic Application Security Testing) scanner running at `http://localhost:8080`.
+You have access to a DAST (Dynamic Application Security Testing) scanner. When the agent runs on the same host as ShakerScan, the API is `http://localhost:8080`.
+
+For a laptop/local install, start with `./scanner.sh start`; it binds UI/API to `127.0.0.1`. For a VPS that should be opened from another machine over Tailscale, start with `./scanner.sh start --remote`; it binds to the VPS Tailscale IPv4 address and prints browser-facing UI/API URLs. Use those printed URLs for final UI links instead of hardcoding `localhost:3000`. If Tailscale is unavailable, only use `SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote` behind a firewall, VPN, or reverse proxy.
+
+Hosted installer users may still be in `/root` or another unrelated directory after install. The global `shakerscan` command works from anywhere for CLI operations, but AI agents should run from `~/.shakerscan` or a source checkout so they can read `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/`. Prefer `shakerscan agent codex`, `shakerscan agent claude`, or `shakerscan agent opencode` to launch the agent in the right directory.
 
 ## Operating Stance
 
@@ -273,7 +277,7 @@ Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 ### AI Gate
 
-Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The UI is at `http://localhost:3000/settings/ai-gate`; the API is fully usable by agents.
+Use AI Gate when the user wants to test an AI app, chatbot, RAG endpoint, agent/tool workflow, or MCP endpoint. The local UI is at `http://localhost:3000/settings/ai-gate`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The API is fully usable by agents.
 
 AI Gate uses deterministic/regex detectors first. If AI settings have a configured provider, semantic AI judging also reviews probe transcripts, fills the standard AI analysis fields on findings, and can downgrade high-confidence false positives before scoring.
 
@@ -331,7 +335,7 @@ After submitting an AI Gate scan, report the scan ID and UI link, then stop. Do 
 
 ### Model Intake
 
-Use Model Intake when the user wants to check a model artifact before deployment. The UI is at `http://localhost:3000/settings/model-intake`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
+Use Model Intake when the user wants to check a model artifact before deployment. The local UI is at `http://localhost:3000/settings/model-intake`; on a remote VPS, use the UI base printed by `./scanner.sh status`. The scanner reads artifact bytes and metadata without importing or executing model code, including provenance, serialization, signing/checksum, license, SBOM, malware scan, eval, deployment restriction, monitoring, and approval evidence.
 
 Model Intake findings are stored as non-AI findings with `tool=model_intake`; `source_type=dast` includes them until the product adds a separate model-intake source filter.
 
@@ -505,7 +509,7 @@ Coverage interpretation: `< 0.5` possible rate limiting, `0.5-0.8` normal, `> 0.
 
 🔍 Findings: 0 Critical, 0 High, 3 Medium, 4 Low
 
-📊 Full report: http://localhost:3000/scans/{id}
+📊 Full report: {ui_base}/scans/{id}
 ```
 
 ## Usage Guidelines

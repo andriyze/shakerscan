@@ -6,6 +6,7 @@ import ComplianceSection from '@/components/ComplianceSection'
 import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
+import { getApiUrl } from '@/lib/api'
 import { CheckCircle2 } from 'lucide-react'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
@@ -601,7 +602,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   }
 
   const handleDownloadAIRedTeamReport = async (format: 'json' | 'markdown') => {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+    const apiUrl = getApiUrl()
     const res = await fetch(`${apiUrl}/scans/${scan.id}/ai-redteam-report?format=${format}`)
     if (!res.ok) {
       console.error('Failed to download AI red-team report')

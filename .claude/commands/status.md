@@ -6,6 +6,8 @@ Check the status of the Shaker Scan scanner.
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote VPS, prefer the URLs printed by `./scanner.sh status` after `./scanner.sh start --remote`.
+
 1. Check if scanner is running:
    ```bash
    curl -s http://localhost:8080/health 2>/dev/null
@@ -15,6 +17,7 @@ Check the status of the Shaker Scan scanner.
    ```
    Scanner is not running.
    Start it with: ./scanner.sh start
+   For remote VPS over Tailscale: ./scanner.sh start --remote
    ```
 
 3. If running, fetch stats:
@@ -38,6 +41,6 @@ Check the status of the Shaker Scan scanner.
    - Active findings: X (Y critical, Z high)
 
    Access:
-   - UI: http://localhost:3000
-   - API: http://localhost:8080
+   - UI: ${UI_BASE}
+   - API: ${API_BASE}
    ```

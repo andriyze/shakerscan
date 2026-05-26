@@ -1,4 +1,19 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+export function getApiUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL
+  }
+
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+      return `http://${host}:8080`
+    }
+  }
+
+  return 'http://localhost:8080'
+}
+
+export const API_URL = getApiUrl()
 
 async function getApiErrorMessage(res: Response, fallback: string): Promise<string> {
   try {

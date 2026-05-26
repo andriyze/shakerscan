@@ -28,10 +28,30 @@ Open-source Dynamic Application Security Testing (DAST) for web applications, wi
 curl -fsSL https://install.shakerscan.com | sh
 ```
 
-That installs the `shakerscan` command into `~/.local/bin`, downloads the runtime files plus `README.md`, `AGENTS.md`, and `CLAUDE.md` into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
+That installs the `shakerscan` command into `~/.local/bin`, downloads the runtime files plus `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/` into `~/.shakerscan`, installs missing prerequisites when possible, starts the full stack, and pulls the `latest` prebuilt Docker Hub images by default.
 
 - **Web UI**: http://localhost:3000
 - **API**: http://localhost:8080
+
+Local laptop installs bind only to `127.0.0.1` by default. For a remote VPS that you want to reach over Tailscale, use remote mode:
+
+```bash
+curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh
+```
+
+Remote mode binds the UI/API to the VPS Tailscale IPv4 address, persists that access mode in `~/.shakerscan/.env`, and prints URLs such as `http://100.x.y.z:3000`. For an existing install, run:
+
+```bash
+shakerscan start --remote
+```
+
+If Tailscale is not available, set the bind and public host explicitly:
+
+```bash
+SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> shakerscan start --remote
+```
+
+Only use `0.0.0.0` behind a firewall, VPN, or reverse proxy. ShakerScan is a security tool and should not be exposed directly to the public internet.
 
 After install:
 
@@ -41,7 +61,16 @@ shakerscan status
 shakerscan stop
 ```
 
-To upgrade an installed runtime, re-run the same installer command. It refreshes `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, and `CLAUDE.md` in `~/.shakerscan`, preserves `.env`, `results`, and Docker volumes, and pulls the selected prebuilt Docker Hub images during startup. Use `curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh` to update files without starting services, or `SHAKERSCAN_PULL_IMAGES=0 shakerscan start` to skip image pulls.
+For AI-assisted use, start the agent inside the installed runtime so it reads ShakerScan's local instructions and skills:
+
+```bash
+shakerscan agent codex      # or: shakerscan agent claude
+shakerscan agent opencode
+```
+
+This is equivalent to `cd ~/.shakerscan && codex`, but works from whatever directory the installer left you in.
+
+To upgrade an installed runtime, re-run the same installer command. It refreshes `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/` in `~/.shakerscan`, preserves `.env`, `results`, and Docker volumes, and pulls the selected prebuilt Docker Hub images during startup. Use `curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh` to update files without starting services, or `SHAKERSCAN_PULL_IMAGES=0 shakerscan start` to skip image pulls.
 
 The installer supports macOS and common Linux package managers: apt-based hosts such as Ubuntu, Debian, Pop!_OS, Linux Mint, Zorin, and Kali; rpm-based hosts such as Fedora, RHEL, CentOS, Rocky, and AlmaLinux; plus Arch, openSUSE, and Alpine. It installs Docker Engine or Docker Desktop, Docker Compose, `curl`, and `jq`, then starts/enables Docker where the host init system allows it.
 
@@ -261,6 +290,7 @@ Options:
   --local            Force local Docker build instead of prebuilt images
   --prebuilt         Force prebuilt Docker Hub images (default)
   --image-tag TAG    Override Docker image tag (default: latest)
+  --remote           Bind UI/API to this host's Tailscale IPv4 address
   --confirm-active   Confirm authorization for scan-full or scan-smart
 ```
 
@@ -338,6 +368,12 @@ This project is designed to work well with coding agents. After the curl install
 cd ~/.shakerscan
 codex     # reads AGENTS.md
 claude    # reads CLAUDE.md
+```
+
+From any directory, you can also run:
+
+```bash
+shakerscan agent codex      # or claude, or opencode
 ```
 
 For source changes, clone the repo and open the clone in your agent:

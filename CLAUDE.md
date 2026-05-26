@@ -10,6 +10,27 @@ If the scanner isn't running, start it:
 ./scanner.sh status    # Check status
 ```
 
+For a remote VPS that should be opened from another machine over Tailscale:
+```bash
+./scanner.sh start --remote
+./scanner.sh status
+```
+
+Remote mode binds the UI/API to the VPS Tailscale IPv4 address and prints remote URLs. Local laptop mode intentionally binds to `127.0.0.1`. If Tailscale is unavailable, use `SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote`, but only behind a firewall, VPN, or reverse proxy.
+
+If the user installed with `curl -fsSL https://install.shakerscan.com | sh` and is still in `/root` or another unrelated directory, ask them to start Claude inside the ShakerScan runtime:
+```bash
+shakerscan agent claude
+```
+
+Equivalent manual form:
+```bash
+cd ~/.shakerscan
+claude
+```
+
+Using the global `shakerscan` command from any directory is fine for CLI operations, but AI agents should run from `~/.shakerscan` or a source checkout so they can read `AGENTS.md`, `CLAUDE.md`, `skills/`, and `.claude/`.
+
 ## How This Works
 
 The scanner runs as Docker containers:
@@ -24,6 +45,8 @@ The scanner runs as Docker containers:
 When users ask about security scanning:
 
 **Important**: After submitting a scan, report the scan ID and UI link, then stop. Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
+
+For commands you run on the same machine as ShakerScan, use `http://localhost:8080` for the API. For browser-facing links on a remote VPS, use the UI URL printed by `./scanner.sh status` or `./scanner.sh start --remote` instead of hardcoding `localhost:3000`.
 
 1. **Check if scanner is running**: `curl -s http://localhost:8080/health 2>/dev/null || echo "not running"`
 2. **Offer to start it** if not running: `./scanner.sh start`

@@ -2,6 +2,8 @@
 # SessionStart hook for DAST Scanner
 # Checks if scanner is running and reports status
 
+API_BASE="${SHAKERSCAN_API_BASE:-http://localhost:8080}"
+
 # Check if Docker is available
 if ! command -v docker &> /dev/null; then
     echo "SCANNER_STATUS=docker_missing"
@@ -9,9 +11,9 @@ if ! command -v docker &> /dev/null; then
 fi
 
 # Check if scanner API is responding
-if curl -s --connect-timeout 2 http://localhost:8080/health > /dev/null 2>&1; then
+if curl -s --connect-timeout 2 "$API_BASE/health" > /dev/null 2>&1; then
     # Scanner is running, get stats
-    STATS=$(curl -s http://localhost:8080/queue/stats 2>/dev/null)
+    STATS=$(curl -s "$API_BASE/queue/stats" 2>/dev/null)
     RUNNING=$(echo "$STATS" | grep -o '"running":[0-9]*' | cut -d: -f2)
     PENDING=$(echo "$STATS" | grep -o '"pending":[0-9]*' | cut -d: -f2)
 

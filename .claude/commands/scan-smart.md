@@ -6,6 +6,8 @@ Run an intelligent adaptive security scan that adjusts based on findings.
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 1. **IMPORTANT**: First ask user for confirmation:
    "This will run a SMART scan which includes active vulnerability testing (XSS, SQLi probes). Do you have permission to test this target? (yes/no)"
 
@@ -48,7 +50,7 @@ Run an intelligent adaptive security scan that adjusts based on findings.
 6. Report scan ID and UI link, then STOP:
    ```
    Smart scan submitted: {scan_id}
-   View progress: http://localhost:3000/scans/{scan_id}
+   View progress: ${UI_BASE}/scans/{scan_id}
    ```
 
 **Important**: Do NOT poll or wait - smart scans adapt dynamically and can take variable time.

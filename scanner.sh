@@ -19,6 +19,7 @@ WORKERS=${WORKERS:-auto}
 DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
 ASSUME_YES=0
 CONFIRM_ACTIVE=0
+REMOTE_ACCESS=0
 FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
@@ -38,6 +39,113 @@ IMAGE_TAG_OVERRIDE=""
 
 command_exists() {
     command -v "$1" > /dev/null 2>&1
+}
+
+first_tailscale_ipv4() {
+    if command_exists tailscale; then
+        tailscale ip -4 2>/dev/null | head -n 1
+    fi
+}
+
+format_url_host() {
+    local host="$1"
+    case "$host" in
+        *:*) echo "[$host]" ;;
+        *) echo "$host" ;;
+    esac
+}
+
+public_access_host() {
+    local host="${SHAKERSCAN_PUBLIC_HOST:-${SHAKERSCAN_BIND_HOST:-localhost}}"
+    case "$host" in
+        ""|127.0.0.1|0.0.0.0)
+            host="localhost"
+            ;;
+    esac
+    echo "$host"
+}
+
+read_dotenv_value() {
+    local key="$1"
+    [ -f "$SCRIPT_DIR/.env" ] || return 0
+    awk -F= -v key="$key" '$1 == key { value = substr($0, index($0, "=") + 1) } END { print value }' "$SCRIPT_DIR/.env" |
+        sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+load_access_env() {
+    local value
+
+    if [ -z "${SHAKERSCAN_BIND_HOST:-}" ]; then
+        value="$(read_dotenv_value SHAKERSCAN_BIND_HOST)"
+        if [ -n "$value" ]; then
+            export SHAKERSCAN_BIND_HOST="$value"
+        fi
+    fi
+
+    if [ -z "${SHAKERSCAN_PUBLIC_HOST:-}" ]; then
+        value="$(read_dotenv_value SHAKERSCAN_PUBLIC_HOST)"
+        if [ -n "$value" ]; then
+            export SHAKERSCAN_PUBLIC_HOST="$value"
+        fi
+    fi
+}
+
+write_dotenv_value() {
+    local key="$1"
+    local value="$2"
+    local file="$SCRIPT_DIR/.env"
+    local tmp="${file}.tmp.$$"
+
+    touch "$file"
+    awk -v key="$key" -v value="$value" '
+        BEGIN { done = 0 }
+        $0 ~ "^" key "=" {
+            print key "=" value
+            done = 1
+            next
+        }
+        { print }
+        END {
+            if (!done) {
+                print key "=" value
+            }
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+}
+
+persist_remote_access_env() {
+    if [ "$REMOTE_ACCESS" -ne 1 ]; then
+        return 0
+    fi
+
+    write_dotenv_value SHAKERSCAN_BIND_HOST "${SHAKERSCAN_BIND_HOST:-}"
+    write_dotenv_value SHAKERSCAN_PUBLIC_HOST "${SHAKERSCAN_PUBLIC_HOST:-$(public_access_host)}"
+}
+
+configure_access_mode() {
+    local tailscale_ip
+
+    if [ "$REMOTE_ACCESS" -eq 1 ]; then
+        if [ -z "${SHAKERSCAN_BIND_HOST:-}" ]; then
+            tailscale_ip="$(first_tailscale_ipv4)"
+            if [ -n "$tailscale_ip" ]; then
+                export SHAKERSCAN_BIND_HOST="$tailscale_ip"
+                export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$tailscale_ip}"
+            else
+                echo -e "${RED}Error: --remote could not find a Tailscale IPv4 address.${NC}"
+                echo "Start Tailscale on this host, or use:"
+                echo "  SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote"
+                return 1
+            fi
+        else
+            export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$SHAKERSCAN_BIND_HOST}"
+        fi
+    else
+        export SHAKERSCAN_BIND_HOST="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"
+    fi
+
+    export SHAKERSCAN_PUBLIC_API_URL="${SHAKERSCAN_PUBLIC_API_URL:-http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_API_PORT:-8080}}"
 }
 
 docker_info_available() {
@@ -154,11 +262,11 @@ compose_run() {
 }
 
 api_base_url() {
-    echo "http://localhost:${SHAKERSCAN_API_PORT:-8080}"
+    echo "http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_API_PORT:-8080}"
 }
 
 ui_base_url() {
-    echo "http://localhost:${SHAKERSCAN_UI_PORT:-3000}"
+    echo "http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_UI_PORT:-3000}"
 }
 
 run_with_sudo() {
@@ -1164,6 +1272,7 @@ print_help() {
     echo "  scan-smart <target> Smart adaptive scan"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
+    echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  build              Build Docker images"
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
@@ -1180,8 +1289,11 @@ print_help() {
     echo "  --local            Force local Docker build instead of prebuilt images"
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for start/restart)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
+    echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
     echo "  --confirm-active   Confirm authorization for scan-full or scan-smart"
     echo "  --budget-profile P scan-smart only: fast, balanced, thorough, exhaustive"
+    echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
+    echo "  SHAKERSCAN_PUBLIC_HOST=HOST overrides displayed/browser API host"
     echo "  SHAKERSCAN_PULL_IMAGES=0 skips Docker Hub pulls in prebuilt mode"
     echo ""
     echo "Auto-install support:"
@@ -1190,6 +1302,8 @@ print_help() {
     echo "Examples:"
     echo "  ./scanner.sh start                    # Start with latest prebuilt images"
     echo "  ./scanner.sh start -y                 # Install prerequisites if missing, then start"
+    echo "  ./scanner.sh start --remote           # VPS access over Tailscale"
+    echo "  ./scanner.sh agent codex              # Start an AI agent with local docs loaded"
     echo "  ./scanner.sh start --local            # Build locally and start"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag 0.4.2  # Use a specific published tag"
@@ -1208,6 +1322,7 @@ start_services() {
     local start_workers
 
     prepare_runtime_files
+    persist_remote_access_env
     start_workers="$(resolve_start_workers)"
     set_build_env
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
@@ -1538,6 +1653,40 @@ doctor() {
     fi
 }
 
+start_agent() {
+    local agent="${1:-}"
+    local candidates=()
+
+    if [ -n "$agent" ]; then
+        candidates=("$agent")
+    else
+        candidates=(codex claude opencode)
+    fi
+
+    for agent in "${candidates[@]}"; do
+        case "$agent" in
+            codex|claude|opencode)
+                if command_exists "$agent"; then
+                    echo "Starting $agent in $SCRIPT_DIR"
+                    echo "This lets the agent read README.md, AGENTS.md, CLAUDE.md, skills/, and .claude/."
+                    cd "$SCRIPT_DIR"
+                    exec "$agent"
+                fi
+                ;;
+            *)
+                echo -e "${RED}Error: unsupported agent '$agent'. Use codex, claude, or opencode.${NC}"
+                return 1
+                ;;
+        esac
+    done
+
+    echo -e "${RED}Error: no supported agent command found.${NC}"
+    echo "Install Codex, Claude Code, or OpenCode, then run:"
+    echo "  cd \"$SCRIPT_DIR\""
+    echo "  codex   # or claude, or opencode"
+    return 1
+}
+
 gungnir_cmd() {
     SUBCMD=${1:-"status"}
 
@@ -1636,6 +1785,26 @@ while [[ $# -gt 0 ]]; do
             IMAGE_TAG_OVERRIDE="$2"
             shift 2
             ;;
+        --remote|--tailscale)
+            REMOTE_ACCESS=1
+            shift
+            ;;
+        --bind-host)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --bind-host requires a value${NC}"
+                exit 1
+            fi
+            export SHAKERSCAN_BIND_HOST="$2"
+            shift 2
+            ;;
+        --public-host)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --public-host requires a value${NC}"
+                exit 1
+            fi
+            export SHAKERSCAN_PUBLIC_HOST="$2"
+            shift 2
+            ;;
         --confirm-active)
             CONFIRM_ACTIVE=1
             shift
@@ -1647,11 +1816,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+load_access_env
+
+if ! configure_access_mode; then
+    exit 1
+fi
+
 configure_runtime_mode "$COMMAND"
 
 # Dependency preflight for command execution
 case $COMMAND in
-    help|--help|-h|install-deps|doctor)
+    help|--help|-h|install-deps|doctor|agent|ai)
         ;;
     *)
         if ! ensure_command_dependencies "$COMMAND" "${ARGS[0]}"; then
@@ -1694,6 +1869,9 @@ case $COMMAND in
         ;;
     doctor)
         doctor
+        ;;
+    agent|ai)
+        start_agent "${ARGS[0]}"
         ;;
     gungnir)
         gungnir_cmd "${ARGS[0]}"

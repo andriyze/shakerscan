@@ -6,6 +6,8 @@ Create/list AI Gate targets and queue AI safety scans.
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 1. Check if scanner is running:
    ```bash
    curl -s http://localhost:8080/health
@@ -52,8 +54,8 @@ Create/list AI Gate targets and queue AI safety scans.
 
 5. After submitting, report:
    - scan ID
-   - UI link: `http://localhost:3000/scans/{scan_id}`
-   - AI Gate page: `http://localhost:3000/settings/ai-gate`
+   - UI link: `${UI_BASE}/scans/{scan_id}`
+   - AI Gate page: `${UI_BASE}/settings/ai-gate`
 
    Then stop. Do not poll unless explicitly asked.
 

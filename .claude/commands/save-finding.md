@@ -1,5 +1,7 @@
 # Save Finding
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 Save a security finding discovered during manual testing or an AI security session.
 
 **Usage**: `/save-finding [session_id]`
@@ -73,7 +75,7 @@ curl -X POST "http://localhost:8080/findings/manual" \
 Report back to the user:
 - Finding ID
 - Whether it was created new or matched an existing finding
-- Link to view in UI: `http://localhost:3000/findings/{id}`
+- Link to view in UI: `${UI_BASE}/findings/{id}`
 
 ## Common Categories and CWEs
 
@@ -121,7 +123,7 @@ Based on our testing, I found a BOLA vulnerability. Let me save it:
   - Severity: Critical
   - Target: https://juice-shop.herokuapp.com
 
-View in UI: http://localhost:3000/findings/f8a3b2c1-...
+View in UI: ${UI_BASE}/findings/f8a3b2c1-...
 ```
 
 ## Finding Sources

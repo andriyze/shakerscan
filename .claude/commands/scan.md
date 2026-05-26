@@ -6,6 +6,8 @@ Run a security scan on the specified target.
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 1. First check if the scanner is running:
    ```bash
    curl -s http://localhost:8080/health
@@ -24,7 +26,7 @@ Run a security scan on the specified target.
 4. Report the scan ID and UI link, then STOP:
    ```
    Scan submitted: {scan_id}
-   View progress: http://localhost:3000/scans/{scan_id}
+   View progress: ${UI_BASE}/scans/{scan_id}
    ```
 
 **Important**: Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
@@ -81,7 +83,7 @@ Top Issues:
 2. [Medium] CSP: script-src allows 'unsafe-eval'
 3. [Low] OCSP stapling not detected
 
-📊 View full report: http://localhost:3000/scans/{scan_id}
+📊 View full report: ${UI_BASE}/scans/{scan_id}
 ```
 
 ## Data Extraction

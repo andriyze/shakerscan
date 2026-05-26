@@ -220,7 +220,7 @@ services:
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:${SHAKERSCAN_API_PORT:-8080}
+      - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
     depends_on:
       - api

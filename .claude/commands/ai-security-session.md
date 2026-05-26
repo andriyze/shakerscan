@@ -1,5 +1,7 @@
 # AI Security Session
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 Interactive security testing session with Claude AI. This is a collaborative workflow for manual penetration testing where Claude analyzes the target, suggests testing approaches, and the user guides the exploration.
 
 **Usage**: `/ai-security-session <target_url>`
@@ -221,7 +223,7 @@ Alternatively, use the `/save-finding` skill for a guided experience.
 The finding will be:
 - Automatically linked to the session's target
 - Marked with `source: "ai_session"` and `session_id`
-- Visible in the UI at `http://localhost:3000/findings`
+- Visible in the UI at `${UI_BASE}/findings`
 
 ### Step 7: Cleanup
 

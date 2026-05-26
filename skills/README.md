@@ -10,6 +10,13 @@ This directory contains skills files for integrating ShakerScan with Claude Code
    ./scanner.sh start
    ```
 
+   For a VPS you will access from another machine over Tailscale:
+   ```bash
+   ./scanner.sh start --remote
+   ```
+
+   Local laptop mode binds the UI/API to `127.0.0.1`. Remote mode binds to the VPS Tailscale IPv4 address and prints browser URLs. If Tailscale is unavailable, use `SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote` only behind a firewall, VPN, or reverse proxy.
+
 2. Copy the skills file to your Claude Code skills directory:
    ```bash
    cp scanner-skill.md ~/.claude/skills/
@@ -21,6 +28,16 @@ This directory contains skills files for integrating ShakerScan with Claude Code
    - "List all critical findings"
    - "Run a full security assessment on my-app.com"
    - "Run model intake on this artifact"
+
+For hosted installer users, the global `shakerscan` command works from any directory, but agents should start inside the installed runtime so local instructions and skills load:
+
+```bash
+shakerscan agent claude
+shakerscan agent codex
+shakerscan agent opencode
+```
+
+This is equivalent to `cd ~/.shakerscan && claude`.
 
 Available skills in this folder:
 - `scanner-skill.md` - primary scanning operations (scans/findings/targets/workers/schedules/AI Gate/model intake)
@@ -39,7 +56,7 @@ Project-local command and agent entrypoints live under:
 
 ## API Endpoints
 
-The scanner exposes these endpoints at `http://localhost:8080`:
+The scanner exposes these endpoints at `http://localhost:8080` when the agent runs on the same host as ShakerScan. For browser-facing links on a remote VPS, use the UI URL printed by `./scanner.sh status` or `./scanner.sh start --remote`.
 
 Agents that support HTTP tools can call these endpoints directly. Agents that support OpenAPI/tool import can use the live FastAPI schema at `http://localhost:8080/openapi.json`.
 

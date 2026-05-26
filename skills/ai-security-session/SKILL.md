@@ -28,6 +28,7 @@ Maintain this checklist in markdown while you work. Do not move on to synthesis 
 
 **Workflow**
 1. Check API health: `curl -s http://localhost:8080/health`. If not running, ask to start `./scanner.sh start`.
+   - For a VPS accessed from another machine over Tailscale, ask to start `./scanner.sh start --remote` instead. Continue using `localhost:8080` for API calls you run on the VPS itself, but use the remote UI URL printed by `./scanner.sh status` for browser-facing links.
 2. Bootstrap context from existing scans. If a scan ID is provided, fetch it with `GET /scans/{id}` and `GET /scans/{id}/result`. Otherwise, look for the latest completed scan for the target using `GET /scans?limit=10&target=...`. If no completed scan exists, ask permission before running a new scan. Do not poll after submission; return scan ID and UI link, then stop.
 3. Start a session: `POST /session/start` with a full target URL. Keep the returned `session_id`.
 4. Explore the app with `/session/{id}/action` and capture screenshots if needed.

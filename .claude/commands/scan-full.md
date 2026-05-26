@@ -6,6 +6,8 @@ Run a comprehensive security assessment with ALL security tests including active
 
 ## Instructions
 
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+
 1. **IMPORTANT**: First ask user for confirmation:
    "This will run a FULL security assessment including active vulnerability testing (XSS, SQLi probes). This may trigger security alerts on the target. Do you have permission to test this target? (yes/no)"
 
@@ -27,7 +29,7 @@ Run a comprehensive security assessment with ALL security tests including active
    ```
    Full assessment submitted: {scan_id}
    Expected duration: 1-2 hours
-   View progress: http://localhost:3000/scans/{scan_id}
+   View progress: ${UI_BASE}/scans/{scan_id}
    ```
 
 **Important**: Do NOT poll or wait for completion - full scans take 1-2 hours. Users can check results via UI or ask later.
@@ -99,7 +101,7 @@ Everything in **deep** scan PLUS:
    Parameter: query
    Payload: ' OR 1=1--
 
-📊 Full report: http://localhost:3000/scans/{id}
+📊 Full report: ${UI_BASE}/scans/{id}
 ```
 
 ## Alternative: Aggressive Scan
