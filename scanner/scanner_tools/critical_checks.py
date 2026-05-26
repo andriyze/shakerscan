@@ -1393,6 +1393,7 @@ async def test_rate_limiting(
         MITRE: T1110 (Brute Force)
     """
     import time
+    from urllib.parse import urlparse
 
     auth_args = get_auth_curl_args(auth_session)
     results = {
@@ -1426,21 +1427,100 @@ async def test_rate_limiting(
             "message": "Safe mode: Limited requests to 100 to prevent DoS"
         })
 
+    auth_path_markers = {
+        "login", "signin", "sign-in", "authenticate", "auth", "token", "session",
+        "register", "signup", "password-reset", "forgot-password", "2fa", "mfa", "otp",
+    }
+    auth_response_markers = {
+        "invalid", "unauthorized", "unauthorised", "bad credentials", "credential",
+        "login", "authentication", "password", "username", "user not found",
+        "not authorized", "token", "otp", "mfa", "2fa", "success",
+    }
+    method_not_allowed_markers = {"method not allowed", "not allowed", "unsupported method"}
+
+    def _has_rate_limit_header(headers: str) -> bool:
+        return any(
+            _get_header_value(headers, name)
+            for name in (
+                "retry-after",
+                "x-ratelimit-limit",
+                "x-rate-limit-limit",
+                "ratelimit-limit",
+                "rate-limit-limit",
+            )
+        )
+
+    def _auth_path_likely(endpoint: str) -> bool:
+        path = (urlparse(endpoint).path or "").lower()
+        segments = [seg for seg in path.split("/") if seg]
+        return any(seg in auth_path_markers for seg in segments) or any(
+            marker in path for marker in auth_path_markers
+        )
+
+    def _auth_probe_confirmed(endpoint: str, status_code: int | None, headers: str, body: str) -> tuple[bool, str]:
+        if status_code is None:
+            return False, "missing_status"
+        if status_code in {404, 405, 410, 501}:
+            return False, f"status_{status_code}"
+        if status_code >= 500:
+            return False, f"status_{status_code}"
+
+        content_type = _get_header_value(headers, "content-type")
+        body_lower = (body or "").lower()
+        if "text/html" in content_type.lower() and _looks_like_spa_shell(body):
+            return False, "spa_shell"
+        if any(marker in body_lower for marker in method_not_allowed_markers):
+            return False, "method_not_allowed_body"
+
+        path_likely = _auth_path_likely(endpoint)
+        if "application/json" in content_type.lower() or _looks_like_json(body):
+            try:
+                data = json.loads(_strip_xssi_prefix(body or ""))
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                token_keys = {
+                    "token", "access_token", "refresh_token", "id_token",
+                    "session", "session_id", "jwt",
+                }
+                if any(key in data for key in token_keys):
+                    return True, "json_token_response"
+                if path_likely and any(key in data for key in ("success", "authenticated", "ok")):
+                    return True, "json_auth_status"
+                detail_text = " ".join(
+                    str(data.get(key, ""))
+                    for key in ("detail", "error", "message", "reason", "status")
+                ).lower()
+                if any(marker in detail_text for marker in auth_response_markers):
+                    return True, "json_auth_error"
+            if path_likely and any(marker in body_lower for marker in auth_response_markers):
+                return True, "json_auth_marker"
+            return False, "json_not_auth_like"
+
+        if "text/html" in content_type.lower():
+            login_form_markers = ('type="password"', "name=\"password\"", "sign in", "signin", "log in", "login")
+            if any(marker in body_lower for marker in login_form_markers):
+                return True, "html_login_form"
+            return False, "html_not_login_like"
+
+        if path_likely and any(marker in body_lower for marker in auth_response_markers):
+            return True, "auth_marker"
+        return False, "not_auth_like"
+
     # Auto-detect sensitive endpoints if not provided
     if not sensitive_endpoints:
-        from urllib.parse import urljoin
         sensitive_endpoints = [
-            urljoin(url, "/api/login"),
-            urljoin(url, "/api/auth/login"),
-            urljoin(url, "/login"),
-            urljoin(url, "/api/register"),
-            urljoin(url, "/api/auth/register"),
-            urljoin(url, "/register"),
-            urljoin(url, "/api/password-reset"),
-            urljoin(url, "/api/auth/password-reset"),
-            urljoin(url, "/forgot-password"),
-            urljoin(url, "/api/2fa/verify"),
-            urljoin(url, "/api/auth/2fa"),
+            urllib.parse.urljoin(url, "/api/login"),
+            urllib.parse.urljoin(url, "/api/auth/login"),
+            urllib.parse.urljoin(url, "/login"),
+            urllib.parse.urljoin(url, "/api/register"),
+            urllib.parse.urljoin(url, "/api/auth/register"),
+            urllib.parse.urljoin(url, "/register"),
+            urllib.parse.urljoin(url, "/api/password-reset"),
+            urllib.parse.urljoin(url, "/api/auth/password-reset"),
+            urllib.parse.urljoin(url, "/forgot-password"),
+            urllib.parse.urljoin(url, "/api/2fa/verify"),
+            urllib.parse.urljoin(url, "/api/auth/2fa"),
         ]
 
     # Limit to first 5 endpoints to prevent excessive testing
@@ -1449,36 +1529,54 @@ async def test_rate_limiting(
     for endpoint in test_endpoints:
         results["tested_endpoints"] += 1
 
-        # Preflight check - skip non-existent endpoints
-        preflight_out, _, preflight_rc = await run([
-            "curl", "-sS", "-k", "--max-time", "5",
-            "-X", "HEAD",
-            "-w", "%{http_code}",
-            "-o", "/dev/null"
-        ] + auth_args + [endpoint], timeout=8)
-
-        if preflight_rc == 0 and preflight_out:
-            try:
-                preflight_code = int(preflight_out.strip())
-                if preflight_code in [404, 410]:
-                    results["evidence"].append({
-                        "endpoint": endpoint,
-                        "status": "skipped",
-                        "message": f"Endpoint returned {preflight_code} - does not exist"
-                    })
-                    continue  # Skip to next endpoint
-            except ValueError:
-                pass
-
         # Track response codes and timing
         response_codes = []
         response_times = []
         rate_limited = False
 
-        # Send burst of requests
+        # First POST validates that this is an auth/abuse endpoint. HEAD is not
+        # reliable here because many real auth APIs reject HEAD while accepting POST.
         start_time = time.time()
+        request_start = time.time()
+        out, err, rc = await run([
+            "curl", "-sS", "-k", "--max-time", "3",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", '{"username":"test","password":"test"}',
+            "-i",
+            "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
+        ] + auth_args + [endpoint], timeout=5)
+        request_end = time.time()
+        response_times.append(request_end - request_start)
+        results["total_requests_sent"] += 1
 
-        for i in range(requests_per_second):
+        if rc != 0 or not out:
+            results["evidence"].append({
+                "endpoint": endpoint,
+                "status": "skipped",
+                "message": "Initial auth probe failed"
+            })
+            continue
+
+        body_part, first_code = _parse_http_meta(out)
+        headers, body = _split_headers_body(body_part or "")
+        confirmed, reason = _auth_probe_confirmed(endpoint, first_code, headers, body)
+        if not confirmed:
+            results["evidence"].append({
+                "endpoint": endpoint,
+                "status": "skipped",
+                "message": f"Auth endpoint not confirmed ({reason})"
+            })
+            continue
+
+        if first_code is not None:
+            response_codes.append(first_code)
+        if first_code in [429, 423, 503] or _get_header_value(headers, "retry-after"):
+            rate_limited = True
+        limit_header_observed = _has_rate_limit_header(headers)
+
+        # Send remaining burst of requests
+        for i in range(max(0, requests_per_second - 1)):
             request_start = time.time()
 
             # Send POST request with dummy credentials
@@ -1487,8 +1585,8 @@ async def test_rate_limiting(
                 "-X", "POST",
                 "-H", "Content-Type: application/json",
                 "-d", '{"username":"test","password":"test"}',
-                "-w", "%{http_code}",
-                "-o", "/dev/null"
+                "-i",
+                "-w", "__SHAKERSCAN_META__%{http_code}__SHAKERSCAN_META__",
             ] + auth_args + [endpoint], timeout=5)
 
             request_end = time.time()
@@ -1496,15 +1594,18 @@ async def test_rate_limiting(
             results["total_requests_sent"] += 1
 
             if rc == 0 and out:
-                try:
-                    http_code = int(out.strip())
+                body_part, http_code = _parse_http_meta(out)
+                headers, _ = _split_headers_body(body_part or "")
+                if http_code is not None:
                     response_codes.append(http_code)
 
                     # Check for rate limiting indicators
-                    if http_code in [429, 503]:  # Too Many Requests, Service Unavailable
+                    if http_code in [429, 423, 503]:  # Too Many Requests, locked, unavailable
                         rate_limited = True
-                except ValueError:
-                    pass
+                if _has_rate_limit_header(headers):
+                    limit_header_observed = True
+                if _get_header_value(headers, "retry-after"):
+                    rate_limited = True
 
             # Small delay to prevent completely overwhelming the server
             if safe_mode:
@@ -1519,7 +1620,7 @@ async def test_rate_limiting(
             # Count requests that were PROCESSED (not rate-limited, not non-existent)
             # Exclude: 429/503 (rate limited), 404/410 (endpoint doesn't exist)
             # 401/403 still means the request was processed, just rejected for auth reasons
-            requests_processed = sum(1 for code in response_codes if code not in [429, 503, 404, 410])
+            requests_processed = sum(1 for code in response_codes if code not in [429, 423, 503, 404, 405, 410, 501])
 
             if requests_processed >= requests_per_second * 0.8:  # 80%+ got through
                 results["vulnerable"] = True
@@ -1530,7 +1631,8 @@ async def test_rate_limiting(
                     "response_codes": response_codes[:10],  # First 10 for brevity
                     "average_response_time": sum(response_times) / len(response_times) if response_times else 0,
                     "total_time_seconds": total_time,
-                    "rate_limit_detected": False
+                    "rate_limit_detected": False,
+                    "rate_limit_header_observed": limit_header_observed,
                 })
                 results["evidence"].append({
                     "endpoint": endpoint,
