@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
+
+SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
 def _load_json(path: Path) -> dict:
@@ -42,6 +45,84 @@ def _format_ratio(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}"
+
+
+def _severity_at_least(value: str | None, minimum: str | None) -> bool:
+    if not minimum:
+        return True
+    return SEVERITY_RANK.get((value or "info").lower(), -1) >= SEVERITY_RANK.get(minimum.lower(), 99)
+
+
+def _evidence_strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        strings: list[str] = []
+        for item in value:
+            strings.extend(_evidence_strings(item))
+        return strings
+    if isinstance(value, dict):
+        strings = []
+        for key, item in value.items():
+            if key in {"url", "endpoint", "path", "file", "location", "request", "reproduction"}:
+                strings.extend(_evidence_strings(item))
+            elif isinstance(item, (dict, list)):
+                strings.extend(_evidence_strings(item))
+        return strings
+    return []
+
+
+def _finding_matches(finding: dict[str, Any], spec: dict[str, Any]) -> bool:
+    title = str(finding.get("title") or "")
+    tool = str(finding.get("tool") or "")
+    finding_type = str(finding.get("type") or (finding.get("evidence") or {}).get("type") or "")
+    severity = str(finding.get("severity") or "info")
+    evidence = finding.get("evidence") or {}
+    evidence_strings = _evidence_strings(evidence)
+
+    if spec.get("tool") and tool.lower() != str(spec["tool"]).lower():
+        return False
+    if spec.get("type") and finding_type.lower() != str(spec["type"]).lower():
+        return False
+    if spec.get("title_contains") and str(spec["title_contains"]).lower() not in title.lower():
+        return False
+    if spec.get("title_regex") and not re.search(str(spec["title_regex"]), title, flags=re.IGNORECASE):
+        return False
+    if spec.get("url_contains"):
+        needle = str(spec["url_contains"]).lower()
+        if not any(needle in value.lower() for value in evidence_strings):
+            return False
+    if spec.get("severity") and severity.lower() != str(spec["severity"]).lower():
+        return False
+    if spec.get("min_severity") and not _severity_at_least(severity, str(spec["min_severity"])):
+        return False
+    if "verified" in spec and bool(finding.get("verified")) is not bool(spec["verified"]):
+        return False
+    if spec.get("confidence_tier") and str(finding.get("confidence_tier") or "").lower() != str(spec["confidence_tier"]).lower():
+        return False
+    return True
+
+
+def _describe_finding_spec(spec: dict[str, Any]) -> str:
+    parts = []
+    for key in (
+        "tool",
+        "type",
+        "title_contains",
+        "title_regex",
+        "url_contains",
+        "severity",
+        "min_severity",
+        "verified",
+        "confidence_tier",
+    ):
+        if key in spec:
+            parts.append(f"{key}={spec[key]!r}")
+    return "{" + ", ".join(parts) + "}"
 
 
 def _collect_metrics(report: dict) -> dict[str, Any]:
@@ -109,12 +190,18 @@ def _collect_metrics(report: dict) -> dict[str, Any]:
         "type_set": sorted(type_set),
         "high_total": high_total,
         "critical_total": critical_total,
+        "verified_high_or_critical": high_verified + critical_verified,
         "high_verified": high_verified,
         "critical_verified": critical_verified,
         "high_precision": _ratio(high_verified, high_total),
         "critical_precision": _ratio(critical_verified, critical_total),
         "unverified_high_ratio": _ratio(unverified_high, high_or_critical_total),
+        "_findings": findings,
     }
+
+
+def _public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in metrics.items() if key != "_findings"}
 
 
 def _apply_assertions(
@@ -222,6 +309,43 @@ def _apply_assertions(
             if ratio > assertions["max_uncertain_ratio"]:
                 fail(f"uncertain_ratio {ratio:.2f} > {assertions['max_uncertain_ratio']}")
 
+    if "max_low_confidence_ratio" in assertions:
+        total = metrics["total_findings"]
+        if total > 0:
+            ratio = metrics["low_confidence"] / total
+            if ratio > assertions["max_low_confidence_ratio"]:
+                fail(f"low_confidence_ratio {ratio:.2f} > {assertions['max_low_confidence_ratio']}")
+
+    if "min_verified_high_or_critical" in assertions:
+        if metrics["verified_high_or_critical"] < assertions["min_verified_high_or_critical"]:
+            fail(
+                "verified_high_or_critical "
+                f"{metrics['verified_high_or_critical']} < {assertions['min_verified_high_or_critical']}"
+            )
+
+    findings = metrics.get("_findings") or []
+    if "require_findings" in assertions:
+        for spec in assertions["require_findings"]:
+            if not any(_finding_matches(finding, spec) for finding in findings):
+                fail(f"required finding missing: {_describe_finding_spec(spec)}")
+
+    if "forbid_findings" in assertions:
+        for spec in assertions["forbid_findings"]:
+            matches = [finding for finding in findings if _finding_matches(finding, spec)]
+            if matches:
+                titles = [str(finding.get("title") or "") for finding in matches[:3]]
+                fail(f"forbidden finding present: {_describe_finding_spec(spec)} titles={titles}")
+
+    if "max_findings_by_tool" in assertions:
+        counts: dict[str, int] = {}
+        for finding in findings:
+            tool = str(finding.get("tool") or "").lower()
+            counts[tool] = counts.get(tool, 0) + 1
+        for tool, max_count in assertions["max_findings_by_tool"].items():
+            actual = counts.get(str(tool).lower(), 0)
+            if actual > max_count:
+                fail(f"findings_by_tool[{tool}] {actual} > {max_count}")
+
 
 def _apply_regression_assertions(
     assertions: dict[str, Any],
@@ -291,6 +415,7 @@ def _aggregate_metrics(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
     high_verified = 0
     critical_verified = 0
     quality_scores = []
+    findings: list[dict[str, Any]] = []
 
     for m in metrics_list:
         total_findings += m.get("total_findings", 0) or 0
@@ -315,6 +440,7 @@ def _aggregate_metrics(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
 
         if m.get("quality_score") is not None:
             quality_scores.append(m["quality_score"])
+        findings.extend(m.get("_findings") or [])
 
     high_or_critical_total = high_total + critical_total
     quality_score = (sum(quality_scores) / len(quality_scores)) if quality_scores else None
@@ -336,11 +462,13 @@ def _aggregate_metrics(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
         "type_set": sorted(type_set),
         "high_total": high_total,
         "critical_total": critical_total,
+        "verified_high_or_critical": high_verified + critical_verified,
         "high_verified": high_verified,
         "critical_verified": critical_verified,
         "high_precision": _ratio(high_verified, high_total),
         "critical_precision": _ratio(critical_verified, critical_total),
         "unverified_high_ratio": _ratio(unverified_high, high_or_critical_total),
+        "_findings": findings,
     }
 
 
@@ -501,7 +629,7 @@ def main() -> int:
             {
                 "name": name,
                 "status": status,
-                "metrics": metrics,
+                "metrics": _public_metrics(metrics),
                 "warnings": warnings,
                 "failures": failures,
             }
@@ -553,7 +681,7 @@ def main() -> int:
                     g_fail,
                     g_warn,
                 )
-                summary["global_baseline_metrics"] = global_baseline
+                summary["global_baseline_metrics"] = _public_metrics(global_baseline)
 
         global_status = "PASS" if not global_failures else "FAIL"
         print(
@@ -571,7 +699,7 @@ def main() -> int:
 
         summary["global"] = {
             "status": global_status,
-            "metrics": global_metrics,
+            "metrics": _public_metrics(global_metrics),
             "warnings": global_warnings,
             "failures": global_failures,
         }

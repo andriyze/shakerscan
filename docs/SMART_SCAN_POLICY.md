@@ -105,6 +105,15 @@ python3 tests/benchmark/run_benchmarks.py \
   --baseline-result juice-shop=host.docker.internal/latest.json \
   --baseline-result crapi=cr.shakerscan.com/latest.json \
   --strict
+
+# Queue a live Honey calibration scan, export it, then assert known true/false positives
+python3 scripts/dast_calibration.py \
+  --benchmarks tests/benchmark/honey_benchmarks.json \
+  --benchmark honey-smart-fast \
+  --allow-active \
+  --wait \
+  --export-results
+python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/honey_benchmarks.json
 ```
 
 ## Upgrade Policy

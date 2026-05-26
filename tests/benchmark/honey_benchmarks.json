@@ -1,0 +1,62 @@
+{
+  "global_assertions": {
+    "min_high_precision": 0.9,
+    "min_critical_precision": 0.95,
+    "max_unverified_high_ratio": 0.1,
+    "max_low_confidence_ratio": 0.4
+  },
+  "benchmarks": [
+    {
+      "name": "honey-smart-fast",
+      "target_url": "https://honey.shakerscan.com",
+      "result_path": "results/honey.shakerscan.com/latest.json",
+      "allow_missing_har": true,
+      "scan_options": {
+        "scan_type": "smart",
+        "budget_profile": "fast",
+        "public": true
+      },
+      "assertions": {
+        "min_total_findings": 12,
+        "min_high_or_critical": 3,
+        "min_confirmed": 4,
+        "min_verified_high_or_critical": 4,
+        "min_quality_score": 45,
+        "min_endpoint_coverage": 0.35,
+        "max_unverified_high_ratio": 0.0,
+        "max_low_confidence_ratio": 0.35,
+        "require_findings": [
+          {
+            "tool": "exposed_files",
+            "title_contains": "id_rsa",
+            "min_severity": "critical",
+            "verified": true
+          },
+          {
+            "tool": "api_security",
+            "title_contains": "Sensitive data exposed",
+            "min_severity": "high",
+            "verified": true
+          },
+          {
+            "tool": "graphql_vulnerability",
+            "title_contains": "introspection_enabled",
+            "verified": true
+          }
+        ],
+        "forbid_findings": [
+          {
+            "title_contains": "Prototype pollution"
+          },
+          {
+            "tool": "ssti"
+          },
+          {
+            "tool": "dom_xss",
+            "url_contains": "clerk"
+          }
+        ]
+      }
+    }
+  ]
+}
