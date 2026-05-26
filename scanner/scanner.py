@@ -3497,7 +3497,7 @@ async def build_report(target: str,
         rate_limit_task = asyncio.create_task(dummy_rate_limit())
 
     # Enhanced security checks (will be run after headers are available)
-    if not public_only:
+    if not public_only and not focused_manual_active_scope:
         api_sec_task = asyncio.create_task(api_security_test(base_url))
         subdomain_takeover_task = asyncio.create_task(subdomain_takeover_check(host))
         xxe_task = asyncio.create_task(xxe_injection_test(base_url))
@@ -3506,6 +3506,8 @@ async def build_report(target: str,
         async def dummy_api_sec(): return {"api_type": "unknown", "vulnerabilities": [], "endpoints_discovered": [], "authentication": {"required": False, "methods": []}}
         async def dummy_subdomain_takeover(): return {"vulnerable": False, "dangling_cnames": [], "vulnerable_services": [], "evidence": []}
         async def dummy_xxe(): return {"vulnerable": False, "payloads_tested": [], "evidence": []}
+        if focused_manual_active_scope:
+            print("[smart] Focused manual active scope: skipping auxiliary API/XXE discovery probes", file=sys.stderr)
         api_sec_task = asyncio.create_task(dummy_api_sec())
         subdomain_takeover_task = asyncio.create_task(dummy_subdomain_takeover())
         xxe_task = asyncio.create_task(dummy_xxe())
@@ -8175,10 +8177,10 @@ async def build_report(target: str,
                             "CWE-79"
                         ))
 
-                # Hash-route DOM XSS always reported (runs unconditionally in smart scans)
+                # Hash-route DOM XSS is only relevant when XSS is in scope.
                 hash_route_dom_xss = smart_results.get("hash_route_dom_xss", {})
                 hash_route_findings = hash_route_dom_xss.get("findings", [])
-                if hash_route_findings:
+                if run_xss and hash_route_findings:
                     active_block["hash_route_dom_xss"] = hash_route_findings
                     active_block["hash_route_endpoints_tested"] = hash_route_dom_xss.get("endpoints_tested", 0)
                     for f in hash_route_findings:
@@ -8580,10 +8582,9 @@ async def build_report(target: str,
         # Track if smart mode ran successfully (no error)
         smart_succeeded = smart_mode and "smart_error" not in active_block
 
-        # DOM XSS Analysis - run in smart mode after smart active tests
-        # Analyzes JavaScript files for source-to-sink flows that could lead to DOM-based XSS
-        # Note: Always runs in smart mode regardless of --xss/--sqli filters (smart-mode feature)
-        if smart_mode and smart_succeeded:
+        # DOM XSS Analysis - run in broad smart mode after smart active tests.
+        # Focused manual active scans keep reporting limited to the requested family.
+        if smart_mode and smart_succeeded and not focused_manual_active_scope:
             try:
                 # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
                 js_urls_for_dom_xss = []
@@ -8648,7 +8649,7 @@ async def build_report(target: str,
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
-        if smart_mode and smart_succeeded and not public_only:
+        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
                 bola_urls: list[str] = []
@@ -8882,12 +8883,64 @@ async def build_report(target: str,
             "custom_xss": []
         }
 
-    # Emit configuration/metadata findings (CSP/Headers/Cookies/TLS/DNS/CORS/etc.)
-    try:
-        emit_config_findings(report)
-    except Exception:
-        # Do not fail the whole scan if emitter has a bug
-        pass
+    # Emit configuration/metadata findings (CSP/Headers/Cookies/TLS/DNS/CORS/etc.).
+    # Focused manual active scans should report only the requested exploit family.
+    if focused_manual_active_scope:
+        report.setdefault("filters_applied", {})
+        report["filters_applied"]["focused_active_scope"] = {
+            "enabled": True,
+            "family": "xss" if active_xss else "sqli",
+            "config_findings_skipped": True,
+        }
+        print("[smart] Focused manual active scope: skipping configuration findings", file=sys.stderr)
+    else:
+        try:
+            emit_config_findings(report)
+        except Exception:
+            # Do not fail the whole scan if emitter has a bug
+            pass
+
+    if focused_manual_active_scope:
+        family = "xss" if active_xss else "sqli"
+        allowed_tools = (
+            {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}
+            if family == "xss"
+            else {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
+        )
+        allowed_cwes = {"CWE-79"} if family == "xss" else {"CWE-89", "CWE-943"}
+        before_count = len(report.get("findings", []) or [])
+        kept_findings = []
+        dropped_tools: dict[str, int] = {}
+        for finding in report.get("findings", []) or []:
+            tool = str(finding.get("tool") or "").lower()
+            cwe = str(finding.get("cwe") or "").upper()
+            title = str(finding.get("title") or "").lower()
+            type_name = str(finding.get("type") or "").lower()
+            family_match = (
+                tool in allowed_tools
+                or cwe in allowed_cwes
+                or (family == "sqli" and ("sql injection" in title or "sqli" in type_name))
+                or (family == "xss" and ("xss" in title or "cross-site scripting" in title or "xss" in type_name))
+            )
+            if family_match:
+                kept_findings.append(finding)
+            else:
+                dropped_tools[tool or "unknown"] = dropped_tools.get(tool or "unknown", 0) + 1
+        report["findings"] = kept_findings
+        focused_filter = report.setdefault("filters_applied", {}).setdefault("focused_active_scope", {})
+        focused_filter.update({
+            "enabled": True,
+            "family": family,
+            "kept": len(kept_findings),
+            "dropped": before_count - len(kept_findings),
+            "dropped_tools": dropped_tools,
+        })
+        if before_count != len(kept_findings):
+            print(
+                f"[smart] Focused manual active scope: kept {len(kept_findings)} {family} findings, "
+                f"dropped {before_count - len(kept_findings)} out-of-scope findings",
+                file=sys.stderr,
+            )
 
     # =========================================================================
     # NOISE REDUCTION: Use unified validation pipeline with AI support
@@ -8999,6 +9052,27 @@ async def build_report(target: str,
         js_dependency_scanning=js_dependency_scanning,
         js_secret_scanning=js_secret_scanning,
     )
+    if focused_manual_active_scope:
+        active_module = (coverage.get("modules") or {}).get("active_checks", {})
+        active_complete = bool(active_module.get("completed"))
+        coverage["focused_active_scope"] = True
+        coverage["grade_reliable"] = active_complete
+        coverage["status"] = "complete" if active_complete else "partial"
+        coverage["issues"] = [
+            issue for issue in (coverage.get("issues") or [])
+            if "TLS scanning incomplete" not in issue
+            and "Nuclei vulnerability scan" not in issue
+            and "Nuclei templates" not in issue
+        ]
+        modules = coverage.get("modules") or {}
+        if "tls" in modules:
+            modules["tls"]["required"] = False
+            modules["tls"]["expected"] = False
+            modules["tls"]["skipped_for_focus"] = True
+        if "nuclei" in modules:
+            modules["nuclei"]["expected"] = False
+            modules["nuclei"]["skipped_for_focus"] = True
+        coverage["modules"] = modules
     report["coverage"] = coverage
 
     # =========================================================================
