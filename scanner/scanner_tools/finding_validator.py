@@ -1872,6 +1872,40 @@ def validate_information_disclosure(
 # MAIN VALIDATION DISPATCHER
 # =============================================================================
 
+HYGIENE_TOOLS = frozenset({
+    "csp_evaluator",
+    "dns_policy",
+    "http_headers",
+    "input_validation",
+    "security_txt",
+    "tls_config",
+})
+
+
+def validate_hygiene_finding(finding: dict[str, Any]) -> ValidationResult:
+    """Classify deterministic hardening/configuration findings as hygiene evidence."""
+    tool = str(finding.get("tool") or "").lower()
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+
+    if tool == "input_validation":
+        confidence = 0.75
+        reason = "Informational input-validation signal from deterministic probe response"
+    elif evidence.get("reproduction") or evidence.get("missing") is True or "record" in evidence:
+        confidence = 0.85
+        reason = "Deterministic configuration/header/DNS evidence"
+    else:
+        confidence = 0.75
+        reason = "Deterministic hygiene finding"
+
+    return ValidationResult(
+        verified=False,
+        confidence=confidence,
+        evidence=str(evidence.get("reproduction") or evidence.get("header") or evidence.get("record") or tool)[:200],
+        reason=reason,
+        evidence_level="hygiene",
+    )
+
+
 def validate_finding(
     finding: dict[str, Any],
     response_body: str | None = None,
@@ -1890,6 +1924,9 @@ def validate_finding(
     """
     title_lower = finding.get("title", "").lower()
     tool = finding.get("tool", "").lower()
+
+    if tool in HYGIENE_TOOLS:
+        return validate_hygiene_finding(finding)
 
     # ==========================================================================
     # INJECTION VULNERABILITIES

@@ -9,7 +9,7 @@ sys.path.insert(0, SCANNER_DIR)
 from findings import apply_dast_precision_policy  # noqa: E402
 from grading import grade  # noqa: E402
 from scanner_tools import active_checks  # noqa: E402
-from scanner_tools.finding_validator import apply_validation_to_finding, validate_sqli, validate_xss  # noqa: E402
+from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
 sys.path.pop(0)
@@ -174,6 +174,27 @@ def test_sqli_error_indicator_is_strong_but_not_verified():
     assert validation.verified is False
     assert validation.confidence == 0.75
     assert validation.evidence_level == "strong_indicator"
+
+
+def test_deterministic_hygiene_finding_is_not_suspected_lead():
+    finding = {
+        "tool": "csp_evaluator",
+        "title": "CSP header missing",
+        "severity": "medium",
+        "cvss_score": 4.0,
+        "evidence": {"present": False, "reproduction": "curl -sIL https://example.test/"},
+    }
+
+    validation = validate_finding(finding)
+    updated = apply_validation_to_finding(finding, validation)
+
+    assert validation.verified is False
+    assert validation.evidence_level == "hygiene"
+    assert validation.confidence == 0.85
+    assert updated["verified"] is False
+    assert updated.get("needs_verification") is not True
+    assert updated.get("suspected") is not True
+    assert updated["confidence_tier"] == "high"
 
 
 def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):
