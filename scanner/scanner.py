@@ -3358,7 +3358,7 @@ async def build_report(target: str,
         nmap_kwargs: dict[str, Any] | None = None
         if quick_mode:
             nmap_kwargs = {"quick_mode": True}
-        elif smart_mode:
+        elif smart_mode and not focused_manual_active_scope:
             nmap_kwargs = {"top_ports": 33, "scripts": False}
         elif complete_mode:
             nmap_kwargs = {"top_ports": 1000, "scripts": exploit_level == "aggressive"}
