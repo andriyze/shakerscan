@@ -8353,6 +8353,9 @@ async def build_report(target: str,
                                     )
                             # Only use aggressive SQLmap for aggressive exploit level
                             aggressive_sqlmap = exploit_level == "aggressive"
+                            sqlmap_quick_mode = quick_mode or focused_manual_active_scope
+                            if focused_manual_active_scope:
+                                print("[sqlmap] Focused manual active scope: using quick SQLMap profile", file=sys.stderr)
                             # Get detected DBMS from smart_sqli for DBMS-aware SQLmap tuning
                             detected_dbms = active_block.get("dbms_detected")
 
@@ -8399,7 +8402,7 @@ async def build_report(target: str,
                                             sqlmap_replay_request(
                                                 matched_capture,
                                                 auth_session=auth_session,
-                                                quick_mode=quick_mode,
+                                                quick_mode=sqlmap_quick_mode,
                                                 aggressive=aggressive_sqlmap,
                                                 param=c.get("param"),
                                                 dbms=detected_dbms,
@@ -8412,7 +8415,7 @@ async def build_report(target: str,
                                         asyncio.create_task(
                                             sqlmap_test_context(
                                                 ep,
-                                                quick_mode=quick_mode,
+                                                quick_mode=sqlmap_quick_mode,
                                                 aggressive=aggressive_sqlmap,
                                                 auth_session=auth_session,
                                                 param=c.get("param"),
