@@ -83,6 +83,26 @@ def test_completion_status_marks_active_endpoint_cap_as_incomplete():
     assert status["budget_exhausted_at"] == "active_endpoint_selection"
 
 
+def test_completion_status_bounds_family_attempts_to_selected_endpoints():
+    status = build_scan_completion_status(
+        coverage_status="complete",
+        active_block={
+            "active_endpoint_budget": 50,
+            "active_endpoints_discovered": 1083,
+            "active_endpoints_selected": 50,
+            "active_endpoint_budget_capped": True,
+            "smart_total_endpoints_tested": 72,
+        },
+    )
+
+    active_cap = status["capped_lists"]["active_endpoints"]
+    assert active_cap["discovered"] == 1083
+    assert active_cap["selected"] == 50
+    assert active_cap["tested"] == 50
+    assert active_cap["family_endpoint_attempts"] == 72
+    assert active_cap["tested_note"].startswith("bounded_by_selected_endpoints")
+
+
 def test_completion_status_records_discovery_url_caps():
     status = build_scan_completion_status(
         coverage_status="complete",

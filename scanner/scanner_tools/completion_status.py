@@ -156,7 +156,15 @@ def _active_endpoint_cap(active_block: dict[str, Any] | None) -> dict[str, Any] 
     if discovered is None and selected is None and budget is None:
         return None
 
-    tested = _int_or_none(active_block.get("smart_total_endpoints_tested"))
+    family_attempts = _int_or_none(active_block.get("smart_total_endpoints_tested"))
+    tested = family_attempts
+    tested_note = None
+    if tested is not None and selected is not None and tested > selected:
+        tested = selected
+        tested_note = (
+            "bounded_by_selected_endpoints; family attempts may count "
+            "SQLi/XSS passes separately"
+        )
     capped = bool(active_block.get("active_endpoint_budget_capped"))
     if discovered is not None and selected is not None:
         capped = capped or selected < discovered
@@ -165,8 +173,10 @@ def _active_endpoint_cap(active_block: dict[str, Any] | None) -> dict[str, Any] 
         "discovered": discovered,
         "selected": selected,
         "tested": tested,
+        "family_endpoint_attempts": family_attempts,
         "budget": budget,
         "capped": capped,
+        "tested_note": tested_note,
     }
     return {k: v for k, v in entry.items() if v is not None}
 
