@@ -23,6 +23,7 @@ try:
         SOC2_CRITERIA_MAP,
         EndpointPatterns,
     )
+    from .target_context import is_local_or_private_scan_target
 except ImportError:
     from constants import (
         FINDING_CVSS_SCORES,
@@ -35,6 +36,7 @@ except ImportError:
         SOC2_CRITERIA_MAP,
         EndpointPatterns,
     )
+    from target_context import is_local_or_private_scan_target
 
 
 def hsts_preload_readiness(hsts: str | None) -> dict[str, Any]:
@@ -362,6 +364,11 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     http = report.get("http", {})
     dns = report.get("dns", {})
     findings = report.get("findings", [])
+    input_info = report.get("input", {}) or {}
+    target_host = input_info.get("normalized_host") or input_info.get("target") or http.get("final_url")
+    local_private_target = is_local_or_private_scan_target(target_host)
+    if local_private_target:
+        notes.append("Local/private target detected; public DNS/TLS delivery controls were not graded.")
 
     # TLS version normalization helper
     def normalize_tls_version(v: str) -> str | None:
@@ -401,12 +408,12 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
             versions.add(normalized)
 
     # TLS scoring
-    if any(v in versions for v in ("ssl2", "ssl3", "1.0", "1.1")):
+    if any(v in versions for v in ("ssl2", "ssl3", "1.0", "1.1")) and not local_private_target:
         score -= 25
         notes.append("Legacy TLS enabled (<=1.1).")
 
     has_modern_tls = any(v in versions for v in ("1.2", "1.3")) or tls.get("testssl", {}).get("supports_tls13")
-    if not has_modern_tls:
+    if not has_modern_tls and not local_private_target:
         score -= 30
         notes.append("Modern TLS (1.2/1.3) not detected.")
 
@@ -432,27 +439,27 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
             notes.append("Certificate expires in <30 days.")
 
     # OCSP stapling (minor)
-    if not tls.get("ocsp", {}).get("stapled"):
+    if not tls.get("ocsp", {}).get("stapled") and not local_private_target:
         score -= 1
         notes.append("OCSP stapling not detected.")
 
     # TLS issues from tools
-    if tls.get("nmap", {}).get("weak_indicators"):
+    if tls.get("nmap", {}).get("weak_indicators") and not local_private_target:
         score -= 8
         notes.append("Potentially weak cipher indicators found (nmap).")
 
     high_issues = [i for i in tls.get("testssl", {}).get("issues", []) if i.get("severity") in ("HIGH", "CRITICAL")]
-    if high_issues:
+    if high_issues and not local_private_target:
         score -= 10
         notes.append("High/critical TLS issues detected by testssl.sh.")
 
     # HTTP security headers
     sec = http.get("security_headers", {})
 
-    if not sec.get("hsts"):
+    if not sec.get("hsts") and not local_private_target:
         score -= 10
         notes.append("HSTS missing.")
-    else:
+    elif sec.get("hsts"):
         pre = hsts_preload_readiness(sec["hsts"])
         if not pre["ready"]:
             score -= 3
@@ -508,7 +515,9 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     dmarc_fields = dmarc_f.get("fields", {}) or {}
     pol = (dmarc_fields.get("p") or "").lower()
 
-    if has_email_capability:
+    if local_private_target:
+        pass
+    elif has_email_capability:
         if not dns.get("spf"):
             score -= 6
             notes.append("SPF missing.")
@@ -528,14 +537,16 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
 
     # DNSSEC
     dnssec_status = (dns.get("dnssec", {}) or {}).get("status") or ""
-    if dnssec_status.lower() == "bogus":
+    if local_private_target:
+        pass
+    elif dnssec_status.lower() == "bogus":
         score -= 6
         notes.append("DNSSEC validation failure (bogus).")
     elif dnssec_status.lower() != "secure":
         notes.append("DNSSEC not validated (informational).")
 
     # HTTPS redirect
-    if http.get("scheme_redirect") == "none":
+    if http.get("scheme_redirect") == "none" and not local_private_target:
         score -= 5
         notes.append("Does not redirect to HTTPS.")
 
@@ -545,7 +556,9 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     http3_advertised = http.get("http3_advertised", False)
     has_modern_http = http2_support or http3_support is True or http3_advertised
 
-    if http3_support is None:
+    if local_private_target:
+        pass
+    elif http3_support is None:
         if not http2_support:
             score -= 2
             notes.append("No HTTP/2 detected (HTTP/3 unknown).")

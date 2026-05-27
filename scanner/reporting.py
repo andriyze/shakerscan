@@ -20,8 +20,10 @@ from typing import Any
 # Support both package import and script import
 try:
     from .findings import normalize_finding
+    from .target_context import is_local_or_private_scan_target
 except ImportError:
     from findings import normalize_finding
+    from target_context import is_local_or_private_scan_target
 
 
 # ---------- Reproduction command helpers ----------
@@ -59,11 +61,18 @@ def emit_config_findings(report: dict[str, Any]) -> None:
     dns = report.get("dns", {})
     tls = report.get("tls", {})
     discovery = report.get("discovery", {})
+    local_private_target = is_local_or_private_scan_target(host)
+    if local_private_target:
+        context = report.setdefault("target_context", {})
+        context["local_or_private_scan_target"] = True
+        context.setdefault("posture_suppression", []).append(
+            "Public DNS, email, TLS delivery, HTTPS redirect, and HSTS findings are not applicable to local/private scan targets."
+        )
 
     # ---- HTTP security headers ----
     sec = http.get("security_headers", {}) or {}
     # HSTS
-    if not sec.get("hsts"):
+    if not sec.get("hsts") and not local_private_target:
         report["findings"].append(normalize_finding(
             "http_headers",
             "HSTS header missing",
@@ -211,7 +220,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             ))
 
     # ---- Redirect to HTTPS ----
-    if http.get("scheme_redirect") == "none":
+    if http.get("scheme_redirect") == "none" and not local_private_target:
         report["findings"].append(normalize_finding(
             "redirect_check",
             "Does not redirect HTTP to HTTPS",
@@ -225,7 +234,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
     tlsx_ep = tls.get("endpoints", []) or []
     supports = (sslyze.get("tls_versions") or {})
     legacy = any(k in supports for k in ("ssl_3_0", "tls_1_0", "tls_1_1") if supports.get(k))
-    if legacy:
+    if legacy and not local_private_target:
         report["findings"].append(normalize_finding(
             "tls_config",
             "Legacy TLS enabled (<= TLS 1.1)",
@@ -235,7 +244,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
     # TLS 1.3 not supported (best-effort)
     has13 = supports.get("tls_1_3") or tls.get("testssl", {}).get("supports_tls13")
-    if has13 is False:
+    if has13 is False and not local_private_target:
         report["findings"].append(normalize_finding(
             "tls_config",
             "TLS 1.3 not supported",
@@ -244,7 +253,10 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "CWE-310"
         ))
     # OCSP stapling off
-    if not (tls.get("ocsp", {}).get("stapled") or sslyze.get("ocsp_stapling")):
+    if (
+        not local_private_target
+        and not (tls.get("ocsp", {}).get("stapled") or sslyze.get("ocsp_stapling"))
+    ):
         report["findings"].append(normalize_finding(
             "tls_config",
             "OCSP stapling not detected",
@@ -254,7 +266,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
     # Certificate expiry
     cert = tls.get("certificate", {}) or {}
-    if isinstance(cert, dict):
+    if isinstance(cert, dict) and not local_private_target:
         days = cert.get("days_remaining")
         if isinstance(days, int) and days <= 30:
             report["findings"].append(normalize_finding(
@@ -271,7 +283,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
     has_email_capability = bool(mx_records)
     email_policy_severity = "medium" if has_email_capability else "info"
 
-    if not dns.get("spf"):
+    if not dns.get("spf") and not local_private_target:
         title = "SPF missing" if has_email_capability else "SPF missing (no MX records - informational)"
         report["findings"].append(normalize_finding(
             "dns_policy",
@@ -281,7 +293,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "CWE-16"
         ))
     dmarc = (dns.get("dmarc") or {})
-    if not dmarc.get("record"):
+    if not dmarc.get("record") and not local_private_target:
         title = "DMARC missing" if has_email_capability else "DMARC missing (no MX records - informational)"
         report["findings"].append(normalize_finding(
             "dns_policy",
@@ -290,7 +302,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             {"record": None, "reproduction": _reproDig(f"_dmarc.{host}", "TXT")},
             "CWE-16"
         ))
-    else:
+    elif not local_private_target:
         pol = (dmarc.get("fields") or {}).get("p", "").lower()
         if pol not in ("quarantine", "reject"):
             report["findings"].append(normalize_finding(
@@ -309,7 +321,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
                 "CWE-16"
             ))
     dnssec = (dns.get("dnssec") or {})
-    if dnssec.get("status") == "bogus":
+    if dnssec.get("status") == "bogus" and not local_private_target:
         report["findings"].append(normalize_finding(
             "dns_policy",
             "DNSSEC validation failure (bogus)",
@@ -317,7 +329,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             {"raw": (dnssec.get("raw") or "")[:400], "reproduction": _reproDelv(host)},
             "CWE-16"
         ))
-    elif dnssec.get("status") in ("insecure", None):
+    elif dnssec.get("status") in ("insecure", None) and not local_private_target:
         report["findings"].append(normalize_finding(
             "dns_policy",
             "DNSSEC not validated",
@@ -327,7 +339,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
     # CAA
     caa = (dns.get("caa") or {}).get("records", [])
-    if not caa:
+    if not caa and not local_private_target:
         report["findings"].append(normalize_finding(
             "dns_policy",
             "CAA record missing",
@@ -337,7 +349,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
     # MTA-STS / TLS-RPT - only relevant if domain has email capability (MX records)
     mta = dns.get("mta_sts", {}) or {}
-    if not mta.get("record") and not mta.get("policy_present"):
+    if not mta.get("record") and not mta.get("policy_present") and not local_private_target:
         mta_title = "MTA-STS not configured" if has_email_capability else "MTA-STS not configured (no MX records - informational)"
         report["findings"].append(normalize_finding(
             "dns_policy",
@@ -347,7 +359,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "CWE-16"
         ))
     tlsrpt = dns.get("tls_rpt", {}) or {}
-    if not tlsrpt.get("record"):
+    if not tlsrpt.get("record") and not local_private_target:
         tlsrpt_title = "TLS-RPT not configured" if has_email_capability else "TLS-RPT not configured (no MX records - informational)"
         report["findings"].append(normalize_finding(
             "dns_policy",
@@ -357,7 +369,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             "CWE-16"
         ))
     # DKIM selectors (if provided)
-    if dns.get("dkim"):
+    if dns.get("dkim") and not local_private_target:
         for name, info in (dns["dkim"] or {}).items():
             if not info.get("present"):
                 report["findings"].append(normalize_finding(
