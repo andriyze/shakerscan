@@ -215,6 +215,33 @@ export interface GroupedDomain {
   total_count: number
 }
 
+export interface PrecisionPolicy {
+  original_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  original_confidence?: number
+  severity_downgraded?: boolean
+  confidence_capped?: boolean
+  confidence_cap_reason?: string
+}
+
+export interface FindingTriage {
+  precision_policy?: PrecisionPolicy
+  verification_reason?: string
+  suspected?: boolean
+  needs_verification?: boolean
+  verified?: boolean
+  confidence?: number
+  confidence_tier?: string
+}
+
+export function extractFindingTriage(finding: Finding | undefined | null): FindingTriage | null {
+  if (!finding) return null
+  const evidence = finding.evidence
+  if (!evidence || typeof evidence !== 'object') return null
+  const triage = (evidence as Record<string, unknown>).triage
+  if (!triage || typeof triage !== 'object') return null
+  return triage as FindingTriage
+}
+
 export interface Finding {
   id: string
   title: string

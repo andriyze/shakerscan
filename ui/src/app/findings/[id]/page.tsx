@@ -6,6 +6,7 @@ import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   formatDate,
+  extractFindingTriage,
   getFinding,
   getFindingRetests,
   retestFinding,
@@ -74,6 +75,110 @@ function InfoItem({ label, children }: { label: string; children: React.ReactNod
       <p className="text-xs text-gray-500">{label}</p>
       <div className="text-sm text-gray-200 mt-1">{children}</div>
     </div>
+  )
+}
+
+function formatTriageReason(value: string | undefined): string {
+  if (!value) return ''
+  return value.replaceAll('_', ' ')
+}
+
+function TriagePanel({ finding }: { finding: Finding }) {
+  const triage = extractFindingTriage(finding)
+  if (!triage) return null
+
+  const policy = triage.precision_policy
+  const hasSomethingToShow =
+    triage.verified === true ||
+    triage.suspected === true ||
+    triage.needs_verification === true ||
+    !!triage.verification_reason ||
+    !!policy?.confidence_cap_reason ||
+    policy?.severity_downgraded === true ||
+    policy?.confidence_capped === true
+
+  if (!hasSomethingToShow) return null
+
+  const downgradedFromSeverity = policy?.original_severity
+  const cappedFromConfidence = policy?.original_confidence
+  const capReason = policy?.confidence_cap_reason
+
+  return (
+    <SectionCard title="Triage">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {triage.verified === true && (
+            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-xs font-medium">
+              verified
+            </span>
+          )}
+          {triage.suspected === true && (
+            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-medium">
+              suspected lead
+            </span>
+          )}
+          {triage.needs_verification === true && (
+            <span className="px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300 text-xs font-medium">
+              needs verification
+            </span>
+          )}
+          {triage.confidence_tier && (
+            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+              confidence tier: {triage.confidence_tier}
+            </span>
+          )}
+          {typeof triage.confidence === 'number' && (
+            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+              confidence: {Math.round(triage.confidence * 100)}%
+            </span>
+          )}
+        </div>
+
+        {(downgradedFromSeverity || typeof cappedFromConfidence === 'number') && (
+          <div className="rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
+            <p className="text-gray-400 font-medium mb-2">Precision policy adjustments</p>
+            <div className="space-y-1">
+              {downgradedFromSeverity && (
+                <div>
+                  Severity downgraded from{' '}
+                  <span className="font-medium text-gray-200">{downgradedFromSeverity}</span> to{' '}
+                  <span className="font-medium text-gray-200">{finding.severity}</span>.
+                </div>
+              )}
+              {typeof cappedFromConfidence === 'number' && (
+                <div>
+                  Confidence capped from{' '}
+                  <span className="font-medium text-gray-200">
+                    {Math.round(cappedFromConfidence * 100)}%
+                  </span>
+                  {typeof triage.confidence === 'number' && (
+                    <>
+                      {' '}to{' '}
+                      <span className="font-medium text-gray-200">
+                        {Math.round(triage.confidence * 100)}%
+                      </span>
+                    </>
+                  )}
+                  .
+                </div>
+              )}
+              {capReason && (
+                <div className="text-gray-400">
+                  Reason: <span className="text-gray-200">{formatTriageReason(capReason)}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {triage.verification_reason && (
+          <div className="rounded border border-gray-800 bg-gray-950 p-3 text-xs">
+            <p className="text-gray-400 font-medium mb-1">Verification reason</p>
+            <p className="text-gray-200">{triage.verification_reason}</p>
+          </div>
+        )}
+      </div>
+    </SectionCard>
   )
 }
 
@@ -470,6 +575,8 @@ function FindingDetailContent() {
           )}
         </div>
       </SectionCard>
+
+      <TriagePanel finding={finding} />
 
       <SectionCard title="Tracking">
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">

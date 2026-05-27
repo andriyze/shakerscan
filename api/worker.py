@@ -124,6 +124,51 @@ db_pool = None
 ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
 
 
+TRIAGE_EVIDENCE_KEY = "triage"
+TRIAGE_FIELDS_FROM_FINDING = (
+    "precision_policy",
+    "verification_reason",
+    "suspected",
+    "needs_verification",
+    "verified",
+    "confidence",
+    "confidence_tier",
+)
+
+
+def _build_evidence_with_triage(finding: dict) -> dict | None:
+    """Embed precision/verification fields into the evidence JSONB.
+
+    These fields live at the top level of the in-memory finding dict but the
+    `findings` table only persists `evidence`. Folding them under
+    `evidence.triage` carries downgrade reasoning to the UI without a schema
+    migration.
+    """
+    evidence = finding.get("evidence")
+    base: dict[str, Any]
+    if isinstance(evidence, dict):
+        base = dict(evidence)
+    elif evidence is None:
+        base = {}
+    else:
+        base = {"raw": evidence}
+
+    triage: dict[str, Any] = {}
+    for key in TRIAGE_FIELDS_FROM_FINDING:
+        if key not in finding:
+            continue
+        value = finding[key]
+        if value is None:
+            continue
+        triage[key] = value
+
+    if not triage and not base:
+        return None
+    if triage:
+        base[TRIAGE_EVIDENCE_KEY] = triage
+    return base or None
+
+
 def _canonicalize_jsonish(value: Any) -> str | None:
     """Return a deterministic JSON string for an asyncpg JSONB cell or local dump.
 
@@ -983,7 +1028,8 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     async with db_pool.acquire() as conn:
         for finding in findings:
             fingerprint = generate_finding_fingerprint(finding)
-            evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+            evidence_with_triage = _build_evidence_with_triage(finding)
+            evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
             ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
             ai_classification_source = finding.get('ai_classification_source')
             finding_tool = finding.get('tool')
@@ -1155,7 +1201,8 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
     async with db_pool.acquire() as conn:
         for finding in findings:
             fingerprint = generate_finding_fingerprint(finding)
-            evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+            evidence_with_triage = _build_evidence_with_triage(finding)
+            evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
             ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
 
             existing = await conn.fetchrow("""

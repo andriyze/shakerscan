@@ -19,6 +19,52 @@ interface Finding {
   ai_confidence?: number
   ai_rationale?: string
   ai_recommendations?: string[] | Record<string, unknown> | null
+  // Inline triage fields (also mirrored under evidence.triage when persisted)
+  precision_policy?: {
+    original_severity?: string
+    original_confidence?: number
+    severity_downgraded?: boolean
+    confidence_capped?: boolean
+    confidence_cap_reason?: string
+  }
+  verification_reason?: string
+  suspected?: boolean
+  needs_verification?: boolean
+  verified?: boolean
+  confidence?: number
+}
+
+type FindingTriage = NonNullable<Finding['precision_policy']> extends infer P
+  ? {
+      precision_policy?: P
+      verification_reason?: string
+      suspected?: boolean
+      needs_verification?: boolean
+      verified?: boolean
+      confidence?: number
+    }
+  : never
+
+function readFindingTriage(finding: Finding): FindingTriage | null {
+  // Prefer fields that live at the top level on a freshly-built scanner report;
+  // fall back to evidence.triage which is how the worker persists them.
+  const fromTop = {
+    precision_policy: finding.precision_policy,
+    verification_reason: finding.verification_reason,
+    suspected: finding.suspected,
+    needs_verification: finding.needs_verification,
+    verified: finding.verified,
+    confidence: finding.confidence,
+  }
+  if (Object.values(fromTop).some((v) => v !== undefined)) {
+    return fromTop as FindingTriage
+  }
+
+  const evidence = finding.evidence
+  if (!evidence || typeof evidence !== 'object') return null
+  const triage = (evidence as Record<string, unknown>).triage
+  if (!triage || typeof triage !== 'object') return null
+  return triage as FindingTriage
 }
 
 interface FindingCardProps {
@@ -205,6 +251,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
   const severityConfig = getSeverityConfig(finding.severity)
   const SeverityIcon = severityConfig.icon
   const evidence = parseEvidence(finding.evidence)
+  const triage = readFindingTriage(finding)
 
   // Extract title without occurrence count for cleaner display
   const titleMatch = finding.title?.match(/^(.+?)\s*\(\d+\s*occurrences?\)$/i)
@@ -251,7 +298,44 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
                   CVSS: {finding.cvss_score}
                 </span>
               )}
+              {triage?.verified && (
+                <span className="px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 text-xs font-medium">
+                  verified
+                </span>
+              )}
+              {triage?.suspected && !triage?.verified && (
+                <span className="px-2 py-0.5 rounded bg-amber-900/60 text-amber-300 text-xs font-medium">
+                  suspected lead
+                </span>
+              )}
+              {triage?.needs_verification && !triage?.verified && (
+                <span className="px-2 py-0.5 rounded bg-yellow-900/60 text-yellow-300 text-xs font-medium">
+                  needs verification
+                </span>
+              )}
+              {triage?.precision_policy?.severity_downgraded && triage?.precision_policy?.original_severity && (
+                <span
+                  className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs"
+                  title={triage.precision_policy.confidence_cap_reason
+                    ? `Reason: ${triage.precision_policy.confidence_cap_reason.replaceAll('_', ' ')}`
+                    : undefined}
+                >
+                  downgraded from {triage.precision_policy.original_severity}
+                </span>
+              )}
             </div>
+            {(triage?.verification_reason || triage?.precision_policy?.confidence_cap_reason) && (
+              <div className="mb-3 rounded border border-gray-800 bg-gray-950/60 p-2 text-xs text-gray-300">
+                {triage.verification_reason && (
+                  <div>{triage.verification_reason}</div>
+                )}
+                {triage.precision_policy?.confidence_cap_reason && (
+                  <div className="text-gray-400">
+                    Confidence cap: {triage.precision_policy.confidence_cap_reason.replaceAll('_', ' ')}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Evidence badges */}
             <div className="flex flex-wrap items-center gap-3 text-sm">
