@@ -140,6 +140,33 @@ def test_precision_policy_accepts_verified_evidence_flag():
     assert adjusted[0]["severity"] == "high"
 
 
+def test_precision_policy_does_not_auto_verify_forced_browsing_response_shape():
+    # `content_validated` reflects response-shape filtering, not exploit proof.
+    # Forced-browsing findings should remain unverified until POE or AI review
+    # confirms the resource is actually sensitive.
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /admin",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "evidence": {
+                "url": "https://example.test/admin",
+                "path": "/admin",
+                "status_code": 200,
+                "content_type": "text/html",
+                "content_validated": True,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0].get("validation", {}).get("evidence_level") != "confirmed_exploit"
+
+
 def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
     findings = [
         {
@@ -163,6 +190,45 @@ def test_precision_policy_does_not_cap_verified_vendor_dom_xss():
     assert adjusted[0]["severity"] == "high"
     assert adjusted[0]["confidence"] >= 0.9
     assert "precision_policy" not in adjusted[0]
+
+
+def test_precision_policy_keeps_dom_xss_on_target_app_bundle():
+    findings = [
+        {
+            "tool": "dom_xss",
+            "title": "DOM-Based XSS sink in app chunk",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.7,
+            "evidence": {"file": "https://app.example.test/_next/static/chunks/03.js"},
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings, target_host="app.example.test")
+
+    assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "static_sink_without_execution"
+    assert adjusted[0]["confidence"] == 0.49
+    # Same-host framework chunk: not treated as vendor, but still capped to
+    # "low" by the generic static-sink-without-execution threshold (0.49 < 0.50).
+    assert adjusted[0]["severity"] == "low"
+
+
+def test_precision_policy_caps_dom_xss_on_third_party_chunk_host():
+    findings = [
+        {
+            "tool": "dom_xss",
+            "title": "DOM-Based XSS sink in chunk on third-party host",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.7,
+            "evidence": {"file": "https://other.example.com/_next/static/chunks/03.js"},
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings, target_host="app.example.test")
+
+    assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "vendor_or_framework_static_sink"
+    assert adjusted[0]["confidence"] == 0.34
 
 
 def test_precision_policy_caps_2fa_rate_limit_lead_to_medium():

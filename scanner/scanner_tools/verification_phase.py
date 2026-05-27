@@ -233,8 +233,20 @@ async def verify_high_severity_findings(
                         finding["verification_evidence"] = validation.evidence
                     verified_findings.append(finding)
                     continue
-            except Exception:
-                pass
+            except Exception as validate_err:
+                # Surface SQLi validator failures rather than swallowing them.
+                # Fall through to the regular verification path so downstream
+                # provers still get a chance, but record the error so it is
+                # visible in reports/logs.
+                print(
+                    f"[verification] SQLi validator error: {validate_err}",
+                    file=sys.stderr,
+                )
+                finding = dict(finding)
+                finding["verification_attempted"] = True
+                finding["verification_error"] = (
+                    f"sqli validator: {validate_err}"
+                )
 
         if finding_type == "xss" and verify_xss:
             xss_prover = provers.get("prove_xss_headless") or legacy_prove_xss_headless

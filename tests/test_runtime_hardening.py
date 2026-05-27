@@ -17,7 +17,9 @@ def test_worker_preflight_checks_scanner_subprocess_modules_and_symbols():
 
     assert "scanner module symbol check" in worker
     assert "apply_dast_precision_policy" in worker
-    assert "python3\", SCANNER_PATH, \"--help\"" in worker
+    # Preflight pins the interpreter to sys.executable so a missing/shadowed
+    # python3 on PATH cannot quietly run the CLI check against the wrong runtime.
+    assert "sys.executable, SCANNER_PATH, \"--help\"" in worker
     assert "sha256_16" in worker
 
 

@@ -14,9 +14,14 @@ LOCAL_LAB_HOSTNAMES = {
     "docker.for.win.localhost",
 }
 
+# Suffixes reserved for lab / non-routable use (RFC 2606, RFC 6761).
+# `.local` is intentionally excluded: while RFC 6762 reserves it for mDNS,
+# corporate AD networks heavily use `*.corp.local` for internal hosts that
+# do serve real traffic over public PKI. Suppressing posture for every
+# `.local` host hides legitimate findings on those networks. Loopback /
+# private-IP hosts are still suppressed via the IP check below.
 LOCAL_LAB_SUFFIXES = (
     ".localhost",
-    ".local",
     ".test",
     ".example",
     ".invalid",

@@ -7759,7 +7759,13 @@ async def build_report(target: str,
 
                 # Prioritize endpoints: high-signal params and sensitive API paths first,
                 # then real discovered endpoints before synthetic/inferred.
-                active_endpoint_budget = int(scan_budget.get("active_max_endpoints") or max_active or 0)
+                # Treat an explicit `0` as "no cap"; only fall back to max_active
+                # when the budget key is missing.
+                _budget_active_max = scan_budget.get("active_max_endpoints")
+                if _budget_active_max is None:
+                    active_endpoint_budget = int(max_active or 0)
+                else:
+                    active_endpoint_budget = int(_budget_active_max)
                 before_active_endpoints = len(endpoints)
 
                 def _endpoint_distribution(items: list[dict[str, Any]], field: str) -> dict[str, int]:
@@ -8545,11 +8551,14 @@ async def build_report(target: str,
                     if total_params > 0:
                         coverage_tracker.record_param_tested(count=total_params)
 
-                sqlmap_decision = should_run_active_enrichment(
-                    "sqlmap",
-                    post_active_budget_exhausted=post_active_budget_exhausted,
-                    active_block=active_block,
-                )
+                if run_sqli:
+                    sqlmap_decision = should_run_active_enrichment(
+                        "sqlmap",
+                        post_active_budget_exhausted=post_active_budget_exhausted,
+                        active_block=active_block,
+                    )
+                else:
+                    sqlmap_decision = None
                 if run_sqli and not sqlmap_decision.run:
                     record_active_enrichment_skip(
                         active_block,
@@ -8854,10 +8863,14 @@ async def build_report(target: str,
 
                 # NoSQL Injection testing for JSON body endpoints
                 # NoSQL is an injection attack and should run when SQLi testing is enabled
-                nosql_decision = should_run_active_enrichment(
-                    "nosql_injection",
-                    post_active_budget_exhausted=post_active_budget_exhausted,
-                    active_block=active_block,
+                nosql_decision = (
+                    should_run_active_enrichment(
+                        "nosql_injection",
+                        post_active_budget_exhausted=post_active_budget_exhausted,
+                        active_block=active_block,
+                    )
+                    if run_sqli
+                    else None
                 )
                 if run_sqli and nosql_decision.run:
                     try:
@@ -8938,12 +8951,17 @@ async def build_report(target: str,
 
         # DOM XSS Analysis - run in broad smart mode after smart active tests.
         # Focused manual active scans keep reporting limited to the requested family.
-        dom_xss_decision = should_run_active_enrichment(
-            "dom_xss",
-            post_active_budget_exhausted=post_active_budget_exhausted,
-            active_block=active_block,
+        dom_xss_eligible = smart_mode and smart_succeeded and not focused_manual_active_scope
+        dom_xss_decision = (
+            should_run_active_enrichment(
+                "dom_xss",
+                post_active_budget_exhausted=post_active_budget_exhausted,
+                active_block=active_block,
+            )
+            if dom_xss_eligible
+            else None
         )
-        if smart_mode and smart_succeeded and not focused_manual_active_scope and dom_xss_decision.run:
+        if dom_xss_eligible and dom_xss_decision.run:
             try:
                 # Get JS URLs from discovery data or crawl results (optional - function can self-discover)
                 js_urls_for_dom_xss = []
@@ -9015,12 +9033,17 @@ async def build_report(target: str,
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues
         # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
-        bola_decision = should_run_active_enrichment(
-            "bola_idor",
-            post_active_budget_exhausted=post_active_budget_exhausted,
-            active_block=active_block,
+        bola_eligible = smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope
+        bola_decision = (
+            should_run_active_enrichment(
+                "bola_idor",
+                post_active_budget_exhausted=post_active_budget_exhausted,
+                active_block=active_block,
+            )
+            if bola_eligible
+            else None
         )
-        if smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and bola_decision.run:
+        if bola_eligible and bola_decision.run:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
                 bola_urls: list[str] = []
@@ -9380,11 +9403,16 @@ async def build_report(target: str,
                 finding["verification_reason"] = f"Confidence {confidence:.0%} below 75% for {severity}-severity finding"
                 needs_verification.append(finding)
 
-        report["findings"] = apply_dast_precision_policy(validated_findings)
+        precision_policy_target_host = urllib.parse.urlparse(target).netloc or None
 
         # Apply targeted dedup (CORS from multiple tools, XXE grouping, etc.)
-        # Note: This is separate from the pipeline dedup which was disabled due to fingerprint issues
-        report["findings"] = apply_dast_precision_policy(deduplicate_findings(report["findings"]))
+        # Note: This is separate from the pipeline dedup which was disabled due to fingerprint issues.
+        # One precision pass after dedup is enough; the final pre-grade pass below picks up any
+        # findings inserted by later stages.
+        report["findings"] = apply_dast_precision_policy(
+            deduplicate_findings(validated_findings),
+            target_host=precision_policy_target_host,
+        )
 
         # Build noise reduction stats from pipeline stats
         total_original = pipeline_stats.get("input_count", 0) + excluded_count
@@ -9558,7 +9586,10 @@ async def build_report(target: str,
     save_checkpoint(report, "pre_finalize")
 
     if report.get("findings"):
-        report["findings"] = apply_dast_precision_policy(report["findings"])
+        report["findings"] = apply_dast_precision_policy(
+            report["findings"],
+            target_host=urllib.parse.urlparse(target).netloc or None,
+        )
         if analyze_attack_chains:
             try:
                 report["attack_chains"] = analyze_attack_chains(

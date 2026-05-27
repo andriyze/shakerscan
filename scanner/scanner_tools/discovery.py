@@ -211,8 +211,18 @@ def _parameter_discovery_limits(
 ) -> tuple[int, int]:
     defaults = PARAM_DISCOVERY_DEFAULTS.get(scan_type, {"url_limit": 0, "max_params": 0})
     budget = budget or {}
-    default_url_limit = int(config.get("param_discovery_url_limit") or defaults["url_limit"])
-    default_max_params = int(config.get("param_discovery_max_params") or defaults["max_params"])
+    # Use sentinel-aware lookups so an explicit `0` (meaning "disabled") is not
+    # silently replaced by the scan_type default via `or`.
+    config_url_limit = config.get("param_discovery_url_limit")
+    config_max_params = config.get("param_discovery_max_params")
+    default_url_limit = _safe_nonnegative_int(
+        config_url_limit if config_url_limit is not None else defaults["url_limit"],
+        defaults["url_limit"],
+    )
+    default_max_params = _safe_nonnegative_int(
+        config_max_params if config_max_params is not None else defaults["max_params"],
+        defaults["max_params"],
+    )
     url_limit = _safe_nonnegative_int(
         budget.get("param_discovery_url_limit"),
         default_url_limit,

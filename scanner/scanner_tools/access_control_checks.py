@@ -886,7 +886,11 @@ def format_findings_for_scanner(
                 "content_type": fb_finding.get("content_type"),
                 "content_length": fb_finding.get("content_length"),
                 "accessible": fb_finding.get("accessible", False),
-                "verified": bool(
+                # `content_validated` records that response shape passed our FP
+                # filters; it is NOT exploit confirmation. The DAST precision
+                # policy keeps these as suspected leads until POE or AI review
+                # actually proves the resource is sensitive.
+                "content_validated": bool(
                     fb_finding.get("accessible")
                     and not fb_finding.get("false_positive_detected")
                     and not fb_finding.get("content_validation_failed")

@@ -174,7 +174,7 @@ def _evidence_value(finding: dict[str, Any], key: str) -> Any:
     return None
 
 
-def _is_vendor_or_framework_js(file_url: str) -> bool:
+def _is_vendor_or_framework_js(file_url: str, target_host: str | None = None) -> bool:
     if not file_url:
         return False
     parsed = urlparse(file_url)
@@ -189,16 +189,29 @@ def _is_vendor_or_framework_js(file_url: str) -> bool:
         "cdnjs.cloudflare.com",
         "unpkg.com",
     )
+    if any(marker in host for marker in vendor_hosts):
+        return True
+    # Framework chunk paths like /_next/static/chunks/ also serve application
+    # code in modern bundlers. Only treat them as vendor when the script is
+    # served from a different host than the scan target (i.e. a true CDN).
     framework_paths = (
         "/_next/static/chunks/",
         "/_next/static/runtime/",
         "/static/chunks/",
         "/webpack/",
     )
-    return any(marker in host for marker in vendor_hosts) or any(marker in path for marker in framework_paths)
+    if not any(marker in path for marker in framework_paths):
+        return False
+    if not target_host:
+        return False
+    target_host = target_host.lower().split(":", 1)[0]
+    return bool(host) and host != target_host
 
 
-def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def apply_dast_precision_policy(
+    findings: list[dict[str, Any]],
+    target_host: str | None = None,
+) -> list[dict[str, Any]]:
     """Downgrade unproven DAST heuristics so reports distinguish leads from bugs.
 
     This preserves the evidence for manual review while preventing static or
@@ -259,7 +272,7 @@ def apply_dast_precision_policy(findings: list[dict[str, Any]]) -> list[dict[str
             finding["needs_verification"] = True
             finding["verification_reason"] = "DOM XSS static source/sink lead without payload execution"
             file_url = str(_evidence_value(finding, "file") or "")
-            vendor_static_sink = _is_vendor_or_framework_js(file_url)
+            vendor_static_sink = _is_vendor_or_framework_js(file_url, target_host)
             _cap_confidence_for_precision(
                 finding,
                 0.34 if vendor_static_sink else 0.49,

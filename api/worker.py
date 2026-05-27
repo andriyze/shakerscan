@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import urllib.parse
 import uuid
@@ -123,6 +124,24 @@ db_pool = None
 ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
 
 
+def _canonicalize_jsonish(value: Any) -> str | None:
+    """Return a deterministic JSON string for an asyncpg JSONB cell or local dump.
+
+    Used to compare stored vs. incoming finding evidence without false-positive
+    diffs from JSONB key-order or whitespace changes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    if isinstance(value, str):
+        try:
+            return json.dumps(json.loads(value), sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return value
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def run_worker_preflight() -> None:
     """Fail fast when the container has an inconsistent scanner import graph."""
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
@@ -166,7 +185,7 @@ def run_worker_preflight() -> None:
             )
         return result
 
-    _run_check("scanner CLI import check", ["python3", SCANNER_PATH, "--help"])
+    _run_check("scanner CLI import check", [sys.executable, SCANNER_PATH, "--help"])
 
     import_check = r"""
 import hashlib
@@ -192,7 +211,7 @@ for module_name, symbols in required.items():
     report[module_name] = {"file": str(path), "sha256_16": digest}
 print(json.dumps(report, sort_keys=True))
 """
-    module_result = _run_check("scanner module symbol check", ["python3", "-c", import_check])
+    module_result = _run_check("scanner module symbol check", [sys.executable, "-c", import_check])
     module_summary = module_result.stdout.strip()
     if module_summary:
         print(f"[preflight] scanner module symbols passed: {module_summary}", flush=True)
@@ -808,9 +827,18 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                 last_progress = (phase, pct)
             elif job_id:
                 try:
-                    get_redis().hset(f"job:{job_id}", "heartbeat", datetime.utcnow().isoformat())
-                except Exception:
-                    pass
+                    # Sync Redis client blocks the event loop; run it on a worker thread
+                    # so a slow Redis connect cannot stall stderr/progress handling.
+                    await asyncio.to_thread(
+                        get_redis().hset,
+                        f"job:{job_id}",
+                        "heartbeat",
+                        datetime.utcnow().isoformat(),
+                    )
+                except Exception as exc:
+                    # Heartbeat is best-effort; log so a sustained Redis outage is
+                    # observable instead of silently failing forever.
+                    print(f"[worker] heartbeat hset failed: {exc}", file=sys.stderr, flush=True)
 
     async def _read_stream_lines(stream: asyncio.StreamReader, handler) -> None:
         """Read stream line-by-line (for stderr progress messages)."""
@@ -968,8 +996,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             """, target_uuid, fingerprint)
 
             if existing:
-                existing_evidence = None if existing['evidence'] is None else str(existing['evidence'])
-                new_evidence = None if evidence_json is None else str(evidence_json)
+                # Canonicalize JSON so cosmetic key-order/whitespace differences
+                # (PG JSONB does not preserve key order on read-back) do not
+                # falsely fire verification_signature_changed and churn
+                # last_verification_* on every re-scan.
+                existing_evidence = _canonicalize_jsonish(existing['evidence'])
+                new_evidence = _canonicalize_jsonish(evidence_json)
                 verification_signature_changed = (
                     existing['title'] != finding.get('title') or
                     existing['tool'] != finding_tool or
@@ -3278,7 +3310,6 @@ async def process_job(job_data: dict):
 async def async_main():
     """Async main worker loop - uses single event loop for database pool."""
     print("Initializing worker...", flush=True)
-    run_worker_preflight()
 
     # Initialize database pool (bound to this event loop)
     await init_db()
@@ -3338,6 +3369,9 @@ async def async_main():
 
 def main():
     """Entry point - runs async main in single event loop."""
+    # Run blocking preflight subprocesses synchronously before entering the
+    # event loop so they cannot stall asyncio tasks or healthchecks.
+    run_worker_preflight()
     asyncio.run(async_main())
 
 

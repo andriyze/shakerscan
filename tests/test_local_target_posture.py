@@ -53,6 +53,13 @@ def test_local_target_context_classifies_lab_hosts():
     assert not is_local_or_private_scan_target("https://honey.shakerscan.com")
 
 
+def test_corporate_dot_local_is_not_classified_as_local():
+    # `.local` is widely used by corporate AD networks for internal hosts
+    # behind public PKI; we should not blanket-suppress posture for them.
+    assert not is_local_or_private_scan_target("https://intranet.corp.local")
+    assert not is_local_or_private_scan_target("https://wiki.example.local")
+
+
 def test_local_targets_suppress_public_posture_findings_but_keep_app_headers():
     report = _local_posture_report()
 
