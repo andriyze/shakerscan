@@ -13,6 +13,7 @@ All checks run in safe_mode by default (detection only, no exploitation).
 """
 
 import asyncio
+import hashlib
 import re
 import urllib.parse
 from typing import Any
@@ -935,6 +936,89 @@ async def test_api_security(
             if re.search(pattern, test_url, re.IGNORECASE):
                 results["api_endpoints_found"].append(test_url)
                 break
+
+    def _is_api_candidate(candidate_url: str) -> bool:
+        candidate_l = candidate_url.lower()
+        if not any(re.search(pattern, candidate_l, re.IGNORECASE) for pattern in api_patterns):
+            return False
+        return not any(
+            marker in candidate_l
+            for marker in (
+                "socket.io",
+                ".js",
+                ".css",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".svg",
+                ".ico",
+                "openapi.json",
+                "swagger.json",
+            )
+        )
+
+    def _json_sensitive_markers(body: str) -> list[str]:
+        marker_patterns = {
+            "password": r'"password"\s*:',
+            "api_key": r'"(?:api[_-]?key|apikey)"\s*:',
+            "secret": r'"(?:secret|totpSecret|mfa_secret)"\s*:',
+            "token": r'"(?:token|auth_token|access_token|refresh_token|deluxeToken)"\s*:',
+            "admin_role": r'"role"\s*:\s*"admin"',
+            "email": r'"email"\s*:\s*"[^"]+@[^"]+\.[^"]+"',
+        }
+        return [
+            name
+            for name, pattern in marker_patterns.items()
+            if re.search(pattern, body, re.IGNORECASE)
+        ]
+
+    # Verify sensitive data leaks from actual machine-readable API responses.
+    api_candidates = []
+    for candidate in results["api_endpoints_found"]:
+        if isinstance(candidate, str) and _is_api_candidate(candidate):
+            api_candidates.append(candidate)
+    api_candidates = list(dict.fromkeys(api_candidates))[:15]
+
+    for api_url in api_candidates:
+        out, _, rc = await run(
+            ["curl", "-sS", "-i", "-L", "-k", "--max-time", "6",
+             "-H", "User-Agent: Mozilla/5.0 (Security Scanner)"] + auth_args + [api_url],
+            timeout=10,
+        )
+        if rc != 0 or not out:
+            continue
+        status_match = re.search(r'HTTP/\d\.?\d?\s+(\d+)', out)
+        if not status_match or int(status_match.group(1)) != 200:
+            continue
+        header_text, _, body = out.partition("\r\n\r\n")
+        if not body:
+            header_text, _, body = out.partition("\n\n")
+        content_type_match = re.search(r"content-type:\s*([^\r\n]+)", header_text, re.IGNORECASE)
+        content_type = (content_type_match.group(1).lower() if content_type_match else "")
+        body_lstrip = body.lstrip()
+        is_machine_readable = (
+            "application/json" in content_type
+            or "application/problem+json" in content_type
+            or body_lstrip.startswith("{")
+            or body_lstrip.startswith("[")
+        )
+        if not is_machine_readable:
+            continue
+        markers = _json_sensitive_markers(body)
+        strong_markers = [m for m in markers if m not in {"email", "admin_role"}]
+        if not strong_markers:
+            continue
+        response_hash = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        results["vulnerable"] = True
+        results["excessive_data_exposure"].append({
+            "url": api_url,
+            "type": "api_sensitive_data",
+            "risk": "Sensitive data exposed in API response",
+            "verified": True,
+            "sensitive_markers": markers[:8],
+            "response_hash16": response_hash,
+            "response_sample": body[:300],
+        })
 
     # Check for mass assignment indicators in forms
     html_out, html_err, html_rc = await run(

@@ -6676,6 +6676,27 @@ async def build_report(target: str,
                     },
                     "CWE-285"
                 ))
+        for exposure in api_security_p4_results.get("excessive_data_exposure", []):
+            if not exposure.get("verified"):
+                continue
+            markers = exposure.get("sensitive_markers") or []
+            severity = "high" if any(
+                marker in markers for marker in ["password", "api_key", "secret", "token"]
+            ) else "medium"
+            report["findings"].append(normalize_finding(
+                "api_security",
+                "Sensitive data exposed in API response",
+                severity,
+                {
+                    "url": exposure.get("url"),
+                    "type": exposure.get("type"),
+                    "sensitive_markers": markers,
+                    "response_hash16": exposure.get("response_hash16"),
+                    "response_sample": exposure.get("response_sample"),
+                    "verified": True,
+                },
+                "CWE-200"
+            ))
 
     # Add web vulnerability check results to report
     report["file_upload"] = file_upload_results
