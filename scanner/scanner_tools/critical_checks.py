@@ -1094,6 +1094,67 @@ async def test_path_traversal(url: str, discovered_urls: list[str] | None = None
     return results
 
 
+DEFAULT_CREDENTIAL_EXPLICIT_LOGIN_PATTERNS = [
+    re.compile(pattern)
+    for pattern in [
+        r"(^|/)(login|log-in|signin|sign-in|signon|sign-on)(/|$)",
+        r"(^|/)(authenticate|authentication|token|session)(/|$)",
+        r"(^|/)admin(/login)?(/|$)",
+        r"(^|/)wp-login\.php$",
+        r"(^|/)wp-admin(/|$)",
+    ]
+]
+DEFAULT_CREDENTIAL_AUTH_CONTAINER_PATTERN = re.compile(r"(^|/)auth(/|$)")
+
+DEFAULT_CREDENTIAL_NON_LOGIN_PATTERNS = [
+    re.compile(pattern)
+    for pattern in [
+        r"(^|/)(users?|profiles?|customers?|accounts?)(/|$)",
+        r"(^|/)(register|registration|signup|sign-up|invite)(/|$)",
+        r"(^|/)(create|new|batch|search|metrics|health|status)(/|$)",
+    ]
+]
+
+
+def _is_default_credential_login_candidate(endpoint: str) -> bool:
+    """
+    Decide whether a discovered URL is safe and meaningful for default credential testing.
+
+    The scanner often passes the full crawl URL set here. Only login-shaped endpoints should
+    receive credential payloads; generic user creation/listing APIs can otherwise look like
+    successful form authentication when they redirect or return a positive body.
+    """
+    parsed = urllib.parse.urlparse(endpoint)
+    path = urllib.parse.unquote(parsed.path or "/").lower().rstrip("/") or "/"
+
+    has_explicit_login_marker = any(
+        pattern.search(path) for pattern in DEFAULT_CREDENTIAL_EXPLICIT_LOGIN_PATTERNS
+    )
+    has_auth_container = bool(DEFAULT_CREDENTIAL_AUTH_CONTAINER_PATTERN.search(path))
+    has_non_login_marker = any(
+        pattern.search(path) for pattern in DEFAULT_CREDENTIAL_NON_LOGIN_PATTERNS
+    )
+
+    if has_explicit_login_marker:
+        return True
+    if has_auth_container and not has_non_login_marker:
+        return True
+    if has_non_login_marker:
+        return False
+    return False
+
+
+def _filter_default_credential_login_candidates(
+    login_endpoints: list[str],
+) -> tuple[list[str], int]:
+    candidates = [
+        endpoint
+        for endpoint in login_endpoints
+        if _is_default_credential_login_candidate(endpoint)
+    ]
+    return candidates, len(login_endpoints) - len(candidates)
+
+
 async def test_default_credentials(
     url: str,
     login_endpoints: list[str] | None = None,
@@ -1133,6 +1194,7 @@ async def test_default_credentials(
         "vulnerable_endpoints": [],
         "tested_endpoints": 0,
         "tested_combinations": 0,
+        "skipped_non_login_endpoints": 0,
         "evidence": [],
         "warning": "⚠️ Only test on systems you own or have authorization to test. Unauthorized access attempts may be illegal."
     }
@@ -1178,6 +1240,14 @@ async def test_default_credentials(
             # Limit auto-detection to avoid excessive requests
             if len(login_endpoints) >= 5:
                 break
+
+    login_endpoints, skipped_non_login = _filter_default_credential_login_candidates(login_endpoints)
+    results["skipped_non_login_endpoints"] = skipped_non_login
+    if skipped_non_login:
+        results["evidence"].append({
+            "type": "info",
+            "message": f"Skipped {skipped_non_login} non-login endpoint(s) during default credential testing"
+        })
 
     # Limit endpoints to test
     login_endpoints = login_endpoints[:5]  # Maximum 5 endpoints
