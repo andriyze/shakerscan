@@ -37,6 +37,7 @@ from scanner_tools.har_discovery import (
     get_bola_candidates,
     HARDiscoveryResult,
 )
+from scanner_tools.hash_routes import build_hash_route_active_endpoints
 from scanner_tools.signal_types import Signal, SignalSet
 from scanner_tools.verification_phase import verify_high_severity_findings
 try:
@@ -293,6 +294,7 @@ def normalize_host(target: str) -> tuple[str,int,str]:
     except Exception:
         # Fallback: try auto-detection
         return auto_detect_protocol(target)
+
 
 def auto_detect_protocol(target: str) -> tuple[str, int, str]:
     """Auto-detect whether to use HTTP or HTTPS"""
@@ -7082,6 +7084,7 @@ async def build_report(target: str,
                 _SOURCE_PRIORITY = {
                     "har_discovery": 1,  # Actually observed in browser network
                     "manual": 2,         # User-specified endpoints
+                    "hash_route": 2,     # SPA fragment routes for browser DOM-XSS proof
                     "openapi": 3,        # From OpenAPI/Swagger spec
                     "form": 4,           # Discovered from HTML forms
                     "common": 5,         # Well-known endpoints like /rest/user/login
@@ -7676,6 +7679,30 @@ async def build_report(target: str,
 
                     if har_get_count or har_post_count:
                         print(f"[scanner] Added {har_get_count} GET and {har_post_count} POST endpoints from HAR discovery", file=sys.stderr)
+
+                if not focused_manual_active_scope:
+                    hash_route_sources: list[Any] = []
+                    hash_route_sources.extend(browser_seed_urls or [])
+                    hash_route_sources.extend(crawl_urls or [])
+                    hash_route_sources.extend(seed_entry_urls or [])
+                    sec_sample = (sec_txt or {}).get("sample") if isinstance(sec_txt, dict) else None
+                    if sec_sample:
+                        hash_route_sources.append(sec_sample)
+                    for header_values in (chosen_headers or {}).values():
+                        if isinstance(header_values, list):
+                            hash_route_sources.extend(header_values)
+                        elif header_values:
+                            hash_route_sources.append(header_values)
+
+                    hash_route_added = 0
+                    for ep in build_hash_route_active_endpoints(base_url, hash_route_sources):
+                        if _merge_endpoint(ep):
+                            hash_route_added += 1
+                    if hash_route_added:
+                        print(
+                            f"[scanner] Added {hash_route_added} SPA hash-route endpoints for DOM XSS testing",
+                            file=sys.stderr,
+                        )
 
                 if endpoints:
                     get_count = sum(1 for ep in endpoints if (ep.get("method") or "GET").upper() == "GET")

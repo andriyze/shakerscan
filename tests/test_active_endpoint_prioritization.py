@@ -73,3 +73,31 @@ def test_options_routes_still_sort_when_no_better_candidates_exist():
 
     assert selected[0]["url"] == "https://example.test/api/users"
     assert active_endpoint_score(selected[0]) > active_endpoint_score(endpoints[0])
+
+
+def test_hash_routes_survive_tight_active_budget_for_dom_xss():
+    endpoints = [
+        {
+            "url": "https://example.test/api/ai-redteam/scenarios",
+            "method": "GET",
+            "params": ["id"],
+            "source": "options",
+        },
+        {
+            "url": "https://example.test/api/docs",
+            "method": "GET",
+            "params": ["id"],
+            "source": "options",
+        },
+        {
+            "url": "https://example.test/#/search?q=test",
+            "method": "GET",
+            "params": ["q"],
+            "source": "hash_route",
+        },
+    ]
+
+    selected = prioritize_active_endpoints(endpoints, budget=1)
+
+    assert selected[0]["source"] == "hash_route"
+    assert selected[0]["url"] == "https://example.test/#/search?q=test"

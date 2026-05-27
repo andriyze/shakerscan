@@ -9,6 +9,7 @@ from typing import Any
 DEFAULT_SOURCE_PRIORITY: dict[str, int] = {
     "har_discovery": 1,
     "manual": 2,
+    "hash_route": 2,
     "openapi": 3,
     "form": 4,
     "common": 5,
@@ -21,6 +22,7 @@ DEFAULT_SOURCE_PRIORITY_VALUE = 6
 SOURCE_BONUS: dict[str, int] = {
     "har_discovery": 14,
     "manual": 14,
+    "hash_route": 18,
     "openapi": 12,
     "form": 8,
     "common": 2,
