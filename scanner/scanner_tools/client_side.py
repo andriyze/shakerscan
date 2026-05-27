@@ -902,6 +902,28 @@ VULNERABLE_JS_LIBRARIES = {
 }
 
 
+def js_dependency_report_severity(vulnerability: dict) -> str:
+    """
+    Map dependency CVE severity into DAST report severity.
+
+    A vulnerable library version is real supply-chain evidence, but without a proven
+    vulnerable call path it is not the same as a verified exploitable XSS/prototype
+    pollution bug. Keep dependency-only high/critical CVEs visible as medium until
+    usage evidence can promote them.
+    """
+    severity = str(vulnerability.get("severity") or "medium").lower()
+    if severity not in {"critical", "high", "medium", "low", "info"}:
+        severity = "medium"
+    has_usage_evidence = bool(
+        vulnerability.get("exploitable_usage")
+        or vulnerability.get("verified_usage")
+        or vulnerability.get("runtime_proof")
+    )
+    if severity in {"critical", "high"} and not has_usage_evidence:
+        return "medium"
+    return severity
+
+
 # ============================================================================
 # API KEY PATTERNS (High-Precision Regexes)
 # ============================================================================

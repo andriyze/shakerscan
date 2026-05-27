@@ -1587,6 +1587,7 @@ try:
     )
     from scanner_tools.client_side import (
         detect_server_versions as _detect_server_versions_mod,
+        js_dependency_report_severity as _js_dependency_report_severity_mod,
         test_client_side_vulns as _test_client_side_vulns_mod,
         test_js_dependencies as _test_js_dependencies_mod,
         test_js_secrets as _test_js_secrets_mod,
@@ -1877,6 +1878,7 @@ try:
     test_session_management = _test_session_management_mod
     test_js_dependencies = _test_js_dependencies_mod
     test_js_secrets = _test_js_secrets_mod
+    js_dependency_report_severity = _js_dependency_report_severity_mod
     detect_server_versions = _detect_server_versions_mod
     test_client_side_vulns = _test_client_side_vulns_mod
     discover_technologies = _discover_technologies_mod
@@ -6197,17 +6199,26 @@ async def build_report(target: str,
         # JavaScript dependency vulnerabilities - severity depends on CVE
         for lib in js_deps_results.get("vulnerable_libraries", []):
             for vuln in lib.get("vulnerabilities", []):
+                report_severity = js_dependency_report_severity(vuln)
+                original_severity = str(vuln.get("severity") or report_severity).lower()
                 report["findings"].append(normalize_finding(
                     "js_dependency",
                     f"Vulnerable JavaScript Library: {lib['library']} {lib['version']} ({vuln['cve']})",
-                    vuln["severity"],
+                    report_severity,
                     {
                         "library": lib["library"],
                         "version": lib["version"],
                         "url": lib["url"],
                         "cve": vuln["cve"],
                         "summary": vuln["summary"],
-                        "fixed_in": vuln["fixed_in"]
+                        "fixed_in": vuln["fixed_in"],
+                        "dependency_only": True,
+                        "original_severity": original_severity,
+                        "severity_basis": (
+                            "capped_to_medium_without_exploitable_usage"
+                            if report_severity != original_severity
+                            else "dependency_advisory"
+                        ),
                     },
                     "CWE-829"
                 ))
