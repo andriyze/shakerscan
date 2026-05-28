@@ -168,6 +168,101 @@ def test_cap_severity_accepts_critical_target_without_keyerror():
     assert finding["severity"] == "high"
 
 
+def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
+    # A DOM XSS finding on a third-party CDN chunk would normally be capped to
+    # info, but a high-confidence AI true_positive should override and verify.
+    findings = [
+        {
+            "tool": "dom_xss",
+            "title": "DOM XSS in vendor chunk",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.7,
+            "evidence": {"file": "https://cdn.jsdelivr.net/npm/foo/x.js"},
+            "ai_verdict": "true_positive",
+            "ai_confidence": 0.9,
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["severity"] == "high"
+    assert adjusted[0]["confidence"] >= 0.9
+
+
+def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
+    # Forced-browsing evidence marked verified by static heuristics, but the
+    # AI judged it false_positive with high confidence — AI wins.
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /admin",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "verified": True,
+            "evidence": {
+                "url": "https://example.test/admin",
+                "verified": True,
+            },
+            "ai_verdict": "false_positive",
+            "ai_confidence": 0.92,
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["precision_policy"]["ai_overrode_verified"] is True
+    assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
+    assert adjusted[0]["severity"] == "info"
+    assert "AI judged false_positive" in adjusted[0]["verification_reason"]
+
+
+def test_precision_policy_low_confidence_ai_verdict_ignored():
+    # AI judged false_positive but only at 0.55 confidence — below trust
+    # threshold, heuristics still rule.
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /admin",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "verified": True,
+            "evidence": {"url": "https://example.test/admin", "verified": True},
+            "ai_verdict": "false_positive",
+            "ai_confidence": 0.55,
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    # Low-confidence AI verdict does not override heuristic verified.
+    assert adjusted[0]["verified"] is True
+
+
+def test_precision_policy_syncs_validation_confidence_on_verified():
+    findings = [
+        {
+            "tool": "smart_sqli",
+            "title": "SQL Injection",
+            "severity": "high",
+            "cvss_score": 9.0,
+            "confidence": 0.7,
+            "verified": True,
+            "validation": {"confidence": 0.75, "evidence_level": "strong_indicator"},
+            "evidence": {"verified": True},
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["confidence"] >= 0.9
+    assert adjusted[0]["validation"]["confidence"] == adjusted[0]["confidence"]
+
+
 def test_precision_policy_does_not_auto_verify_forced_browsing_response_shape():
     # `content_validated` reflects response-shape filtering, not exploit proof.
     # Forced-browsing findings should remain unverified until POE or AI review

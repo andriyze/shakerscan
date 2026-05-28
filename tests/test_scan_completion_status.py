@@ -1,6 +1,25 @@
 from scanner.scanner_tools.completion_status import build_scan_completion_status
 
 
+def test_completion_status_detects_budget_in_multi_entry_sqlmap_skip_list():
+    # When sqlmap_skipped is a list with one budget entry and one
+    # non-budget entry (e.g. "no_candidates"), the joined-string heuristic
+    # previously could miss budget-classification. Each entry must be
+    # classified individually.
+    status = build_scan_completion_status(
+        coverage_status="complete",
+        active_block={
+            "sqlmap_skipped": [
+                {"skip_reason": "no_candidates_found"},
+                {"skip_reason": "primary_family_budget_exhausted"},
+            ],
+        },
+    )
+
+    assert status["budget_exhausted"] is True
+    assert status["budget_exhausted_at"] == "active_enrichment"
+
+
 def test_completion_status_surfaces_post_active_budget_skips():
     status = build_scan_completion_status(
         coverage_status="complete",

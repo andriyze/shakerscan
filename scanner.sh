@@ -77,6 +77,17 @@ read_dotenv_value() {
 load_access_env() {
     local value
 
+    # Record whether the user set BIND/PUBLIC host in their shell *before* we
+    # pull defaults out of .env, so configure_access_mode can distinguish a
+    # user override from a cached value that may be stale (e.g. Tailscale IP
+    # change after reboot).
+    if [ -n "${SHAKERSCAN_BIND_HOST:-}" ]; then
+        export SHAKERSCAN_BIND_HOST_EXPLICIT=1
+    fi
+    if [ -n "${SHAKERSCAN_PUBLIC_HOST:-}" ]; then
+        export SHAKERSCAN_PUBLIC_HOST_EXPLICIT=1
+    fi
+
     if [ -z "${SHAKERSCAN_BIND_HOST:-}" ]; then
         value="$(read_dotenv_value SHAKERSCAN_BIND_HOST)"
         if [ -n "$value" ]; then
@@ -127,21 +138,32 @@ persist_remote_access_env() {
 
 configure_access_mode() {
     local tailscale_ip
+    local cached_bind="${SHAKERSCAN_BIND_HOST:-}"
+    local explicit_shell_bind="${SHAKERSCAN_BIND_HOST_EXPLICIT:-0}"
 
     if [ "$REMOTE_ACCESS" -eq 1 ]; then
-        if [ -z "${SHAKERSCAN_BIND_HOST:-}" ]; then
-            tailscale_ip="$(first_tailscale_ipv4)"
-            if [ -n "$tailscale_ip" ]; then
-                export SHAKERSCAN_BIND_HOST="$tailscale_ip"
-                export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$tailscale_ip}"
-            else
-                echo -e "${RED}Error: --remote could not find a Tailscale IPv4 address.${NC}"
-                echo "Start Tailscale on this host, or use:"
-                echo "  SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote"
-                return 1
+        # Always re-resolve the Tailscale IP at start time so a reboot or
+        # interface change doesn't leave the persisted .env value pointing at
+        # an address that no longer exists. The .env cache is only honored
+        # when no live tailscale IPv4 is available (offline fallback).
+        tailscale_ip="$(first_tailscale_ipv4)"
+        if [ -n "$tailscale_ip" ]; then
+            if [ -n "$cached_bind" ] && [ "$cached_bind" != "$tailscale_ip" ] && [ "$explicit_shell_bind" != "1" ]; then
+                echo "[remote] Tailscale IP changed: ${cached_bind} → ${tailscale_ip}"
             fi
+            export SHAKERSCAN_BIND_HOST="$tailscale_ip"
+            # Only override PUBLIC_HOST when it was tracking BIND_HOST (or empty).
+            if [ -z "${SHAKERSCAN_PUBLIC_HOST:-}" ] || [ "${SHAKERSCAN_PUBLIC_HOST:-}" = "$cached_bind" ]; then
+                export SHAKERSCAN_PUBLIC_HOST="$tailscale_ip"
+            fi
+        elif [ -n "$cached_bind" ]; then
+            echo "[remote] No live Tailscale IPv4; reusing ${cached_bind} from environment/.env"
+            export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$cached_bind}"
         else
-            export SHAKERSCAN_PUBLIC_HOST="${SHAKERSCAN_PUBLIC_HOST:-$SHAKERSCAN_BIND_HOST}"
+            echo -e "${RED}Error: --remote could not find a Tailscale IPv4 address.${NC}"
+            echo "Start Tailscale on this host, or use:"
+            echo "  SHAKERSCAN_BIND_HOST=0.0.0.0 SHAKERSCAN_PUBLIC_HOST=<server-ip-or-dns> ./scanner.sh start --remote"
+            return 1
         fi
     else
         export SHAKERSCAN_BIND_HOST="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"

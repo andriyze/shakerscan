@@ -2068,9 +2068,20 @@ async def check_cors(url: str) -> dict[str, Any]:
                 })
             elif acao == "*":
                 if acac == "true":
-                    results["weak_issues"].append("Wildcard CORS with credentials is browser-blocked")
+                    issue = "Wildcard CORS with credentials is browser-blocked"
+                    evidence_type = "wildcard_with_credentials_blocked"
                 else:
-                    results["weak_issues"].append("Wildcard CORS without credentials")
+                    issue = "Wildcard CORS without credentials"
+                    evidence_type = "wildcard_without_credentials"
+                results["weak_issues"].append(issue)
+                results["reportable_weak_issues"].append({
+                    "issue": issue,
+                    "origin": origin,
+                    "evidence_type": evidence_type,
+                    "access-control-allow-origin": acao,
+                    "access-control-allow-credentials": acac,
+                    "browser_credentials_read": False,
+                })
     # De-duplicate repeated issues
     if results["issues"]:
         results["issues"] = sorted(list(set(results["issues"])))

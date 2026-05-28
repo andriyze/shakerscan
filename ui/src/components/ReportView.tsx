@@ -783,12 +783,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="rounded border border-gray-800 bg-black/20 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Skipped Modules</div>
                     <div className="flex flex-wrap gap-2">
-                      {completionSkippedModules.slice(0, 8).map((skip: any, index: number) => (
-                        <span key={`${skip.module || skip.check || index}-${index}`} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
-                          {formatScanToken(skip.module || skip.check || skip)}
-                          {skip.reason ? `: ${formatScanToken(skip.reason)}` : ''}
-                        </span>
-                      ))}
+                      {completionSkippedModules.slice(0, 8).map((skip: any, index: number) => {
+                        // skip may be a string, an object with module/check, or
+                        // an arbitrary object — coerce defensively so we never
+                        // render "[object Object]".
+                        const isString = typeof skip === 'string'
+                        const label = isString
+                          ? skip
+                          : (skip?.module || skip?.check || skip?.name || `module_${index}`)
+                        const reason = !isString && skip?.reason ? skip.reason : null
+                        return (
+                          <span key={`${typeof label === 'string' ? label : index}-${index}`} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
+                            {formatScanToken(label)}
+                            {reason ? `: ${formatScanToken(reason)}` : ''}
+                          </span>
+                        )
+                      })}
                       {completionSkippedModules.length > 8 && (
                         <span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-500">
                           +{completionSkippedModules.length - 8} more

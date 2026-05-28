@@ -7401,6 +7401,9 @@ def _split_active_family_budget(active_max_seconds: float, run_sqli: bool, run_x
     return sqli_max_seconds, xss_reserved_seconds
 
 
+USE_DEFAULT_MAX_FINDINGS_PER_FAMILY: Any = object()
+
+
 async def run_smart_active_tests(
     url: str,
     endpoints: list[dict],
@@ -7414,7 +7417,7 @@ async def run_smart_active_tests(
     active_max_seconds: int | float | None = None,
     active_max_endpoints: int | None = None,
     active_params_per_endpoint: int | None = None,
-    max_findings_per_family: int | None | str = "default",
+    max_findings_per_family: int | None | Any = USE_DEFAULT_MAX_FINDINGS_PER_FAMILY,
 ) -> dict:
     """
     Run all smart active tests (SQLi + XSS).
@@ -7463,7 +7466,7 @@ async def run_smart_active_tests(
         active_max_seconds = default_active_max_seconds
     else:
         active_max_seconds = float(requested_active_max_seconds)
-    if max_findings_per_family == "default":
+    if max_findings_per_family is USE_DEFAULT_MAX_FINDINGS_PER_FAMILY:
         max_findings_per_family = default_max_findings_per_family
     elif max_findings_per_family is not None:
         max_findings_per_family = max(0, int(max_findings_per_family))

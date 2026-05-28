@@ -253,7 +253,14 @@ def apply_dast_precision_policy(
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
         poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
-        verified = (
+
+        ai_verdict = str(finding.get("ai_verdict") or "").lower()
+        ai_confidence = float(finding.get("ai_confidence") or 0)
+        ai_trusts = ai_confidence >= 0.80
+        ai_true_positive = ai_verdict == "true_positive" and ai_trusts
+        ai_false_positive = ai_verdict == "false_positive" and ai_trusts
+
+        heuristic_verified = (
             finding.get("verified") is True
             or evidence.get("verified") is True
             or evidence.get("confirmed") is True
@@ -261,6 +268,21 @@ def apply_dast_precision_policy(
             or validation.get("poe_proven") is True
             or poe_result.get("proven") is True
         )
+
+        # AI verdict overrides heuristic gating in both directions:
+        #   - A high-confidence true_positive confirms a finding the static
+        #     gates would have downgraded (e.g. DOM XSS in vendor chunks the
+        #     AI inspected and validated).
+        #   - A high-confidence false_positive overrides heuristic
+        #     "verified=True" signals so a confidently-misclassified finding
+        #     does not get bumped to confirmed_exploit by static gates.
+        if ai_false_positive and heuristic_verified:
+            heuristic_verified = False
+            policy = finding.setdefault("precision_policy", {})
+            policy["ai_overrode_verified"] = True
+            policy["ai_overrode_reason"] = "ai_false_positive_high_confidence"
+
+        verified = heuristic_verified or ai_true_positive
         finding["verified"] = bool(verified)
         if verified:
             validation["evidence_level"] = validation.get("evidence_level") or "confirmed_exploit"
@@ -280,8 +302,25 @@ def apply_dast_precision_policy(
             current_confidence = float(finding.get("confidence") or 0)
             finding["confidence"] = max(current_confidence, min_confidence)
             finding["confidence_tier"] = get_confidence_tier(finding["confidence"])
+            # Keep validation.confidence in sync so consumers reading either
+            # field see the same number.
+            if isinstance(finding.get("validation"), dict):
+                finding["validation"]["confidence"] = finding["confidence"]
 
         if verified:
+            continue
+
+        # If AI judged this a false positive with high confidence, downgrade
+        # immediately rather than falling into per-tool heuristic ladders.
+        if ai_false_positive:
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["verification_reason"] = (
+                f"AI judged false_positive with {ai_confidence:.0%} confidence"
+            )
+            _cap_confidence_for_precision(finding, 0.34, "ai_false_positive")
+            confidence = float(finding.get("confidence") or 0.5)
+            finding["confidence_tier"] = get_confidence_tier(confidence)
             continue
 
         if tool == "bfla":

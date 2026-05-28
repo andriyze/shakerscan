@@ -5,7 +5,20 @@ export function getApiUrl(): string {
 
   if (typeof window !== 'undefined') {
     const host = window.location.hostname
+    const pageProtocol = window.location.protocol // "http:" or "https:"
     if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+      // Match the page protocol so we don't downgrade to HTTP behind a TLS
+      // reverse proxy (which would cause mixed-content blocking) and so we
+      // don't try to hit 8080 when the proxy already exposes the API on 443.
+      if (pageProtocol === 'https:') {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[shakerscan] NEXT_PUBLIC_API_URL is not set on an HTTPS deploy. ' +
+            'Falling back to same-origin API; set NEXT_PUBLIC_API_URL when the ' +
+            'API is behind a different host or port.'
+        )
+        return `${window.location.origin}`
+      }
       return `http://${host}:8080`
     }
   }

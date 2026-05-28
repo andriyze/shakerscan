@@ -127,6 +127,31 @@ def test_normalize_dast_scan_options_maps_legacy_thorough_to_deep():
     assert options.scan_type == "deep"
 
 
+def test_normalize_dast_scan_options_explicit_type_syncs_legacy_flags():
+    # Caller sends scan_type='quick' but also passes legacy active=True; the
+    # explicit scan_type should win and the legacy flag should be rewritten
+    # so downstream worker.py never sees both --quick and --active.
+    options = api_module.ScanOptions(scan_type="quick", active=True, thorough=True)
+
+    scan_type = api_module.normalize_dast_scan_options(options)
+
+    assert scan_type == "quick"
+    assert options.quick is True
+    assert options.active is False
+    assert options.thorough is False
+
+
+def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
+    # An explicit smart/full/aggressive scan implies the legacy active flag.
+    options = api_module.ScanOptions(scan_type="smart")
+
+    api_module.normalize_dast_scan_options(options)
+
+    assert options.thorough is True
+    assert options.active is True
+    assert options.quick is False
+
+
 def test_normalize_dast_scan_options_rejects_invalid_explicit_type():
     options = api_module.ScanOptions(scan_type="standard-ish")
 

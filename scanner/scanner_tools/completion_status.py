@@ -98,6 +98,45 @@ def _reason_is_budget_limited(reason: str | None) -> bool:
     return any(token in reason_l for token in BUDGET_REASON_TOKENS)
 
 
+def _iter_raw_reasons(value: Any) -> list[str]:
+    """Yield each individual reason string from a string/dict/list shape.
+
+    `_clean_reason` flattens lists into a comma-joined string which makes
+    substring matching ambiguous. This walks the original value and returns
+    one reason per element so callers can classify each entry.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        for key in ("reason", "candidate_reason", "skip_reason", "error"):
+            if value.get(key):
+                return [str(value[key])]
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_iter_raw_reasons(item))
+        return out
+    return [str(value)]
+
+
+def _value_is_budget_limited(value: Any) -> bool:
+    """Return True iff ANY individual reason looks budget-shaped.
+
+    Avoids the false-negative risk of substring-matching a joined blob: if
+    the active block holds [{"skip_reason": "no_candidates"}, {"skip_reason":
+    "active_time_budget_exhausted"}], we want budget_exhausted=True. And it
+    avoids the false-positive risk of a single reason coincidentally
+    containing "budget" — we now check one reason at a time.
+    """
+    for raw_reason in _iter_raw_reasons(value):
+        if _reason_is_budget_limited(raw_reason):
+            return True
+    return False
+
+
 def _checks_skipped_entries(checks_skipped: list[Any] | None) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for raw in checks_skipped or []:
@@ -143,8 +182,12 @@ def _active_skip_entries(active_block: dict[str, Any] | None) -> tuple[list[dict
     for field, module in ACTIVE_SKIP_FIELDS.items():
         if field not in active_block:
             continue
-        reason = _clean_reason(active_block.get(field)) or post_reason or "not_run"
-        if _reason_is_budget_limited(reason):
+        raw_value = active_block.get(field)
+        reason = _clean_reason(raw_value) or post_reason or "not_run"
+        # Inspect each raw reason individually instead of substring-matching
+        # the joined blob, so multi-entry sqlmap_skipped lists classify
+        # correctly.
+        if _value_is_budget_limited(raw_value) or _reason_is_budget_limited(post_reason):
             budget_exhausted = True
             budget_exhausted_at = budget_exhausted_at or "active_enrichment"
         _append_unique(

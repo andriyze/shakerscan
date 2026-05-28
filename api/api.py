@@ -4988,7 +4988,14 @@ async def exposure_graph(
 # ============================================================
 
 def normalize_dast_scan_options(options: ScanOptions) -> str:
-    """Resolve scan_type from explicit or legacy options and mutate options consistently."""
+    """Resolve scan_type from explicit or legacy options and mutate options consistently.
+
+    When an explicit scan_type is provided, the legacy boolean flags
+    (thorough/active/quick) are rewritten to match it. This prevents downstream
+    consumers from seeing contradictory state such as scan_type='quick' with
+    active=True, which previously caused worker.py to add both --quick and
+    --active to the scanner CLI.
+    """
     raw_scan_type = (options.scan_type or "").strip().lower()
     if raw_scan_type:
         if raw_scan_type not in VALID_DAST_SCAN_TYPES:
@@ -5002,6 +5009,11 @@ def normalize_dast_scan_options(options: ScanOptions) -> str:
                 },
             )
         options.scan_type = raw_scan_type
+        # Sync legacy flags to match the explicit scan_type so worker.py never
+        # sees a "scan_type=X plus contradictory boolean flag" combination.
+        options.quick = raw_scan_type == "quick"
+        options.thorough = raw_scan_type in {"deep", "full", "aggressive", "smart"}
+        options.active = raw_scan_type in {"full", "aggressive", "smart"}
         return raw_scan_type
 
     if options.thorough and options.active:

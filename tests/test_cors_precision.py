@@ -15,6 +15,14 @@ def test_cors_wildcard_without_credentials_is_not_reported_as_vulnerable(monkeyp
     assert result["vulnerable"] is False
     assert result["issues"] == []
     assert "Wildcard CORS without credentials" in result["weak_issues"]
+    # Wildcard issues must also propagate into reportable_weak_issues so
+    # downstream graders/validators see them.
+    wildcard_entries = [
+        entry for entry in result["reportable_weak_issues"]
+        if entry["evidence_type"] == "wildcard_without_credentials"
+    ]
+    assert wildcard_entries
+    assert wildcard_entries[0]["access-control-allow-origin"] == "*"
 
 
 def test_cors_reflection_with_credentials_is_reported(monkeypatch):
