@@ -100,7 +100,11 @@ def calculate_confidence(tool: str, evidence: dict, severity: str) -> float:
 
 
 def get_confidence_tier(confidence: float) -> str:
-    """Get confidence tier label from confidence score.
+    """Display label for a finding's confidence score.
+
+    This is a *user-facing* tier (verified/high/medium/low/uncertain) that
+    governs how findings are grouped in the UI. It is intentionally distinct
+    from `SEVERITY_CONFIDENCE_THRESHOLDS` below, which caps severity bands.
 
     Args:
         confidence: Confidence score from 0.0 to 1.0
@@ -120,6 +124,11 @@ def get_confidence_tier(confidence: float) -> str:
         return "uncertain"
 
 
+# Severity ceiling for a given confidence. Looser than `get_confidence_tier`
+# on purpose: a "medium" tier finding can still legitimately ship at medium
+# severity, while only a confident-enough finding may claim critical/high.
+# If you change one ladder, document why the other should (or should not)
+# move with it.
 SEVERITY_CONFIDENCE_THRESHOLDS = {
     "critical": 0.85,
     "high": 0.75,
@@ -136,17 +145,38 @@ def _max_severity_for_confidence(confidence: float) -> str:
     return "info"
 
 
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+# Conservative CVSS ceiling applied when a finding is capped down to a band.
+# Preserves the historical clamping (info=0, low=3, medium=6, high=8) and adds
+# a `critical` entry so callers passing it don't KeyError.
+_SEVERITY_CVSS_CEIL = {
+    "info": 0.0,
+    "low": 3.0,
+    "medium": 6.0,
+    "high": 8.0,
+    "critical": 10.0,
+}
+
+
 def _cap_severity(finding: dict[str, Any], max_severity: str) -> None:
-    order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    if max_severity not in _SEVERITY_CVSS_CEIL:
+        # Defensive fallback: callers should pass a known label, but a typo
+        # should not raise — leave the finding unchanged.
+        return
     current = str(finding.get("severity") or "info").lower()
-    if order.get(current, 0) > order[max_severity]:
-        finding.setdefault("precision_policy", {})["original_severity"] = current
+    if _SEVERITY_ORDER.get(current, 0) > _SEVERITY_ORDER[max_severity]:
+        policy = finding.setdefault("precision_policy", {})
+        # Preserve the *earliest* recorded severity across chained downgrades
+        # (e.g. critical → high → low) so the UI can show the full delta.
+        policy.setdefault("original_severity", current)
+        if "original_cvss_score" not in policy and finding.get("cvss_score") is not None:
+            policy["original_cvss_score"] = float(finding["cvss_score"])
         finding["severity"] = max_severity
         finding["cvss_score"] = min(
             float(finding.get("cvss_score") or 0.0),
-            {"info": 0.0, "low": 3.0, "medium": 6.0, "high": 8.0}[max_severity],
+            _SEVERITY_CVSS_CEIL[max_severity],
         )
-        finding.setdefault("precision_policy", {})["severity_downgraded"] = True
+        policy["severity_downgraded"] = True
 
 
 def _cap_confidence_for_precision(

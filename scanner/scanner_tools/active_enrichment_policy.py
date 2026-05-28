@@ -61,7 +61,14 @@ def record_active_enrichment_skip(
     candidate_reason: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> None:
-    """Record a skip reason using the report fields existing consumers expect."""
+    """Record a skip reason using the report fields existing consumers expect.
+
+    `sqlmap_skipped` is a list-of-dicts so per-candidate detail is preserved
+    across multiple calls (also written directly by SQLMap-specific code).
+    Every other module's skip key is a flat reason string. Both shapes are
+    deduplicated so repeated calls do not overwrite an earlier richer reason
+    or balloon the list with identical entries.
+    """
     skip_key = ACTIVE_ENRICHMENT_SKIP_KEYS.get(module, f"{module}_skipped")
     if skip_key == "sqlmap_skipped":
         entry = {
@@ -70,7 +77,18 @@ def record_active_enrichment_skip(
         }
         if details:
             entry.update(details)
-        active_block.setdefault(skip_key, []).append(entry)
+        existing = active_block.setdefault(skip_key, [])
+        for prior in existing:
+            if (
+                prior.get("skip_reason") == entry["skip_reason"]
+                and prior.get("candidate_reason") == entry["candidate_reason"]
+            ):
+                return
+        existing.append(entry)
         return
 
-    active_block[skip_key] = reason
+    # Flat-string shape: keep the first recorded reason. Later identical calls
+    # are no-ops; later *different* reasons would silently overwrite, so prefer
+    # the original (callers should prefer the earliest, most specific signal).
+    if skip_key not in active_block:
+        active_block[skip_key] = reason

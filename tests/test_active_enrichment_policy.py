@@ -42,6 +42,38 @@ def test_enrichment_skip_records_existing_report_keys():
     ]
 
 
+def test_record_skip_dedupes_identical_calls():
+    active_block: dict = {}
+    record_active_enrichment_skip(active_block, "dom_xss", "active_time_budget_exhausted")
+    record_active_enrichment_skip(active_block, "dom_xss", "active_time_budget_exhausted")
+    record_active_enrichment_skip(
+        active_block,
+        "sqlmap",
+        "primary_family_budget_exhausted",
+        candidate_reason="post_active_budget",
+    )
+    record_active_enrichment_skip(
+        active_block,
+        "sqlmap",
+        "primary_family_budget_exhausted",
+        candidate_reason="post_active_budget",
+    )
+
+    # Flat-string shape: identical second write is a no-op.
+    assert active_block["dom_xss_skipped"] == "active_time_budget_exhausted"
+    # List shape: duplicate sqlmap entry is not appended.
+    assert len(active_block["sqlmap_skipped"]) == 1
+
+
+def test_record_skip_preserves_first_string_reason():
+    active_block: dict = {}
+    record_active_enrichment_skip(active_block, "dom_xss", "primary_family_budget_exhausted")
+    record_active_enrichment_skip(active_block, "dom_xss", "different_reason_later")
+
+    # Earlier, more specific reason wins; the later call does not overwrite.
+    assert active_block["dom_xss_skipped"] == "primary_family_budget_exhausted"
+
+
 def test_completion_status_consumes_shared_skip_keys():
     active_block = {}
     record_active_enrichment_skip(active_block, "bola_idor", "primary_family_budget_exhausted")

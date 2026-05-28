@@ -140,6 +140,34 @@ def test_precision_policy_accepts_verified_evidence_flag():
     assert adjusted[0]["severity"] == "high"
 
 
+def test_cap_severity_preserves_earliest_original_across_chain():
+    # Simulate a downgrade chain: critical → medium → low. The audit must keep
+    # the first recorded severity (critical), not the intermediate one.
+    from findings import _cap_severity
+
+    finding = {"severity": "critical", "cvss_score": 9.8}
+
+    _cap_severity(finding, "medium")
+    _cap_severity(finding, "low")
+
+    assert finding["severity"] == "low"
+    assert finding["precision_policy"]["original_severity"] == "critical"
+    assert finding["precision_policy"]["original_cvss_score"] == 9.8
+
+
+def test_cap_severity_accepts_critical_target_without_keyerror():
+    from findings import _cap_severity
+
+    finding = {"severity": "high", "cvss_score": 7.5}
+
+    # Should not raise even though `critical` was previously missing from the
+    # cvss_score map.
+    _cap_severity(finding, "critical")
+
+    # `high` < `critical`, so nothing should change.
+    assert finding["severity"] == "high"
+
+
 def test_precision_policy_does_not_auto_verify_forced_browsing_response_shape():
     # `content_validated` reflects response-shape filtering, not exploit proof.
     # Forced-browsing findings should remain unverified until POE or AI review

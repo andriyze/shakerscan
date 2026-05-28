@@ -29,6 +29,11 @@ from scanner_tools.active_enrichment_policy import (
     record_active_enrichment_skip,
     should_run_active_enrichment,
 )
+from scanner_tools.active_prioritization import (
+    DEFAULT_SOURCE_PRIORITY,
+    DEFAULT_SOURCE_PRIORITY_VALUE,
+    prioritize_active_endpoints,
+)
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.har_discovery import (
@@ -4574,6 +4579,7 @@ async def build_report(target: str,
 
     # Phase 4 watchdog for smart scans (prevents hangs from non-cancellable awaits)
     phase4_deadline = None
+    phase4_disabled = False
     if smart_mode:
         try:
             phase4_default_seconds = int(os.environ.get("SCAN_PHASE4_MAX_SECONDS", "360"))
@@ -4586,8 +4592,15 @@ async def build_report(target: str,
             default_seconds=phase4_default_seconds,
         )
         phase4_max_seconds = 0 if phase4_max_seconds is None else phase4_max_seconds
+        # Sentinel: when the resolved budget is 0, phase 4 is explicitly disabled.
+        # Use a sentinel deadline of `now` so _phase4_timeout reports skips with
+        # a clearer reason rather than the misleading "Deadline exceeded".
+        phase4_disabled = phase4_max_seconds == 0
         phase4_deadline = time.monotonic() + phase4_max_seconds
-        print(f"[phase_4] Enforcing max duration {phase4_max_seconds}s for smart scan", file=sys.stderr, flush=True)
+        if phase4_disabled:
+            print("[phase_4] Phase 4 disabled by budget; all phase 4 modules will be skipped", file=sys.stderr, flush=True)
+        else:
+            print(f"[phase_4] Enforcing max duration {phase4_max_seconds}s for smart scan", file=sys.stderr, flush=True)
         if active_checks and not public_only and phase4_max_seconds < phase4_default_seconds:
             active_budget_for_log = scan_budget.get("active_max_seconds") if isinstance(scan_budget, dict) else None
             print(
@@ -4635,6 +4648,9 @@ async def build_report(target: str,
     def _phase4_timeout(requested: int, name: str) -> int:
         if phase4_deadline is None:
             return requested
+        if phase4_disabled:
+            # Quiet skip: a single banner above announced phase 4 is off.
+            return 0
         remaining = phase4_deadline - time.monotonic()
         if remaining <= 0:
             print(f"[phase_4] Deadline exceeded; skipping {name}", file=sys.stderr)
@@ -7111,19 +7127,11 @@ async def build_report(target: str,
                             file=sys.stderr
                         )
 
-                # Source priority for endpoint testing (lower = higher priority)
-                # Real discovered endpoints should be tested before synthetic/inferred
-                _SOURCE_PRIORITY = {
-                    "har_discovery": 1,  # Actually observed in browser network
-                    "manual": 2,         # User-specified endpoints
-                    "hash_route": 2,     # SPA fragment routes for browser DOM-XSS proof
-                    "openapi": 3,        # From OpenAPI/Swagger spec
-                    "form": 4,           # Discovered from HTML forms
-                    "common": 5,         # Well-known endpoints like /rest/user/login
-                    "options": 6,        # Discovered via OPTIONS method
-                    "inferred": 7,       # Synthetic endpoints guessed from patterns
-                }
-                _DEFAULT_SOURCE_PRIORITY = 6
+                # Endpoint-source priorities live in scanner_tools.active_prioritization
+                # as DEFAULT_SOURCE_PRIORITY so the merge logic here and the active-scan
+                # ordering downstream stay in lock-step. Keep aliases readable.
+                _SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY
+                _DEFAULT_SOURCE_PRIORITY = DEFAULT_SOURCE_PRIORITY_VALUE
 
                 def _merge_endpoint(new_ep):
                     url = new_ep.get("url")
@@ -7779,14 +7787,6 @@ async def build_report(target: str,
 
                 active_block["active_endpoints_discovered_by_source"] = _endpoint_distribution(endpoints, "source")
                 active_block["active_endpoints_discovered_by_method"] = _endpoint_distribution(endpoints, "method")
-                try:
-                    from scanner_tools.active_prioritization import prioritize_active_endpoints
-                except ImportError:
-                    try:
-                        from .scanner_tools.active_prioritization import prioritize_active_endpoints
-                    except ImportError:
-                        from scanner.scanner_tools.active_prioritization import prioritize_active_endpoints
-
                 endpoints = prioritize_active_endpoints(
                     endpoints,
                     budget=active_endpoint_budget,
