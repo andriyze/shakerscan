@@ -98,6 +98,7 @@ services:
       - ./scanner/findings.py:/app/findings.py:ro
       - ./scanner/reporting.py:/app/reporting.py:ro
       - ./scanner/signals.py:/app/signals.py:ro
+      - ./scanner/target_context.py:/app/target_context.py:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
@@ -167,6 +168,7 @@ services:
       - ./scanner/findings.py:/app/findings.py:ro
       - ./scanner/reporting.py:/app/reporting.py:ro
       - ./scanner/signals.py:/app/signals.py:ro
+      - ./scanner/target_context.py:/app/target_context.py:ro
       - ./scanner/scanner.py:/app/scanner.py:ro
       - ./scanner/scanner_tools:/app/scanner_tools:ro
       - ./results:/results

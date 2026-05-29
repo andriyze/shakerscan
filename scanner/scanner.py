@@ -3572,15 +3572,20 @@ async def build_report(target: str,
         subdomain_takeover_task = asyncio.create_task(subdomain_takeover_check(host))
         xxe_task = asyncio.create_task(xxe_injection_test(base_url))
     else:
-        # Create dummy tasks that return empty results for public-only mode
-        async def dummy_api_sec(): return {"api_type": "unknown", "vulnerabilities": [], "endpoints_discovered": [], "authentication": {"required": False, "methods": []}}
-        async def dummy_subdomain_takeover(): return {"vulnerable": False, "dangling_cnames": [], "vulnerable_services": [], "evidence": []}
-        async def dummy_xxe(): return {"vulnerable": False, "payloads_tested": [], "evidence": []}
+        # Empty results. For focused scans, carry the skip marker so completion
+        # status reports the coverage gap; public-only mode returns bare empties
+        # (these probes are simply not applicable there).
+        api_sec_empty = {"api_type": "unknown", "vulnerabilities": [], "endpoints_discovered": [], "authentication": {"required": False, "methods": []}}
+        subdomain_empty = {"vulnerable": False, "dangling_cnames": [], "vulnerable_services": [], "evidence": []}
+        xxe_empty = {"vulnerable": False, "payloads_tested": [], "evidence": []}
         if focused_manual_active_scope:
             print("[smart] Focused manual active scope: skipping auxiliary API/XXE discovery probes", file=sys.stderr)
-        api_sec_task = asyncio.create_task(dummy_api_sec())
-        subdomain_takeover_task = asyncio.create_task(dummy_subdomain_takeover())
-        xxe_task = asyncio.create_task(dummy_xxe())
+            api_sec_empty = focused_scope.skipped_result(api_sec_empty)
+            subdomain_empty = focused_scope.skipped_result(subdomain_empty)
+            xxe_empty = focused_scope.skipped_result(xxe_empty)
+        api_sec_task = asyncio.create_task(_focused_async_value(api_sec_empty))
+        subdomain_takeover_task = asyncio.create_task(_focused_async_value(subdomain_empty))
+        xxe_task = asyncio.create_task(_focused_async_value(xxe_empty))
 
     # Phase 1/2 Critical Checks - MOVED to after crawling completes (see below)
     # These checks need discovered_urls from katana crawling to be effective
@@ -3767,8 +3772,8 @@ async def build_report(target: str,
     if har_test_targets:
         existing_urls = set(crawl_urls)
         har_added = 0
-        for target in har_test_targets:
-            target_url = target.get("url", "")
+        for har_target in har_test_targets:
+            target_url = har_target.get("url", "")
             if target_url and target_url not in existing_urls:
                 crawl_urls.append(target_url)
                 existing_urls.add(target_url)
@@ -7081,8 +7086,8 @@ async def build_report(target: str,
                         scored_urls = []
                         # Add HAR endpoints with high priority
                         if har_test_targets:
-                            for target in har_test_targets[:10]:
-                                url = target.get("url", "")
+                            for har_target in har_test_targets[:10]:
+                                url = har_target.get("url", "")
                                 if url and "?" in url:
                                     scored_urls.append((score_url_for_dbms(url, is_har=True), url))
                         # Add discovered URLs
@@ -9145,15 +9150,48 @@ async def build_report(target: str,
                         print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
                     emit_progress("active_bola", 91, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
 
-                    bola_results = await smart_bola_test(
-                        base_url=base_url,
-                        discovered_urls=bola_urls,
-                        user1_session=auth_session,
-                        user2_session=user2_session,  # Only runs cross-user tests if provided
-                        param_endpoints=bola_param_endpoints,
-                        max_endpoints=smart_bola_max_endpoints,
-                        timeout=10
-                    )
+                    # Overall watchdog: smart_bola_test only has a per-request
+                    # timeout, so a target that dies or hangs mid-sweep (active
+                    # scans can crash fragile apps) would otherwise stall the
+                    # whole scan at this phase. This is a SAFETY NET, not a
+                    # tight budget: a legitimate sweep over hundreds of
+                    # discovered URLs on a responsive app can take several
+                    # minutes, so we grant the full active budget (floored at
+                    # 300s, capped at 900s). A genuinely dead target — where
+                    # every request burns the 10s per-request timeout — still
+                    # blows past this and gets cut off.
+                    try:
+                        _bola_active_budget = scan_budget.get("active_max_seconds") if isinstance(scan_budget, dict) else None
+                    except Exception:
+                        _bola_active_budget = None
+                    bola_overall_deadline = max(300, min(900, int(_bola_active_budget or 600)))
+                    try:
+                        bola_results = await asyncio.wait_for(
+                            smart_bola_test(
+                                base_url=base_url,
+                                discovered_urls=bola_urls,
+                                user1_session=auth_session,
+                                user2_session=user2_session,  # Only runs cross-user tests if provided
+                                param_endpoints=bola_param_endpoints,
+                                max_endpoints=smart_bola_max_endpoints,
+                                timeout=10
+                            ),
+                            timeout=bola_overall_deadline,
+                        )
+                    except (asyncio.TimeoutError, TimeoutError):
+                        print(
+                            f"[scanner] Smart BOLA testing exceeded {bola_overall_deadline}s deadline "
+                            "(target slow/unreachable?); recording partial coverage",
+                            file=sys.stderr,
+                        )
+                        bola_results = {
+                            "vulnerable": False, "findings": [], "endpoints_analyzed": 0,
+                            "id_patterns_found": 0, "access_violations": 0, "cross_user_violations": 0,
+                            "timed_out": True, "deadline_seconds": bola_overall_deadline,
+                        }
+                        record_active_enrichment_skip(
+                            active_block, "bola_idor", "bola_overall_deadline_exceeded"
+                        )
 
                     active_block["smart_bola"] = bola_results
                     emit_progress("active_bola", 91, "BOLA/IDOR testing complete")
@@ -9161,19 +9199,38 @@ async def build_report(target: str,
                     # Add findings to report
                     if bola_results.get("findings"):
                         for f in bola_results["findings"]:
-                            report["findings"].append(normalize_finding(
+                            src_ev = f.get("evidence") or {}
+                            built_ev = {
+                                "url": src_ev.get("url"),
+                                "test_id": src_ev.get("test_id"),
+                                "pattern_type": src_ev.get("pattern_type"),
+                                "description": f.get("description"),
+                                "response_snippet": (src_ev.get("response_snippet") or "")[:300],
+                            }
+                            # Preserve cross-user comparison evidence so the report
+                            # explains *why* this was flagged and triage can verify
+                            # it. normalize_finding only keeps what we pass in, so
+                            # these would otherwise be dropped.
+                            for ev_key in (
+                                "responses_equivalent", "response_similarity",
+                                "user_specific_signals", "user1_status", "user2_status",
+                            ):
+                                if src_ev.get(ev_key) is not None:
+                                    built_ev[ev_key] = src_ev[ev_key]
+                            nf = normalize_finding(
                                 "smart_bola",
                                 f.get("title", "BOLA/IDOR Vulnerability"),
                                 f.get("severity", "high"),
-                                {
-                                    "url": f.get("evidence", {}).get("url"),
-                                    "test_id": f.get("evidence", {}).get("test_id"),
-                                    "pattern_type": f.get("evidence", {}).get("pattern_type"),
-                                    "description": f.get("description"),
-                                    "response_snippet": f.get("evidence", {}).get("response_snippet", "")[:300],
-                                },
+                                built_ev,
                                 f.get("cwe", "CWE-639")
-                            ))
+                            )
+                            # Propagate triage classification set by smart_bola_test
+                            # (suspected lead / needs verification / calibrated
+                            # confidence); normalize_finding does not carry these.
+                            for tkey in ("suspected", "needs_verification", "verification_reason", "confidence"):
+                                if f.get(tkey) is not None:
+                                    nf[tkey] = f[tkey]
+                            report["findings"].append(nf)
                         print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
                     else:
                         print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
@@ -9435,7 +9492,11 @@ async def build_report(target: str,
                 finding["verification_reason"] = f"Confidence {confidence:.0%} below 75% for {severity}-severity finding"
                 needs_verification.append(finding)
 
-        precision_policy_target_host = urllib.parse.urlparse(target).netloc or None
+        # Use `host` (normalized scan hostname, captured at scan start) rather
+        # than re-parsing `target`: earlier `for target in har_test_targets`
+        # loops leak their loop variable into this scope, leaving `target`
+        # bound to a dict. `host` is never reassigned.
+        precision_policy_target_host = host or None
 
         # Apply targeted dedup (CORS from multiple tools, XXE grouping, etc.)
         # Note: This is separate from the pipeline dedup which was disabled due to fingerprint issues.
@@ -9620,7 +9681,7 @@ async def build_report(target: str,
     if report.get("findings"):
         report["findings"] = apply_dast_precision_policy(
             report["findings"],
-            target_host=urllib.parse.urlparse(target).netloc or None,
+            target_host=host or None,
         )
         if analyze_attack_chains:
             try:

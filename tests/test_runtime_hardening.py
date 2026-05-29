@@ -7,7 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_local_compose_mounts_all_scanner_top_level_modules():
     compose = (ROOT / "docker-compose.yml").read_text()
 
-    for module in ("constants.py", "grading.py", "findings.py", "reporting.py", "signals.py"):
+    # target_context.py is imported by grading/findings/reporting and must be
+    # mounted alongside them into both API and worker, or the worker preflight
+    # crash-loops with ModuleNotFoundError.
+    for module in ("constants.py", "grading.py", "findings.py", "reporting.py", "signals.py", "target_context.py"):
         mount = f"./scanner/{module}:/app/{module}:ro"
         assert compose.count(mount) >= 2, f"{mount} should be mounted into API and worker"
 

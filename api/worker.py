@@ -244,6 +244,10 @@ required = {
     "findings": ["normalize_finding", "deduplicate_findings", "apply_dast_precision_policy", "now_utc_iso"],
     "reporting": ["emit_config_findings"],
     "signals": ["extract_signals_from_nuclei"],
+    # target_context is a top-level module imported by grading/findings/reporting.
+    # It must be mounted/baked alongside them; listing it here turns a missing
+    # mount into a clear preflight failure instead of a worker crash loop.
+    "target_context": ["is_local_or_private_scan_target"],
 }
 report = {}
 for module_name, symbols in required.items():
