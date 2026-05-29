@@ -9150,16 +9150,14 @@ async def build_report(target: str,
                         print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
                     emit_progress("active_bola", 91, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
 
-                    # Overall watchdog: smart_bola_test only has a per-request
-                    # timeout, so a target that dies or hangs mid-sweep (active
-                    # scans can crash fragile apps) would otherwise stall the
-                    # whole scan at this phase. This is a SAFETY NET, not a
-                    # tight budget: a legitimate sweep over hundreds of
-                    # discovered URLs on a responsive app can take several
-                    # minutes, so we grant the full active budget (floored at
-                    # 300s, capped at 900s). A genuinely dead target — where
-                    # every request burns the 10s per-request timeout — still
-                    # blows past this and gets cut off.
+                    # Budget for BOLA testing. On a rich app the discovered-URL
+                    # set can be large enough that testing every template takes
+                    # many minutes. smart_bola_test self-bounds to `max_seconds`
+                    # and returns the findings gathered so far; the outer
+                    # asyncio.wait_for is only a hard backstop (deadline + grace)
+                    # for the pathological case where a request hangs past its
+                    # own timeout. The internal graceful stop preserves partial
+                    # findings that a hard cancel would discard.
                     try:
                         _bola_active_budget = scan_budget.get("active_max_seconds") if isinstance(scan_budget, dict) else None
                     except Exception:
@@ -9174,13 +9172,14 @@ async def build_report(target: str,
                                 user2_session=user2_session,  # Only runs cross-user tests if provided
                                 param_endpoints=bola_param_endpoints,
                                 max_endpoints=smart_bola_max_endpoints,
-                                timeout=10
+                                timeout=10,
+                                max_seconds=bola_overall_deadline,
                             ),
-                            timeout=bola_overall_deadline,
+                            timeout=bola_overall_deadline + 60,
                         )
                     except (asyncio.TimeoutError, TimeoutError):
                         print(
-                            f"[scanner] Smart BOLA testing exceeded {bola_overall_deadline}s deadline "
+                            f"[scanner] Smart BOLA testing exceeded {bola_overall_deadline + 60}s hard deadline "
                             "(target slow/unreachable?); recording partial coverage",
                             file=sys.stderr,
                         )

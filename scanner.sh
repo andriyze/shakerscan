@@ -1298,6 +1298,7 @@ print_help() {
     echo "  start              Start all services (API, workers, UI)"
     echo "  stop               Stop all services"
     echo "  restart            Restart all services"
+    echo "  reload             Reload edited source into running containers + verify parity"
     echo "  status             Show service status"
     echo "  scale <N>          Scale to N workers (1-20)"
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
@@ -1394,6 +1395,47 @@ stop_services() {
 restart_services() {
     stop_services
     start_services
+}
+
+# Reload source into running containers without a full stop/start.
+#
+# On macOS Docker, single-file bind mounts (scanner.py and the top-level
+# scanner modules in docker-compose.yml) do NOT reliably propagate host edits
+# to running containers — editor rename-replace leaves the container on a
+# stale inode, so scans silently run old code. A graceful `compose restart`
+# re-resolves the mounts. This command does that and verifies host<->container
+# parity so drift is caught loudly instead of debugged for an hour.
+reload_services() {
+    echo -e "${BLUE}Reloading source into running containers...${NC}"
+    compose restart api worker || return 1
+
+    # API-scaled workers (created by the /workers scaler, not compose) are not
+    # covered by `compose restart worker`; restart them directly.
+    local scaled
+    scaled=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null)
+    for w in $scaled; do
+        docker restart "$w" >/dev/null 2>&1 || true
+    done
+
+    # Verify host<->container parity for the single-file-mounted modules.
+    local host_sha cont_sha drift=0 worker
+    worker=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null | head -n1)
+    if [ -n "$worker" ]; then
+        sleep 4
+        for f in scanner.py constants.py grading.py findings.py reporting.py signals.py target_context.py; do
+            host_sha=$(shasum -a 256 "$SCRIPT_DIR/scanner/$f" 2>/dev/null | awk '{print $1}')
+            cont_sha=$(docker exec "$worker" sha256sum "/app/$f" 2>/dev/null | awk '{print $1}')
+            if [ -n "$host_sha" ] && [ "$host_sha" != "$cont_sha" ]; then
+                echo -e "  ${YELLOW}drift${NC} $f (host $host_sha != container $cont_sha)"
+                drift=1
+            fi
+        done
+        if [ "$drift" -eq 0 ]; then
+            echo -e "  ${GREEN}ok${NC} container source matches host"
+        else
+            echo -e "  ${YELLOW}Some modules still differ; try '${NC}./scanner.sh restart${YELLOW}' for a full recreate.${NC}"
+        fi
+    fi
 }
 
 show_status() {
@@ -1944,6 +1986,9 @@ case $COMMAND in
         ;;
     restart)
         restart_services
+        ;;
+    reload)
+        reload_services
         ;;
     status)
         show_status

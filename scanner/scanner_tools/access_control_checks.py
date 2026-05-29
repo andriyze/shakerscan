@@ -1689,7 +1689,8 @@ async def smart_bola_test(
     user2_session: Any | None = None,
     param_endpoints: list[dict[str, Any]] | None = None,
     max_endpoints: int = 30,
-    timeout: int = 10
+    timeout: int = 10,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
     """
     Smart BOLA/IDOR testing that auto-discovers endpoints with ID patterns.
@@ -1709,13 +1710,22 @@ async def smart_bola_test(
         param_endpoints: Endpoints with parameter names for query synthesis
         max_endpoints: Maximum unique endpoints to test
         timeout: Request timeout
+        max_seconds: Optional overall wall-clock budget. On a rich app the
+            discovered-URL set can be large enough that testing every template
+            takes many minutes; when the budget is exceeded we stop the
+            endpoint loop gracefully and return the findings gathered so far
+            (rather than being hard-cancelled by an external watchdog, which
+            would discard partial results).
 
     Returns:
         Dictionary with findings and statistics
     """
     import re
     import random
+    import time as _time
     from .proof_of_exploit import fetch_with_capture
+
+    _deadline = (_time.monotonic() + max_seconds) if max_seconds and max_seconds > 0 else None
 
     results = {
         "vulnerable": False,
@@ -1727,6 +1737,7 @@ async def smart_bola_test(
         "method_variations_tested": 0,
         "synthesized_urls_tested": 0,
         "synthesized_query_urls_tested": 0,
+        "budget_exceeded": False,
     }
 
     def build_headers(session):
@@ -1799,6 +1810,17 @@ async def smart_bola_test(
 
     # Test each unique endpoint template
     for template, info in list(id_endpoints.items())[:max_endpoints]:
+        # Respect the overall budget: stop gracefully and keep findings so far
+        # instead of being hard-cancelled (which discards partial results).
+        if _deadline is not None and _time.monotonic() >= _deadline:
+            results["budget_exceeded"] = True
+            print(
+                f"[bola] Overall budget reached after {results['endpoints_analyzed']} "
+                f"endpoints; returning {len(results['findings'])} findings gathered so far",
+                file=__import__('sys').stderr,
+            )
+            break
+
         if _is_operational_only_bola_endpoint(template):
             continue
 
