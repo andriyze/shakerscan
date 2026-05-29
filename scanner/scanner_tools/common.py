@@ -184,6 +184,29 @@ def now_utc_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def sanitize_header_value(value: Any) -> str:
+    """Strip CR/LF from a header value to defeat outbound header injection.
+
+    User-supplied auth headers, cookies, and custom header maps flow into
+    curl `-H name: value` arguments via this module. A `\\r\\n` in the
+    value would let an attacker who can submit a scan inject arbitrary
+    additional HTTP request headers against the scan target. Modern curl
+    rejects this for `-H`, but the broader scanner toolchain doesn't all
+    use modern curl; sanitize defensively at the source.
+    """
+    if value is None:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def sanitize_header_name(name: Any) -> str:
+    """Strip CR/LF and `:` from a header name. Empty result means drop the entry."""
+    if name is None:
+        return ""
+    cleaned = str(name).replace("\r", "").replace("\n", "").replace(":", "")
+    return cleaned.strip()
+
+
 def get_auth_curl_args(auth_session: Any | None = None) -> list[str]:
     """Build curl args for authenticated requests.
 
@@ -205,14 +228,23 @@ def get_auth_curl_args(auth_session: Any | None = None) -> list[str]:
         cookies.update(auth_session.state.cookies_received or {})
 
     if cookies:
-        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        args.extend(["-H", f"Cookie: {cookie_str}"])
+        sanitized_pairs = [
+            f"{sanitize_header_value(k)}={sanitize_header_value(v)}"
+            for k, v in cookies.items()
+            if sanitize_header_value(k)
+        ]
+        if sanitized_pairs:
+            cookie_str = "; ".join(sanitized_pairs)
+            args.extend(["-H", f"Cookie: {cookie_str}"])
 
     # Get auth headers from config
     if hasattr(auth_session, 'config') and hasattr(auth_session.config, 'headers'):
         headers = auth_session.config.headers or {}
         for name, value in headers.items():
-            args.extend(["-H", f"{name}: {value}"])
+            clean_name = sanitize_header_name(name)
+            if not clean_name:
+                continue
+            args.extend(["-H", f"{clean_name}: {sanitize_header_value(value)}"])
 
     return args
 
@@ -228,15 +260,24 @@ def get_auth_sqlmap_context(auth_session: Any | None = None) -> tuple[str | None
     if hasattr(auth_session, "state") and hasattr(auth_session.state, "cookies_received"):
         cookies.update(auth_session.state.cookies_received or {})
 
-    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items()) if cookies else None
+    cookie_str = (
+        "; ".join(
+            f"{sanitize_header_value(k)}={sanitize_header_value(v)}"
+            for k, v in cookies.items()
+            if sanitize_header_value(k)
+        )
+        if cookies
+        else None
+    )
 
     header_lines: list[str] = []
     if hasattr(auth_session, "config") and hasattr(auth_session.config, "headers"):
         headers = auth_session.config.headers or {}
         for name, value in headers.items():
-            if name.lower() == "cookie":
+            clean_name = sanitize_header_name(name)
+            if not clean_name or clean_name.lower() == "cookie":
                 continue
-            header_lines.append(f"{name}: {value}")
+            header_lines.append(f"{clean_name}: {sanitize_header_value(value)}")
 
     return cookie_str, header_lines
 

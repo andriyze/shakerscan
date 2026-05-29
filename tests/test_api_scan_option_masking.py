@@ -141,6 +141,54 @@ def test_normalize_dast_scan_options_explicit_type_syncs_legacy_flags():
     assert options.thorough is False
 
 
+def test_scan_options_reject_crlf_in_auth_header():
+    # auth_header flows into curl `-H` arguments downstream. CR/LF in the
+    # value would let a scan submitter smuggle additional request headers
+    # to the scan target.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        api_module.ScanOptions(auth_header="Bearer abc\r\nX-Admin: 1")
+
+    assert "CR or LF" in str(exc.value)
+
+
+def test_scan_options_reject_crlf_in_user2_cookies():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        api_module.ScanOptions(user2_cookies="session=abc\nfoo=bar")
+
+
+def test_scan_options_accept_clean_auth_header():
+    options = api_module.ScanOptions(auth_header="Bearer eyJ.xyz")
+    assert options.auth_header == "Bearer eyJ.xyz"
+
+
+def test_scan_options_reject_oob_callback_without_scheme():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        api_module.ScanOptions(oob_callback_url="evil.example.com")
+
+
+def test_scan_options_reject_oob_callback_with_unsafe_scheme():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        api_module.ScanOptions(oob_callback_url="javascript:alert(1)")
+
+
+def test_scan_options_accept_valid_oob_callback_url():
+    options = api_module.ScanOptions(oob_callback_url="https://callback.example.com/hit")
+    assert options.oob_callback_url == "https://callback.example.com/hit"
+
+
+def test_scan_options_normalize_oob_callback_url_strips_whitespace():
+    options = api_module.ScanOptions(oob_callback_url="  http://callback.example.com  ")
+    assert options.oob_callback_url == "http://callback.example.com"
+
+
 def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
     # An explicit smart/full/aggressive scan implies the legacy active flag.
     options = api_module.ScanOptions(scan_type="smart")

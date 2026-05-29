@@ -11,34 +11,16 @@ import argparse
 import copy
 import json
 import sys
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
+from pathlib import Path
 from typing import Any
 
-
-def request_json(url: str, *, method: str = "GET", payload: Any = None, timeout: int = 30) -> dict[str, Any]:
-    headers = {}
-    data = None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {body}") from exc
-
-
-def try_request_json(url: str, *, timeout: int = 15) -> dict[str, Any] | None:
-    try:
-        return request_json(url, timeout=timeout)
-    except Exception:
-        return None
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.calibration import (  # noqa: E402
+    request_json,
+    try_request_json,
+    wait_for_scans as _wait_for_scans,
+)
 
 
 def docker_url(url: str, docker_base: str, run_id: str, scenario_id: str | None = None) -> str:
@@ -297,18 +279,12 @@ def queue_model_intake(args: argparse.Namespace, run_id: str) -> list[dict[str, 
 
 
 def wait_for_scans(args: argparse.Namespace, queued: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deadline = time.time() + args.timeout
-    pending = {item["scan_id"] for item in queued if item.get("scan_id")}
-    details: dict[str, dict[str, Any]] = {}
-    while pending and time.time() < deadline:
-        for scan_id in list(pending):
-            detail = request_json(f"{args.api}/scans/{scan_id}", timeout=60)
-            details[scan_id] = detail
-            if detail.get("status") in {"completed", "failed", "cancelled"}:
-                pending.remove(scan_id)
-        if pending:
-            time.sleep(args.poll_interval)
-    return [{**item, "detail": details.get(item["scan_id"], {})} for item in queued]
+    return _wait_for_scans(
+        args.api,
+        queued,
+        timeout=args.timeout,
+        poll_interval=args.poll_interval,
+    )
 
 
 def finding_ids(result: dict[str, Any]) -> set[str]:

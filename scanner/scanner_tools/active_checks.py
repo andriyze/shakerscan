@@ -3855,13 +3855,23 @@ async def oauth_vulnerability_test(url: str) -> dict[str, Any]:
 async def session_vulnerability_test(url: str) -> dict[str, Any]:
     results: dict[str, Any] = {"vulnerable": False, "issues": [], "evidence": []}
     test_session_id = "FIXED" + ''.join(random.choices(string.ascii_letters + string.digits, k=20))
-    await run(["curl", "-sS", "-L", "-k", "-c", "/tmp/cookies.txt", "-H", f"Cookie: PHPSESSID={test_session_id}; JSESSIONID={test_session_id}", url], timeout=10)
-    out2, err2, rc2 = await run(["curl", "-sS", "-I", "-L", "-k", "-b", "/tmp/cookies.txt", url], timeout=10)
-    if rc2 == 0 and out2 and test_session_id in out2:
-        results["vulnerable"] = True
-        results["issues"] .append("session_fixation")
-        results["evidence"].append({"type": "session_fixation", "description": "Application accepts externally set session IDs"})
-    await run(["rm", "-f", "/tmp/cookies.txt"])
+    # Use a per-call tempfile cookie jar so concurrent worker scans on the same
+    # host don't clobber each other's cookies (and so we don't leak captured
+    # cookies from one target into another's evidence).
+    cookie_fd, cookie_jar = tempfile.mkstemp(prefix="shakerscan-cookies-", suffix=".txt")
+    os.close(cookie_fd)
+    try:
+        await run(["curl", "-sS", "-L", "-k", "-c", cookie_jar, "-H", f"Cookie: PHPSESSID={test_session_id}; JSESSIONID={test_session_id}", url], timeout=10)
+        out2, err2, rc2 = await run(["curl", "-sS", "-I", "-L", "-k", "-b", cookie_jar, url], timeout=10)
+        if rc2 == 0 and out2 and test_session_id in out2:
+            results["vulnerable"] = True
+            results["issues"].append("session_fixation")
+            results["evidence"].append({"type": "session_fixation", "description": "Application accepts externally set session IDs"})
+    finally:
+        try:
+            os.unlink(cookie_jar)
+        except OSError:
+            pass
     return results
 
 

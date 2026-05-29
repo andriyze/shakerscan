@@ -27,7 +27,7 @@ import redis
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
     from constants import SMART_SCAN_BUDGETS, resolve_scan_budget
@@ -1279,6 +1279,55 @@ class ScanOptions(BaseModel):
     # Multi-user auth for BOLA/IDOR testing
     user2_cookies: Optional[str] = None          # Second user session cookies
     user2_header: Optional[str] = None           # Second user auth header
+
+    @field_validator(
+        "auth_cookies",
+        "auth_header",
+        "auth_headers_json",
+        "user2_cookies",
+        "user2_header",
+        "login_username",
+        "login_password",
+        "login_url",
+        mode="before",
+    )
+    @classmethod
+    def _strip_crlf_from_header_inputs(cls, value):
+        """Reject CR/LF in auth-related inputs to prevent outbound header injection.
+
+        These values flow into curl `-H name: value` arguments downstream. A
+        `\\r\\n` in any of them would let a scan submitter inject arbitrary
+        request headers (or full requests) against the scan target.
+        """
+        if value is None:
+            return value
+        if isinstance(value, str) and ("\r" in value or "\n" in value):
+            raise ValueError("value must not contain CR or LF characters")
+        return value
+
+    @field_validator("oob_callback_url", mode="before")
+    @classmethod
+    def _validate_oob_callback_url(cls, value):
+        """Ensure oob_callback_url parses as http(s)://host[:port][/path].
+
+        The value is interpolated into SQLi/SSRF payloads and rendered into
+        findings JSON. Garbage values break payload formatting and pollute
+        the report; explicit validation keeps the contract honest.
+        """
+        if value is None or value == "":
+            return value
+        if not isinstance(value, str):
+            raise ValueError("oob_callback_url must be a string")
+        if "\r" in value or "\n" in value:
+            raise ValueError("oob_callback_url must not contain CR or LF characters")
+        import urllib.parse as _urlparse
+
+        parsed = _urlparse.urlparse(value.strip())
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("oob_callback_url must use http or https scheme")
+        if not parsed.netloc:
+            raise ValueError("oob_callback_url must include a host")
+        return value.strip()
 
     # Manual endpoint specification for API-only targets
     # Format: "METHOD /path params" or just "/path"

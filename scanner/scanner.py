@@ -34,6 +34,18 @@ from scanner_tools.active_prioritization import (
     DEFAULT_SOURCE_PRIORITY_VALUE,
     prioritize_active_endpoints,
 )
+from scanner_tools.focused_scope import (
+    CAA_SHAPE,
+    CORS_SHAPE,
+    DMARC_SHAPE,
+    DNSSEC_SHAPE,
+    EXPOSED_FILES_SHAPE,
+    SECURITY_TXT_SHAPE,
+    SUBDOMAIN_TAKEOVER_SHAPE,
+    TLSRPT_SHAPE,
+    FocusedScope,
+    async_value as _focused_async_value,
+)
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.har_discovery import (
@@ -2456,7 +2468,13 @@ async def build_report(target: str,
                 file=sys.stderr
             )
 
-    focused_manual_active_scope = bool(smart_mode and focused_active_family and manual_endpoints_norm)
+    focused_scope = FocusedScope.from_request(
+        smart_mode=smart_mode,
+        family=focused_active_family,
+        manual_endpoints=manual_endpoints_norm,
+    )
+    # Backwards-compatible alias. New code should reference focused_scope.
+    focused_manual_active_scope = focused_scope.active
     discovery_budget = scan_budget
     if focused_manual_active_scope:
         discovery_budget = dict(scan_budget)
@@ -3023,14 +3041,10 @@ async def build_report(target: str,
 
     # parallel tasks (infra)
     dns_task    = asyncio.create_task(resolve_dns(host))
-    if focused_manual_active_scope:
+    if focused_scope.skip_posture():
         print("[smart] Focused manual active scope: skipping DNS/email hardening probes", file=sys.stderr)
-
-        async def dummy_dmarc(): return {"record": None, "fields": {}, "skipped": True, "reason": "focused_manual_active_scope"}
-        async def dummy_dnssec(): return {"status": "skipped", "algorithm": None, "skipped": True, "reason": "focused_manual_active_scope"}
-
-        dmarc_task  = asyncio.create_task(dummy_dmarc())
-        dnssec_task = asyncio.create_task(dummy_dnssec())
+        dmarc_task  = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(DMARC_SHAPE)))
+        dnssec_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(DNSSEC_SHAPE)))
     else:
         dmarc_task  = asyncio.create_task(fetch_dmarc(host))
         dnssec_task = asyncio.create_task(check_dnssec(host))
@@ -3060,30 +3074,25 @@ async def build_report(target: str,
     http_redirect_task = None
     if scheme == "https" and not focused_manual_active_scope:
         http_redirect_task = asyncio.create_task(curl_headers(f"http://{host}"))
-    if focused_manual_active_scope:
+    if focused_scope.skip_posture():
         print("[smart] Focused manual active scope: skipping HTTP capability and security.txt probes", file=sys.stderr)
-
-        async def dummy_http2(): return False
-        async def dummy_http3(): return None
-        async def dummy_sec_txt(): return {"present": False, "url": base_url.rstrip("/") + "/.well-known/security.txt", "sample": None, "skipped": True, "reason": "focused_manual_active_scope"}
-
-        h2_task     = asyncio.create_task(dummy_http2())
-        h3_task     = asyncio.create_task(dummy_http3())
-        sec_txt_task= asyncio.create_task(dummy_sec_txt())
+        sec_txt_shape = dict(SECURITY_TXT_SHAPE)
+        sec_txt_shape["url"] = base_url.rstrip("/") + "/.well-known/security.txt"
+        h2_task     = asyncio.create_task(_focused_async_value(False))
+        h3_task     = asyncio.create_task(_focused_async_value(None))
+        sec_txt_task= asyncio.create_task(_focused_async_value(focused_scope.skipped_result(sec_txt_shape)))
     else:
         h2_task     = asyncio.create_task(supports_http2(base_url))
         h3_task     = asyncio.create_task(supports_http3(base_url))
         sec_txt_task= asyncio.create_task(fetch_security_txt(base_url))
 
     # Email/DNS security extras (best-effort)
-    if focused_manual_active_scope:
-        async def dummy_caa(): return {"records": [], "skipped": True, "reason": "focused_manual_active_scope"}
-        async def dummy_mta(): return {"record": None, "policy_url": f"https://{host}/.well-known/mta-sts.txt", "policy_present": False, "policy_sample": None, "skipped": True, "reason": "focused_manual_active_scope"}
-        async def dummy_tlsrpt(): return {"record": None, "rua": None, "skipped": True, "reason": "focused_manual_active_scope"}
-
-        caa_task    = asyncio.create_task(dummy_caa())
-        mta_task    = asyncio.create_task(dummy_mta())
-        tlsrpt_task = asyncio.create_task(dummy_tlsrpt())
+    if focused_scope.skip_posture():
+        mta_shape = dict({"record": None, "policy_present": False, "policy_sample": None})
+        mta_shape["policy_url"] = f"https://{host}/.well-known/mta-sts.txt"
+        caa_task    = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CAA_SHAPE)))
+        mta_task    = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(mta_shape)))
+        tlsrpt_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(TLSRPT_SHAPE)))
     else:
         caa_task    = asyncio.create_task(fetch_caa(host))
         mta_task    = asyncio.create_task(fetch_mta_sts(host))
@@ -3416,16 +3425,11 @@ async def build_report(target: str,
 
     # Additional security checks
     if not public_only:
-        if focused_manual_active_scope:
+        if focused_scope.skip_posture():
             print("[smart] Focused manual active scope: skipping unrelated passive exposure probes", file=sys.stderr)
-
-            async def dummy_cors(): return {"vulnerable": False, "issues": [], "skipped": True, "reason": "focused_manual_active_scope"}
-            async def dummy_takeover(): return {"vulnerable": False, "cname": None, "issues": [], "skipped": True, "reason": "focused_manual_active_scope"}
-            async def dummy_exposed(): return {"exposed_files": [], "skipped": True, "reason": "focused_manual_active_scope"}
-
-            cors_task = asyncio.create_task(dummy_cors())
-            takeover_task = asyncio.create_task(dummy_takeover())
-            exposed_task = asyncio.create_task(dummy_exposed())
+            cors_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CORS_SHAPE)))
+            takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SUBDOMAIN_TAKEOVER_SHAPE)))
+            exposed_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(EXPOSED_FILES_SHAPE)))
         else:
             cors_task = asyncio.create_task(check_cors(base_url))
             takeover_task = asyncio.create_task(check_subdomain_takeover(host))

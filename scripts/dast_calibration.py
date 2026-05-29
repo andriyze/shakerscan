@@ -12,31 +12,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.calibration import request_json, wait_for_scans  # noqa: E402
 
 ACTIVE_SCAN_TYPES = {"smart", "full", "aggressive"}
-
-
-def request_json(url: str, *, method: str = "GET", payload: Any = None, timeout: int = 30) -> dict[str, Any]:
-    headers = {}
-    data = None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {body}") from exc
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -113,22 +96,6 @@ def queue_scan(api: str, bench: dict[str, Any], options: dict[str, Any]) -> dict
     }
 
 
-def wait_for_scans(api: str, queued: list[dict[str, Any]], timeout: int, poll_interval: float) -> list[dict[str, Any]]:
-    deadline = time.time() + timeout
-    pending = {item["scan_id"] for item in queued}
-    details: dict[str, dict[str, Any]] = {}
-    while pending and time.time() < deadline:
-        for scan_id in list(pending):
-            detail = request_json(f"{api.rstrip('/')}/scans/{scan_id}", timeout=60)
-            details[scan_id] = detail
-            if detail.get("status") in {"completed", "failed", "cancelled"}:
-                pending.remove(scan_id)
-        if pending:
-            time.sleep(poll_interval)
-
-    return [{**item, "detail": details.get(item["scan_id"], {})} for item in queued]
-
-
 def export_report(repo_root: Path, item: dict[str, Any]) -> dict[str, Any]:
     detail = item.get("detail") or {}
     report = detail.get("result")
@@ -199,7 +166,11 @@ def main() -> int:
             queue_errors.append(error)
             print(error, file=sys.stderr)
 
-    completed = wait_for_scans(args.api, queued, args.timeout, args.poll_interval) if args.wait else queued
+    completed = (
+        wait_for_scans(args.api, queued, timeout=args.timeout, poll_interval=args.poll_interval)
+        if args.wait
+        else queued
+    )
     export_errors: list[str] = []
     if args.export_results:
         if not args.wait:
