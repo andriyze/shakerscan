@@ -169,6 +169,10 @@ def _cap_severity(finding: dict[str, Any], max_severity: str) -> None:
         # Preserve the *earliest* recorded severity across chained downgrades
         # (e.g. critical → high → low) so the UI can show the full delta.
         policy.setdefault("original_severity", current)
+        # Canonical, pipeline-agnostic audit field: whichever pipeline first
+        # downgrades records it here so consumers have one place to read the
+        # pre-downgrade severity (see also noise_reduction / validation).
+        finding.setdefault("original_severity", current)
         if "original_cvss_score" not in policy and finding.get("cvss_score") is not None:
             policy["original_cvss_score"] = float(finding["cvss_score"])
         finding["severity"] = max_severity
@@ -478,6 +482,8 @@ def normalize_finding(
             "reason": downgrade_reason,
             "original_severity": original_sev
         }
+        # Canonical, pipeline-agnostic audit field (see _cap_severity).
+        finding.setdefault("original_severity", original_sev)
     else:
         # Calculate CVSS score
         passed_cvss = evidence.get("cvss_score")

@@ -186,3 +186,57 @@ def test_smart_bola_cross_user_chrome_only_is_not_flagged(monkeypatch):
 
     cross = [f for f in results["findings"] if "Cross-user data access" in f.get("title", "")]
     assert cross == []
+
+
+def test_smart_bola_respects_max_seconds_budget(monkeypatch):
+    # Regression for the internal graceful-deadline fix: with a tiny overall
+    # budget and multiple ID-pattern templates, smart_bola_test must stop the
+    # endpoint loop and flag budget_exceeded rather than running unbounded
+    # (and without being hard-cancelled, which would discard partial results).
+    async def fake_fetch(url, **kwargs):
+        body = json.dumps({"user_id": 1, "email": "alice@acme.io"})
+        return _fake_http_response(url, 200, body)
+
+    monkeypatch.setattr(
+        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=[
+                "https://example.com/api/users/1",
+                "https://example.com/api/orders/2",
+                "https://example.com/api/items/3",
+            ],
+            max_endpoints=50,
+            timeout=1,
+            max_seconds=0.0001,  # effectively already expired
+        )
+    )
+
+    assert results.get("budget_exceeded") is True
+
+
+def test_smart_bola_no_budget_runs_to_completion(monkeypatch):
+    # Without max_seconds the deadline machinery is inert (no early stop).
+    async def fake_fetch(url, **kwargs):
+        body = json.dumps({"user_id": 1, "email": "alice@acme.io"})
+        return _fake_http_response(url, 200, body)
+
+    monkeypatch.setattr(
+        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/users/1"],
+            max_endpoints=5,
+            timeout=1,
+        )
+    )
+
+    assert results.get("budget_exceeded") is False

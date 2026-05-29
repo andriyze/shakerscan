@@ -2135,6 +2135,10 @@ def apply_validation_to_finding(
         finding["severity"] = validation.downgrade_to
         finding["validation"]["original_severity"] = original_severity
         finding["validation"]["severity_downgraded"] = True
+        # Canonical, pipeline-agnostic audit field so consumers read one place
+        # for the pre-downgrade severity regardless of which pipeline acted.
+        if original_severity is not None:
+            finding.setdefault("original_severity", original_severity)
 
         # Adjust CVSS score for downgrade
         severity_cvss = {

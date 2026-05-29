@@ -661,3 +661,92 @@ def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):
 
     assert result["vulnerable"] is False
     assert result["evidence"] == []
+
+
+def test_append_bola_finding_preserves_evidence_and_triage():
+    # Regression for the "enrichment silently dropped" class: the shared BOLA
+    # report builder must carry the cross-user evidence AND the triage fields
+    # (normalize_finding keeps neither on its own).
+    report = {"findings": []}
+    finding = {
+        "title": "BOLA: Cross-user data access at /rest/basket/6",
+        "severity": "high",
+        "suspected": True,
+        "needs_verification": True,
+        "verification_reason": "two users received equivalent user-specific data",
+        "confidence": 0.6,
+        "evidence": {
+            "url": "https://x.test/rest/basket/6",
+            "responses_equivalent": True,
+            "response_similarity": 1.0,
+            "user_specific_signals": ["field:userid"],
+        },
+    }
+
+    nf = scanner_main._append_bola_finding(
+        report, finding, tool="smart_bola", default_title="BOLA/IDOR Vulnerability"
+    )
+
+    assert report["findings"] == [nf]
+    # Triage classification preserved.
+    assert nf["suspected"] is True
+    assert nf["needs_verification"] is True
+    assert nf["confidence"] == 0.6
+    assert "equivalent" in nf["verification_reason"]
+    # Cross-user evidence preserved through normalize_finding.
+    ev = nf["evidence"]
+    assert ev["response_similarity"] == 1.0
+    assert ev["user_specific_signals"] == ["field:userid"]
+    assert ev["responses_equivalent"] is True
+
+
+def test_append_bola_finding_caps_response_snippet():
+    report = {"findings": []}
+    finding = {
+        "title": "BOLA",
+        "severity": "high",
+        "evidence": {"response_snippet": "A" * 5000},
+    }
+    nf = scanner_main._append_bola_finding(
+        report, finding, tool="bola_idor", default_title="BOLA", default_severity="critical"
+    )
+    assert len(nf["evidence"]["response_snippet"]) == 300
+
+
+def test_append_bola_finding_uses_defaults_when_missing():
+    report = {"findings": []}
+    nf = scanner_main._append_bola_finding(
+        report, {"evidence": {}}, tool="bola_idor",
+        default_title="Broken Object Level Authorization", default_severity="critical",
+    )
+    assert nf["title"] == "Broken Object Level Authorization"
+    # severity passes through normalize_finding's CVSS validation (which may
+    # adjust an unsupported "critical" down) — just confirm it's a real band.
+    assert nf["severity"] in {"critical", "high", "medium", "low", "info"}
+    assert nf["tool"] == "bola_idor"
+    # No triage fields leaked onto a bare finding.
+    assert nf.get("suspected") is not True
+    assert nf.get("needs_verification") is not True
+
+
+def test_canonical_original_severity_set_on_precision_downgrade():
+    # Consolidated audit: whichever pipeline downgrades, a single top-level
+    # `original_severity` records the pre-downgrade severity.
+    from findings import _cap_severity
+
+    finding = {"severity": "critical", "cvss_score": 9.8}
+    _cap_severity(finding, "low")
+    assert finding["original_severity"] == "critical"
+    # Structured per-pipeline audit still present alongside the canonical field.
+    assert finding["precision_policy"]["original_severity"] == "critical"
+
+
+def test_canonical_original_severity_not_set_without_downgrade():
+    findings = [{
+        "tool": "smart_sqli", "title": "SQLi", "severity": "high",
+        "cvss_score": 9.0, "confidence": 0.7, "verified": True,
+        "evidence": {"verified": True},
+    }]
+    adjusted = apply_dast_precision_policy(findings)
+    # Verified finding, no downgrade -> no canonical original_severity recorded.
+    assert "original_severity" not in adjusted[0]

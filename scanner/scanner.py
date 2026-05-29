@@ -2144,6 +2144,50 @@ except Exception:
         return False
 
 
+# Triage fields a BOLA detector sets on a finding dict that normalize_finding
+# does not carry through on its own.
+_BOLA_TRIAGE_FIELDS = ("suspected", "needs_verification", "verification_reason", "confidence")
+
+
+def _append_bola_finding(
+    report: dict[str, Any],
+    finding: dict[str, Any],
+    *,
+    tool: str,
+    default_title: str,
+    default_severity: str = "high",
+    default_cwe: str = "CWE-639",
+) -> dict[str, Any]:
+    """Normalize and append a BOLA/IDOR finding, preserving evidence + triage.
+
+    Both the smart-path (smart_bola_test) and the phase-4 path (check_bola /
+    bola_multi_user) produce findings carrying cross-user evidence
+    (responses_equivalent / response_similarity / user_specific_signals) and a
+    triage classification (suspected / needs_verification / verification_reason
+    / confidence). normalize_finding only keeps the evidence dict we hand it and
+    drops the top-level triage fields, so we pass the whole evidence through and
+    copy the triage fields back. Centralizing this keeps the two report builders
+    consistent and prevents the recurring "enrichment silently dropped" class of
+    bug.
+    """
+    evidence = dict(finding.get("evidence") or {})
+    snippet = evidence.get("response_snippet")
+    if isinstance(snippet, str) and len(snippet) > 300:
+        evidence["response_snippet"] = snippet[:300]
+    nf = normalize_finding(
+        tool,
+        finding.get("title", default_title),
+        finding.get("severity", default_severity),
+        evidence,
+        finding.get("cwe", default_cwe),
+    )
+    for tkey in _BOLA_TRIAGE_FIELDS:
+        if finding.get(tkey) is not None:
+            nf[tkey] = finding[tkey]
+    report["findings"].append(nf)
+    return nf
+
+
 # ---------- Scan orchestration ----------
 
 async def build_report(target: str,
@@ -6820,13 +6864,15 @@ async def build_report(target: str,
     # BOLA/IDOR Findings
     if bola_results.get("vulnerable"):
         for bola_finding in bola_results.get("findings", []):
-            report["findings"].append(normalize_finding(
-                "bola_idor",
-                bola_finding.get("title", "Broken Object Level Authorization"),
-                bola_finding.get("severity", "critical"),
-                bola_finding.get("evidence", {}),
-                "CWE-639"  # BOLA/IDOR
-            ))
+            # Shared builder also propagates suspected/needs_verification/etc.
+            # so cross-user "potential BOLA" leads keep their triage status
+            # (the inline append here previously dropped them).
+            _append_bola_finding(
+                report, bola_finding,
+                tool="bola_idor",
+                default_title="Broken Object Level Authorization",
+                default_severity="critical",
+            )
 
     # Race Condition Findings
     if race_condition_results.get("vulnerable_endpoints", 0) > 0:
@@ -9195,41 +9241,15 @@ async def build_report(target: str,
                     active_block["smart_bola"] = bola_results
                     emit_progress("active_bola", 91, "BOLA/IDOR testing complete")
 
-                    # Add findings to report
+                    # Add findings to report (shared builder preserves the
+                    # cross-user evidence and triage classification).
                     if bola_results.get("findings"):
                         for f in bola_results["findings"]:
-                            src_ev = f.get("evidence") or {}
-                            built_ev = {
-                                "url": src_ev.get("url"),
-                                "test_id": src_ev.get("test_id"),
-                                "pattern_type": src_ev.get("pattern_type"),
-                                "description": f.get("description"),
-                                "response_snippet": (src_ev.get("response_snippet") or "")[:300],
-                            }
-                            # Preserve cross-user comparison evidence so the report
-                            # explains *why* this was flagged and triage can verify
-                            # it. normalize_finding only keeps what we pass in, so
-                            # these would otherwise be dropped.
-                            for ev_key in (
-                                "responses_equivalent", "response_similarity",
-                                "user_specific_signals", "user1_status", "user2_status",
-                            ):
-                                if src_ev.get(ev_key) is not None:
-                                    built_ev[ev_key] = src_ev[ev_key]
-                            nf = normalize_finding(
-                                "smart_bola",
-                                f.get("title", "BOLA/IDOR Vulnerability"),
-                                f.get("severity", "high"),
-                                built_ev,
-                                f.get("cwe", "CWE-639")
+                            _append_bola_finding(
+                                report, f,
+                                tool="smart_bola",
+                                default_title="BOLA/IDOR Vulnerability",
                             )
-                            # Propagate triage classification set by smart_bola_test
-                            # (suspected lead / needs verification / calibrated
-                            # confidence); normalize_finding does not carry these.
-                            for tkey in ("suspected", "needs_verification", "verification_reason", "confidence"):
-                                if f.get(tkey) is not None:
-                                    nf[tkey] = f[tkey]
-                            report["findings"].append(nf)
                         print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
                     else:
                         print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
