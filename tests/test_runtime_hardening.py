@@ -15,6 +15,47 @@ def test_local_compose_mounts_all_scanner_top_level_modules():
         assert compose.count(mount) >= 2, f"{mount} should be mounted into API and worker"
 
 
+def test_dockerfile_copies_all_scanner_modules_without_drift():
+    # The prebuilt image must contain every top-level scanner module the runtime
+    # imports — not just a hand-maintained subset that silently drifts (this is
+    # how target_context.py went missing and crashed prebuilt deploys). Either a
+    # glob copy, or an explicit copy of every scanner/*.py that runtime imports.
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    scanner_dir = ROOT / "scanner"
+
+    glob_copy = "COPY scanner/*.py /app/" in dockerfile
+    if not glob_copy:
+        # Fallback: if listed individually, every runtime-imported top-level
+        # module must appear. target_context is the one that bit us.
+        for module in ("scanner.py", "constants.py", "grading.py", "findings.py",
+                       "reporting.py", "signals.py", "target_context.py"):
+            assert f"COPY scanner/{module} /app/{module}" in dockerfile, (
+                f"Dockerfile must COPY scanner/{module} (or use the glob)"
+            )
+
+    # Guard against re-introducing the latent bug specifically: target_context.py
+    # exists and is imported, so it must be covered either way.
+    assert (scanner_dir / "target_context.py").exists()
+    assert glob_copy or "COPY scanner/target_context.py" in dockerfile
+
+
+def test_dockerfile_copies_api_modules_without_drift():
+    # Same drift class on the api side: api.py/worker.py import sibling modules
+    # (retest_contract, session_manager, ...) that must be in the prebuilt image.
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    api_glob = "COPY api/*.py /app/" in dockerfile
+    if not api_glob:
+        for module in ("api.py", "worker.py", "retest_contract.py", "session_manager.py"):
+            assert f"COPY api/{module} /app/{module}" in dockerfile, (
+                f"Dockerfile must COPY api/{module} (or use the glob)"
+            )
+    # scanner/*.py must be copied before api/*.py so the api versions of the
+    # colliding module names (gungnir_worker.py, __init__.py) win — matching the
+    # dev bind-mount.
+    if api_glob and "COPY scanner/*.py /app/" in dockerfile:
+        assert dockerfile.index("COPY scanner/*.py /app/") < dockerfile.index("COPY api/*.py /app/")
+
+
 def test_worker_preflight_checks_scanner_subprocess_modules_and_symbols():
     worker = (ROOT / "api" / "worker.py").read_text()
 

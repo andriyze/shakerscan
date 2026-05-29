@@ -46,6 +46,7 @@ from scanner_tools.focused_scope import (
     SUBDOMAIN_TAKEOVER_SHAPE,
     TESTSSL_SHAPE,
     TLSRPT_SHAPE,
+    VHOST_SHAPE,
     FocusedScope,
     async_value as _focused_async_value,
 )
@@ -3690,8 +3691,14 @@ async def build_report(target: str,
     if not public_only and dns.get("A") and not focused_manual_active_scope:
         vhost_task = asyncio.create_task(enumerate_virtual_hosts(base_url, host, dns.get("A")))
     else:
-        async def dummy_vhost(): return {"hosts_tested": 0, "potential_vhosts": [], "baseline": {}, "skipped": bool(focused_manual_active_scope), "reason": "focused_manual_active_scope" if focused_manual_active_scope else None}
-        vhost_task = asyncio.create_task(dummy_vhost())
+        # Focused scans carry the skip marker (so completion status reports the
+        # gap); public-only / no-A-record cases are simply not applicable and
+        # return a bare empty result.
+        if focused_scope.skip_discovery():
+            vhost_result = focused_scope.skipped_result(VHOST_SHAPE)
+        else:
+            vhost_result = dict(VHOST_SHAPE)
+        vhost_task = asyncio.create_task(_focused_async_value(vhost_result))
 
     httpx_meta = await httpx_task
     katana_result = await katana_task

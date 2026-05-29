@@ -104,29 +104,24 @@ RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head 
         ln -sf "$CHROME_PATH" /usr/bin/google-chrome; \
     fi
 
-# Copy scanner application files
-COPY scanner/scanner.py /app/scanner.py
-COPY scanner/constants.py /app/constants.py
-COPY scanner/grading.py /app/grading.py
-COPY scanner/findings.py /app/findings.py
-COPY scanner/signals.py /app/signals.py
-COPY scanner/reporting.py /app/reporting.py
-COPY scanner/gungnir_worker.py /app/gungnir_worker.py
+# Copy scanner application files.
+# Glob all top-level scanner modules instead of listing them individually: the
+# explicit list silently drifted from the real module set (target_context.py is
+# imported by grading/reporting but was never copied, so prebuilt images run
+# without the dev source bind-mount crashed with ModuleNotFoundError). The glob
+# keeps the image in sync with the package automatically.
+# (.dockerignore strips __pycache__ / *.pyc so no build cruft is copied.)
+COPY scanner/*.py /app/
 COPY scanner/scanner_tools /app/scanner_tools
 COPY scanner/wordlists /app/wordlists
 
 # Copy API/worker files used by prebuilt images.
-COPY api/api.py /app/api.py
-COPY api/worker.py /app/worker.py
-COPY api/gungnir_worker.py /app/gungnir_worker.py
-COPY api/session_manager.py /app/session_manager.py
-COPY api/retest_contract.py /app/retest_contract.py
-COPY api/ai_verifier.py /app/ai_verifier.py
-COPY api/ai_control_requirements.py /app/ai_control_requirements.py
-COPY api/ai_demo_scenarios.py /app/ai_demo_scenarios.py
-COPY api/ai_redteam_artifacts.py /app/ai_redteam_artifacts.py
-COPY api/ai_assurance.py /app/ai_assurance.py
-COPY api/ai_gate_scan.py /app/ai_gate_scan.py
+# Globbed (like the scanner modules above) so the image can't drift from the
+# package as new api modules are imported. This COPY runs AFTER scanner/*.py,
+# so for the gungnir_worker.py / __init__.py names that exist in both trees the
+# api/ version wins — matching the dev bind-mount, where api/gungnir_worker.py
+# is the one mounted at /app/gungnir_worker.py.
+COPY api/*.py /app/
 COPY api/ai_gate /app/ai_gate
 
 # Ensure scanner files are readable
