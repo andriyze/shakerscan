@@ -19,6 +19,12 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
+from .bola_comparison import (
+    all_responses_equivalent,
+    extract_user_specific_signals,
+    response_similarity,
+    responses_equivalent,
+)
 
 FORCED_BROWSING_MAX_BODY_BYTES = 262_144
 
@@ -1246,28 +1252,45 @@ async def check_bola(
 
                 # Both users can access - potential BOLA if they shouldn't both have access
                 if user1_status == 200 and user2_status == 200:
-                    # If responses are identical and contain data
-                    if len(user1_body) > 50 and user1_body == user2_body:
-                        # Could be BOLA - both users getting same resource
-                        # This needs manual verification but is suspicious
-                        path_hash = hashlib.sha256(f"{path}:crossuser".encode()).hexdigest()[:8]
-                        results["findings"].append({
-                            "id": f"bola_potential:{path_hash}",
-                            "tool": "bola_check",
-                            "title": f"Potential BOLA: Both users access same resource at {path}",
-                            "severity": "medium",
-                            "evidence": {
-                                "url": url,
-                                "resource_id": resource_id,
-                                "user1_status": user1_status,
-                                "user2_status": user2_status,
-                                "responses_identical": True,
-                            },
-                            "description": f"Both test users can access the same resource at {path}. This may indicate missing authorization checks.",
-                            "remediation": "Verify that users can only access resources they own. Implement object-level authorization checks.",
-                            "cwe": "CWE-639",
-                            "owasp": "API1:2023 - Broken Object Level Authorization",
-                        })
+                    # Equivalence after masking per-request volatile fields
+                    # (CSRF/timestamps/request-ids) so a genuine BOLA isn't
+                    # missed when the two requests differ only in those.
+                    if len(user1_body) > 50 and responses_equivalent(user1_body, user2_body):
+                        # Cross-user-equivalent alone can't distinguish BOLA
+                        # from shared/public data, so require concrete
+                        # user-specific data in the response and emit this as
+                        # a suspected lead for verification rather than a
+                        # confirmed finding.
+                        user_signals = extract_user_specific_signals(user1_body)
+                        if user_signals:
+                            similarity = response_similarity(user1_body, user2_body)
+                            path_hash = hashlib.sha256(f"{path}:crossuser".encode()).hexdigest()[:8]
+                            results["findings"].append({
+                                "id": f"bola_potential:{path_hash}",
+                                "tool": "bola_check",
+                                "title": f"Potential BOLA: Both users access same resource at {path}",
+                                "severity": "medium",
+                                "suspected": True,
+                                "needs_verification": True,
+                                "verification_reason": (
+                                    "Two users received equivalent user-specific data for the same "
+                                    "resource ID; confirm the second user does not own the resource."
+                                ),
+                                "confidence": 0.55,
+                                "evidence": {
+                                    "url": url,
+                                    "resource_id": resource_id,
+                                    "user1_status": user1_status,
+                                    "user2_status": user2_status,
+                                    "responses_equivalent": True,
+                                    "response_similarity": round(similarity, 3),
+                                    "user_specific_signals": user_signals[:8],
+                                },
+                                "description": f"Both test users received equivalent user-specific data at {path}. This may indicate missing object-level authorization.",
+                                "remediation": "Verify that users can only access resources they own. Implement object-level authorization checks.",
+                                "cwe": "CWE-639",
+                                "owasp": "API1:2023 - Broken Object Level Authorization",
+                            })
 
         if endpoint_no_auth_candidates:
             sample = endpoint_no_auth_candidates[0]
@@ -1835,15 +1858,18 @@ async def smart_bola_test(
                 if user1_status == 200 and user2_status == 200:
                     # Both users can access - check if data is user-specific
                     if len(user1_body) > 50 and len(user2_body) > 50:
-                        # Compare responses
-                        if user1_body == user2_body:
-                            # Identical responses - might be public data or BOLA
-                            # Look for user-specific indicators
-                            user_indicators = ['user_id', 'userId', 'email', 'name', 'profile', 'account']
-                            has_user_data = any(ind in user1_body.lower() for ind in user_indicators)
-
-                            if has_user_data:
-                                results["vulnerable"] = True
+                        # Equivalence after volatile-field normalization (fixes
+                        # missed BOLA when responses embed CSRF/timestamps), and
+                        # value-based user-data detection (avoids matching nav
+                        # chrome / error envelopes).
+                        if responses_equivalent(user1_body, user2_body):
+                            user_signals = extract_user_specific_signals(user1_body)
+                            if user_signals:
+                                # Cross-user-equivalent + user-specific data is a
+                                # strong lead but still can't prove user2 lacks
+                                # ownership without a control, so mark it for
+                                # verification rather than auto-confirming.
+                                similarity = response_similarity(user1_body, user2_body)
                                 results["cross_user_violations"] += 1
                                 path_hash = hashlib.sha256(f"{test_url}:crossuser".encode()).hexdigest()[:8]
                                 results["findings"].append({
@@ -1851,17 +1877,26 @@ async def smart_bola_test(
                                     "tool": "smart_bola",
                                     "title": f"BOLA: Cross-user data access at {template}",
                                     "severity": "high",
+                                    "suspected": True,
+                                    "needs_verification": True,
+                                    "verification_reason": (
+                                        "Both users received equivalent user-specific data for the same "
+                                        "resource ID; confirm the second user is not an owner/admin."
+                                    ),
+                                    "confidence": 0.6,
                                     "evidence": {
                                         "url": test_url,
                                         "test_id": test_id,
                                         "pattern_type": pattern_type,
                                         "user1_status": user1_status,
                                         "user2_status": user2_status,
-                                        "responses_identical": True,
+                                        "responses_equivalent": True,
+                                        "response_similarity": round(similarity, 3),
+                                        "user_specific_signals": user_signals[:8],
                                         "response_snippet": user1_body[:300],
                                     },
-                                    "description": f"Both test users can access resource with ID {test_id}. "
-                                                 "If this is user-specific data, this indicates missing authorization.",
+                                    "description": f"Both test users received equivalent user-specific data for resource ID {test_id}. "
+                                                 "If user2 does not own this resource, this is missing object-level authorization.",
                                     "remediation": "Implement object-level authorization. Verify requesting user owns the resource.",
                                     "cwe": "CWE-639",
                                     "owasp": "API1:2023 - Broken Object Level Authorization",
@@ -2136,15 +2171,18 @@ async def check_bola_multi_user(
                             expected_owner = owner_idx
                             break
 
-                # Compare bodies
+                # Compare bodies, tolerating per-request volatile fields.
                 bodies = [body for _, body in successful_users]
-                if len(set(bodies)) == 1:  # All identical responses
+                if all_responses_equivalent(bodies):  # All equivalent responses
                     accessing_users = [uid for uid, _ in successful_users]
 
                     # If we know the owner and others can access
                     if expected_owner is not None:
                         unauthorized_users = [u for u in accessing_users if u != expected_owner]
                         if unauthorized_users:
+                            # Operator asserted ownership via user_owned_resources,
+                            # so unauthorized cross-user access is a confirmed
+                            # violation.
                             results["vulnerable"] = True
                             results["access_violations"] += 1
                             path_hash = hashlib.sha256(f"{path}:crossuser:multi".encode()).hexdigest()[:8]
@@ -2166,24 +2204,37 @@ async def check_bola_multi_user(
                                 "owasp": "API1:2023 - Broken Object Level Authorization",
                             })
                     else:
-                        # No ownership defined, flag as potential BOLA
-                        path_hash = hashlib.sha256(f"{path}:shared:multi".encode()).hexdigest()[:8]
-                        results["findings"].append({
-                            "id": f"bola_multi_potential:{path_hash}",
-                            "tool": "bola_multi_user",
-                            "title": f"Potential BOLA: Multiple users access same resource at {path}",
-                            "severity": "medium",
-                            "evidence": {
-                                "url": url,
-                                "resource_id": resource_id,
-                                "accessing_users": [f"user_{u}" for u in accessing_users],
-                                "responses_identical": True,
-                            },
-                            "description": f"{len(successful_users)} users can access the same resource. Verify this is intended.",
-                            "remediation": "Review access control to ensure only authorized users can access.",
-                            "cwe": "CWE-639",
-                            "owasp": "API1:2023 - Broken Object Level Authorization",
-                        })
+                        # No ownership defined — equivalent responses across
+                        # users can't be distinguished from shared/public data
+                        # without it. Require concrete user-specific data and
+                        # emit a suspected lead rather than a finding.
+                        user_signals = extract_user_specific_signals(bodies[0])
+                        if user_signals:
+                            path_hash = hashlib.sha256(f"{path}:shared:multi".encode()).hexdigest()[:8]
+                            results["findings"].append({
+                                "id": f"bola_multi_potential:{path_hash}",
+                                "tool": "bola_multi_user",
+                                "title": f"Potential BOLA: Multiple users access same resource at {path}",
+                                "severity": "medium",
+                                "suspected": True,
+                                "needs_verification": True,
+                                "verification_reason": (
+                                    "Multiple users received equivalent user-specific data for the same "
+                                    "resource; confirm they are not all legitimate owners/admins."
+                                ),
+                                "confidence": 0.5,
+                                "evidence": {
+                                    "url": url,
+                                    "resource_id": resource_id,
+                                    "accessing_users": [f"user_{u}" for u in accessing_users],
+                                    "responses_equivalent": True,
+                                    "user_specific_signals": user_signals[:8],
+                                },
+                                "description": f"{len(successful_users)} users received equivalent user-specific data for the same resource. Verify this is intended.",
+                                "remediation": "Review access control to ensure only authorized users can access.",
+                                "cwe": "CWE-639",
+                                "owasp": "API1:2023 - Broken Object Level Authorization",
+                            })
 
         if endpoint_no_auth_candidates:
             sample = endpoint_no_auth_candidates[0]

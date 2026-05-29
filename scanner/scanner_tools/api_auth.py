@@ -199,6 +199,13 @@ async def api_login(
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
         for candidate in candidates:
+            # Isolate the cookie jar per candidate endpoint. Otherwise a cookie
+            # set by one candidate (e.g. an anonymous session/CSRF cookie from
+            # /wp-login.php) leaks into requests to every later candidate, which
+            # can produce a false "logged in via cookie" success attributed to
+            # the wrong endpoint. Credentials against the same endpoint (the
+            # JSON→form fallback below) still legitimately share its cookies.
+            client.cookies.clear()
             for payload in payloads:
                 if max_attempts and attempts >= max_attempts:
                     break

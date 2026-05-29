@@ -369,26 +369,82 @@ async def find_login_page(base_url: str, session: AuthSession) -> str | None:
     Find the login page URL by trying common patterns.
 
     Returns the URL of a page containing a login form, or None.
+
+    Candidate pages are *scored* rather than first-match: a settings page at
+    `/account` with a "change password" field would otherwise win over the
+    real `/login`, causing the scanner to submit credentials to the wrong
+    form. We prefer pages that look like genuine login forms (exactly one
+    password field, a username/email field, login keywords, login-shaped URL)
+    and short-circuit only on a high-confidence match.
     """
-    # Try common login URLs
-    for pattern in LOGIN_URL_PATTERNS:
-        url = urljoin(base_url, pattern)
+    candidates: list[tuple[float, str]] = []
+
+    # URLs to probe: known login patterns first, then the base URL.
+    probe_urls = [urljoin(base_url, pattern) for pattern in LOGIN_URL_PATTERNS]
+    probe_urls.append(base_url)
+
+    for url in probe_urls:
         response = await session.get(url)
-
-        if response.get("status") == 200:
-            body = response.get("body", "")
-            # Check if page has a password field
-            if re.search(r'<input[^>]*type=["\']password["\']', body, re.IGNORECASE):
-                return url
-
-    # Check if base URL has a login form
-    response = await session.get(base_url)
-    if response.get("status") == 200:
+        if response.get("status") != 200:
+            continue
         body = response.get("body", "")
-        if re.search(r'<input[^>]*type=["\']password["\']', body, re.IGNORECASE):
-            return base_url
+        if not re.search(r'<input[^>]*type=["\']password["\']', body, re.IGNORECASE):
+            continue
+        score = _score_login_page(url, body)
+        candidates.append((score, url))
+        # Strong, unambiguous match — stop early to avoid extra requests.
+        if score >= 0.9:
+            return url
 
-    return None
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _score_login_page(url: str, body: str) -> float:
+    """Heuristic 0.0-1.0 score that `url` is a genuine login page.
+
+    Higher when the page has exactly one password field (login forms rarely
+    have two; change-password/registration forms usually do), a username/email
+    field, login keywords, and a login-shaped URL.
+    """
+    score = 0.0
+    body_lower = body.lower()
+
+    password_fields = len(re.findall(r'<input[^>]*type=["\']password["\']', body, re.IGNORECASE))
+    if password_fields == 1:
+        score += 0.4
+    elif password_fields >= 2:
+        # Two+ password inputs strongly implies change-password / registration
+        # / confirm-password, not a login form.
+        score -= 0.3
+
+    # Username / email field present.
+    if re.search(r'<input[^>]*type=["\']email["\']', body, re.IGNORECASE) or re.search(
+        r'name=["\'](?:user(?:name)?|email|login|j_username)["\']', body, re.IGNORECASE
+    ):
+        score += 0.25
+
+    # Login-shaped URL.
+    path = urlparse(url).path.lower()
+    if any(token in path for token in ("login", "signin", "sign-in", "session", "auth")):
+        score += 0.25
+
+    # De-prioritize URLs/pages that look like account settings / registration /
+    # password change, which also carry password inputs.
+    negative_tokens = ("change-password", "reset", "register", "signup", "sign-up", "settings", "account")
+    if any(token in path for token in negative_tokens):
+        score -= 0.25
+    if any(kw in body_lower for kw in ("change password", "current password", "new password", "confirm password", "create account", "register")):
+        score -= 0.2
+
+    # Login keywords in body.
+    if any(kw in body_lower for kw in ("sign in", "log in", "login")):
+        score += 0.1
+
+    return score
 
 
 def check_login_success(

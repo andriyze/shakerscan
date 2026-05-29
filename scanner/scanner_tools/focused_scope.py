@@ -123,6 +123,17 @@ NO_FOCUSED_SCOPE = FocusedScope(active=False)
 # instead of redeclaring the dict inline. New modules should add their shape
 # here as part of the migration.
 
+NMAP_CIPHERS_SHAPE: dict[str, Any] = {"raw": "", "weak_indicators": [], "ciphers_by_protocol": {}}
+TESTSSL_SHAPE: dict[str, Any] = {"supports_tls13": None, "issues": [], "raw_present": False}
+SSLYZE_SHAPE: dict[str, Any] = {
+    "certificate_chain": [],
+    "cipher_suites": {},
+    "vulnerabilities": [],
+    "tls_versions": {},
+    "ocsp_stapling": False,
+    "session_resumption": {},
+    "scan_completed": False,
+}
 DMARC_SHAPE: dict[str, Any] = {"record": None, "fields": {}}
 DNSSEC_SHAPE: dict[str, Any] = {"status": "skipped", "algorithm": None}
 CAA_SHAPE: dict[str, Any] = {"records": []}

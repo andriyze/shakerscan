@@ -40,8 +40,11 @@ from scanner_tools.focused_scope import (
     DMARC_SHAPE,
     DNSSEC_SHAPE,
     EXPOSED_FILES_SHAPE,
+    NMAP_CIPHERS_SHAPE,
     SECURITY_TXT_SHAPE,
+    SSLYZE_SHAPE,
     SUBDOMAIN_TAKEOVER_SHAPE,
+    TESTSSL_SHAPE,
     TLSRPT_SHAPE,
     FocusedScope,
     async_value as _focused_async_value,
@@ -2949,6 +2952,32 @@ async def build_report(target: str,
                 if auth_config:
                     auth_config["user2_enabled"] = True
                     auth_config["user2_method"] = "form_login"
+
+                # Register a re-auth callback for user2 too. Without it, an
+                # expired user2 session mid-scan returns 401/403 and every
+                # subsequent cross-user BOLA comparison silently records "no
+                # violation" — false negatives for the rest of the scan. Bind
+                # the loop variables as defaults so the closure uses user2's
+                # credentials, never user1's.
+                async def _refresh_user2_form_login(
+                    _u=user2_login_username,
+                    _p=user2_login_password,
+                    _login_url=login_url,
+                    _extra=extra_fields,
+                ):
+                    result = await form_login(
+                        base_url=base_url,
+                        username=_u,
+                        password=_p,
+                        login_url=_login_url,
+                        extra_fields=_extra,
+                    )
+                    return result.session if result and result.success else None
+
+                if hasattr(user2_session, "set_refresh_callback"):
+                    user2_session.set_refresh_callback(
+                        _refresh_user2_form_login, cooldown_seconds=90, max_failures=3
+                    )
         except Exception as e:
             print(f"Warning: User2 form login failed: {e}", file=sys.stderr)
 
@@ -3058,15 +3087,12 @@ async def build_report(target: str,
     if skip_slow_tls_analysis:
         if focused_manual_active_scope:
             print("[smart] Focused manual active scope: skipping slow TLS analyzers", file=sys.stderr)
-        # Basic TLS info only - skip deep cipher analysis
+        # Basic TLS info only - skip deep cipher analysis. This skip fires for
+        # focused scans AND public+quick mode, so carry the specific reason.
         skip_reason = "focused_manual_active_scope" if focused_manual_active_scope else "public_quick_mode"
-
-        async def dummy_nmap(): return {"raw": "", "weak_indicators": [], "ciphers_by_protocol": {}, "skipped": True, "reason": skip_reason}
-        async def dummy_testssl(): return {"supports_tls13": None, "issues": [], "raw_present": False, "skipped": True, "reason": skip_reason}
-        async def dummy_sslyze(): return {"certificate_chain": [], "cipher_suites": {}, "vulnerabilities": [], "tls_versions": {}, "ocsp_stapling": False, "session_resumption": {}, "scan_completed": False, "skipped": True, "reason": skip_reason}
-        nmap_task   = asyncio.create_task(dummy_nmap())
-        testssl_task= asyncio.create_task(dummy_testssl())
-        sslyze_task = asyncio.create_task(dummy_sslyze())
+        nmap_task   = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(NMAP_CIPHERS_SHAPE, reason=skip_reason)))
+        testssl_task= asyncio.create_task(_focused_async_value(focused_scope.skipped_result(TESTSSL_SHAPE, reason=skip_reason)))
+        sslyze_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SSLYZE_SHAPE, reason=skip_reason)))
     else:
         nmap_task   = asyncio.create_task(nmap_ciphers(host, port))
         testssl_task= asyncio.create_task(testssl(host, port))
