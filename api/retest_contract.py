@@ -669,8 +669,35 @@ async def run_schema_migrations(pool) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_verdict ON finding_verifications(verdict)",
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_job_id ON finding_verifications(job_id) WHERE job_id IS NOT NULL",
                 "CREATE INDEX IF NOT EXISTS idx_finding_verifications_retry_class ON finding_verifications(retry_class) WHERE retry_class IS NOT NULL",
+                # Sort/filter hot paths for the /findings list endpoint.
+                "CREATE INDEX IF NOT EXISTS idx_findings_last_seen ON findings(last_seen_at DESC NULLS LAST)",
             ]:
                 await conn.execute(stmt)
+
+            # Dedup hot path + race guard for save_findings. On upgraded
+            # databases that pre-date this constraint we may have duplicate
+            # rows from concurrent inserts; collapse them keeping the most
+            # recently seen row before creating the UNIQUE index.
+            await conn.execute("""
+                WITH ranked AS (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY target_id, fingerprint
+                            ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC
+                        ) AS rn
+                    FROM findings
+                    WHERE target_id IS NOT NULL
+                )
+                DELETE FROM findings
+                USING ranked
+                WHERE findings.id = ranked.id AND ranked.rn > 1
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_target_fingerprint
+                    ON findings(target_id, fingerprint)
+                    WHERE target_id IS NOT NULL
+            """)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

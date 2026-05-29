@@ -2470,7 +2470,9 @@ async def build_report(target: str,
 
     focused_scope = FocusedScope.from_request(
         smart_mode=smart_mode,
-        family=focused_active_family,
+        # Pass the resolved family name string (e.g. "xss"), not the bool
+        # `focused_active_family` predicate.
+        family=focused_active_family_name,
         manual_endpoints=manual_endpoints_norm,
     )
     # Backwards-compatible alias. New code should reference focused_scope.

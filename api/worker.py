@@ -482,10 +482,33 @@ async def _hydrate_ai_gate_options(options: dict[str, Any]) -> dict[str, Any]:
     return hydrated
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        raw = os.environ.get(name)
+        return int(raw) if raw is not None and raw != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
 async def init_db():
     """Initialize database connection pool."""
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    db_pool_min = _int_env("DB_POOL_MIN_SIZE", 2)
+    db_pool_max = _int_env("DB_POOL_MAX_SIZE", 8)
+    db_statement_timeout_ms = _int_env("DB_STATEMENT_TIMEOUT_MS", 60000)
+
+    async def _init_conn(conn):
+        # Per-worker statement timeout. Longer than the API default because
+        # save_findings can run a tight loop of inserts under heavy churn.
+        if db_statement_timeout_ms > 0:
+            await conn.execute(f"SET statement_timeout = {db_statement_timeout_ms}")
+
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=db_pool_min,
+        max_size=db_pool_max,
+        init=_init_conn,
+    )
     await run_schema_migrations(db_pool)
 
 
@@ -1035,156 +1058,171 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             finding_tool = finding.get('tool')
             finding_source = finding.get('source') or ('model_intake' if finding_tool == 'model_intake' else None)
 
-            existing = await conn.fetchrow("""
-                SELECT id, status, resurfaced_count, title, tool, cwe, evidence
-                FROM findings
-                WHERE target_id = $1 AND fingerprint = $2
-            """, target_uuid, fingerprint)
+            # Wrap each finding in a transaction so the SELECT-then-INSERT race
+            # between concurrent workers (e.g. a retest + scheduled scan) is
+            # serialised. The UNIQUE(target_id, fingerprint) index added in
+            # run_schema_migrations is the ultimate guard; on the race-loser
+            # side we fall back to UPDATE rather than crashing.
+            async with conn.transaction():
+                existing = await conn.fetchrow("""
+                    SELECT id, status, resurfaced_count, title, tool, cwe, evidence
+                    FROM findings
+                    WHERE target_id = $1 AND fingerprint = $2
+                    FOR UPDATE
+                """, target_uuid, fingerprint)
 
-            if existing:
-                # Canonicalize JSON so cosmetic key-order/whitespace differences
-                # (PG JSONB does not preserve key order on read-back) do not
-                # falsely fire verification_signature_changed and churn
-                # last_verification_* on every re-scan.
-                existing_evidence = _canonicalize_jsonish(existing['evidence'])
-                new_evidence = _canonicalize_jsonish(evidence_json)
-                verification_signature_changed = (
-                    existing['title'] != finding.get('title') or
-                    existing['tool'] != finding_tool or
-                    existing['cwe'] != finding.get('cwe') or
-                    existing_evidence != new_evidence
-                )
-                if existing['status'] == 'resolved':
-                    await conn.execute("""
-                        UPDATE findings SET
-                            status = 'active',
-                            last_seen_at = NOW(),
-                            resurfaced_count = $1,
-                            scan_id = $2,
-                            title = $3,
-                            description = $4,
-                            severity = $5,
-                            cvss_score = $6,
-                            tool = $7,
-                            cwe = $8,
-                            cwe_name = $9,
-                            owasp = $10,
-                            url = $11,
-                            evidence = $12,
-                            ai_verdict = $13,
-                            ai_confidence = $14,
-                            ai_rationale = $15,
-                            ai_recommendations = $16,
-                            ai_classification_source = $17,
-                            source = COALESCE($18, source),
-                            last_verification_status = CASE WHEN $19 THEN NULL ELSE last_verification_status END,
-                            last_verification_verdict = CASE WHEN $19 THEN NULL ELSE last_verification_verdict END,
-                            last_verification_confidence = CASE WHEN $19 THEN NULL ELSE last_verification_confidence END,
-                            last_verified_at = CASE WHEN $19 THEN NULL ELSE last_verified_at END,
-                            updated_at = NOW()
-                        WHERE id = $20
-                    """,
-                        existing['resurfaced_count'] + 1,
-                        scan_uuid,
-                        finding.get('title'),
-                        finding.get('description'),
-                        finding.get('severity', 'info'),
-                        finding.get('cvss_score'),
-                        finding_tool,
-                        finding.get('cwe'),
-                        finding.get('cwe_name'),
-                        finding.get('owasp'),
-                        finding.get('url'),
-                        evidence_json,
-                        finding.get('ai_verdict'),
-                        finding.get('ai_confidence'),
-                        finding.get('ai_rationale'),
-                        ai_recommendations_json,
-                        ai_classification_source,
-                        finding_source,
-                        verification_signature_changed,
-                        existing['id'],
+                if existing:
+                    # Canonicalize JSON so cosmetic key-order/whitespace differences
+                    # (PG JSONB does not preserve key order on read-back) do not
+                    # falsely fire verification_signature_changed and churn
+                    # last_verification_* on every re-scan.
+                    existing_evidence = _canonicalize_jsonish(existing['evidence'])
+                    new_evidence = _canonicalize_jsonish(evidence_json)
+                    verification_signature_changed = (
+                        existing['title'] != finding.get('title') or
+                        existing['tool'] != finding_tool or
+                        existing['cwe'] != finding.get('cwe') or
+                        existing_evidence != new_evidence
                     )
-                else:
-                    await conn.execute("""
-                        UPDATE findings SET
-                            last_seen_at = NOW(),
-                            scan_id = $1,
-                            title = $2,
-                            description = $3,
-                            severity = $4,
-                            cvss_score = $5,
-                            tool = $6,
-                            cwe = $7,
-                            cwe_name = $8,
-                            owasp = $9,
-                            url = $10,
-                            evidence = $11,
-                            ai_verdict = $12,
-                            ai_confidence = $13,
-                            ai_rationale = $14,
-                            ai_recommendations = $15,
-                            ai_classification_source = $16,
-                            source = COALESCE($17, source),
-                            last_verification_status = CASE WHEN $18 THEN NULL ELSE last_verification_status END,
-                            last_verification_verdict = CASE WHEN $18 THEN NULL ELSE last_verification_verdict END,
-                            last_verification_confidence = CASE WHEN $18 THEN NULL ELSE last_verification_confidence END,
-                            last_verified_at = CASE WHEN $18 THEN NULL ELSE last_verified_at END,
-                            updated_at = NOW()
-                        WHERE id = $19
-                    """,
-                        scan_uuid,
-                        finding.get('title'),
-                        finding.get('description'),
-                        finding.get('severity', 'info'),
-                        finding.get('cvss_score'),
-                        finding_tool,
-                        finding.get('cwe'),
-                        finding.get('cwe_name'),
-                        finding.get('owasp'),
-                        finding.get('url'),
-                        evidence_json,
-                        finding.get('ai_verdict'),
-                        finding.get('ai_confidence'),
-                        finding.get('ai_rationale'),
-                        ai_recommendations_json,
-                        ai_classification_source,
-                        finding_source,
-                        verification_signature_changed,
-                        existing['id'],
-                    )
-                saved += 1
-            else:
-                result = await conn.fetchval("""
-                    INSERT INTO findings (
-                        scan_id, target_id, fingerprint, title, description,
-                        severity, cvss_score, tool, cwe, cwe_name, owasp,
-                        url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source, source
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-                    RETURNING id
-                """,
-                    scan_uuid,
-                    target_uuid,
-                    fingerprint,
-                    finding.get('title'),
-                    finding.get('description'),
-                    finding.get('severity', 'info'),
-                    finding.get('cvss_score'),
-                    finding_tool,
-                    finding.get('cwe'),
-                    finding.get('cwe_name'),
-                    finding.get('owasp'),
-                    finding.get('url'),
-                    evidence_json,
-                    finding.get('ai_verdict'),
-                    finding.get('ai_confidence'),
-                    finding.get('ai_rationale'),
-                    ai_recommendations_json,
-                    ai_classification_source,
-                    finding_source,
-                )
-                if result:
+                    if existing['status'] == 'resolved':
+                        await conn.execute("""
+                            UPDATE findings SET
+                                status = 'active',
+                                last_seen_at = NOW(),
+                                resurfaced_count = $1,
+                                scan_id = $2,
+                                title = $3,
+                                description = $4,
+                                severity = $5,
+                                cvss_score = $6,
+                                tool = $7,
+                                cwe = $8,
+                                cwe_name = $9,
+                                owasp = $10,
+                                url = $11,
+                                evidence = $12,
+                                ai_verdict = $13,
+                                ai_confidence = $14,
+                                ai_rationale = $15,
+                                ai_recommendations = $16,
+                                ai_classification_source = $17,
+                                source = COALESCE($18, source),
+                                last_verification_status = CASE WHEN $19 THEN NULL ELSE last_verification_status END,
+                                last_verification_verdict = CASE WHEN $19 THEN NULL ELSE last_verification_verdict END,
+                                last_verification_confidence = CASE WHEN $19 THEN NULL ELSE last_verification_confidence END,
+                                last_verified_at = CASE WHEN $19 THEN NULL ELSE last_verified_at END,
+                                updated_at = NOW()
+                            WHERE id = $20
+                        """,
+                            existing['resurfaced_count'] + 1,
+                            scan_uuid,
+                            finding.get('title'),
+                            finding.get('description'),
+                            finding.get('severity', 'info'),
+                            finding.get('cvss_score'),
+                            finding_tool,
+                            finding.get('cwe'),
+                            finding.get('cwe_name'),
+                            finding.get('owasp'),
+                            finding.get('url'),
+                            evidence_json,
+                            finding.get('ai_verdict'),
+                            finding.get('ai_confidence'),
+                            finding.get('ai_rationale'),
+                            ai_recommendations_json,
+                            ai_classification_source,
+                            finding_source,
+                            verification_signature_changed,
+                            existing['id'],
+                        )
+                    else:
+                        await conn.execute("""
+                            UPDATE findings SET
+                                last_seen_at = NOW(),
+                                scan_id = $1,
+                                title = $2,
+                                description = $3,
+                                severity = $4,
+                                cvss_score = $5,
+                                tool = $6,
+                                cwe = $7,
+                                cwe_name = $8,
+                                owasp = $9,
+                                url = $10,
+                                evidence = $11,
+                                ai_verdict = $12,
+                                ai_confidence = $13,
+                                ai_rationale = $14,
+                                ai_recommendations = $15,
+                                ai_classification_source = $16,
+                                source = COALESCE($17, source),
+                                last_verification_status = CASE WHEN $18 THEN NULL ELSE last_verification_status END,
+                                last_verification_verdict = CASE WHEN $18 THEN NULL ELSE last_verification_verdict END,
+                                last_verification_confidence = CASE WHEN $18 THEN NULL ELSE last_verification_confidence END,
+                                last_verified_at = CASE WHEN $18 THEN NULL ELSE last_verified_at END,
+                                updated_at = NOW()
+                            WHERE id = $19
+                        """,
+                            scan_uuid,
+                            finding.get('title'),
+                            finding.get('description'),
+                            finding.get('severity', 'info'),
+                            finding.get('cvss_score'),
+                            finding_tool,
+                            finding.get('cwe'),
+                            finding.get('cwe_name'),
+                            finding.get('owasp'),
+                            finding.get('url'),
+                            evidence_json,
+                            finding.get('ai_verdict'),
+                            finding.get('ai_confidence'),
+                            finding.get('ai_rationale'),
+                            ai_recommendations_json,
+                            ai_classification_source,
+                            finding_source,
+                            verification_signature_changed,
+                            existing['id'],
+                        )
                     saved += 1
+                else:
+                    # Use ON CONFLICT as a belt-and-braces guard: if a
+                    # concurrent worker inserted the same (target_id, fingerprint)
+                    # between our SELECT and INSERT, the UNIQUE index would
+                    # otherwise raise UniqueViolationError and abort the
+                    # transaction. ON CONFLICT DO NOTHING lets us treat the
+                    # race-loser path as "already saved" without crashing the
+                    # whole save_findings batch.
+                    result = await conn.fetchval("""
+                        INSERT INTO findings (
+                            scan_id, target_id, fingerprint, title, description,
+                            severity, cvss_score, tool, cwe, cwe_name, owasp,
+                            url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source, source
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                        ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL DO NOTHING
+                        RETURNING id
+                    """,
+                        scan_uuid,
+                        target_uuid,
+                        fingerprint,
+                        finding.get('title'),
+                        finding.get('description'),
+                        finding.get('severity', 'info'),
+                        finding.get('cvss_score'),
+                        finding_tool,
+                        finding.get('cwe'),
+                        finding.get('cwe_name'),
+                        finding.get('owasp'),
+                        finding.get('url'),
+                        evidence_json,
+                        finding.get('ai_verdict'),
+                        finding.get('ai_confidence'),
+                        finding.get('ai_rationale'),
+                        ai_recommendations_json,
+                        ai_classification_source,
+                        finding_source,
+                    )
+                    if result:
+                        saved += 1
 
     return saved
 

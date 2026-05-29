@@ -338,10 +338,17 @@ CREATE INDEX idx_findings_severity ON findings(severity);
 CREATE INDEX idx_findings_status ON findings(status);
 CREATE INDEX idx_findings_fingerprint ON findings(fingerprint);
 CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
+CREATE INDEX idx_findings_last_seen ON findings(last_seen_at DESC NULLS LAST);
 CREATE INDEX idx_findings_source ON findings(source);
 CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL;
 CREATE INDEX idx_findings_last_verification_verdict ON findings(last_verification_verdict);
+-- Dedup hot path: save_findings looks up by (target_id, fingerprint) on every
+-- finding write. UNIQUE doubles as the race guard for concurrent save_findings
+-- calls that previously could both SELECT-miss and both INSERT.
+CREATE UNIQUE INDEX idx_findings_target_fingerprint
+    ON findings(target_id, fingerprint)
+    WHERE target_id IS NOT NULL;
 
 -- Finding verifications
 CREATE INDEX idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC);

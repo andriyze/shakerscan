@@ -1073,7 +1073,14 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
 
 
 async def run_due_schedules(pool: asyncpg.Pool):
-    """Check for and execute due scheduled scans."""
+    """Check for and execute due scheduled scans.
+
+    Connection lifetime: acquire a connection only to fetch the due list, then
+    release it. Each due schedule then re-acquires for its own short-lived
+    transaction. Previously this method pinned a single connection across the
+    entire loop, which could starve the shared API pool when many schedules
+    fire together or when a single schedule got slow (e.g. Redis push delay).
+    """
     r = get_redis()
     now = datetime.utcnow()
 
@@ -1085,12 +1092,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
             WHERE s.is_active = true AND s.next_run_at <= $1
         """, now)
 
-        for schedule in due_schedules:
-            schedule_id = schedule['id']
-            target_id = schedule['target_id']
-            target_url = schedule['target_url']
-            scan_type = schedule['scan_type'] or 'standard'
+    for schedule in due_schedules:
+        schedule_id = schedule['id']
+        target_id = schedule['target_id']
+        target_url = schedule['target_url']
+        scan_type = schedule['scan_type'] or 'standard'
 
+        async with pool.acquire() as conn:
             # Check if target already has a running/pending scan
             existing = await conn.fetchval("""
                 SELECT COUNT(*) FROM scans
@@ -1116,46 +1124,50 @@ async def run_due_schedules(pool: asyncpg.Pool):
             job_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
 
-            scan_options = {}
-            if schedule['scan_options']:
-                if isinstance(schedule['scan_options'], str):
-                    scan_options = json.loads(schedule['scan_options'])
-                else:
-                    scan_options = dict(schedule['scan_options'])
+            # Use the shared helper so JSONB shapes (raw string vs decoded
+            # dict, depending on asyncpg version / column type) are handled
+            # consistently with the rest of the codebase.
+            decoded_options = _decode_json_value(schedule['scan_options']) or {}
+            if not isinstance(decoded_options, dict):
+                decoded_options = {}
+            scan_options = dict(decoded_options)
             scan_options['scan_type'] = scan_type
 
-            await conn.execute("""
-                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-            """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                 json.dumps(scan_options), scan_type)
+            async with conn.transaction():
+                # Insert scan row and update schedule atomically so a Redis
+                # push failure below cannot leave a "phantom pending" scan
+                # without an updated schedule next_run_at.
+                await conn.execute("""
+                    INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
+                    VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+                """, uuid.UUID(scan_id), target_id, target_url, job_id,
+                     json.dumps(scan_options), scan_type)
 
-            job_data = {
-                'job_id': job_id,
-                'scan_id': scan_id,
-                'target': target_url,
-                'options': scan_options,
-                'submitted_at': datetime.utcnow().isoformat(),
-                'scheduled': True,
-                'schedule_id': str(schedule_id)
-            }
-            r.rpush(QUEUE_NAME, json.dumps(job_data))
-            r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': target_url})
+                next_run = calculate_next_run(
+                    schedule['frequency'],
+                    schedule['day_of_week'],
+                    schedule['time_of_day'] or '02:00',
+                    schedule['timezone'] or 'UTC',
+                    schedule['jitter_minutes'] or 0
+                )
+                await conn.execute("""
+                    UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
+                    WHERE id = $3
+                """, now, next_run, schedule_id)
 
-            # Update schedule
-            next_run = calculate_next_run(
-                schedule['frequency'],
-                schedule['day_of_week'],
-                schedule['time_of_day'] or '02:00',
-                schedule['timezone'] or 'UTC',
-                schedule['jitter_minutes'] or 0
-            )
-            await conn.execute("""
-                UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
-                WHERE id = $3
-            """, now, next_run, schedule_id)
+        job_data = {
+            'job_id': job_id,
+            'scan_id': scan_id,
+            'target': target_url,
+            'options': scan_options,
+            'submitted_at': datetime.utcnow().isoformat(),
+            'scheduled': True,
+            'schedule_id': str(schedule_id)
+        }
+        r.rpush(QUEUE_NAME, json.dumps(job_data))
+        r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': target_url})
 
-            print(f"[scheduler] Triggered scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url}, {scan_type})", flush=True)
+        print(f"[scheduler] Triggered scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url}, {scan_type})", flush=True)
 
 
 async def schedule_runner(pool: asyncpg.Pool):
@@ -1176,11 +1188,56 @@ async def schedule_runner(pool: asyncpg.Pool):
 db_pool: Optional[asyncpg.Pool] = None
 
 
+def _int_env(name: str, default: int) -> int:
+    """Coerce an env var to int, falling back to default on bad values."""
+    try:
+        raw = os.environ.get(name)
+        return int(raw) if raw is not None and raw != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
+    """Convert a SELECT…ORDER BY…LIMIT $N OFFSET $N+1 into a COUNT(*) query.
+
+    Used by list endpoints that optimize the common case with COUNT(*) OVER()
+    but still need a fallback `COUNT(*)` when the page is past the end of the
+    result set (the window function returns no rows in that case).
+    """
+    # Remove ORDER BY ... LIMIT ... OFFSET ... — everything from ORDER BY on.
+    order_by_idx = query.rfind("ORDER BY")
+    body = query[:order_by_idx] if order_by_idx != -1 else query
+    # Replace the SELECT … FROM with SELECT COUNT(*) FROM.
+    from_idx = body.find("FROM")
+    count_sql = "SELECT COUNT(*) " + body[from_idx:]
+    # Drop the trailing LIMIT and OFFSET placeholders (always the last two args).
+    return count_sql, params[:-2]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage database connection pool lifecycle and background tasks."""
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    # Larger pool defaults: with up to ~20 workers persisting findings, two
+    # always-running background tasks (stale_scan_checker, schedule_runner),
+    # and concurrent UI requests, min=2/max=10 starves under load. Tune via
+    # DB_POOL_MIN_SIZE / DB_POOL_MAX_SIZE / DB_STATEMENT_TIMEOUT_MS env vars.
+    db_pool_min = _int_env("DB_POOL_MIN_SIZE", 5)
+    db_pool_max = _int_env("DB_POOL_MAX_SIZE", 25)
+    db_statement_timeout_ms = _int_env("DB_STATEMENT_TIMEOUT_MS", 30000)
+
+    async def _init_conn(conn):
+        # Server-side cap so a runaway query (e.g. ILIKE without a usable
+        # index) can't pin a pool slot indefinitely. 0 disables.
+        if db_statement_timeout_ms > 0:
+            await conn.execute(f"SET statement_timeout = {db_statement_timeout_ms}")
+
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=db_pool_min,
+        max_size=db_pool_max,
+        init=_init_conn,
+    )
     await ensure_verification_schema(db_pool)
 
     # Start background tasks
@@ -5903,7 +5960,12 @@ async def list_findings(
     limit: int = Query(100, le=500),
     offset: int = 0
 ):
-    """List findings with filtering and sorting."""
+    """List findings with filtering and sorting.
+
+    The COUNT(*) OVER() window emits the unbounded row total alongside each
+    paginated row, so we only execute the (expensive, ILIKE-heavy) query
+    once instead of twice.
+    """
     async with db_pool.acquire() as conn:
         query = """
             SELECT f.*,
@@ -5911,107 +5973,66 @@ async def list_findings(
                    COALESCE(t.name, ait.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name
+                   ait.name as ai_target_name,
+                   COUNT(*) OVER() AS total_count
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             WHERE 1=1
         """
-        count_query = """
-            SELECT COUNT(*)
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
-            WHERE 1=1
-        """
-        params = []
-        count_params = []
+        params: list = []
         param_idx = 1
-        count_param_idx = 1
 
         if severity:
             query += f" AND f.severity = ${param_idx}"
-            count_query += f" AND f.severity = ${count_param_idx}"
             params.append(severity)
-            count_params.append(severity)
             param_idx += 1
-            count_param_idx += 1
 
         if status:
             query += f" AND f.status = ${param_idx}"
-            count_query += f" AND f.status = ${count_param_idx}"
             params.append(status)
-            count_params.append(status)
             param_idx += 1
-            count_param_idx += 1
 
         if source_type == "ai":
             query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
-            count_query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
         elif source_type == "model_intake":
             query += " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
-            count_query += " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
         elif source_type == "dast":
             query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake') AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
-            count_query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake') AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
-            count_query += f" AND f.target_id = ${count_param_idx}"
             params.append(uuid.UUID(target_id))
-            count_params.append(uuid.UUID(target_id))
             param_idx += 1
-            count_param_idx += 1
 
         if scan_id:
             query += f" AND f.scan_id = ${param_idx}"
-            count_query += f" AND f.scan_id = ${count_param_idx}"
             params.append(uuid.UUID(scan_id))
-            count_params.append(uuid.UUID(scan_id))
             param_idx += 1
-            count_param_idx += 1
 
         if root_domain:
             query += f""" AND (
                 t.root_domain = ${param_idx}
                 OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${param_idx}) || '%'
             )"""
-            count_query += f""" AND (
-                t.root_domain = ${count_param_idx}
-                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${count_param_idx}) || '%'
-            )"""
             params.append(root_domain)
-            count_params.append(root_domain)
             param_idx += 1
-            count_param_idx += 1
 
         if verification_verdict:
             query += f" AND f.last_verification_verdict = ${param_idx}"
-            count_query += f" AND f.last_verification_verdict = ${count_param_idx}"
             params.append(verification_verdict)
-            count_params.append(verification_verdict)
             param_idx += 1
-            count_param_idx += 1
 
         if verified_only:
             query += " AND f.last_verification_verdict = 'exploited'"
-            count_query += " AND f.last_verification_verdict = 'exploited'"
 
         if verification_mode:
-            mode_filter = f""" AND EXISTS (
+            query += f""" AND EXISTS (
                 SELECT 1 FROM finding_verifications fv2
                 WHERE fv2.finding_id = f.id AND fv2.verification_mode = ${param_idx}
             )"""
-            query += mode_filter
-            count_query_mode = f""" AND EXISTS (
-                SELECT 1 FROM finding_verifications fv2
-                WHERE fv2.finding_id = f.id AND fv2.verification_mode = ${count_param_idx}
-            )"""
-            count_query += count_query_mode
             params.append(verification_mode)
-            count_params.append(verification_mode)
             param_idx += 1
-            count_param_idx += 1
 
         if search:
             search_pattern = f"%{search}%"
@@ -6022,25 +6043,13 @@ async def list_findings(
                 OR ait.endpoint_url ILIKE ${param_idx}
                 OR ait.name ILIKE ${param_idx}
             )"""
-            count_query += f""" AND (
-                f.title ILIKE ${count_param_idx}
-                OR f.url ILIKE ${count_param_idx}
-                OR t.url ILIKE ${count_param_idx}
-                OR ait.endpoint_url ILIKE ${count_param_idx}
-                OR ait.name ILIKE ${count_param_idx}
-            )"""
             params.append(search_pattern)
-            count_params.append(search_pattern)
             param_idx += 1
-            count_param_idx += 1
 
         if seen_within_days:
             query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
-            count_query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${count_param_idx}"
             params.append(seen_within_days)
-            count_params.append(seen_within_days)
             param_idx += 1
-            count_param_idx += 1
 
         # Build ORDER BY clause based on sort_by parameter
         order_dir = "DESC" if sort_order == "desc" else "ASC"
@@ -6068,10 +6077,30 @@ async def list_findings(
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
-        total = await conn.fetchval(count_query, *count_params)
+
+        # `total_count` is identical on every row of the window. The empty
+        # result set is ambiguous (truly no matches vs offset past end), so
+        # only trust the window count when we got rows back. With offset > 0
+        # and no rows we fall back to a dedicated COUNT(*) query so the UI
+        # paginator can render correctly.
+        if rows:
+            total = rows[0]["total_count"]
+        elif offset > 0:
+            # Strip the window column from the SELECT, drop LIMIT/OFFSET
+            # parameters, and wrap as COUNT(*).
+            count_sql, count_args = _strip_pagination_for_count(query, params)
+            total = await conn.fetchval(count_sql, *count_args) or 0
+        else:
+            total = 0
+
+    findings_out = []
+    for row in rows:
+        row_dict = dict(row)
+        row_dict.pop("total_count", None)
+        findings_out.append(row_dict)
 
     return {
-        'findings': [dict(r) for r in rows],
+        'findings': findings_out,
         'total': total,
         'limit': limit,
         'offset': offset

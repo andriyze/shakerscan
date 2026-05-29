@@ -40,6 +40,58 @@ from urllib.parse import urljoin, urlparse
 # Import auth session for making requests
 from .auth_session import AuthConfig, AuthSession
 
+
+def _registrable_domain(host: str) -> str:
+    """Return the last two host labels (eTLD+1 approximation).
+
+    Good-enough for "same registrable domain" checks: avoids the full PSL
+    dependency and accepts the common case of subdomain login flows like
+    `app.example.com` → `auth.example.com`. Hostnames with fewer than two
+    labels (`localhost`, raw IPs) are returned as-is.
+    """
+    host = (host or "").strip().lower()
+    if not host:
+        return ""
+    # Strip port if present and any IPv6 brackets.
+    host = host.split(":", 1)[0].strip("[]")
+    parts = [p for p in host.split(".") if p]
+    if len(parts) < 2:
+        return host
+    return ".".join(parts[-2:])
+
+
+def _is_action_safe_for_credentials(action_url: str, base_url: str) -> bool:
+    """Return True iff submitting credentials to `action_url` is safe.
+
+    Safe when:
+      - The action URL is a relative path (urljoin gave us same-origin).
+      - The action's host shares a registrable domain with `base_url`.
+      - The action uses a scheme that won't downgrade from https → http.
+    """
+    if not action_url:
+        return False
+    action_parsed = urlparse(action_url)
+    base_parsed = urlparse(base_url)
+
+    # Relative action (no scheme/host) — same origin by construction.
+    if not action_parsed.scheme and not action_parsed.netloc:
+        return True
+
+    base_scheme = (base_parsed.scheme or "https").lower()
+    action_scheme = (action_parsed.scheme or "").lower()
+    if action_scheme not in {"http", "https"}:
+        return False
+    if base_scheme == "https" and action_scheme == "http":
+        # Prevent silent TLS downgrade of credential POST.
+        return False
+
+    base_host = base_parsed.hostname or ""
+    action_host = action_parsed.hostname or ""
+    if not base_host or not action_host:
+        return False
+
+    return _registrable_domain(action_host) == _registrable_domain(base_host)
+
 # Common login URL patterns
 LOGIN_URL_PATTERNS = [
     "/login",
@@ -501,6 +553,20 @@ async def form_login(
             login_form.password_field = password_field
 
         result.form_used = login_form
+
+        # SECURITY: Refuse to submit credentials to a host different from the
+        # scan target. A misidentified or tampered login page could carry
+        # `action="https://attacker.example/steal"` and exfiltrate the supplied
+        # username/password. Subdomains of the target are allowed (a common
+        # legitimate pattern: `https://app.example.com` posts to
+        # `https://auth.example.com/login`).
+        if not _is_action_safe_for_credentials(login_form.action, base_url):
+            result.error = (
+                f"Refusing to submit credentials cross-origin: login form action "
+                f"{login_form.action!r} is not on the same registrable domain as "
+                f"{base_url!r}"
+            )
+            return result
 
         # Record pre-login cookies
         pre_login_cookies = set(session.state.cookies_received.keys())

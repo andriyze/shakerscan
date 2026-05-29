@@ -1163,16 +1163,26 @@ async def check_bola(
         ]
 
     def build_headers(session):
+        """Snapshot auth headers + cookies for a session.
+
+        Merges `state.cookies_received` (cookies the server set on us during
+        login or earlier crawl) with `config.cookies` (operator-supplied
+        cookies). Many targets only issue the real session cookie after the
+        form-login redirect, so omitting state.cookies_received would send
+        BOLA requests with no session — every response would be 401/403 and
+        all BOLA findings would be false negatives.
+        """
         headers = {}
         if session and hasattr(session, 'config'):
             headers.update(session.config.headers or {})
-            if session.config.cookies:
-                cookie_str = "; ".join(f"{k}={v}" for k, v in session.config.cookies.items())
+            cookies = dict(session.config.cookies or {})
+            state = getattr(session, "state", None)
+            if state is not None:
+                cookies.update(getattr(state, "cookies_received", None) or {})
+            if cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                 headers["Cookie"] = cookie_str
         return headers
-
-    user1_headers = build_headers(user1_session)
-    user2_headers = build_headers(user2_session)
 
     for endpoint_config in resource_endpoints:
         path_template = endpoint_config.get("path", "")
@@ -1186,6 +1196,13 @@ async def check_bola(
             path = path_template.replace("{id}", str(resource_id))
             url = urljoin(base_url, path)
             results["endpoints_tested"] += 1
+
+            # Rebuild headers per request so a mid-loop re-authentication
+            # (cookies/Authorization mutated by AuthSession._adopt_session)
+            # is actually applied. Snapshotting once meant the rest of the
+            # BOLA loop kept sending stale cookies after any session refresh.
+            user1_headers = build_headers(user1_session)
+            user2_headers = build_headers(user2_session)
 
             # Test without auth (should fail)
             no_auth_response = await fetch_with_capture(url, timeout=timeout, budget_key="bola")
@@ -1690,16 +1707,21 @@ async def smart_bola_test(
     }
 
     def build_headers(session):
+        """Snapshot auth headers + cookies for a session.
+
+        See `check_bola.build_headers` for rationale on merging cookies_received.
+        """
         headers = {}
         if session and hasattr(session, 'config'):
             headers.update(session.config.headers or {})
-            if session.config.cookies:
-                cookie_str = "; ".join(f"{k}={v}" for k, v in session.config.cookies.items())
+            cookies = dict(session.config.cookies or {})
+            state = getattr(session, "state", None)
+            if state is not None:
+                cookies.update(getattr(state, "cookies_received", None) or {})
+            if cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                 headers["Cookie"] = cookie_str
         return headers
-
-    user1_headers = build_headers(user1_session)
-    user2_headers = build_headers(user2_session)
 
     # Synthesize resource URLs from collection endpoints
     synthesized_urls = synthesize_resource_urls_from_collections(
@@ -1792,6 +1814,10 @@ async def smart_bola_test(
         for test_id in test_ids:
             # Replace {id} with test ID
             test_url = template.replace('{id}', test_id)
+
+            # Rebuild headers per request so mid-loop session refresh is honoured.
+            user1_headers = build_headers(user1_session)
+            user2_headers = build_headers(user2_session)
 
             # Test with user1
             user1_resp = await fetch_with_capture(test_url, headers=user1_headers, timeout=timeout, budget_key="bola")

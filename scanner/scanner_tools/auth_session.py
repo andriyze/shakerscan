@@ -45,11 +45,17 @@ except ImportError:
     ssl = None
 
 
-# Session expiry indicators - responses that suggest session is no longer valid
+# Session expiry indicators - responses that suggest session is no longer valid.
+# 401 is the canonical "no/expired session" signal. 403 is RBAC ("you are
+# authenticated but lack permission") and on its own should NOT force a
+# credential replay — that risks account lockout and audit-log noise when the
+# scanner crawls into a protected admin path. We keep a small 403 weight so it
+# can combine with a body indicator (e.g. 403 + "session expired"), but no
+# single 403 reaches the default 0.7 threshold.
 SESSION_EXPIRY_INDICATORS = [
     # Status codes
     {"type": "status", "value": 401, "weight": 1.0},
-    {"type": "status", "value": 403, "weight": 0.7},
+    {"type": "status", "value": 403, "weight": 0.3},
 
     # Response body patterns (login redirects, session expired messages)
     {"type": "body_pattern", "value": r"(?i)session\s*(has\s*)?expired", "weight": 1.0},
@@ -563,6 +569,12 @@ class AuthSession:
         Check response for session expiry indicators.
 
         Returns a score from 0.0 to 1.0 indicating likelihood of session expiry.
+
+        Body-pattern indicators only count on non-2xx responses. A 200 page
+        that happens to contain "please re-login" in help text, an admin
+        docs page describing the logout flow, or an HTML error envelope
+        rendered alongside the real content should not trigger a credential
+        replay.
         """
         score = 0.0
         indicators_found = []
@@ -572,6 +584,10 @@ class AuthSession:
         headers = response.get("headers", {})
         redirects = response.get("redirects", [])
         final_url = response.get("url", "")
+        # 2xx responses (including the 200 default for some non-HTTP captures)
+        # are treated as successful page loads. Body-pattern matching only
+        # applies when the server returned an error.
+        body_patterns_allowed = not (200 <= int(status or 0) < 300)
 
         for indicator in SESSION_EXPIRY_INDICATORS:
             ind_type = indicator["type"]
@@ -583,6 +599,8 @@ class AuthSession:
                     indicators_found.append(f"Status {status}")
 
             elif ind_type == "body_pattern":
+                if not body_patterns_allowed:
+                    continue
                 pattern = indicator["value"]
                 if re.search(pattern, body):
                     score = max(score, weight)
