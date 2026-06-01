@@ -2391,7 +2391,10 @@ async def build_report(target: str,
         if active_sqli and not active_xss:
             js_dependency_scanning = False
             js_secret_scanning = False
-        scan_budget["nuclei_max_targets"] = 0
+        # Keep passive/template checks budgeted even in focused active scans.
+        # Focused mode limits active fanout and broad discovery, but passive
+        # context such as headers, CSP, TLS, and Nuclei hits is still useful
+        # analyst context and should not disappear from the report.
     if scan_budget.get("active_max_endpoints"):
         max_active = int(scan_budget["active_max_endpoints"])
     smart_bola_max_endpoints = int(scan_budget.get("smart_bola_max_endpoints") or smart_bola_max_endpoints)
@@ -2690,13 +2693,6 @@ async def build_report(target: str,
                     "impact": "Unrelated active modules were intentionally skipped",
                     "configured": True,
                 })
-                if scan_budget.get("nuclei_max_targets") == 0:
-                    checks_skipped.append({
-                        "check": "nuclei",
-                        "reason": "Nuclei disabled by focused active mode",
-                        "impact": "Template findings were not tested",
-                        "configured": True,
-                    })
 
             report["scan_completion_status"] = build_scan_completion_status(
                 coverage_status=coverage["status"],
@@ -9400,21 +9396,13 @@ async def build_report(target: str,
         }
 
     # Emit configuration/metadata findings (CSP/Headers/Cookies/TLS/DNS/CORS/etc.).
-    # Focused manual active scans should report only the requested exploit family.
-    if focused_manual_active_scope:
-        report.setdefault("filters_applied", {})
-        report["filters_applied"]["focused_active_scope"] = {
-            "enabled": True,
-            "family": "xss" if active_xss else "sqli",
-            "config_findings_skipped": True,
-        }
-        print("[smart] Focused manual active scope: skipping configuration findings", file=sys.stderr)
-    else:
-        try:
-            emit_config_findings(report)
-        except Exception:
-            # Do not fail the whole scan if emitter has a bug
-            pass
+    # Focused active scans still keep passive context; only unrelated active
+    # modules are scoped out.
+    try:
+        emit_config_findings(report)
+    except Exception:
+        # Do not fail the whole scan if emitter has a bug
+        pass
 
     if focused_manual_active_scope:
         family = "xss" if active_xss else "sqli"
@@ -9424,8 +9412,24 @@ async def build_report(target: str,
             else {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
         )
         allowed_cwes = {"CWE-79"} if family == "xss" else {"CWE-89", "CWE-943"}
+        passive_context_tools = {
+            "cloud_scanner",
+            "cookies_analyzer",
+            "cors_scanner",
+            "csp_evaluator",
+            "dns_policy",
+            "http_headers",
+            "http_methods",
+            "nuclei",
+            "redirect_check",
+            "security_txt",
+            "tls_config",
+            "waf_detector",
+        }
         before_count = len(report.get("findings", []) or [])
         kept_findings = []
+        kept_family_count = 0
+        kept_context_count = 0
         dropped_tools: dict[str, int] = {}
         for finding in report.get("findings", []) or []:
             tool = str(finding.get("tool") or "").lower()
@@ -9438,8 +9442,13 @@ async def build_report(target: str,
                 or (family == "sqli" and ("sql injection" in title or "sqli" in type_name))
                 or (family == "xss" and ("xss" in title or "cross-site scripting" in title or "xss" in type_name))
             )
-            if family_match:
+            context_match = tool in passive_context_tools
+            if family_match or context_match:
                 kept_findings.append(finding)
+                if family_match:
+                    kept_family_count += 1
+                elif context_match:
+                    kept_context_count += 1
             else:
                 dropped_tools[tool or "unknown"] = dropped_tools.get(tool or "unknown", 0) + 1
         report["findings"] = kept_findings
@@ -9448,8 +9457,11 @@ async def build_report(target: str,
             "enabled": True,
             "family": family,
             "kept": len(kept_findings),
+            "kept_family": kept_family_count,
+            "kept_passive_context": kept_context_count,
             "dropped": before_count - len(kept_findings),
             "dropped_tools": dropped_tools,
+            "config_findings_skipped": False,
         })
         if before_count != len(kept_findings):
             print(
@@ -9731,11 +9743,34 @@ async def build_report(target: str,
     if focused_manual_active_scope:
         family = "xss" if active_xss else "sqli"
         focused_findings = report.get("findings") or []
+        focused_family_tools = (
+            {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}
+            if family == "xss"
+            else {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
+        )
+
+        def _focused_family_finding(finding: dict[str, Any]) -> bool:
+            tool = str(finding.get("tool") or "").lower()
+            cwe = str(finding.get("cwe") or "").upper()
+            title = str(finding.get("title") or "").lower()
+            type_name = str(finding.get("type") or "").lower()
+            return (
+                tool in focused_family_tools
+                or (family == "sqli" and cwe in {"CWE-89", "CWE-943"})
+                or (family == "xss" and cwe == "CWE-79")
+                or (family == "sqli" and ("sql injection" in title or "sqli" in type_name))
+                or (family == "xss" and ("xss" in title or "cross-site scripting" in title or "xss" in type_name))
+            )
+
+        focused_grade_findings = [
+            f for f in focused_findings
+            if isinstance(f, dict) and _focused_family_finding(f)
+        ]
         severity_counts_for_grade = {
-            "critical": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "critical"),
-            "high": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "high"),
-            "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
-            "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
+            "critical": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "critical"),
+            "high": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "high"),
+            "medium": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "medium"),
+            "low": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "low"),
         }
         focused_score = 100
         focused_score -= min(severity_counts_for_grade["critical"] * 15, 45)
@@ -9763,7 +9798,7 @@ async def build_report(target: str,
 
         focused_notes = []
         if severity_counts_for_grade["critical"]:
-            max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_findings] or [0])
+            max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_grade_findings] or [0])
             focused_notes.append(
                 f"{severity_counts_for_grade['critical']} critical vulnerability(ies) found "
                 f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts_for_grade['critical'] * 15, 45)})."
@@ -9799,10 +9834,11 @@ async def build_report(target: str,
             "remediation": focused_remediation,
             "summary": (
                 f"Focused {family.upper()} Scan Grade: {focused_grade} "
-                f"({focused_score}/100) - {len(focused_findings)} issue(s) found"
+                f"({focused_score}/100) - {len(focused_grade_findings)} in-scope issue(s) found"
             ),
             "focused_active_scope": True,
             "focused_family": family,
+            "focused_context_findings": max(0, len(focused_findings) - len(focused_grade_findings)),
         })
 
     # If required modules failed, mark grade as unreliable
@@ -9856,13 +9892,6 @@ async def build_report(target: str,
             "impact": "Unrelated active modules were intentionally skipped",
             "configured": True,
         })
-        if scan_budget.get("nuclei_max_targets") == 0:
-            checks_skipped.append({
-                "check": "nuclei",
-                "reason": "Nuclei disabled by focused active mode",
-                "impact": "Template findings were not tested",
-                "configured": True,
-            })
 
     report["scan_metadata"] = {
         "scan_id": scan_session_id,
@@ -10245,6 +10274,42 @@ def _refresh_ai_quality_metrics(report: dict[str, Any], ai_summary: dict[str, An
     fallback_count = int(source_counts.get("heuristic_fallback") or 0)
     if ai_quality["enabled"] and fallback_count:
         add_note(f"{fallback_count} AI-eligible finding(s) used heuristic fallback classification")
+
+
+def apply_post_ai_precision_policy(
+    report: dict[str, Any],
+    *,
+    include_partial_attack_chains: bool = False,
+) -> None:
+    """Re-apply DAST precision policy after AI verdicts mutate findings."""
+    findings = report.get("findings")
+    if not isinstance(findings, list) or not findings:
+        return
+
+    target_host = str((report.get("input") or {}).get("normalized_host") or "") or None
+    report["findings"] = apply_dast_precision_policy(findings, target_host=target_host)
+
+    if analyze_attack_chains:
+        try:
+            report["attack_chains"] = analyze_attack_chains(
+                report["findings"],
+                include_partial_chains=include_partial_attack_chains,
+            )
+        except Exception as exc:
+            report["attack_chains"] = {
+                "chains": [],
+                "partial_chains": [],
+                "summary": {
+                    "total_chains": 0,
+                    "total_partial_chains": 0,
+                    "critical_chains": 0,
+                    "high_chains": 0,
+                    "chain_types": [],
+                    "partial_chain_types": [],
+                    "partial_chains_included": include_partial_attack_chains,
+                },
+                "error": str(exc),
+            }
 
 
 async def ai_review_findings(
@@ -11274,6 +11339,10 @@ async def cli_main():
                         mask_host=ai_mask_host or "example.com",
                         ai_fallback_model=ai_fallback_model,
                     )
+                    apply_post_ai_precision_policy(
+                        rep,
+                        include_partial_attack_chains=include_partial_attack_chains,
+                    )
                     # Recompute grade now that AI has set ai_verdict on findings
                     rep["result"] = grade(rep)
                 except Exception as e:
@@ -11835,6 +11904,10 @@ async def cli_main():
                 ai_fallback_model=getattr(args, "ai_fallback_model", None),
             )
             report["ai_logs"] = ai
+            apply_post_ai_precision_policy(
+                report,
+                include_partial_attack_chains=args.include_partial_attack_chains,
+            )
             # Surface AI errors in result.notes for visibility
             ai_summary = ai.get("summary", {})
             if ai_summary.get("provider_error"):

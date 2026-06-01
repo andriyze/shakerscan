@@ -1133,27 +1133,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
             scan_options = dict(decoded_options)
             scan_options['scan_type'] = scan_type
 
-            async with conn.transaction():
-                # Insert scan row and update schedule atomically so a Redis
-                # push failure below cannot leave a "phantom pending" scan
-                # without an updated schedule next_run_at.
-                await conn.execute("""
-                    INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
-                    VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-                """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                     json.dumps(scan_options), scan_type)
-
-                next_run = calculate_next_run(
-                    schedule['frequency'],
-                    schedule['day_of_week'],
-                    schedule['time_of_day'] or '02:00',
-                    schedule['timezone'] or 'UTC',
-                    schedule['jitter_minutes'] or 0
-                )
-                await conn.execute("""
-                    UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
-                    WHERE id = $3
-                """, now, next_run, schedule_id)
+            await conn.execute("""
+                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+            """, uuid.UUID(scan_id), target_id, target_url, job_id,
+                 json.dumps(scan_options), scan_type)
 
         job_data = {
             'job_id': job_id,
@@ -1164,8 +1148,47 @@ async def run_due_schedules(pool: asyncpg.Pool):
             'scheduled': True,
             'schedule_id': str(schedule_id)
         }
-        r.rpush(QUEUE_NAME, json.dumps(job_data))
-        r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': target_url})
+
+        try:
+            r.rpush(QUEUE_NAME, json.dumps(job_data))
+        except Exception as exc:
+            # Do not advance the schedule if Redis failed to accept the queue
+            # item. Mark the inserted scan failed so the next scheduler pass can
+            # retry the still-due schedule instead of being blocked by a
+            # phantom pending scan that no worker can ever receive.
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE scans
+                    SET status = 'failed', error_message = $1, completed_at = NOW()
+                    WHERE id = $2
+                """, f"scheduled enqueue failed: {exc}", uuid.UUID(scan_id))
+            print(
+                f"[scheduler] Failed to enqueue scheduled scan {scan_id[:8]} for schedule "
+                f"{str(schedule_id)[:8]}: {exc}",
+                flush=True,
+            )
+            continue
+
+        try:
+            r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': target_url})
+        except Exception as exc:
+            print(
+                f"[scheduler] Scheduled scan {scan_id[:8]} queued, but Redis job status update failed: {exc}",
+                flush=True,
+            )
+
+        next_run = calculate_next_run(
+            schedule['frequency'],
+            schedule['day_of_week'],
+            schedule['time_of_day'] or '02:00',
+            schedule['timezone'] or 'UTC',
+            schedule['jitter_minutes'] or 0
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
+                WHERE id = $3
+            """, now, next_run, schedule_id)
 
         print(f"[scheduler] Triggered scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url}, {scan_type})", flush=True)
 

@@ -4,9 +4,11 @@ These cover the env-var coercer, the pagination → COUNT(*) rewriter, and the
 JSON-decode helper that have grown enough surface to be worth pinning.
 """
 
+import asyncio
 import os
 import sys
 import types
+import uuid
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -150,3 +152,111 @@ def test_decode_json_value_passes_non_json_string_through():
 
 def test_decode_json_value_handles_none():
     assert api_module._decode_json_value(None) is None
+
+
+# ----- run_due_schedules --------------------------------------------------
+
+class _FakeAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _FakeAcquire(self.conn)
+
+
+class _FakeConn:
+    def __init__(self, schedules):
+        self.schedules = schedules
+        self.executes = []
+
+    async def fetch(self, query, *args):
+        if "FROM schedules" in query:
+            return self.schedules
+        return []
+
+    async def fetchval(self, query, *args):
+        return 0
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        return "OK"
+
+
+class _FailingRedis:
+    def __init__(self):
+        self.rpush_calls = []
+
+    def rpush(self, *args):
+        self.rpush_calls.append(args)
+        raise RuntimeError("redis down")
+
+    def hset(self, *args, **kwargs):
+        raise AssertionError("hset should not run after rpush fails")
+
+
+class _RecordingRedis:
+    def __init__(self):
+        self.rpush_calls = []
+        self.hset_calls = []
+
+    def rpush(self, *args):
+        self.rpush_calls.append(args)
+
+    def hset(self, *args, **kwargs):
+        self.hset_calls.append((args, kwargs))
+
+
+def _due_schedule():
+    return {
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "target_url": "https://example.test",
+        "scan_type": "smart",
+        "scan_options": {"budget_profile": "fast"},
+        "frequency": "daily",
+        "day_of_week": None,
+        "time_of_day": "02:00",
+        "timezone": "UTC",
+        "jitter_minutes": 0,
+    }
+
+
+def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatch):
+    conn = _FakeConn([_due_schedule()])
+    redis_client = _FailingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    executed_sql = "\n".join(query for query, _args in conn.executes)
+    assert "INSERT INTO scans" in executed_sql
+    assert "UPDATE scans" in executed_sql
+    assert "scheduled enqueue failed" in str(conn.executes)
+    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert redis_client.rpush_calls
+
+
+def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatch):
+    conn = _FakeConn([_due_schedule()])
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    executed_sql = "\n".join(query for query, _args in conn.executes)
+    assert "INSERT INTO scans" in executed_sql
+    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "UPDATE scans" not in executed_sql
+    assert len(redis_client.rpush_calls) == 1
+    assert len(redis_client.hset_calls) == 1

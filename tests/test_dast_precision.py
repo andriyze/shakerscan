@@ -22,6 +22,7 @@ scanner_main = importlib.util.module_from_spec(SCANNER_MAIN_SPEC)
 assert SCANNER_MAIN_SPEC and SCANNER_MAIN_SPEC.loader
 SCANNER_MAIN_SPEC.loader.exec_module(scanner_main)
 _refresh_ai_quality_metrics = scanner_main._refresh_ai_quality_metrics
+apply_post_ai_precision_policy = scanner_main.apply_post_ai_precision_policy
 
 
 def _healthy_grade_report(findings):
@@ -583,6 +584,31 @@ def test_ai_quality_metrics_refresh_after_ai_review():
     assert ai_quality["verdicts"] == {"true_positive": 1, "false_positive": 1, "unclear": 0}
     assert ai_quality["classification_source_counts"] == {"provider": 1, "heuristic_fallback": 1}
     assert "1 AI-eligible finding(s) used heuristic fallback classification" in report["quality_metrics"]["reliability_notes"]
+
+
+def test_post_ai_precision_policy_applies_ai_false_positive_downgrade():
+    report = _healthy_grade_report([
+        {
+            "id": "dom-xss-1",
+            "tool": "dom_xss",
+            "title": "DOM XSS static sink",
+            "severity": "high",
+            "confidence": 0.9,
+            "cvss_score": 8.0,
+            "evidence": {"verified": True, "file": "https://cdn.jsdelivr.net/lib.js"},
+            "ai_verdict": "false_positive",
+            "ai_confidence": 0.92,
+        }
+    ])
+    report["input"] = {"normalized_host": "app.example.test"}
+
+    apply_post_ai_precision_policy(report)
+
+    finding = report["findings"][0]
+    assert finding["verified"] is False
+    assert finding["severity"] == "info"
+    assert finding["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
+    assert finding["precision_policy"]["ai_overrode_reason"] == "ai_false_positive_high_confidence"
 
 
 def test_focused_fallback_summary_uses_focused_remediation_only():
