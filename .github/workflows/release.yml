@@ -105,7 +105,11 @@ jobs:
         with:
           context: .
           file: scanner/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # amd64-only: the scanner image's Go-tool build (katana's CGO dep via
+          # go-tree-sitter) cannot cross-compile to arm64, and building arm64
+          # under QEMU emulation exceeded GitHub's 6h job limit (v0.5.4 was
+          # killed at 6h). arm64 hosts run the amd64 image via runtime emulation.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.scanner_tags.outputs.tags }}
           labels: |
@@ -125,7 +129,9 @@ jobs:
         with:
           context: ./ui
           file: ui/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # amd64-only for parity with the scanner image and to keep the single
+          # release job well under the 6h limit (no emulated arm64 build).
+          platforms: linux/amd64
           push: true
           build-args: |
             NEXT_PUBLIC_APP_VERSION=${{ steps.meta.outputs.version }}

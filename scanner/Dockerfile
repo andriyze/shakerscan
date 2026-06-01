@@ -3,9 +3,20 @@
 
 # --- Stage 1: Build Go tools ---
 # Pin Go to a stable major/minor while meeting current ProjectDiscovery tool requirements.
+#
+# NOTE: this image is built linux/amd64-only (see .github/workflows/release.yml).
+# A multi-arch (amd64+arm64) build compiled these 9 tools for arm64 under QEMU
+# emulation, which is 10-50x slower and blew past GitHub's 6h job limit (the
+# v0.5.4 release build was killed at 6h). Pure cross-compilation isn't an option
+# either: katana pulls a CGO dependency (go-tree-sitter) that needs an arm64 C
+# toolchain to cross-build. amd64-only keeps the build native and fast; arm64
+# hosts run the amd64 image via the runtime's emulation. (Restoring native arm64
+# would require a CGO cross-toolchain for katana.)
 FROM golang:1.25 AS go-builder
 
-# Install ProjectDiscovery tools + Gungnir (CT log scanner)
+# Install ProjectDiscovery tools + Gungnir (CT log scanner). Separate installs
+# because Go requires all packages in a single `go install` to share one
+# module@version.
 RUN go install github.com/projectdiscovery/tlsx/cmd/tlsx@v1.2.2 \
  && go install github.com/projectdiscovery/httpx/cmd/httpx@v1.9.0 \
  && go install github.com/projectdiscovery/katana/cmd/katana@v1.5.0 \
