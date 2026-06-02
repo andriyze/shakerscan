@@ -6,6 +6,7 @@ This file tracks which git commit produced each published Docker image tag.
 
 | Version | Git Commit | Scanner Image | UI Image |
 | --- | --- | --- | --- |
+| 0.5.6 | pending | `shakerscan/shakerscan-scanner:0.5.6` | `shakerscan/shakerscan-ui:0.5.6` |
 | 0.5.5 | `53f3cb47ee88a90de7fc49346ac85497f4a6c1db` | `shakerscan/shakerscan-scanner:0.5.5` | `shakerscan/shakerscan-ui:0.5.5` |
 | 0.4.2 | `5e1f484469cfc3a9aa1c031613df0b8aada65254` | `shakerscan/shakerscan-scanner:0.4.2` | `shakerscan/shakerscan-ui:0.4.2` |
 | 0.4.1 | `65e87ba5a7d7f48982b7f2cb3fb3d9fe4ed53ef1` | `shakerscan/shakerscan-scanner:0.4.1` | `shakerscan/shakerscan-ui:0.4.1` |
