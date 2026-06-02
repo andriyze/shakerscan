@@ -155,7 +155,7 @@ jobs:
           touch "/tmp/digests/ui/${ui_digest#sha256:}"
 
       - name: Upload digests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -176,7 +176,7 @@ jobs:
       ui_image: ${{ env.UI_IMAGE }}:${{ needs.meta.outputs.version }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
