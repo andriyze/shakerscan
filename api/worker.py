@@ -118,55 +118,16 @@ AI_SCAN_CLASSIFICATION_ENABLED = os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"
 AI_CLASSIFY_MIN_SEVERITY = os.environ.get("AI_CLASSIFY_MIN_SEVERITY", AI_VERIFY_MIN_SEVERITY).lower()
 
 from retest_contract import SEVERITY_ORDER
+try:
+    from evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+except ModuleNotFoundError as exc:
+    if exc.name != "evidence_triage":
+        raise
+    from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
 
 # Database pool (initialized in main)
 db_pool = None
 ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
-
-
-TRIAGE_EVIDENCE_KEY = "triage"
-TRIAGE_FIELDS_FROM_FINDING = (
-    "precision_policy",
-    "verification_reason",
-    "suspected",
-    "needs_verification",
-    "verified",
-    "confidence",
-    "confidence_tier",
-)
-
-
-def _build_evidence_with_triage(finding: dict) -> dict | None:
-    """Embed precision/verification fields into the evidence JSONB.
-
-    These fields live at the top level of the in-memory finding dict but the
-    `findings` table only persists `evidence`. Folding them under
-    `evidence.triage` carries downgrade reasoning to the UI without a schema
-    migration.
-    """
-    evidence = finding.get("evidence")
-    base: dict[str, Any]
-    if isinstance(evidence, dict):
-        base = dict(evidence)
-    elif evidence is None:
-        base = {}
-    else:
-        base = {"raw": evidence}
-
-    triage: dict[str, Any] = {}
-    for key in TRIAGE_FIELDS_FROM_FINDING:
-        if key not in finding:
-            continue
-        value = finding[key]
-        if value is None:
-            continue
-        triage[key] = value
-
-    if not triage and not base:
-        return None
-    if triage:
-        base[TRIAGE_EVIDENCE_KEY] = triage
-    return base or None
 
 
 def _canonicalize_jsonish(value: Any) -> str | None:

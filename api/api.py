@@ -38,42 +38,13 @@ except ModuleNotFoundError as exc:
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
-TRIAGE_EVIDENCE_KEY = "triage"
-TRIAGE_FIELDS_FROM_FINDING = (
-    "precision_policy",
-    "verification_reason",
-    "suspected",
-    "needs_verification",
-    "verified",
-    "confidence",
-    "confidence_tier",
-)
 
-
-def _build_evidence_with_triage(finding: dict[str, Any]) -> dict[str, Any] | None:
-    """Embed precision/verification fields into persisted evidence JSONB."""
-    evidence = finding.get("evidence")
-    if isinstance(evidence, dict):
-        base: dict[str, Any] = dict(evidence)
-    elif evidence is None:
-        base = {}
-    else:
-        base = {"raw": evidence}
-
-    triage: dict[str, Any] = {}
-    for key in TRIAGE_FIELDS_FROM_FINDING:
-        if key not in finding:
-            continue
-        value = finding[key]
-        if value is None:
-            continue
-        triage[key] = value
-
-    if not triage and not base:
-        return None
-    if triage:
-        base[TRIAGE_EVIDENCE_KEY] = triage
-    return base or None
+try:
+    from evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+except ModuleNotFoundError as exc:
+    if exc.name != "evidence_triage":
+        raise
+    from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
 
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,

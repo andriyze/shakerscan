@@ -2173,24 +2173,27 @@ async def enhance_finding_with_ai(
         "verdict": result.verdict,
         "confidence": result.confidence,
         "reasoning": result.reasoning,
-        "evidence": result.evidence
+        "evidence": result.evidence,
+        "classification_source": "provider",
     }
+    finding["ai_verdict"] = result.verdict
+    finding["ai_confidence"] = round(result.confidence, 2)
+    finding["ai_confidence_percent"] = int(round(result.confidence * 100))
+    finding["ai_rationale"] = result.reasoning
+    finding["ai_classification_source"] = "provider"
 
     # Adjust finding based on AI verdict
     if result.verdict == "false_positive" and result.confidence >= 0.75:
         # High-confidence FP - mark for filtering
-        finding["ai_verdict"] = "false_positive"
         finding["confidence"] = min(finding.get("confidence", 0.5), 0.25)
         finding["filter_reason"] = f"AI FP detection: {result.reasoning}"
 
     elif result.verdict == "true_positive" and result.confidence >= 0.80:
         # High-confidence TP - boost confidence
-        finding["ai_verdict"] = "true_positive"
         finding["confidence"] = max(finding.get("confidence", 0.5), result.confidence)
 
     elif result.verdict == "uncertain":
         # AI couldn't decide - flag for manual review
-        finding["ai_verdict"] = "uncertain"
         finding["needs_manual_review"] = True
 
     return finding

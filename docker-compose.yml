@@ -86,6 +86,7 @@ services:
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
       - ./api/api.py:/app/api.py:ro
+      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
       - ./api/session_manager.py:/app/session_manager.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
@@ -158,6 +159,7 @@ services:
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
       - ./api/worker.py:/app/worker.py:ro
+      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
       - ./api/retest_contract.py:/app/retest_contract.py:ro
       - ./api/ai_verifier.py:/app/ai_verifier.py:ro
       - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
