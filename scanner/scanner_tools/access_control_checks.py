@@ -22,6 +22,7 @@ from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_h
 from .bola_comparison import (
     all_responses_equivalent,
     extract_user_specific_signals,
+    normalize_response_body,
     response_similarity,
     responses_equivalent,
 )
@@ -1521,7 +1522,7 @@ def _looks_like_bola_resource_response(url_or_template: str, body: str) -> bool:
 def _response_body_fingerprint(body: str) -> str:
     if not body:
         return ""
-    normalized = " ".join(body.split())
+    normalized = normalize_response_body(body)
     return hashlib.sha256(normalized[:4000].encode()).hexdigest()
 
 

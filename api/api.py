@@ -38,6 +38,42 @@ except ModuleNotFoundError as exc:
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+TRIAGE_EVIDENCE_KEY = "triage"
+TRIAGE_FIELDS_FROM_FINDING = (
+    "precision_policy",
+    "verification_reason",
+    "suspected",
+    "needs_verification",
+    "verified",
+    "confidence",
+    "confidence_tier",
+)
+
+
+def _build_evidence_with_triage(finding: dict[str, Any]) -> dict[str, Any] | None:
+    """Embed precision/verification fields into persisted evidence JSONB."""
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        base: dict[str, Any] = dict(evidence)
+    elif evidence is None:
+        base = {}
+    else:
+        base = {"raw": evidence}
+
+    triage: dict[str, Any] = {}
+    for key in TRIAGE_FIELDS_FROM_FINDING:
+        if key not in finding:
+            continue
+        value = finding[key]
+        if value is None:
+            continue
+        triage[key] = value
+
+    if not triage and not base:
+        return None
+    if triage:
+        base[TRIAGE_EVIDENCE_KEY] = triage
+    return base or None
 
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
@@ -710,7 +746,8 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
     saved_count = 0
     for finding in findings:
         fingerprint = generate_finding_fingerprint(finding)
-        evidence_json = json.dumps(finding.get('evidence')) if finding.get('evidence') else None
+        evidence_with_triage = _build_evidence_with_triage(finding)
+        evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
         ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
         ai_classification_source = finding.get('ai_classification_source')
 

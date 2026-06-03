@@ -182,6 +182,7 @@ def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
             "evidence": {"file": "https://cdn.jsdelivr.net/npm/foo/x.js"},
             "ai_verdict": "true_positive",
             "ai_confidence": 0.9,
+            "ai_classification_source": "provider",
         }
     ]
 
@@ -209,6 +210,7 @@ def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
             },
             "ai_verdict": "false_positive",
             "ai_confidence": 0.92,
+            "ai_classification_source": "provider",
         }
     ]
 
@@ -219,6 +221,50 @@ def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
     assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
     assert adjusted[0]["severity"] == "info"
     assert "AI judged false_positive" in adjusted[0]["verification_reason"]
+
+
+def test_precision_policy_ai_false_positive_without_provenance_does_not_override_verified():
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /admin",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "verified": True,
+            "evidence": {"url": "https://example.test/admin", "verified": True},
+            "ai_verdict": "false_positive",
+            "ai_confidence": 0.98,
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["severity"] == "high"
+
+
+def test_precision_policy_ai_false_positive_does_not_override_poe():
+    findings = [
+        {
+            "tool": "smart_sqli",
+            "title": "SQL injection",
+            "severity": "critical",
+            "cvss_score": 9.8,
+            "confidence": 0.95,
+            "verified": True,
+            "validation": {"poe_proven": True},
+            "poe_result": {"proven": True},
+            "ai_verdict": "false_positive",
+            "ai_confidence": 0.98,
+            "ai_classification_source": "provider",
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["severity"] == "critical"
 
 
 def test_precision_policy_low_confidence_ai_verdict_ignored():
@@ -235,6 +281,7 @@ def test_precision_policy_low_confidence_ai_verdict_ignored():
             "evidence": {"url": "https://example.test/admin", "verified": True},
             "ai_verdict": "false_positive",
             "ai_confidence": 0.55,
+            "ai_classification_source": "provider",
         }
     ]
 
@@ -443,6 +490,48 @@ def test_grade_ceiling_ignores_unverified_suspected_high_findings():
     assert result["grade"] in {"A", "B"}
 
 
+def test_grade_only_discounts_trusted_ai_false_positives():
+    base = {
+        "tool": "dom_xss",
+        "title": "DOM XSS static sink",
+        "severity": "high",
+        "cvss_score": 8.0,
+        "confidence": 0.9,
+        "ai_verdict": "false_positive",
+        "ai_confidence": 0.98,
+    }
+
+    untrusted = grade(_healthy_grade_report([base]))
+    trusted = grade(_healthy_grade_report([
+        {**base, "ai_classification_source": "provider"}
+    ]))
+
+    assert untrusted["grade"] == "C"
+    assert trusted["grade"] == "A"
+    assert "likely FP" not in untrusted["summary"]
+    assert "likely FP" in trusted["summary"]
+
+
+def test_grade_does_not_discount_ai_false_positive_over_poe():
+    finding = {
+        "tool": "smart_sqli",
+        "title": "SQL Injection",
+        "severity": "critical",
+        "cvss_score": 9.8,
+        "confidence": 0.95,
+        "validation": {"poe_proven": True},
+        "poe_result": {"proven": True},
+        "ai_verdict": "false_positive",
+        "ai_confidence": 0.98,
+        "ai_classification_source": "provider",
+    }
+
+    result = grade(_healthy_grade_report([finding]))
+
+    assert result["grade"] in {"D", "F"}
+    assert "likely FP" not in result["summary"]
+
+
 def test_xss_payload_without_response_is_not_verified():
     finding = {
         "tool": "active_xss",
@@ -598,6 +687,7 @@ def test_post_ai_precision_policy_applies_ai_false_positive_downgrade():
             "evidence": {"verified": True, "file": "https://cdn.jsdelivr.net/lib.js"},
             "ai_verdict": "false_positive",
             "ai_confidence": 0.92,
+            "ai_classification_source": "provider",
         }
     ])
     report["input"] = {"normalized_host": "app.example.test"}

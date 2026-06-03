@@ -23,7 +23,9 @@ usage() {
 Usage: scripts/publish-images.sh [options]
 
 Builds shakerscan/shakerscan-scanner and shakerscan/shakerscan-ui with OCI
-image labels. With --push it publishes a multi-architecture manifest by default.
+image labels. With --push, --platform is required so release operators do not
+accidentally publish a slow emulated multi-architecture build or a single-arch
+tag over an official manifest.
 
 Options:
   --push                  Push built images to the registry
@@ -31,7 +33,7 @@ Options:
   --tag TAG               Image tag to use (default: VERSION file)
   --scanner-repo REPO     Scanner image repo (default: shakerscan/shakerscan-scanner)
   --ui-repo REPO          UI image repo (default: shakerscan/shakerscan-ui)
-  --platform PLATFORM     build platform(s), e.g. linux/amd64,linux/arm64
+  --platform PLATFORM     build platform(s), e.g. linux/amd64 or linux/amd64,linux/arm64
   --no-cache              Build without cache
   --allow-dirty           Allow publishing from a dirty git worktree
   -h, --help              Show this help
@@ -41,8 +43,8 @@ Environment overrides:
 
 Examples:
   scripts/publish-images.sh --tag 0.3.2 --platform linux/arm64
-  scripts/publish-images.sh --tag 0.3.2 --push
-  scripts/publish-images.sh --tag 0.3.2 --push --latest
+  scripts/publish-images.sh --tag 0.3.2 --push --platform linux/amd64
+  scripts/publish-images.sh --tag 0.3.2 --push --latest --platform linux/amd64,linux/arm64
 EOF
 }
 
@@ -155,7 +157,8 @@ REVISION_LABEL="${REVISION}${DIRTY_SUFFIX}"
 
 if [[ -z "$PLATFORM" ]]; then
     if [[ "$PUSH" -eq 1 ]]; then
-        PLATFORM="linux/amd64,linux/arm64"
+        echo "Error: --push requires explicit --platform. Use the GitHub Release workflow for official multi-arch releases." >&2
+        exit 1
     else
         PLATFORM="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
         if [[ "$PLATFORM" == "linux/aarch64" ]]; then
@@ -229,5 +232,6 @@ docker buildx build \
 
 if [[ "$PUSH" -ne 1 ]]; then
     echo
-    echo "Build complete. Re-run with --push to publish a linux/amd64,linux/arm64 manifest."
+    echo "Build complete. Re-run with --push --platform $PLATFORM to publish this platform."
+    echo "Use the GitHub Release workflow for official linux/amd64 + linux/arm64 manifests."
 fi

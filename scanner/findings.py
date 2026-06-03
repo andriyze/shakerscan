@@ -31,6 +31,11 @@ try:
         soc2_mapping,
         get_cwe_url,
     )
+    from .ai_verdict_policy import (
+        ai_confidence,
+        is_trusted_ai_false_positive,
+        is_trusted_ai_true_positive,
+    )
 except ImportError:
     from constants import (
         TOOL_CONFIDENCE,
@@ -47,6 +52,11 @@ except ImportError:
         owasp_mapping,
         soc2_mapping,
         get_cwe_url,
+    )
+    from ai_verdict_policy import (
+        ai_confidence,
+        is_trusted_ai_false_positive,
+        is_trusted_ai_true_positive,
     )
 
 
@@ -258,11 +268,9 @@ def apply_dast_precision_policy(
         validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
         poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
 
-        ai_verdict = str(finding.get("ai_verdict") or "").lower()
-        ai_confidence = float(finding.get("ai_confidence") or 0)
-        ai_trusts = ai_confidence >= 0.80
-        ai_true_positive = ai_verdict == "true_positive" and ai_trusts
-        ai_false_positive = ai_verdict == "false_positive" and ai_trusts
+        ai_confidence_score = ai_confidence(finding)
+        ai_true_positive = is_trusted_ai_true_positive(finding)
+        ai_false_positive = is_trusted_ai_false_positive(finding)
 
         heuristic_verified = (
             finding.get("verified") is True
@@ -320,7 +328,7 @@ def apply_dast_precision_policy(
             finding["suspected"] = True
             finding["needs_verification"] = True
             finding["verification_reason"] = (
-                f"AI judged false_positive with {ai_confidence:.0%} confidence"
+                f"AI judged false_positive with {ai_confidence_score:.0%} confidence"
             )
             _cap_confidence_for_precision(finding, 0.34, "ai_false_positive")
             confidence = float(finding.get("confidence") or 0.5)

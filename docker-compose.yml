@@ -94,6 +94,7 @@ services:
       - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
       - ./api/ai_assurance.py:/app/ai_assurance.py:ro
       - ./scanner/constants.py:/app/constants.py:ro
+      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
       - ./scanner/grading.py:/app/grading.py:ro
       - ./scanner/findings.py:/app/findings.py:ro
       - ./scanner/reporting.py:/app/reporting.py:ro
@@ -164,6 +165,7 @@ services:
       - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
       - ./api/ai_gate:/app/ai_gate:ro
       - ./scanner/constants.py:/app/constants.py:ro
+      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
       - ./scanner/grading.py:/app/grading.py:ro
       - ./scanner/findings.py:/app/findings.py:ro
       - ./scanner/reporting.py:/app/reporting.py:ro

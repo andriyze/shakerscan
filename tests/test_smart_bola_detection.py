@@ -113,6 +113,42 @@ def test_smart_bola_skips_when_id_parameter_is_ignored(monkeypatch):
     assert results["findings"] == []
 
 
+def test_smart_bola_skips_ignored_id_with_volatile_response_fields(monkeypatch):
+    call_state = {"n": 0}
+
+    async def fake_fetch(url, **kwargs):
+        call_state["n"] += 1
+        _ = parse_qs(urlsplit(url).query).get("id", ["1"])[0]
+        # Same resource regardless of requested ID, but with per-request
+        # values that should not make the ID look response-sensitive.
+        body = json.dumps(
+            {
+                "user_id": 1,
+                "email": "current-user@example.com",
+                "request_id": f"11111111-1111-4111-8111-{call_state['n']:012d}",
+                "generated_at": f"2026-06-03T12:00:{call_state['n']:02d}Z",
+            }
+        )
+        return _fake_http_response(url, 200, body)
+
+    monkeypatch.setattr(
+        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/users?id=7"],
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    assert not results["vulnerable"]
+    assert results["findings"] == []
+
+
 def test_smart_bola_cross_user_equivalent_emits_suspected_lead(monkeypatch):
     # Both users get the SAME user-specific data for a fixed resource, with
     # only a per-request CSRF token differing. Exact equality would miss this;
