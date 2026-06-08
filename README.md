@@ -1,6 +1,41 @@
 # ShakerScan
 
-Open-source Dynamic Application Security Testing (DAST) for web applications, with a local web UI, persistent storage, worker-based scanning, optional AI Gate checks for chat/RAG/agent/MCP surfaces, and model artifact intake checks.
+**Open-source security scanner for web apps and AI systems — driven by plain English through your AI coding agent.**
+
+- **DAST (Dynamic Application Security Testing)** — it actively probes a running website or API for real vulnerabilities (XSS, SQL injection, exposed secrets, broken access control, weak TLS/headers, and more), the way an attacker would, and grades what it finds.
+- **AI red teaming** — it attacks your AI features the same way: chatbots, RAG endpoints, agents, and MCP tools get tested for prompt injection, data leakage, unsafe tool use, and approval bypass.
+
+ShakerScan runs locally (Docker) with a web UI, stores everything in a database, and is built to be **driven directly by an AI agent** like Claude Code, Codex, or OpenCode. You just ask in plain English — *"scan example.com"*, *"show me critical findings"*, *"red team my chatbot"* — and the agent runs the scans, reads the results, and explains them.
+
+## Quick Install
+
+Install and start the scanner (Docker, local web UI at http://localhost:3000):
+
+```bash
+curl -fsSL https://install.shakerscan.com | sh
+```
+
+Then drive it with your AI agent — just open one inside the runtime and ask in plain English:
+
+```bash
+shakerscan agent claude       # or: codex, opencode
+```
+
+```text
+Start ShakerScan
+Run a quick scan on https://example.com
+Show active high and critical findings
+Red team my chatbot API with AI Gate smoke tests
+```
+
+Prefer to run it yourself without AI? Use the CLI directly:
+
+```bash
+shakerscan scan https://example.com     # quick scan
+shakerscan status                       # check what's running
+```
+
+See [Quick Start](#quick-start) below for remote/VPS setup, source builds, and more.
 
 ## Contents
 
