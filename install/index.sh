@@ -164,6 +164,8 @@ install_path_profiles() {
     fi
 }
 
+PATH_NEEDS_ACTIVATION=0
+
 install_command() {
     mkdir -p "$BIN_DIR"
     launcher="$BIN_DIR/shakerscan"
@@ -176,13 +178,60 @@ EOF
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
         *)
-            say ""
-            say "$BIN_DIR is not in the current PATH."
+            PATH_NEEDS_ACTIVATION=1
             install_path_profiles
-            say "Open a new shell, or run this once in the current shell:"
-            say "  export PATH=\"$BIN_DIR:\$PATH\""
             ;;
     esac
+}
+
+# Prefer the bare shakerscan command only when it resolves to this install's
+# launcher; otherwise fall back to the absolute path so copied commands work.
+sk() {
+    resolved="$(command -v shakerscan 2>/dev/null || true)"
+    if [ "$resolved" = "$BIN_DIR/shakerscan" ]; then
+        printf 'shakerscan'
+    else
+        printf '%s' "$BIN_DIR/shakerscan"
+    fi
+}
+
+print_path_activation() {
+    [ "$PATH_NEEDS_ACTIVATION" = "1" ] || return 0
+    say "Activate the 'shakerscan' command in THIS terminal (new shells already have it):"
+    say "  export PATH=\"$BIN_DIR:\$PATH\""
+    say ""
+}
+
+print_next_steps() {
+    say ""
+    say "--------------------------------------------------------------"
+    say "  ShakerScan is ready. Two ways to use it:"
+    say "--------------------------------------------------------------"
+    say ""
+    print_path_activation
+    say "1) Drive it with an AI agent (recommended) - just ask in plain English:"
+    say "     $(sk) agent        # auto-detects codex, claude, or opencode"
+    say ""
+    say "   Then try asking:"
+    say "     \"Scan https://example.com and summarize the findings\""
+    say "     \"Show me active critical and high findings\""
+    say "     \"Red team my chatbot API with AI Gate smoke tests\""
+    say ""
+    say "2) Or run it yourself from the CLI:"
+    say "     $(sk) scan https://example.com   # quick scan"
+    say "     $(sk) status                     # what's running + UI/API URLs"
+    say "     $(sk) stop                       # stop everything"
+    say ""
+    if [ "$REMOTE_ACCESS" = "1" ]; then
+        say "   Remote mode is on - open the UI from your laptop using the URL printed above."
+    else
+        say "   Open the web UI in your browser:  http://localhost:3000"
+        say "   (On a remote server? Re-run with:  $(sk) start --remote)"
+    fi
+    say ""
+    say "Optional: for AI semantic judging, add AI_API_KEY to $INSTALL_DIR/.env"
+    say "Docs & more commands:  $(sk) env   |   $INSTALL_DIR/README.md"
+    say ""
 }
 
 say "ShakerScan installer"
@@ -247,44 +296,40 @@ chmod +x "$INSTALL_DIR/.claude/hooks/session-start.sh"
 install_command
 
 say ""
-say "Installed ShakerScan."
-say ""
-say "Use ShakerScan now:"
-say "  \"$BIN_DIR/shakerscan\" status"
-say "  \"$BIN_DIR/shakerscan\" start"
-say "  \"$BIN_DIR/shakerscan\" env"
-say ""
-say "After opening a new shell, this shorter command should work:"
-say "  shakerscan status"
-say ""
-say "Remote VPS over Tailscale:"
-say "  curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh"
-say "  \"$BIN_DIR/shakerscan\" start --remote"
-say ""
-say "Upgrade later:"
-say "  curl -fsSL https://install.shakerscan.com | sh"
-say ""
-say "Use with AI agents:"
-say "  \"$BIN_DIR/shakerscan\" agent codex"
-say "  \"$BIN_DIR/shakerscan\" agent claude"
-say "  \"$BIN_DIR/shakerscan\" agent opencode"
-say ""
-say "Or open the runtime directory manually:"
-say "  cd \"$INSTALL_DIR\""
-say "  codex   # reads AGENTS.md"
-say "  claude  # reads CLAUDE.md"
-say ""
-say "For local source builds:"
-say "  git clone https://github.com/andriyze/shakerscan.git"
-say "  cd shakerscan"
-say "  ./scanner.sh start --local"
+say "Installed ShakerScan to $INSTALL_DIR"
 say ""
 
-if [ "$START_AFTER_INSTALL" = "1" ]; then
-    say "Starting ShakerScan with latest Docker Hub images..."
-    cd "$INSTALL_DIR"
-    if [ "$REMOTE_ACCESS" = "1" ]; then
-        exec bash "$INSTALL_DIR/scanner.sh" start -y --remote
-    fi
-    exec bash "$INSTALL_DIR/scanner.sh" start -y
+if [ "$START_AFTER_INSTALL" != "1" ]; then
+    # Not auto-starting: show how to start, then the usage summary.
+    say "Start the scanner when ready:"
+    say "  $(sk) start            # local (UI stays on http://localhost:3000)"
+    say "  $(sk) start --remote   # VPS access over Tailscale"
+    print_next_steps
+    say "Upgrade later by re-running:  curl -fsSL https://install.shakerscan.com | sh"
+    exit 0
 fi
+
+say "Starting ShakerScan with latest Docker Hub images (first run pulls images, ~1-3 min)..."
+say ""
+cd "$INSTALL_DIR"
+start_rc=0
+if [ "$REMOTE_ACCESS" = "1" ]; then
+    bash "$INSTALL_DIR/scanner.sh" start -y --remote || start_rc=$?
+else
+    bash "$INSTALL_DIR/scanner.sh" start -y || start_rc=$?
+fi
+
+if [ "$start_rc" -ne 0 ]; then
+    say ""
+    say "Startup did not finish cleanly (exit $start_rc)."
+    say "Check what happened, then retry:"
+    say "  $(sk) status"
+    say "  $(sk) logs -f"
+    say "  $(sk) start"
+    exit "$start_rc"
+fi
+
+# scanner.sh prints health + UI/API URLs above; add the "what now" guidance last
+# so it is the final thing on screen rather than a pull progress bar.
+print_next_steps
+say "Upgrade later by re-running:  curl -fsSL https://install.shakerscan.com | sh"
