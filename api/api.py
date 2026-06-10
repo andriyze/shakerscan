@@ -5484,6 +5484,239 @@ async def exposure_nodes(
     return {"nodes": nodes, "count": len(nodes)}
 
 
+def _exposure_is_new(created: Any, *, days: int = 7) -> bool:
+    if not isinstance(created, datetime):
+        return False
+    when = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when) < timedelta(days=days)
+
+
+def _exposure_risk_score(critical: int, high: int, total: int) -> int:
+    return critical * 1000 + high * 50 + total
+
+
+@app.get("/exposure/assets")
+async def exposure_assets(
+    root_domain: Optional[str] = None,
+    kind: Optional[str] = None,
+    limit: int = Query(300, ge=1, le=1000),
+):
+    """Unified, risk-ranked asset inventory for the triage view.
+
+    Merges web targets, AI surfaces, and model artifacts with their active
+    critical/high/total finding counts (uncapped SQL aggregation), grade, and
+    first-seen timestamp. Each asset carries the graph ``node_id`` so the UI can
+    jump straight into the Map lens focused on it.
+    """
+    async with db_pool.acquire() as conn:
+        target_rows = await conn.fetch(
+            """
+            SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
+                   t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
+                   COALESCE(fc.active_total, 0) AS active_total,
+                   COALESCE(fc.active_critical, 0) AS active_critical,
+                   COALESCE(fc.active_high, 0) AS active_high
+            FROM targets t
+            LEFT JOIN (
+                SELECT target_id,
+                    COUNT(*) FILTER (WHERE status = 'active') AS active_total,
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high
+                FROM findings WHERE target_id IS NOT NULL GROUP BY target_id
+            ) fc ON fc.target_id = t.id
+            WHERE t.is_active = true
+              AND ($1::text IS NULL OR t.root_domain = $1::text)
+            """,
+            root_domain,
+        )
+
+        ai_rows = await conn.fetch(
+            """
+            SELECT a.id, a.name, a.endpoint_url, a.target_type, a.production_mode,
+                   a.last_scanned_at, a.created_at,
+                   COALESCE(fc.active_total, 0) AS active_total,
+                   COALESCE(fc.active_critical, 0) AS active_critical,
+                   COALESCE(fc.active_high, 0) AS active_high
+            FROM ai_targets a
+            LEFT JOIN (
+                SELECT ai_target_id,
+                    COUNT(*) FILTER (WHERE status = 'active') AS active_total,
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high
+                FROM findings WHERE ai_target_id IS NOT NULL GROUP BY ai_target_id
+            ) fc ON fc.ai_target_id = a.id
+            WHERE a.is_active = true
+              AND ($1::text IS NULL OR LOWER(a.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
+            """,
+            root_domain,
+        )
+
+    assets: list[dict[str, Any]] = []
+
+    for row in target_rows:
+        row = row_to_dict(row)
+        is_model = row.get("discovery_source") == "model-intake"
+        asset_kind = "model" if is_model else "web"
+        if kind and kind != asset_kind:
+            continue
+        crit = int(row["active_critical"] or 0)
+        high = int(row["active_high"] or 0)
+        total = int(row["active_total"] or 0)
+        assets.append({
+            "id": str(row["id"]),
+            "node_id": f"target:{row['id']}",
+            "kind": asset_kind,
+            "label": _short_url_label(row.get("url")) or row.get("name") or "",
+            "url": row.get("url"),
+            "root_domain": None if is_model else row.get("root_domain"),
+            "origin": row.get("root_domain") if is_model else None,
+            "grade": row.get("last_grade"),
+            "score": row.get("last_score"),
+            "active_total": total,
+            "active_critical": crit,
+            "active_high": high,
+            "total_scans": row.get("total_scans") or 0,
+            "last_scanned_at": row.get("last_scanned_at"),
+            "first_seen_at": row.get("created_at"),
+            "is_new": _exposure_is_new(row.get("created_at")),
+            "risk_score": _exposure_risk_score(crit, high, total),
+            "findings_href": f"/findings?target_id={row['id']}&status=active",
+        })
+
+    for row in ai_rows:
+        row = row_to_dict(row)
+        if kind and kind != "ai":
+            continue
+        crit = int(row["active_critical"] or 0)
+        high = int(row["active_high"] or 0)
+        total = int(row["active_total"] or 0)
+        assets.append({
+            "id": str(row["id"]),
+            "node_id": f"ai_target:{row['id']}",
+            "kind": "ai",
+            "label": row.get("name") or _short_url_label(row.get("endpoint_url")) or "",
+            "url": row.get("endpoint_url"),
+            "root_domain": extract_root_domain(row.get("endpoint_url") or ""),
+            "target_type": row.get("target_type"),
+            "production_mode": bool(row.get("production_mode")),
+            "grade": None,
+            "score": None,
+            "active_total": total,
+            "active_critical": crit,
+            "active_high": high,
+            "last_scanned_at": row.get("last_scanned_at"),
+            "first_seen_at": row.get("created_at"),
+            "is_new": _exposure_is_new(row.get("created_at")),
+            "risk_score": _exposure_risk_score(crit, high, total),
+            "findings_href": "/findings?source_type=ai&status=active",
+        })
+
+    assets.sort(key=lambda a: (a["risk_score"], a["is_new"]), reverse=True)
+    assets = assets[:limit]
+    return {
+        "assets": assets,
+        "count": len(assets),
+        "new_count": sum(1 for a in assets if a["is_new"]),
+    }
+
+
+@app.get("/exposure/attack-paths")
+async def exposure_attack_paths(
+    root_domain: Optional[str] = None,
+    limit_scans: int = Query(150, ge=1, le=300),
+    include_partial: bool = True,
+):
+    """Flat, severity-ranked list of correlated attack chains across scans.
+
+    Extracts ``attack_chains`` from recent completed scan results, dedupes a
+    chain type to its most recent occurrence per asset, and surfaces the step
+    narrative so the UI can render each path as a walkable sequence.
+    """
+    async with db_pool.acquire() as conn:
+        scan_rows = await conn.fetch(
+            """
+            SELECT s.id, s.target_id, s.ai_target_id, s.target_url, s.scan_type,
+                   s.created_at, s.result, t.root_domain, ait.endpoint_url AS ai_endpoint_url
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
+            WHERE s.status = 'completed' AND s.result IS NOT NULL
+              AND ($1::text IS NULL OR t.root_domain = $1::text
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
+            ORDER BY s.created_at DESC
+            LIMIT $2
+            """,
+            root_domain,
+            limit_scans,
+        )
+
+    paths: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+
+    for row in scan_rows:
+        row = row_to_dict(row)
+        result = _parse_graph_json(row.get("result"))
+        attack_chains = _parse_graph_json(result.get("attack_chains"))
+        chains = list(attack_chains.get("chains") or [])
+        if include_partial:
+            chains += list(attack_chains.get("partial_chains") or [])
+
+        if row.get("ai_target_id"):
+            subject_node = f"ai_target:{row['ai_target_id']}"
+        elif row.get("target_id"):
+            subject_node = f"target:{row['target_id']}"
+        else:
+            subject_node = None
+
+        for idx, chain in enumerate(chains):
+            if not isinstance(chain, dict):
+                continue
+            chain_type = str(chain.get("chain_type") or chain.get("name") or idx)
+            key = (subject_node, chain_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            steps = [
+                {
+                    "step_number": st.get("step_number"),
+                    "description": st.get("description"),
+                    "impact": st.get("impact"),
+                    "finding_type": st.get("finding_type"),
+                }
+                for st in (chain.get("steps") or [])
+                if isinstance(st, dict)
+            ]
+            severity = str(chain.get("severity") or "").lower() or None
+            paths.append({
+                "id": f"{row['id']}:{chain_type}:{idx}",
+                "name": chain.get("name") or chain_type,
+                "chain_type": chain.get("chain_type"),
+                "severity": severity,
+                "status": chain.get("status"),
+                "confidence": chain.get("confidence"),
+                "completeness": chain.get("completeness"),
+                "business_impact": chain.get("business_impact"),
+                "description": chain.get("description"),
+                "remediation": chain.get("remediation"),
+                "steps": steps,
+                "asset_label": _short_url_label(row.get("target_url")),
+                "asset_node_id": subject_node,
+                "scan_id": str(row["id"]),
+                "scan_href": f"/scans/{row['id']}",
+            })
+
+    severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    paths.sort(
+        key=lambda p: (
+            severity_rank.get(p["severity"] or "", 0),
+            1 if p["status"] == "complete" else 0,
+            len(p["steps"]),
+        ),
+        reverse=True,
+    )
+    return {"attack_paths": paths, "count": len(paths)}
+
+
 # ============================================================
 # SCANS
 # ============================================================

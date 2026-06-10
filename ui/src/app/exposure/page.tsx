@@ -15,8 +15,10 @@ import {
   Globe2,
   KeyRound,
   Layers,
+  ListTree,
   Loader2,
   Package,
+  Radar,
   RefreshCw,
   Route,
   Search,
@@ -26,18 +28,32 @@ import {
 } from 'lucide-react'
 import {
   getDomains,
+  getExposureAssets,
+  getExposureAttackPaths,
   getExposureGraph,
   getExposureNodes,
-  type ExposureEdge,
+  scanTarget,
+  type ExposureAsset,
+  type ExposureAttackPath,
   type ExposureGraph,
   type ExposureNode,
   type ExposureNodeType,
   type ExposureSearchNode,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { Button, CardSkeleton, EmptyState, ErrorState } from '@/components/ui'
+import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
+import { TriageTable } from './TriageTable'
+import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
+
+type Lens = 'triage' | 'map' | 'paths'
+
+const LENSES: Array<{ value: Lens; label: string; icon: typeof ListTree }> = [
+  { value: 'triage', label: 'Triage', icon: ListTree },
+  { value: 'map', label: 'Map', icon: Radar },
+  { value: 'paths', label: 'Attack paths', icon: GitBranch },
+]
 
 const displayFont = Chakra_Petch({
   weight: ['500', '600', '700'],
@@ -50,8 +66,6 @@ const monoFont = Spline_Sans_Mono({
   subsets: ['latin'],
   variable: '--font-mono',
 })
-
-const LIST_PAGE_SIZE = 40
 
 const NODE_LABELS: Record<string, string> = {
   domain: 'Domains',
@@ -249,21 +263,6 @@ function StatPanel({
   )
 }
 
-function RelationshipRow({ edge, byId, onFocus }: { edge: ExposureEdge; byId: Map<string, ExposureNode>; onFocus: (node: ExposureNode) => void }) {
-  const source = byId.get(edge.source)
-  const target = byId.get(edge.target)
-  if (!source || !target) return null
-  return (
-    <div className="grid gap-3 border-b border-gray-800 px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(0,1fr)_150px_minmax(0,1fr)]">
-      <NodePill node={source} onFocus={onFocus} />
-      <div className="flex items-center justify-start lg:justify-center">
-        <span className="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs text-gray-300">{edge.label}</span>
-      </div>
-      <NodePill node={target} onFocus={onFocus} />
-    </div>
-  )
-}
-
 function NodeDetailPanel({
   node,
   neighbors,
@@ -405,14 +404,12 @@ export default function ExposurePage() {
   const [domains, setDomains] = useState<string[]>([])
   const [domain, setDomain] = useState('')
   const [includeResolved, setIncludeResolved] = useState(false)
-  const [view, setView] = useState<'graph' | 'list'>('graph')
+  const [lens, setLens] = useState<Lens>('triage')
   const [focusId, setFocusId] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
   const [depth, setDepth] = useState(1)
   const [showEndpoints, setShowEndpoints] = useState(false)
-  const [selectedType, setSelectedType] = useState('')
   const [highlightType, setHighlightType] = useState<string | null>(null)
-  const [listPage, setListPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [refetching, setRefetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -420,6 +417,20 @@ export default function ExposurePage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const hasLoadedRef = useRef(false)
+
+  // Triage lens
+  const [assets, setAssets] = useState<ExposureAsset[]>([])
+  const [assetsLoading, setAssetsLoading] = useState(true)
+  const [assetsError, setAssetsError] = useState<string | null>(null)
+  const [newCount, setNewCount] = useState(0)
+  const [scanningIds, setScanningIds] = useState<Set<string>>(new Set())
+
+  // Attack paths lens
+  const [paths, setPaths] = useState<ExposureAttackPath[]>([])
+  const [pathsLoading, setPathsLoading] = useState(true)
+  const [pathsError, setPathsError] = useState<string | null>(null)
+
+  const toast = useToast()
 
   async function loadGraph() {
     if (hasLoadedRef.current) setRefetching(true)
@@ -445,9 +456,48 @@ export default function ExposurePage() {
     }
   }
 
+  async function loadAssets() {
+    setAssetsLoading(true)
+    try {
+      const res = await getExposureAssets({ root_domain: domain || undefined })
+      setAssets(res.assets || [])
+      setNewCount(res.new_count || 0)
+      setAssetsError(null)
+    } catch (err) {
+      setAssetsError(err instanceof Error ? err.message : 'Failed to load assets')
+    } finally {
+      setAssetsLoading(false)
+    }
+  }
+
+  async function loadPaths() {
+    setPathsLoading(true)
+    try {
+      const res = await getExposureAttackPaths({ root_domain: domain || undefined })
+      setPaths(res.attack_paths || [])
+      setPathsError(null)
+    } catch (err) {
+      setPathsError(err instanceof Error ? err.message : 'Failed to load attack paths')
+    } finally {
+      setPathsLoading(false)
+    }
+  }
+
   useEffect(() => {
     getDomains().then((payload) => setDomains(payload.domains || [])).catch(() => {})
   }, [])
+
+  // Assets power the default triage lens and the "new" badge; load up front.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    loadAssets()
+  }, [domain])
+
+  // Attack paths load lazily the first time that lens is opened, and on scope change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (lens === 'paths') loadPaths()
+  }, [lens, domain])
 
   // Search index: refetched whenever the domain/resolved scope changes.
   useEffect(() => {
@@ -476,20 +526,43 @@ export default function ExposurePage() {
     // their detail without re-focusing the graph.
     if (node.type === 'finding_group') return
     setFocusId(node.id)
-    setView('graph')
+    setLens('map')
   }
 
   function focusById(id: string) {
     setFocusId(id)
     setSelectedNode(null)
     setHighlightType(null)
-    setView('graph')
+    setLens('map')
   }
 
   function handleClear() {
     setSelectedNode(null)
     setFocusId(null)
     setShowEndpoints(false)
+  }
+
+  async function handleScan(asset: ExposureAsset) {
+    setScanningIds((prev) => new Set(prev).add(asset.id))
+    try {
+      const res = await scanTarget(asset.id, { scan_type: 'quick' })
+      const scanId = res?.scan_id || res?.id
+      toast.success('Quick scan started', scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined)
+    } catch {
+      toast.error(`Failed to start scan for ${asset.label}`)
+    } finally {
+      setScanningIds((prev) => {
+        const next = new Set(prev)
+        next.delete(asset.id)
+        return next
+      })
+    }
+  }
+
+  function refreshActiveLens() {
+    if (lens === 'triage') loadAssets()
+    else if (lens === 'paths') loadPaths()
+    else loadGraph()
   }
 
   const searchMatches = useMemo(() => {
@@ -525,27 +598,10 @@ export default function ExposurePage() {
     )
   }, [focusId, graph, byId])
 
-  const SEVERITY_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 }
-  const listEdges = useMemo(() => {
-    const edges = graph?.edges || []
-    const filtered = selectedType
-      ? edges.filter((edge) => byId.get(edge.source)?.type === selectedType || byId.get(edge.target)?.type === selectedType)
-      : edges
-    return [...filtered].sort((a, b) => (SEVERITY_RANK[String(b.severity || '')] || 0) - (SEVERITY_RANK[String(a.severity || '')] || 0))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, selectedType, byId])
-
-  const listTotalPages = Math.max(1, Math.ceil(listEdges.length / LIST_PAGE_SIZE))
-  const listPageClamped = Math.min(listPage, listTotalPages)
-  const visibleListEdges = listEdges.slice((listPageClamped - 1) * LIST_PAGE_SIZE, listPageClamped * LIST_PAGE_SIZE)
-
-  useEffect(() => {
-    setListPage(1)
-  }, [selectedType, focusId, domain])
-
   const graphIsEmpty = !loading && (graph?.nodes?.length ?? 0) === 0
   const renderedNodes = summary?.rendered_node_count ?? graph?.nodes?.length ?? 0
   const totalNodes = summary?.node_count ?? renderedNodes
+  const lensBusy = lens === 'triage' ? assetsLoading : lens === 'paths' ? pathsLoading : loading || refetching
 
   return (
     <div className={`${displayFont.variable} ${monoFont.variable} ${styles.page}`}>
@@ -557,9 +613,11 @@ export default function ExposurePage() {
             <span className={styles.liveDot} aria-hidden="true" />
             <span className={styles.kicker}>Attack surface · live</span>
           </div>
-          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure Graph</h1>
+          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Attack Surface</h1>
           <p className="mt-1 text-sm text-gray-400">
-            Connected view of targets, AI surfaces, findings, vendors, and attack chains. Click a node to focus its neighborhood.
+            {lens === 'triage' && 'Risk-ranked inventory of every asset — scan, triage, and drill in.'}
+            {lens === 'map' && 'Connected view — click a node to explore its blast radius.'}
+            {lens === 'paths' && 'Correlated exploit paths across your attack surface.'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -592,22 +650,6 @@ export default function ExposurePage() {
               </div>
             )}
           </div>
-          <div className={`inline-flex p-0.5 ${styles.input}`} role="tablist" aria-label="View mode">
-            {(['graph', 'list'] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                role="tab"
-                aria-selected={view === mode}
-                onClick={() => setView(mode)}
-                className={`rounded-md px-3 py-1.5 text-sm capitalize focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                  view === mode ? 'bg-teal-500/20 text-teal-200' : 'text-gray-300 hover:text-white'
-                }`}
-              >
-                {mode}
-              </button>
-            ))}
-          </div>
           <select
             value={domain}
             onChange={(event) => changeScope(() => setDomain(event.target.value))}
@@ -619,23 +661,33 @@ export default function ExposurePage() {
               <option key={item} value={item}>{item}</option>
             ))}
           </select>
-          <label className={`flex items-center gap-2 px-3 py-2 text-sm text-gray-300 ${styles.input}`}>
-            <input
-              type="checkbox"
-              checked={includeResolved}
-              onChange={(event) => changeScope(() => setIncludeResolved(event.target.checked))}
-              className="rounded border-gray-700 bg-gray-800"
-            />
-            Include resolved
-          </label>
-          <Button onClick={() => void loadGraph()} disabled={loading}>
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
+          <Button onClick={refreshActiveLens} disabled={lensBusy}>
+            <RefreshCw className={`h-4 w-4 ${lensBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
             Refresh
           </Button>
         </div>
       </div>
 
-      {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
+      <div className={`flex flex-wrap items-center gap-1 ${styles.rise} ${styles.d1}`} role="tablist" aria-label="Exposure lens">
+        {LENSES.map((l) => (
+          <button
+            key={l.value}
+            type="button"
+            role="tab"
+            aria-selected={lens === l.value}
+            onClick={() => setLens(l.value)}
+            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              lens === l.value ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
+            }`}
+          >
+            <l.icon className="h-4 w-4" aria-hidden="true" />
+            {l.label}
+            {l.value === 'triage' && newCount > 0 && (
+              <span className="rounded-full bg-teal-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-teal-200">{newCount} new</span>
+            )}
+          </button>
+        ))}
+      </div>
 
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
         <StatPanel label="Assets" value={metrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
@@ -649,17 +701,44 @@ export default function ExposurePage() {
         <StatPanel label="AI Surfaces" value={metrics?.ai_surfaces ?? nodeTypeCounts.ai_target ?? '--'} icon={<Bot className="h-5 w-5" />} />
       </div>
 
+      {lens === 'triage' && (
+        <div className={`${styles.rise} ${styles.d3}`}>
+          <TriageTable
+            assets={assets}
+            loading={assetsLoading}
+            error={assetsError}
+            onRetry={loadAssets}
+            onExplore={focusById}
+            onScan={handleScan}
+            scanningIds={scanningIds}
+          />
+        </div>
+      )}
+
+      {lens === 'paths' && (
+        <div className={`${styles.rise} ${styles.d3}`}>
+          <AttackPaths
+            paths={paths}
+            loading={pathsLoading}
+            error={pathsError}
+            onRetry={loadPaths}
+            onExploreAsset={focusById}
+          />
+        </div>
+      )}
+
+      {lens === 'map' && (
+      <div className="space-y-4">
+      {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
         <Panel className={`overflow-hidden ${styles.rise} ${styles.d4}`}>
           <div className={`flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between ${styles.moduleHeader}`}>
             <div>
               <h2 className={`${styles.displayTitle} text-sm text-white`}>{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
               <p className="mt-1 text-sm text-gray-500">
-                {view === 'graph'
-                  ? focusId
-                    ? `${renderedNodes} connected nodes${summary?.truncated ? ' · riskiest shown' : ''}`
-                    : `Showing the ${renderedNodes} riskiest of ${totalNodes} nodes · search or click to explore more`
-                  : `${listEdges.length} relationship${listEdges.length === 1 ? '' : 's'}`}
+                {focusId
+                  ? `${renderedNodes} connected nodes${summary?.truncated ? ' · riskiest shown' : ''}`
+                  : `Showing the ${renderedNodes} riskiest of ${totalNodes} nodes · search or click to explore more`}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -696,19 +775,15 @@ export default function ExposurePage() {
                   All endpoints
                 </label>
               )}
-              {view === 'list' && (
-                <select
-                  value={selectedType}
-                  onChange={(event) => setSelectedType(event.target.value)}
-                  aria-label="Filter by node type"
-                  className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
-                >
-                  <option value="">All node types</option>
-                  {Object.entries(NODE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              )}
+              <label className={`flex items-center gap-2 px-3 py-2 text-xs text-gray-300 ${styles.input}`}>
+                <input
+                  type="checkbox"
+                  checked={includeResolved}
+                  onChange={(event) => changeScope(() => setIncludeResolved(event.target.checked))}
+                  className="rounded border-gray-700 bg-gray-800"
+                />
+                Include resolved
+              </label>
             </div>
           </div>
 
@@ -724,7 +799,7 @@ export default function ExposurePage() {
                 action={{ label: 'New Scan', href: '/scan/new' }}
               />
             </div>
-          ) : view === 'graph' ? (
+          ) : (
             <div>
               <div className={`relative h-[560px] w-full ${styles.graphBackdrop}`}>
                 <div className={styles.radarRings} aria-hidden="true" />
@@ -758,29 +833,6 @@ export default function ExposurePage() {
               <div className="border-t border-gray-800">
                 <Legend />
               </div>
-            </div>
-          ) : visibleListEdges.length === 0 ? (
-            <div className="p-4">
-              <EmptyState message="No relationships found." hint="Try a different node type filter." />
-            </div>
-          ) : (
-            <div>
-              {visibleListEdges.map((edge, index) => (
-                <RelationshipRow key={`${edge.source}-${edge.target}-${edge.type}-${index}`} edge={edge} byId={byId} onFocus={handleFocus} />
-              ))}
-              {listTotalPages > 1 && (
-                <div className="flex items-center justify-between border-t border-gray-800 px-4 py-3">
-                  <span className="text-xs text-gray-500">Page {listPageClamped} of {listTotalPages}</span>
-                  <div className="flex gap-2">
-                    <Button variant="secondary" size="sm" disabled={listPageClamped <= 1} onClick={() => setListPage((p) => Math.max(1, p - 1))}>
-                      Previous
-                    </Button>
-                    <Button variant="secondary" size="sm" disabled={listPageClamped >= listTotalPages} onClick={() => setListPage((p) => p + 1)}>
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </Panel>
@@ -831,7 +883,7 @@ export default function ExposurePage() {
                           key={type}
                           type="button"
                           aria-pressed={active}
-                          onClick={() => { setHighlightType(active ? null : type); setView('graph') }}
+                          onClick={() => setHighlightType(active ? null : type)}
                           className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                             active ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                           }`}
@@ -850,6 +902,8 @@ export default function ExposurePage() {
           )}
         </div>
       </div>
+      </div>
+      )}
       </div>
     </div>
   )

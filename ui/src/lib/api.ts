@@ -551,6 +551,67 @@ export interface ExposureSearchNode {
   severity?: string | null
 }
 
+export type ExposureAssetKind = 'web' | 'ai' | 'model'
+
+export interface ExposureAsset {
+  id: string
+  node_id: string
+  kind: ExposureAssetKind
+  label: string
+  url?: string | null
+  root_domain?: string | null
+  origin?: string | null
+  target_type?: string | null
+  production_mode?: boolean
+  grade?: string | null
+  score?: number | null
+  active_total: number
+  active_critical: number
+  active_high: number
+  total_scans?: number
+  last_scanned_at?: string | null
+  first_seen_at?: string | null
+  is_new: boolean
+  risk_score: number
+  findings_href: string
+}
+
+export interface ExposureAssetsResponse {
+  assets: ExposureAsset[]
+  count: number
+  new_count: number
+}
+
+export interface ExposureAttackStep {
+  step_number?: number | null
+  description?: string | null
+  impact?: string | null
+  finding_type?: string | null
+}
+
+export interface ExposureAttackPath {
+  id: string
+  name: string
+  chain_type?: string | null
+  severity?: string | null
+  status?: string | null
+  confidence?: number | null
+  completeness?: number | null
+  business_impact?: string | null
+  description?: string | null
+  remediation?: string | null
+  steps: ExposureAttackStep[]
+  asset_label?: string | null
+  asset_node_id?: string | null
+  scan_id: string
+  scan_href: string
+}
+
+export interface ExposureAttackPathsResponse {
+  attack_paths: ExposureAttackPath[]
+  count: number
+}
+
 export interface ExposureNode {
   id: string
   type: ExposureNodeType
@@ -632,6 +693,30 @@ export async function getExposureNodes(params?: {
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/nodes${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure nodes'))
+  return res.json()
+}
+
+export async function getExposureAssets(params?: {
+  root_domain?: string
+  kind?: ExposureAssetKind
+}): Promise<ExposureAssetsResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.kind) searchParams.set('kind', params.kind)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
+  return res.json()
+}
+
+export async function getExposureAttackPaths(params?: {
+  root_domain?: string
+}): Promise<ExposureAttackPathsResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/exposure/attack-paths${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch attack paths'))
   return res.json()
 }
 
