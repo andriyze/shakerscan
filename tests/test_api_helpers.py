@@ -197,6 +197,41 @@ def test_scan_time_verification_fields_preserves_zero_confidence():
     assert fields["last_verification_confidence"] == 0.0
 
 
+def test_normalize_scan_result_backfills_staged_nuclei_coverage():
+    report = {
+        "discovery": {
+            "nuclei": {
+                "scan_completed": True,
+                "templates_executed": 0,
+                "waves_completed": 2,
+                "total_duration_seconds": 75,
+                "wave_stats": [
+                    {"tags": ["default-login", "rce", "cve", "takeover", "critical"]},
+                    {"tags": ["auth", "exposure", "misconfig"]},
+                ],
+            }
+        },
+        "smart_coverage": {
+            "nuclei_templates": {"run": 0, "matched": 0, "hit_rate": 0.0, "by_category": {}}
+        },
+        "coverage_gaps": {
+            "count": 2,
+            "issues": [
+                "Low endpoint coverage (0.18) - increase crawl depth or authenticated coverage",
+                "Nuclei templates not executed - check nuclei configuration or timeouts",
+            ],
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["smart_coverage"]["nuclei_templates"]["run"] == 8
+    assert normalized["coverage_gaps"]["count"] == 1
+    assert normalized["coverage_gaps"]["issues"] == [
+        "Low endpoint coverage (0.18) - increase crawl depth or authenticated coverage"
+    ]
+
+
 # ----- run_due_schedules --------------------------------------------------
 
 class _FakeAcquire:

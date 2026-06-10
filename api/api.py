@@ -607,6 +607,91 @@ def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> d
     return overrides
 
 
+_NUCLEI_NOT_EXECUTED_COVERAGE_GAP = "Nuclei templates not executed - check nuclei configuration or timeouts"
+
+
+def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
+    discovery = scan_result.get("discovery") if isinstance(scan_result.get("discovery"), dict) else {}
+    nuclei = discovery.get("nuclei") if isinstance(discovery.get("nuclei"), dict) else {}
+    if not nuclei:
+        return 0
+
+    for key in ("templates_executed", "templates_used"):
+        try:
+            value = int(nuclei.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+
+    stats = nuclei.get("statistics") if isinstance(nuclei.get("statistics"), dict) else {}
+    for key in ("templates_executed", "templates_loaded"):
+        try:
+            value = int(stats.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+
+    if nuclei.get("scan_completed") is not True:
+        return 0
+
+    wave_tags: set[str] = set()
+    for wave in nuclei.get("wave_stats") or []:
+        if not isinstance(wave, dict):
+            continue
+        for tag in wave.get("tags") or []:
+            if tag:
+                wave_tags.add(str(tag))
+    if wave_tags:
+        return len(wave_tags)
+
+    try:
+        waves_completed = int(nuclei.get("waves_completed") or 0)
+    except (TypeError, ValueError):
+        waves_completed = 0
+    try:
+        duration = int(nuclei.get("total_duration_seconds") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if waves_completed > 0 or duration > 0:
+        return max(1, waves_completed)
+    return 0
+
+
+def _normalize_scan_result_for_api(scan_result: Any) -> Any:
+    if not isinstance(scan_result, dict):
+        return scan_result
+
+    inferred_nuclei_run = _infer_nuclei_templates_run(scan_result)
+    if inferred_nuclei_run > 0:
+        smart_coverage = scan_result.setdefault("smart_coverage", {})
+        if isinstance(smart_coverage, dict):
+            nuclei_cov = smart_coverage.setdefault("nuclei_templates", {})
+            if isinstance(nuclei_cov, dict):
+                try:
+                    current_run = int(nuclei_cov.get("run") or 0)
+                except (TypeError, ValueError):
+                    current_run = 0
+                if current_run <= 0:
+                    nuclei_cov["run"] = inferred_nuclei_run
+                    nuclei_cov.setdefault("matched", 0)
+                    nuclei_cov.setdefault("hit_rate", 0.0)
+                    nuclei_cov.setdefault("by_category", {})
+                    nuclei_cov["run_source"] = "staged_nuclei_wave_stats"
+
+        coverage_gaps = scan_result.get("coverage_gaps")
+        if isinstance(coverage_gaps, dict) and isinstance(coverage_gaps.get("issues"), list):
+            issues = [
+                issue for issue in coverage_gaps.get("issues") or []
+                if issue != _NUCLEI_NOT_EXECUTED_COVERAGE_GAP
+            ]
+            coverage_gaps["issues"] = issues
+            coverage_gaps["count"] = len(issues)
+
+    return scan_result
+
+
 def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
     normalized = normalize_retest_type(override_type)
     if normalized:
@@ -6028,7 +6113,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
 
     result = dict(scan)
     if result.get('result') is not None:
-        result['result'] = _decode_json_value(result['result'])
+        result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
     verification_overrides = _scan_result_verification_overrides(result.get('result'))
     merged_findings = []
     for row in findings:
@@ -6128,7 +6213,7 @@ async def get_scan_result(scan_id: str):
         )
         if not scan or not scan['result']:
             raise HTTPException(status_code=404, detail="Scan result not found")
-        return _decode_json_value(scan['result'])
+        return _normalize_scan_result_for_api(_decode_json_value(scan['result']))
 
 
 @app.get("/scans/{scan_id}/logs")
