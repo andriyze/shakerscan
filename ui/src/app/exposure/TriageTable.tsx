@@ -60,7 +60,7 @@ function InlineFindings({ asset }: { asset: ExposureAsset }) {
     let active = true
     const params =
       asset.kind === 'ai'
-        ? { source_type: 'ai' as const, status: 'active', limit: 8, sort_by: 'severity' as const, search: asset.label }
+        ? { ai_target_id: asset.id, status: 'active', limit: 8, sort_by: 'severity' as const }
         : { target_id: asset.id, status: 'active', limit: 8, sort_by: 'severity' as const }
     getFindings(params)
       .then((res) => {
@@ -78,6 +78,7 @@ function InlineFindings({ asset }: { asset: ExposureAsset }) {
     setBusyId(finding.id)
     try {
       await updateFinding(finding.id, status)
+      // The list shows active findings; drop this one unless it stays active.
       setFindings((prev) => (prev ? prev.filter((f) => f.id !== finding.id || status === 'active') : prev))
       toast.success(`Finding marked ${status.replace(/_/g, ' ')}`)
     } catch {
@@ -180,6 +181,7 @@ function AssetRow({
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
+          aria-controls={`findings-${asset.id}`}
           aria-label={`Toggle findings for ${asset.label}`}
           className="shrink-0 rounded p-0.5 text-gray-500 hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
@@ -248,7 +250,11 @@ function AssetRow({
           </button>
         </div>
       </div>
-      {open && <div className="bg-black/30">{<InlineFindings asset={asset} />}</div>}
+      {open && (
+        <div id={`findings-${asset.id}`} className="bg-black/30">
+          <InlineFindings asset={asset} />
+        </div>
+      )}
     </div>
   )
 }
@@ -282,13 +288,12 @@ export function TriageTable({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
-        <div className={`inline-flex p-0.5 ${styles.input}`} role="tablist" aria-label="Asset kind">
+        <div className={`inline-flex p-0.5 ${styles.input}`} role="group" aria-label="Filter by asset kind">
           {KIND_FILTERS.map((f) => (
             <button
               key={f.value}
               type="button"
-              role="tab"
-              aria-selected={kind === f.value}
+              aria-pressed={kind === f.value}
               onClick={() => setKind(f.value)}
               className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 kind === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'

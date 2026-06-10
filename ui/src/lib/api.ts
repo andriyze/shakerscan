@@ -576,10 +576,18 @@ export interface ExposureAsset {
   findings_href: string
 }
 
+export interface ExposureAssetMetrics {
+  asset_count: number
+  active_critical: number
+  active_high: number
+  ai_surfaces: number
+}
+
 export interface ExposureAssetsResponse {
   assets: ExposureAsset[]
   count: number
   new_count: number
+  metrics: ExposureAssetMetrics
 }
 
 export interface ExposureAttackStep {
@@ -870,6 +878,7 @@ export async function getFindings(params?: {
   root_domain?: string
   scan_id?: string
   target_id?: string
+  ai_target_id?: string
   search?: string
   seen_within_days?: number
   verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
@@ -887,6 +896,7 @@ export async function getFindings(params?: {
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.ai_target_id) searchParams.set('ai_target_id', params.ai_target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)

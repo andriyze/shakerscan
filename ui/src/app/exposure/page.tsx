@@ -34,6 +34,7 @@ import {
   getExposureNodes,
   scanTarget,
   type ExposureAsset,
+  type ExposureAssetMetrics,
   type ExposureAttackPath,
   type ExposureGraph,
   type ExposureNode,
@@ -420,10 +421,13 @@ export default function ExposurePage() {
 
   // Triage lens
   const [assets, setAssets] = useState<ExposureAsset[]>([])
+  const [assetMetrics, setAssetMetrics] = useState<ExposureAssetMetrics | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [newCount, setNewCount] = useState(0)
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set())
+  const graphKeyRef = useRef<string | null>(null)
+  const pathsKeyRef = useRef<string | null>(null)
 
   // Attack paths lens
   const [paths, setPaths] = useState<ExposureAttackPath[]>([])
@@ -461,6 +465,7 @@ export default function ExposurePage() {
     try {
       const res = await getExposureAssets({ root_domain: domain || undefined })
       setAssets(res.assets || [])
+      setAssetMetrics(res.metrics || null)
       setNewCount(res.new_count || 0)
       setAssetsError(null)
     } catch (err) {
@@ -493,10 +498,14 @@ export default function ExposurePage() {
     loadAssets()
   }, [domain])
 
-  // Attack paths load lazily the first time that lens is opened, and on scope change.
+  // Attack paths load lazily the first time that lens is opened, then once per
+  // scope change — not on every switch back to the lens.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (lens === 'paths') loadPaths()
+    if (lens !== 'paths') return
+    if (pathsKeyRef.current === domain) return
+    pathsKeyRef.current = domain
+    loadPaths()
   }, [lens, domain])
 
   // Search index: refetched whenever the domain/resolved scope changes.
@@ -506,10 +515,16 @@ export default function ExposurePage() {
       .catch(() => setSearchIndex([]))
   }, [domain, includeResolved])
 
+  // The graph is only needed for the Map lens — load it lazily when that lens
+  // is active, and skip redundant reloads when scope/focus haven't changed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
+    if (lens !== 'map') return
+    const key = `${domain}|${includeResolved}|${focusId}|${depth}|${showEndpoints}`
+    if (graphKeyRef.current === key) return
+    graphKeyRef.current = key
     loadGraph()
-  }, [domain, includeResolved, focusId, depth, showEndpoints])
+  }, [lens, domain, includeResolved, focusId, depth, showEndpoints])
 
   // Filters that change the domain/scope reset the focus back to the overview.
   function changeScope(next: () => void) {
@@ -574,7 +589,6 @@ export default function ExposurePage() {
   const byId = useMemo(() => new Map((graph?.nodes || []).map((node) => [node.id, node])), [graph])
   const summary = graph?.summary
   const nodeTypeCounts = summary?.node_type_counts || {}
-  const metrics = summary?.metrics
   const hotspots = summary?.hotspots || []
 
   const neighbors = useMemo(() => {
@@ -674,7 +688,9 @@ export default function ExposurePage() {
             key={l.value}
             type="button"
             role="tab"
+            id={`lens-tab-${l.value}`}
             aria-selected={lens === l.value}
+            aria-controls={`lens-panel-${l.value}`}
             onClick={() => setLens(l.value)}
             className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
               lens === l.value ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
@@ -690,19 +706,19 @@ export default function ExposurePage() {
       </div>
 
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
-        <StatPanel label="Assets" value={metrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
+        <StatPanel label="Assets" value={assetMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
         <StatPanel
-          label="Active Critical / High"
-          value={metrics ? `${metrics.active_critical} / ${metrics.active_high}` : '--'}
+          label="Active Critical"
+          value={assetMetrics?.active_critical ?? '--'}
           icon={<AlertTriangle className="h-5 w-5" />}
-          alert={Boolean(metrics && metrics.active_critical > 0)}
+          alert={Boolean(assetMetrics && assetMetrics.active_critical > 0)}
         />
-        <StatPanel label="Attack Chains" value={metrics?.attack_chains ?? '--'} icon={<GitBranch className="h-5 w-5" />} />
-        <StatPanel label="AI Surfaces" value={metrics?.ai_surfaces ?? nodeTypeCounts.ai_target ?? '--'} icon={<Bot className="h-5 w-5" />} />
+        <StatPanel label="Active High" value={assetMetrics?.active_high ?? '--'} icon={<ShieldAlert className="h-5 w-5" />} />
+        <StatPanel label="AI Surfaces" value={assetMetrics?.ai_surfaces ?? '--'} icon={<Bot className="h-5 w-5" />} />
       </div>
 
       {lens === 'triage' && (
-        <div className={`${styles.rise} ${styles.d3}`}>
+        <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3}`}>
           <TriageTable
             assets={assets}
             loading={assetsLoading}
@@ -716,7 +732,7 @@ export default function ExposurePage() {
       )}
 
       {lens === 'paths' && (
-        <div className={`${styles.rise} ${styles.d3}`}>
+        <div role="tabpanel" id="lens-panel-paths" aria-labelledby="lens-tab-paths" className={`${styles.rise} ${styles.d3}`}>
           <AttackPaths
             paths={paths}
             loading={pathsLoading}
@@ -728,7 +744,7 @@ export default function ExposurePage() {
       )}
 
       {lens === 'map' && (
-      <div className="space-y-4">
+      <div role="tabpanel" id="lens-panel-map" aria-labelledby="lens-tab-map" className="space-y-4">
       {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
         <Panel className={`overflow-hidden ${styles.rise} ${styles.d4}`}>

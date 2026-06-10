@@ -5611,12 +5611,25 @@ async def exposure_assets(
             "findings_href": "/findings?source_type=ai&status=active",
         })
 
-    assets.sort(key=lambda a: (a["risk_score"], a["is_new"]), reverse=True)
+    # Headline metrics from the full (uncapped) set so the stat row stays
+    # accurate and independent of the heavier graph fetch. Compute before the
+    # display limit is applied.
+    metrics = {
+        "asset_count": len(assets),
+        "active_critical": sum(a["active_critical"] for a in assets),
+        "active_high": sum(a["active_high"] for a in assets),
+        "ai_surfaces": sum(1 for a in assets if a["kind"] == "ai"),
+    }
+    new_count = sum(1 for a in assets if a["is_new"])
+
+    # Stable, deterministic ordering: risk, then newness, then id as a tiebreak.
+    assets.sort(key=lambda a: (a["risk_score"], a["is_new"], a["id"]), reverse=True)
     assets = assets[:limit]
     return {
         "assets": assets,
         "count": len(assets),
-        "new_count": sum(1 for a in assets if a["is_new"]),
+        "new_count": new_count,
+        "metrics": metrics,
     }
 
 
@@ -6576,6 +6589,7 @@ async def list_findings(
     status: Optional[str] = None,
     source_type: Optional[str] = Query(None, regex="^(dast|ai|model_intake)$"),
     target_id: Optional[str] = None,
+    ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     verification_verdict: Optional[str] = Query(None, regex="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
@@ -6631,6 +6645,11 @@ async def list_findings(
         if target_id:
             query += f" AND f.target_id = ${param_idx}"
             params.append(uuid.UUID(target_id))
+            param_idx += 1
+
+        if ai_target_id:
+            query += f" AND f.ai_target_id = ${param_idx}"
+            params.append(uuid.UUID(ai_target_id))
             param_idx += 1
 
         if scan_id:

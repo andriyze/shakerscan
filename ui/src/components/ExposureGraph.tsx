@@ -153,6 +153,15 @@ export function ExposureGraph({
       return fresh
     })
 
+    // Bound the position cache: across a long session of focus changes it
+    // would otherwise retain every node ever seen. Once large, keep only the
+    // nodes currently on screen (their positions still carry continuity).
+    if (cache.size > 1500) {
+      for (const id of cache.keys()) {
+        if (!incomingIds.has(id)) cache.delete(id)
+      }
+    }
+
     const links: GraphLink[] = edges
       .filter((e) => incomingIds.has(e.source) && incomingIds.has(e.target))
       .map((e) => ({ source: e.source, target: e.target, type: e.type, severity: e.severity }))
