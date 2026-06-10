@@ -242,10 +242,10 @@ def test_build_exposure_graph_links_domains_targets_findings_and_ai_surfaces():
     assert "tests_auth_role" in edge_types
     assert "has_cloud_hint" in edge_types
     assert "exposes_mcp_tool" in edge_types
-    assert "inspected_model_artifact" in edge_types
+    assert "contains_artifact" in edge_types
     assert "loads_third_party" in edge_types
     assert "loads_script" in edge_types
-    assert "produced_chain" in edge_types
+    assert "exploit_path" in edge_types
     assert graph["summary"]["node_type_counts"]["model_artifact"] == 1
     assert graph["summary"]["severity_counts"]["critical"] == 1
     assert graph["summary"]["severity_counts"]["high"] == 1

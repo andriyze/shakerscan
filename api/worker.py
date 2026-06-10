@@ -148,6 +148,54 @@ def _canonicalize_jsonish(value: Any) -> str | None:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_time_verification_fields(finding: dict[str, Any]) -> tuple[str | None, str | None, float | None]:
+    """Return DB verification fields implied by fresh scan-time proof.
+
+    Post-scan retests persist their latest verdict on the canonical finding row.
+    A later smart scan can independently prove the same fingerprint again; that
+    fresh proof must override stale `false_positive` or `likely_fixed` state so
+    scan detail pages and verified-only filters do not contradict the raw report.
+    """
+    if not isinstance(finding, dict):
+        return None, None, None
+
+    validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
+    poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
+    poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
+    verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
+    result_status = str(finding.get("result_status") or "").strip().lower()
+    confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
+
+    has_fresh_proof = (
+        finding.get("verified") is True
+        or validation.get("verified") is True
+        or validation.get("poe_proven") is True
+        or poe.get("proven") is True
+        or poe_result.get("proven") is True
+        or verdict in {"exploited", "likely_vulnerable"}
+        or result_status in {"still_vulnerable", "verified_vulnerable"}
+        or confidence_tier == "verified"
+    )
+    if not has_fresh_proof:
+        return None, None, None
+
+    confidence = (
+        _coerce_float(finding.get("verification_confidence"))
+        or _coerce_float(finding.get("confidence"))
+        or _coerce_float(validation.get("confidence"))
+        or _coerce_float(poe.get("confidence"))
+        or _coerce_float(poe_result.get("confidence"))
+    )
+    return "still_vulnerable", "exploited", confidence
+
+
 def run_worker_preflight() -> None:
     """Fail fast when the container has an inconsistent scanner import graph."""
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
@@ -1022,6 +1070,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             ai_classification_source = finding.get('ai_classification_source')
             finding_tool = finding.get('tool')
             finding_source = finding.get('source') or ('model_intake' if finding_tool == 'model_intake' else None)
+            scan_verification_status, scan_verification_verdict, scan_verification_confidence = _scan_time_verification_fields(finding)
 
             # Wrap each finding in a transaction so the SELECT-then-INSERT race
             # between concurrent workers (e.g. a retest + scheduled scan) is
@@ -1072,12 +1121,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                                 ai_recommendations = $16,
                                 ai_classification_source = $17,
                                 source = COALESCE($18, source),
-                                last_verification_status = CASE WHEN $19 THEN NULL ELSE last_verification_status END,
-                                last_verification_verdict = CASE WHEN $19 THEN NULL ELSE last_verification_verdict END,
-                                last_verification_confidence = CASE WHEN $19 THEN NULL ELSE last_verification_confidence END,
-                                last_verified_at = CASE WHEN $19 THEN NULL ELSE last_verified_at END,
+                                last_verification_status = CASE WHEN $20::text IS NOT NULL THEN $20 ELSE CASE WHEN $19 THEN NULL ELSE last_verification_status END END,
+                                last_verification_verdict = CASE WHEN $21::text IS NOT NULL THEN $21 ELSE CASE WHEN $19 THEN NULL ELSE last_verification_verdict END END,
+                                last_verification_confidence = CASE WHEN $21::text IS NOT NULL THEN $22 ELSE CASE WHEN $19 THEN NULL ELSE last_verification_confidence END END,
+                                last_verified_at = CASE WHEN $21::text IS NOT NULL THEN NOW() ELSE CASE WHEN $19 THEN NULL ELSE last_verified_at END END,
                                 updated_at = NOW()
-                            WHERE id = $20
+                            WHERE id = $23
                         """,
                             existing['resurfaced_count'] + 1,
                             scan_uuid,
@@ -1098,6 +1147,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_classification_source,
                             finding_source,
                             verification_signature_changed,
+                            scan_verification_status,
+                            scan_verification_verdict,
+                            scan_verification_confidence,
                             existing['id'],
                         )
                     else:
@@ -1121,12 +1173,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                                 ai_recommendations = $15,
                                 ai_classification_source = $16,
                                 source = COALESCE($17, source),
-                                last_verification_status = CASE WHEN $18 THEN NULL ELSE last_verification_status END,
-                                last_verification_verdict = CASE WHEN $18 THEN NULL ELSE last_verification_verdict END,
-                                last_verification_confidence = CASE WHEN $18 THEN NULL ELSE last_verification_confidence END,
-                                last_verified_at = CASE WHEN $18 THEN NULL ELSE last_verified_at END,
+                                last_verification_status = CASE WHEN $19::text IS NOT NULL THEN $19 ELSE CASE WHEN $18 THEN NULL ELSE last_verification_status END END,
+                                last_verification_verdict = CASE WHEN $20::text IS NOT NULL THEN $20 ELSE CASE WHEN $18 THEN NULL ELSE last_verification_verdict END END,
+                                last_verification_confidence = CASE WHEN $20::text IS NOT NULL THEN $21 ELSE CASE WHEN $18 THEN NULL ELSE last_verification_confidence END END,
+                                last_verified_at = CASE WHEN $20::text IS NOT NULL THEN NOW() ELSE CASE WHEN $18 THEN NULL ELSE last_verified_at END END,
                                 updated_at = NOW()
-                            WHERE id = $19
+                            WHERE id = $22
                         """,
                             scan_uuid,
                             finding.get('title'),
@@ -1146,6 +1198,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             ai_classification_source,
                             finding_source,
                             verification_signature_changed,
+                            scan_verification_status,
+                            scan_verification_verdict,
+                            scan_verification_confidence,
                             existing['id'],
                         )
                     saved += 1
@@ -1161,8 +1216,14 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         INSERT INTO findings (
                             scan_id, target_id, fingerprint, title, description,
                             severity, cvss_score, tool, cwe, cwe_name, owasp,
-                            url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source, source
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                            url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations,
+                            ai_classification_source, source, last_verification_status,
+                            last_verification_verdict, last_verification_confidence, last_verified_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                            $14, $15, $16, $17, $18, $19, $20, $21, $22,
+                            CASE WHEN $21::text IS NOT NULL THEN NOW() ELSE NULL END
+                        )
                         ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL DO NOTHING
                         RETURNING id
                     """,
@@ -1185,6 +1246,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         ai_recommendations_json,
                         ai_classification_source,
                         finding_source,
+                        scan_verification_status,
+                        scan_verification_verdict,
+                        scan_verification_confidence,
                     )
                     if result:
                         saved += 1

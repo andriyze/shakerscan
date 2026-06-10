@@ -154,6 +154,39 @@ def test_decode_json_value_handles_none():
     assert api_module._decode_json_value(None) is None
 
 
+# ----- scan-time verification overrides -------------------------------------
+
+def test_scan_result_verification_overrides_promote_raw_scan_proof():
+    overrides = api_module._scan_result_verification_overrides({
+        "findings": [
+            {
+                "id": "smart_sqli:abc",
+                "verified": True,
+                "confidence": 0.95,
+                "last_verification_verdict": None,
+            }
+        ]
+    })
+
+    assert overrides["smart_sqli:abc"]["last_verification_status"] == "still_vulnerable"
+    assert overrides["smart_sqli:abc"]["last_verification_verdict"] == "exploited"
+    assert overrides["smart_sqli:abc"]["last_verification_confidence"] == 0.95
+
+
+def test_scan_result_verification_overrides_ignore_stale_false_positive_without_proof():
+    overrides = api_module._scan_result_verification_overrides({
+        "findings": [
+            {
+                "id": "smart_sqli:abc",
+                "verified": False,
+                "last_verification_verdict": "false_positive",
+            }
+        ]
+    })
+
+    assert overrides == {}
+
+
 # ----- run_due_schedules --------------------------------------------------
 
 class _FakeAcquire:

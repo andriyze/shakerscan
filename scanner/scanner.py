@@ -1350,7 +1350,7 @@ def assess_scan_completeness(
 
     # Nuclei (if results present)
     discovery = report.get("discovery", {})
-    nuclei_expected = not public_only
+    nuclei_expected = not public_only and not quick_mode
     nuclei_data = discovery.get("nuclei") or discovery.get("exposures", {}).get("nuclei")
     if nuclei_expected and isinstance(nuclei_data, dict) and nuclei_data:
         scan_completed = nuclei_data.get("scan_completed")
@@ -10160,7 +10160,7 @@ async def build_report(target: str,
             )
 
     nuclei_cov = smart_cov.get("nuclei_templates") or {}
-    if nuclei_cov.get("run") == 0 and not public_only and not focused_manual_active_scope:
+    if nuclei_cov.get("run") == 0 and not public_only and not quick_mode and not focused_manual_active_scope:
         coverage_gaps.append("Nuclei templates not executed - check nuclei configuration or timeouts")
 
     auth_states = smart_cov.get("auth_states_tested") or []

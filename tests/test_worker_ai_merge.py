@@ -17,6 +17,7 @@ from worker import (  # noqa: E402
     _is_ai_circuit_open,
     _is_retryable_ai_error,
     _result_status_for_verdict,
+    _scan_time_verification_fields,
     _should_open_ai_circuit,
     _slot_wait_backoff_seconds,
     _slot_wait_state,
@@ -24,6 +25,32 @@ from worker import (  # noqa: E402
     RETEST_AI_CIRCUIT_ERROR_THRESHOLD,
     RETEST_STALE_REQUEUE_LIMIT,
 )
+
+
+def test_scan_time_verification_fields_promote_fresh_verified_finding():
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"verified": True, "confidence": 0.95, "last_verification_verdict": "false_positive"}
+    )
+
+    assert status == "still_vulnerable"
+    assert verdict == "exploited"
+    assert confidence == 0.95
+
+
+def test_scan_time_verification_fields_accept_nested_validation_proof():
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"validation": {"verified": True, "confidence": "0.88"}}
+    )
+
+    assert status == "still_vulnerable"
+    assert verdict == "exploited"
+    assert confidence == 0.88
+
+
+def test_scan_time_verification_fields_ignores_stale_false_positive_without_fresh_proof():
+    assert _scan_time_verification_fields(
+        {"verified": False, "last_verification_verdict": "false_positive", "confidence": 0.9}
+    ) == (None, None, None)
 
 
 def test_result_status_mapping_for_supported_verdicts():

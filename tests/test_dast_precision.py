@@ -511,6 +511,27 @@ def test_quick_public_scan_accepts_basic_tls_probe_for_completeness():
     assert coverage["issues"] == []
 
 
+def test_quick_scan_does_not_expect_nuclei_for_completeness():
+    report = _healthy_grade_report([])
+    report["http"]["status"] = "HTTP/2 200"
+    report["dns"]["a"] = ["203.0.113.10"]
+    report["tls"]["nmap"] = {"scan_completed": True}
+    report["discovery"] = {
+        "nuclei": {"scan_completed": False, "templates_used": 0, "skipped": True}
+    }
+
+    coverage = scanner_main.assess_scan_completeness(
+        report,
+        public_only=False,
+        quick_mode=True,
+    )
+
+    assert coverage["status"] == "complete"
+    assert coverage["grade_reliable"] is True
+    assert "nuclei" not in coverage["modules"]
+    assert coverage["issues"] == []
+
+
 def test_non_quick_public_scan_does_not_accept_basic_tls_probe_only():
     report = _healthy_grade_report([])
     report["http"]["status"] = "HTTP/2 200"
