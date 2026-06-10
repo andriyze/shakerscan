@@ -91,3 +91,50 @@ def test_local_targets_do_not_grade_public_delivery_controls():
     assert "DNSSEC not validated" not in notes
     assert "Does not redirect to HTTPS" not in notes
     assert "No HTTP/2" not in notes
+
+
+def test_optional_trusted_types_csp_finding_stays_low_severity():
+    report = _local_posture_report()
+    report["http"]["csp_evaluation"] = {
+        "present": True,
+        "grade": "C",
+        "issues": ["Trusted Types not required (optional)."],
+        "directives": {"default-src": ["'self'"], "script-src": ["'self'"]},
+    }
+
+    emit_config_findings(report)
+
+    finding = next(
+        finding
+        for finding in report["findings"]
+        if finding["title"] == "CSP: Trusted Types not required (optional)."
+    )
+    assert finding["severity"] == "low"
+    assert finding["cvss_score"] == 3.0
+
+
+def test_waf_config_finding_deduplicates_existing_waf_detection():
+    report = _local_posture_report()
+    report["findings"] = [
+        {
+            "tool": "waf_detection",
+            "title": "WAF Detected: cloudflare",
+            "severity": "info",
+        }
+    ]
+    report["discovery"] = {
+        "waf_detection": {
+            "waf_detected": True,
+            "waf_products": ["cloudflare"],
+            "confidence": "none",
+        }
+    }
+
+    emit_config_findings(report)
+
+    waf_findings = [
+        finding
+        for finding in report["findings"]
+        if str(finding.get("tool", "")).startswith("waf_")
+    ]
+    assert [finding["tool"] for finding in waf_findings] == ["waf_detection"]

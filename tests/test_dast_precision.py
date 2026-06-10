@@ -490,6 +490,48 @@ def test_grade_ceiling_ignores_unverified_suspected_high_findings():
     assert result["grade"] in {"A", "B"}
 
 
+def test_quick_public_scan_accepts_basic_tls_probe_for_completeness():
+    report = _healthy_grade_report([])
+    report["http"]["status"] = "HTTP/2 200"
+    report["dns"]["a"] = ["203.0.113.10"]
+    report["tls"]["sslyze"] = {"reason": "public_quick_mode", "skipped": True}
+    report["tls"]["testssl"] = {"reason": "public_quick_mode", "skipped": True}
+    report["tls"]["nmap"] = {"reason": "public_quick_mode", "skipped": True}
+    report["tls"]["cipher_suites"] = {}
+
+    coverage = scanner_main.assess_scan_completeness(
+        report,
+        public_only=True,
+        quick_mode=True,
+    )
+
+    assert coverage["status"] == "complete"
+    assert coverage["grade_reliable"] is True
+    assert coverage["modules"]["tls"]["details"]["quick_public_tls"] is True
+    assert coverage["issues"] == []
+
+
+def test_non_quick_public_scan_does_not_accept_basic_tls_probe_only():
+    report = _healthy_grade_report([])
+    report["http"]["status"] = "HTTP/2 200"
+    report["dns"]["a"] = ["203.0.113.10"]
+    report["tls"]["sslyze"] = {"reason": "missing", "skipped": True}
+    report["tls"]["testssl"] = {"reason": "missing", "skipped": True}
+    report["tls"]["nmap"] = {"reason": "missing", "skipped": True}
+    report["tls"]["cipher_suites"] = {}
+
+    coverage = scanner_main.assess_scan_completeness(
+        report,
+        public_only=True,
+        quick_mode=False,
+    )
+
+    assert coverage["status"] == "failed"
+    assert coverage["grade_reliable"] is False
+    assert coverage["modules"]["tls"]["details"]["basic_tls_probe"] is True
+    assert coverage["modules"]["tls"]["details"]["quick_public_tls"] is False
+
+
 def test_grade_only_discounts_trusted_ai_false_positives():
     base = {
         "tool": "dom_xss",

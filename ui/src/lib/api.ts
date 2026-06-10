@@ -1,8 +1,8 @@
 import {
-  GRADE_TEXT_COLORS,
   SEVERITY_BADGE_STYLES,
   SEVERITY_TEXT_COLORS,
   type SeverityLevel,
+  gradeTextColorClass,
 } from './constants'
 
 export function getApiUrl(): string {
@@ -1583,7 +1583,7 @@ export function getSeverityBg(severity: string): string {
 }
 
 export function getGradeColor(grade: string): string {
-  return GRADE_TEXT_COLORS[grade?.toUpperCase()] ?? 'text-gray-500'
+  return gradeTextColorClass(grade)
 }
 
 export function formatDate(date: string): string {

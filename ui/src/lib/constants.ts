@@ -173,6 +173,18 @@ export const GRADE_TEXT_COLORS: Record<string, string> = {
   F: 'text-red-500',
 }
 
+export function normalizeGradeKey(grade?: string | null): string {
+  const raw = String(grade || '').trim().toUpperCase()
+  if (!raw) return ''
+  if (raw.startsWith('A+')) return 'A+'
+  return raw.match(/^[A-F]/)?.[0] || ''
+}
+
+export function gradeTextColorClass(grade?: string | null): string {
+  const key = normalizeGradeKey(grade)
+  return GRADE_TEXT_COLORS[key] ?? 'text-gray-500'
+}
+
 // Helper to get scan type options for API calls
 export function getScanOptions(scanType: ScanType): Record<string, boolean | string> {
   const type = SCAN_TYPES.find(t => t.value === scanType)

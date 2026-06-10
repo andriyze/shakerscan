@@ -1,6 +1,5 @@
 import {
   FINDING_STATUS_BADGE_STYLES,
-  GRADE_TEXT_COLORS,
   SCAN_STATUS_BADGE_STYLES,
   SEVERITY_BADGE_STYLES,
   SOURCE_TYPE_BADGE_STYLES,
@@ -8,6 +7,7 @@ import {
   type FindingStatus,
   type ScanStatus,
   type SeverityLevel,
+  gradeTextColorClass,
 } from '@/lib/constants'
 
 const BADGE_BASE = 'inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded'
@@ -52,6 +52,5 @@ export function SourceTypeBadge({ type }: { type: FindingSourceType }) {
 }
 
 export function gradeTextColor(grade?: string | null): string {
-  if (!grade) return 'text-gray-500'
-  return GRADE_TEXT_COLORS[grade.toUpperCase()] ?? 'text-gray-500'
+  return gradeTextColorClass(grade)
 }

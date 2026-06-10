@@ -1216,6 +1216,7 @@ def assess_scan_completeness(
     report: dict[str, Any],
     *,
     public_only: bool = False,
+    quick_mode: bool = False,
     active_checks_requested: bool = False,
     js_dependency_scanning: bool = False,
     js_secret_scanning: bool = False,
@@ -1245,12 +1246,15 @@ def assess_scan_completeness(
 
     # --- Required Modules ---
 
-    # TLS: Check sslyze OR testssl OR nmap ciphers completed
+    # TLS: Check sslyze OR testssl OR nmap ciphers completed. Public quick
+    # scans intentionally skip those slow analyzers, so accept the lightweight
+    # TLS handshake probe there.
     tls = report.get("tls", {})
     sslyze = tls.get("sslyze", {}) or {}
     testssl = tls.get("testssl", {}) or {}
     nmap_tls = tls.get("nmap", {}) or {}
     cipher_suites = tls.get("cipher_suites") or {}
+    endpoints = tls.get("endpoints") or []
 
     sslyze_completed = bool(
         sslyze.get("scan_completed")
@@ -1269,8 +1273,24 @@ def assess_scan_completeness(
         or (nmap_tls.get("ciphers_by_protocol") or {})
     )
     cipher_suites_present = bool(cipher_suites)
+    basic_tls_probe_completed = any(
+        isinstance(endpoint, dict)
+        and (
+            endpoint.get("handshake_completed") is True
+            or bool(endpoint.get("tlsversion"))
+            or bool(endpoint.get("cipher"))
+        )
+        for endpoint in endpoints
+    )
+    quick_public_tls_completed = bool(public_only and quick_mode and basic_tls_probe_completed)
 
-    tls_completed = sslyze_completed or testssl_completed or nmap_tls_completed or cipher_suites_present
+    tls_completed = (
+        sslyze_completed
+        or testssl_completed
+        or nmap_tls_completed
+        or cipher_suites_present
+        or quick_public_tls_completed
+    )
     modules["tls"] = {
         "completed": tls_completed,
         "required": True,
@@ -1279,10 +1299,12 @@ def assess_scan_completeness(
             "testssl": testssl_completed,
             "nmap_ciphers": nmap_tls_completed,
             "cipher_suites": cipher_suites_present,
+            "basic_tls_probe": basic_tls_probe_completed,
+            "quick_public_tls": quick_public_tls_completed,
         }
     }
     if not tls_completed:
-        issues.append("TLS scanning incomplete - no TLS tool (sslyze/testssl/nmap) completed successfully")
+        issues.append("TLS scanning incomplete - no TLS tool or basic TLS probe completed successfully")
 
     # HTTP: Check we got a valid response
     http = report.get("http", {})
@@ -2647,6 +2669,7 @@ async def build_report(target: str,
             coverage = assess_scan_completeness(
                 report,
                 public_only=public_only,
+                quick_mode=quick_mode,
                 active_checks_requested=active_checks,
                 js_dependency_scanning=js_dependency_scanning,
                 js_secret_scanning=js_secret_scanning,
@@ -9425,6 +9448,7 @@ async def build_report(target: str,
             "security_txt",
             "tls_config",
             "waf_detector",
+            "waf_detection",
         }
         before_count = len(report.get("findings", []) or [])
         kept_findings = []
@@ -9585,6 +9609,7 @@ async def build_report(target: str,
     coverage = assess_scan_completeness(
         report,
         public_only=public_only,
+        quick_mode=quick_mode,
         active_checks_requested=active_checks,
         js_dependency_scanning=js_dependency_scanning,
         js_secret_scanning=js_secret_scanning,

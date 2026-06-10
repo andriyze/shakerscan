@@ -161,6 +161,14 @@ def emit_config_findings(report: dict[str, Any]) -> None:
             low_patterns = ["upgrade-insecure-requests missing", "Trusted Types not required"]
             if any(lp in issue for lp in low_patterns):
                 sev = "low"
+            evidence = {
+                "present": True,
+                "grade": csp_eval.get("grade"),
+                "issue": issue,
+                "reproduction": _reproCurlHost(base_url)
+            }
+            if sev == "low":
+                evidence["cvss_score"] = 3.0
             if "missing default-src" in issue.lower():
                 template_id = "http/csp/missing-default-src"
                 # Skip individual issue if both are missing (already emitted combined)
@@ -178,12 +186,7 @@ def emit_config_findings(report: dict[str, Any]) -> None:
                 template_id = "http/csp/missing-script-src"
                 if missing_default and missing_script:
                     continue
-            finding = normalize_finding("csp_evaluator", title, sev, {
-                "present": True,
-                "grade": csp_eval.get("grade"),
-                "issue": issue,
-                "reproduction": _reproCurlHost(base_url)
-            }, "CWE-693")
+            finding = normalize_finding("csp_evaluator", title, sev, evidence, "CWE-693")
             if template_id:
                 finding["template_id"] = template_id
             finding["category"] = "http.csp"
@@ -448,13 +451,18 @@ def emit_config_findings(report: dict[str, Any]) -> None:
         ))
     waf = (discovery.get("waf_detection") or {})
     if waf.get("waf_detected"):
-        report["findings"].append(normalize_finding(
-            "waf_detector",
-            "WAF detected",
-            "info",
-            {"products": waf.get("waf_products", []), "confidence": waf.get("confidence")},
-            "CWE-16"
-        ))
+        existing_waf_finding = any(
+            str(finding.get("tool") or "").lower() in {"waf_detection", "waf_detector"}
+            for finding in report.get("findings", []) or []
+        )
+        if not existing_waf_finding:
+            report["findings"].append(normalize_finding(
+                "waf_detector",
+                "WAF detected",
+                "info",
+                {"products": waf.get("waf_products", []), "confidence": waf.get("confidence")},
+                "CWE-16"
+            ))
 
 
 def emit_http_method_findings(report: dict[str, Any], http_methods_results: dict[str, Any]) -> None:
