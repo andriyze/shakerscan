@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState, useCallback, Suspense } from 'react'
-import { Check, Copy, ExternalLink } from 'lucide-react'
+import { Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -258,6 +258,16 @@ function FindingDetailContent() {
   useEffect(() => {
     fetchFinding()
   }, [fetchFinding])
+
+  const hasPendingRetest = retestHistory.some((r) => r.status === 'queued' || r.status === 'running')
+
+  // While a retest is queued/running, poll so the verdict and verification
+  // summary update live instead of requiring a manual page refresh.
+  useEffect(() => {
+    if (!hasPendingRetest) return
+    const interval = setInterval(() => { void fetchFinding() }, 4000)
+    return () => clearInterval(interval)
+  }, [hasPendingRetest, fetchFinding])
 
   async function handleStatusChange(newStatus: string) {
     if (!finding || statusUpdating) return
@@ -589,6 +599,12 @@ function FindingDetailContent() {
 
       <SectionCard title="Retest Verification">
         <div className="space-y-3">
+          {hasPendingRetest && (
+            <div className="inline-flex items-center gap-2 rounded bg-blue-900/30 border border-blue-900/60 px-2 py-1 text-xs text-blue-300">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              Verifying… results update automatically
+            </div>
+          )}
           {retestMessage && (
             <div className={`text-xs rounded px-2 py-1 ${
               retestMessage.includes('Failed')
@@ -623,7 +639,10 @@ function FindingDetailContent() {
               {retestHistory.map((entry) => (
                 <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-gray-300">
+                    <div className="flex items-center gap-1.5 text-gray-300">
+                      {(entry.status === 'queued' || entry.status === 'running') && (
+                        <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden="true" />
+                      )}
                       {entry.finding_type} • {(entry.verdict || entry.result_status || entry.status).replaceAll('_', ' ')}
                     </div>
                     <div className="text-gray-500">
