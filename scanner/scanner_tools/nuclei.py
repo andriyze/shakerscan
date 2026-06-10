@@ -1263,10 +1263,12 @@ async def _run_nuclei_wave(
                 result["templates_executed"] = len(matched_templates)
 
     if tags and result["templates_executed"] == 0:
-        # Nuclei stats may be absent on wave timeout or no-finding runs. Still
-        # record a conservative lower bound so coverage does not say Nuclei
-        # never executed after a timed wave.
+        # Nuclei stats may be absent on wave timeout or no-finding runs. Record a
+        # best-effort count so coverage does not say Nuclei never executed after
+        # a timed wave, but flag it as estimated: templates_loaded can exceed
+        # what a timed-out wave actually ran, so this is not an exact measure.
         result["templates_executed"] = max(result["templates_loaded"], len(tags))
+        result["templates_executed_estimated"] = True
 
     return result
 

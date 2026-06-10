@@ -610,11 +610,22 @@ def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> d
 _NUCLEI_NOT_EXECUTED_COVERAGE_GAP = "Nuclei templates not executed - check nuclei configuration or timeouts"
 
 
-def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
+# Inference sources that are counted directly from nuclei stats vs. estimated
+# from coarser wave/duration signals. Estimates are flagged so the UI can show
+# coverage as approximate rather than presenting a guess as a measured count.
+_NUCLEI_APPROXIMATE_RUN_SOURCES = {"staged_nuclei_wave_tags", "staged_nuclei_wave_estimate"}
+
+
+def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> tuple[int, str | None]:
+    """Best-effort count of nuclei templates run, with its provenance.
+
+    Returns ``(count, source)``. ``source`` identifies where the number came
+    from so callers can distinguish measured counts from coarse estimates.
+    """
     discovery = scan_result.get("discovery") if isinstance(scan_result.get("discovery"), dict) else {}
     nuclei = discovery.get("nuclei") if isinstance(discovery.get("nuclei"), dict) else {}
     if not nuclei:
-        return 0
+        return 0, None
 
     for key in ("templates_executed", "templates_used"):
         try:
@@ -622,7 +633,7 @@ def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
         except (TypeError, ValueError):
             value = 0
         if value > 0:
-            return value
+            return value, "nuclei_templates_executed"
 
     stats = nuclei.get("statistics") if isinstance(nuclei.get("statistics"), dict) else {}
     for key in ("templates_executed", "templates_loaded"):
@@ -631,10 +642,10 @@ def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
         except (TypeError, ValueError):
             value = 0
         if value > 0:
-            return value
+            return value, "nuclei_statistics"
 
     if nuclei.get("scan_completed") is not True:
-        return 0
+        return 0, None
 
     wave_tags: set[str] = set()
     for wave in nuclei.get("wave_stats") or []:
@@ -644,7 +655,7 @@ def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
             if tag:
                 wave_tags.add(str(tag))
     if wave_tags:
-        return len(wave_tags)
+        return len(wave_tags), "staged_nuclei_wave_tags"
 
     try:
         waves_completed = int(nuclei.get("waves_completed") or 0)
@@ -655,15 +666,15 @@ def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         duration = 0
     if waves_completed > 0 or duration > 0:
-        return max(1, waves_completed)
-    return 0
+        return max(1, waves_completed), "staged_nuclei_wave_estimate"
+    return 0, None
 
 
 def _normalize_scan_result_for_api(scan_result: Any) -> Any:
     if not isinstance(scan_result, dict):
         return scan_result
 
-    inferred_nuclei_run = _infer_nuclei_templates_run(scan_result)
+    inferred_nuclei_run, inferred_source = _infer_nuclei_templates_run(scan_result)
     if inferred_nuclei_run > 0:
         smart_coverage = scan_result.setdefault("smart_coverage", {})
         if isinstance(smart_coverage, dict):
@@ -678,7 +689,8 @@ def _normalize_scan_result_for_api(scan_result: Any) -> Any:
                     nuclei_cov.setdefault("matched", 0)
                     nuclei_cov.setdefault("hit_rate", 0.0)
                     nuclei_cov.setdefault("by_category", {})
-                    nuclei_cov["run_source"] = "staged_nuclei_wave_stats"
+                    nuclei_cov["run_source"] = inferred_source or "inferred"
+                    nuclei_cov["run_approximate"] = inferred_source in _NUCLEI_APPROXIMATE_RUN_SOURCES
 
         coverage_gaps = scan_result.get("coverage_gaps")
         if isinstance(coverage_gaps, dict) and isinstance(coverage_gaps.get("issues"), list):

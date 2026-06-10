@@ -19,6 +19,11 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     A later smart scan can independently prove the same fingerprint again; that
     fresh proof must override stale `false_positive` or `likely_fixed` state so
     scan detail pages and verified-only filters do not contradict the raw report.
+
+    Proof strength is preserved rather than flattened: only hard proof (a proven
+    PoE / explicit `exploited`) yields an `exploited` verdict. Softer signals
+    (`likely_vulnerable`, a "verified" confidence tier) yield `likely_vulnerable`
+    so the merged state never over-states a finding as exploited.
     """
     if not isinstance(finding, dict):
         return None
@@ -30,17 +35,26 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     result_status = str(finding.get("result_status") or "").strip().lower()
     confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
 
-    has_fresh_proof = (
+    strong_proof = (
         finding.get("verified") is True
         or validation.get("verified") is True
         or validation.get("poe_proven") is True
         or poe.get("proven") is True
         or poe_result.get("proven") is True
-        or verdict in {"exploited", "likely_vulnerable"}
-        or result_status in {"still_vulnerable", "verified_vulnerable"}
+        or verdict == "exploited"
+        or result_status == "verified_vulnerable"
+    )
+    weak_proof = (
+        verdict == "likely_vulnerable"
+        or result_status == "still_vulnerable"
         or confidence_tier == "verified"
     )
-    if not has_fresh_proof:
+
+    if strong_proof:
+        out_verdict = "exploited"
+    elif weak_proof:
+        out_verdict = "likely_vulnerable"
+    else:
         return None
 
     confidence = None
@@ -57,6 +71,6 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
 
     return {
         "last_verification_status": "still_vulnerable",
-        "last_verification_verdict": "exploited",
+        "last_verification_verdict": out_verdict,
         "last_verification_confidence": confidence,
     }

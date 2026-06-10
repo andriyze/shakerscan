@@ -197,6 +197,33 @@ def test_scan_time_verification_fields_preserves_zero_confidence():
     assert fields["last_verification_confidence"] == 0.0
 
 
+def test_scan_time_verification_fields_strong_proof_is_exploited():
+    for finding in (
+        {"poe": {"proven": True}},
+        {"verification_verdict": "exploited"},
+        {"result_status": "verified_vulnerable"},
+    ):
+        assert scan_time_verification_fields(finding)["last_verification_verdict"] == "exploited"
+
+
+def test_scan_time_verification_fields_weak_proof_is_not_exploited():
+    # Soft signals must not be flattened up to "exploited".
+    for finding in (
+        {"verification_verdict": "likely_vulnerable", "confidence": 0.6},
+        {"result_status": "still_vulnerable"},
+        {"confidence_tier": "verified"},
+    ):
+        fields = scan_time_verification_fields(finding)
+        assert fields is not None
+        assert fields["last_verification_verdict"] == "likely_vulnerable"
+        assert fields["last_verification_status"] == "still_vulnerable"
+
+
+def test_scan_time_verification_fields_returns_none_without_proof():
+    assert scan_time_verification_fields({"verification_verdict": "false_positive"}) is None
+    assert scan_time_verification_fields({}) is None
+
+
 def test_normalize_scan_result_backfills_staged_nuclei_coverage():
     report = {
         "discovery": {
