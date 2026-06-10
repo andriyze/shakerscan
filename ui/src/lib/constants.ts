@@ -119,6 +119,60 @@ export const CLEANUP_AGE_OPTIONS = [
   { value: 180, label: '180+ days' },
 ] as const
 
+// ---------------------------------------------------------------------------
+// Shared style maps — single source of truth for severity/status/grade colors.
+// Class strings must stay literal so Tailwind's JIT can see them.
+// ---------------------------------------------------------------------------
+
+export const SEVERITY_BADGE_STYLES: Record<SeverityLevel, string> = {
+  critical: 'bg-red-500/20 text-red-400',
+  high: 'bg-orange-500/20 text-orange-400',
+  medium: 'bg-yellow-500/20 text-yellow-400',
+  low: 'bg-blue-500/20 text-blue-400',
+  info: 'bg-gray-500/20 text-gray-400',
+}
+
+export const SEVERITY_TEXT_COLORS: Record<SeverityLevel, string> = {
+  critical: 'text-red-500',
+  high: 'text-orange-500',
+  medium: 'text-yellow-500',
+  low: 'text-blue-500',
+  info: 'text-gray-500',
+}
+
+export const SCAN_STATUS_BADGE_STYLES: Record<ScanStatus, string> = {
+  pending: 'bg-gray-500/20 text-gray-400',
+  queued: 'bg-gray-500/20 text-gray-400',
+  running: 'bg-blue-500/20 text-blue-400',
+  completed: 'bg-green-500/20 text-green-400',
+  failed: 'bg-red-500/20 text-red-400',
+  cancelled: 'bg-orange-500/20 text-orange-400',
+}
+
+export const FINDING_STATUS_BADGE_STYLES: Record<FindingStatus, string> = {
+  active: 'bg-yellow-500/20 text-yellow-400',
+  resolved: 'bg-green-500/20 text-green-400',
+  false_positive: 'bg-gray-500/20 text-gray-400',
+  accepted_risk: 'bg-purple-500/20 text-purple-400',
+}
+
+export type FindingSourceType = 'AI' | 'DAST' | 'Model Intake'
+
+export const SOURCE_TYPE_BADGE_STYLES: Record<FindingSourceType, string> = {
+  AI: 'bg-purple-500/20 text-purple-300',
+  DAST: 'bg-blue-500/20 text-blue-300',
+  'Model Intake': 'bg-cyan-500/20 text-cyan-300',
+}
+
+export const GRADE_TEXT_COLORS: Record<string, string> = {
+  'A+': 'text-green-500',
+  A: 'text-green-500',
+  B: 'text-lime-500',
+  C: 'text-yellow-500',
+  D: 'text-orange-500',
+  F: 'text-red-500',
+}
+
 // Helper to get scan type options for API calls
 export function getScanOptions(scanType: ScanType): Record<string, boolean | string> {
   const type = SCAN_TYPES.find(t => t.value === scanType)

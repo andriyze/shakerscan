@@ -1,3 +1,10 @@
+import {
+  GRADE_TEXT_COLORS,
+  SEVERITY_BADGE_STYLES,
+  SEVERITY_TEXT_COLORS,
+  type SeverityLevel,
+} from './constants'
+
 export function getApiUrl(): string {
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL
@@ -1566,36 +1573,17 @@ export async function endInteractiveSession(sessionId: string): Promise<{ status
   return res.json()
 }
 
-// Utilities
+// Utilities — color maps live in constants.ts as the single source of truth.
 export function getSeverityColor(severity: string): string {
-  switch (severity) {
-    case 'critical': return 'text-red-500'
-    case 'high': return 'text-orange-500'
-    case 'medium': return 'text-yellow-500'
-    case 'low': return 'text-blue-500'
-    default: return 'text-gray-500'
-  }
+  return SEVERITY_TEXT_COLORS[severity as SeverityLevel] ?? SEVERITY_TEXT_COLORS.info
 }
 
 export function getSeverityBg(severity: string): string {
-  switch (severity) {
-    case 'critical': return 'bg-red-500/20 text-red-400'
-    case 'high': return 'bg-orange-500/20 text-orange-400'
-    case 'medium': return 'bg-yellow-500/20 text-yellow-400'
-    case 'low': return 'bg-blue-500/20 text-blue-400'
-    default: return 'bg-gray-500/20 text-gray-400'
-  }
+  return SEVERITY_BADGE_STYLES[severity as SeverityLevel] ?? SEVERITY_BADGE_STYLES.info
 }
 
 export function getGradeColor(grade: string): string {
-  switch (grade?.toUpperCase()) {
-    case 'A': case 'A+': return 'text-green-500'
-    case 'B': return 'text-lime-500'
-    case 'C': return 'text-yellow-500'
-    case 'D': return 'text-orange-500'
-    case 'F': return 'text-red-500'
-    default: return 'text-gray-500'
-  }
+  return GRADE_TEXT_COLORS[grade?.toUpperCase()] ?? 'text-gray-500'
 }
 
 export function formatDate(date: string): string {

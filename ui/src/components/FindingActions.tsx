@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { getApiUrl } from '@/lib/api'
+import { useToast } from '@/components/ui'
 
 const API_URL = getApiUrl()
 
@@ -43,6 +44,7 @@ export default function FindingActions({
   const [notes, setNotes] = useState(currentNotes)
   const [isExpanded, setIsExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
+  const toast = useToast()
 
   const handleSave = async () => {
     setSaving(true)
@@ -58,9 +60,13 @@ export default function FindingActions({
       if (res.ok) {
         onStatusChange(status, notes)
         setIsExpanded(false)
+        toast.success('Finding status updated')
+      } else {
+        toast.error('Failed to update finding status')
       }
     } catch (err) {
       console.error('Failed to save remediation:', err)
+      toast.error('Failed to update finding status')
     } finally {
       setSaving(false)
     }
@@ -74,11 +80,13 @@ export default function FindingActions({
         <span className="text-gray-500 text-xs">Status:</span>
         <select
           value={status}
+          disabled={saving}
           onChange={(e) => {
             setStatus(e.target.value as RemediationStatus)
             setIsExpanded(true)
           }}
-          className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500"
+          aria-label="Finding status"
+          className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
         >
           {STATUS_OPTIONS.map(option => (
             <option key={option.value} value={option.value}>
@@ -87,8 +95,10 @@ export default function FindingActions({
           ))}
         </select>
         <button
+          type="button"
           onClick={() => setIsExpanded(!isExpanded)}
-          className="text-gray-500 text-xs hover:text-gray-300"
+          aria-expanded={isExpanded}
+          className="rounded text-gray-500 text-xs hover:text-gray-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           {isExpanded ? 'Hide' : 'Add notes'}
         </button>
@@ -105,19 +115,22 @@ export default function FindingActions({
           />
           <div className="flex gap-2">
             <button
+              type="button"
               onClick={handleSave}
               disabled={saving}
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded disabled:opacity-50"
+              className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {saving ? 'Saving...' : 'Save'}
             </button>
             <button
+              type="button"
               onClick={() => {
                 setStatus(currentStatus)
                 setNotes(currentNotes)
                 setIsExpanded(false)
               }}
-              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded"
+              disabled={saving}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               Cancel
             </button>

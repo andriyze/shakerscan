@@ -3,8 +3,91 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getScan, getScanLogs } from '@/lib/api'
+import { getScan, getScanLogs, formatDuration } from '@/lib/api'
+import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
+import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
+
+function formatScanTypeLabel(scan: any): string {
+  if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
+    return 'AI Gate'
+  }
+  return String(scan?.scan_type || '')
+    .split('_')
+    .filter(Boolean)
+    .map((part: string) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function countSeverities(scan: any): Record<SeverityLevel, number> {
+  const counts: Record<SeverityLevel, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
+  const findings = Array.isArray(scan?.result?.findings)
+    ? scan.result.findings
+    : Array.isArray(scan?.findings)
+      ? scan.findings
+      : []
+  for (const finding of findings) {
+    const severity = String(finding?.severity || 'info').toLowerCase()
+    const key = (SEVERITY_LEVELS as readonly string[]).includes(severity)
+      ? (severity as SeverityLevel)
+      : 'info'
+    counts[key] += 1
+  }
+  return counts
+}
+
+function ScanVerdictCard({ scan }: { scan: any }) {
+  const severityCounts = countSeverities(scan)
+  const severityEntries = SEVERITY_LEVELS
+    .map((severity) => [severity, severityCounts[severity]] as const)
+    .filter(([, count]) => count > 0)
+  const totalCounted = severityEntries.reduce((sum, [, count]) => sum + count, 0)
+  const hasGrade = Boolean(scan.grade)
+  const hasScore = typeof scan.score === 'number'
+  const scanTypeLabel = formatScanTypeLabel(scan)
+  const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
+
+  return (
+    <Card className="p-6 mb-6">
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
+        {(hasGrade || hasScore) && (
+          <div className="flex items-baseline gap-3">
+            {hasGrade && (
+              <span className={`text-5xl font-bold ${gradeTextColor(scan.grade)}`}>
+                {scan.grade}
+              </span>
+            )}
+            {hasScore && (
+              <span className="text-lg text-gray-400">{scan.score}/100</span>
+            )}
+          </div>
+        )}
+        {severityEntries.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {severityEntries.map(([severity, count]) => (
+              <span
+                key={severity}
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded uppercase ${SEVERITY_BADGE_STYLES[severity]}`}
+              >
+                {count} {severity}
+              </span>
+            ))}
+          </div>
+        ) : totalCounted === 0 && (scan.findings_count || 0) === 0 ? (
+          <span className="text-sm text-gray-500">No findings</span>
+        ) : null}
+        <div className="ml-auto text-right">
+          {scanTypeLabel && (
+            <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>
+          )}
+          {duration && (
+            <p className="text-xs text-gray-500 mt-0.5">Completed in {duration}</p>
+          )}
+        </div>
+      </div>
+    </Card>
+  )
+}
 
 function ScanDetailContent() {
   const params = useParams()
@@ -13,6 +96,7 @@ function ScanDetailContent() {
   const [scan, setScan] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsError, setLogsError] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
@@ -60,7 +144,7 @@ function ScanDetailContent() {
       }
     }, 5000)
     return () => clearInterval(interval)
-  }, [scanId, scan?.status])
+  }, [scanId, scan?.status, retryNonce])
 
   useEffect(() => {
     if (logsRef.current) {
@@ -78,9 +162,14 @@ function ScanDetailContent() {
 
   if (error || !scan) {
     return (
-      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-red-400">
-        {error || 'Scan not found'}
-      </div>
+      <ErrorState
+        message={error || 'Scan not found'}
+        onRetry={() => {
+          setLoading(true)
+          setError(null)
+          setRetryNonce((n) => n + 1)
+        }}
+      />
     )
   }
 
@@ -116,7 +205,7 @@ function ScanDetailContent() {
           </p>
         </div>
 
-        <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <Card className="p-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-semibold text-gray-400">Live Logs</h2>
             <span className="text-xs text-gray-500">{logs.length} lines</span>
@@ -135,7 +224,7 @@ function ScanDetailContent() {
           {logsError && (
             <p className="text-red-400 text-xs mt-2">{logsError}</p>
           )}
-        </div>
+        </Card>
       </div>
     )
   }
@@ -217,6 +306,7 @@ function ScanDetailContent() {
         </Link>
         <span className="text-gray-500">Back to scans</span>
       </div>
+      {scan.status === 'completed' && <ScanVerdictCard scan={scan} />}
       <ReportView
         scan={scan}
         isAuthenticated={true}

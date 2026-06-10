@@ -8,6 +8,7 @@ import {
   type AISettings,
   type AISettingsUpdate,
 } from '@/lib/api'
+import { useToast } from '@/components/ui'
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 
@@ -57,6 +58,7 @@ function detectDemoHoneyMode(publicURL: string, scannerURL: string): DemoHoneyMo
 }
 
 export default function AISettingsPanel() {
+  const toast = useToast()
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [aiSettingsError, setAISettingsError] = useState<string | null>(null)
   const [aiSettingsMessage, setAISettingsMessage] = useState<string | null>(null)
@@ -170,14 +172,15 @@ export default function AISettingsPanel() {
       const result = await updateAISettings(payload)
       setAISettings(result.settings)
       applyAISettingsToForm(result.settings)
-      setAISettingsMessage(
-        result.persisted_to_env
-          ? result.persist_message || 'AI settings updated and persisted to .env'
-          : 'AI runtime settings updated'
-      )
+      const successMessage = result.persisted_to_env
+        ? result.persist_message || 'AI settings updated and persisted to .env'
+        : 'AI runtime settings updated'
+      setAISettingsMessage(successMessage)
+      toast.success(successMessage)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to update AI settings'
       setAISettingsError(message)
+      toast.error(message)
     } finally {
       setAISaving(false)
     }
@@ -216,6 +219,11 @@ export default function AISettingsPanel() {
       } else {
         setVerifyProbeMessage(message)
       }
+      if (result.status === 'ok') {
+        toast.success(message)
+      } else {
+        toast.error(message)
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to test AI settings'
       if (scope === 'scan') {
@@ -224,6 +232,7 @@ export default function AISettingsPanel() {
         setVerifyProbeMessage(`Probe failed: ${message}`)
       }
       setAISettingsError(message)
+      toast.error(`Probe failed: ${message}`)
     } finally {
       setTestingScope(null)
     }
@@ -279,16 +288,18 @@ export default function AISettingsPanel() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={fetchAISettings}
             disabled={loading || aiSaving}
-            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-sm"
+            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             Refresh
           </button>
           <button
+            type="button"
             onClick={handleSaveAISettings}
             disabled={aiSaving || loading}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-sm"
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {aiSaving ? 'Saving...' : 'Save'}
           </button>
@@ -315,8 +326,9 @@ export default function AISettingsPanel() {
 
       <div className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-gray-800 p-1">
         <button
+          type="button"
           onClick={() => setSettingsMode('basic')}
-          className={`px-2.5 py-1 text-xs rounded ${
+          className={`px-2.5 py-1 text-xs rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
             settingsMode === 'basic' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
           }`}
           aria-pressed={settingsMode === 'basic'}
@@ -324,8 +336,9 @@ export default function AISettingsPanel() {
           Basic
         </button>
         <button
+          type="button"
           onClick={() => setSettingsMode('advanced')}
-          className={`px-2.5 py-1 text-xs rounded ${
+          className={`px-2.5 py-1 text-xs rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
             settingsMode === 'advanced' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
           }`}
           aria-pressed={settingsMode === 'advanced'}
@@ -410,7 +423,8 @@ export default function AISettingsPanel() {
               <button
                 type="button"
                 onClick={() => setShowDemoNetworking(!showDemoNetworking)}
-                className="text-xs text-gray-400 hover:text-gray-200"
+                aria-expanded={showDemoNetworking}
+                className="rounded text-xs text-gray-400 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {showDemoNetworking ? 'Hide networking details' : 'Show networking details'}
               </button>
@@ -457,6 +471,7 @@ export default function AISettingsPanel() {
             >
               <input
                 type="password"
+                autoComplete="off"
                 value={scanAPIKeyInput}
                 onChange={(e) => setScanAPIKeyInput(e.target.value)}
                 className={INPUT_CLASS}
@@ -492,9 +507,10 @@ export default function AISettingsPanel() {
             </p>
             <div className="flex items-center gap-2 pt-1">
               <button
+                type="button"
                 onClick={() => handleTestAISettings('verify')}
                 disabled={loading || aiSaving || testingScope !== null}
-                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {testingScope === 'verify' ? 'Testing retest AI...' : 'Test AI Verification'}
               </button>
@@ -560,6 +576,7 @@ export default function AISettingsPanel() {
           <Field label="AI API Key" hint="Shared provider key used unless a dedicated retest key is configured.">
             <input
               type="password"
+              autoComplete="off"
               value={scanAPIKeyInput}
               onChange={(e) => setScanAPIKeyInput(e.target.value)}
               className={INPUT_CLASS}
@@ -575,9 +592,10 @@ export default function AISettingsPanel() {
           />
           <div className="flex items-center gap-2 pt-1">
             <button
+              type="button"
               onClick={() => handleTestAISettings('scan')}
               disabled={loading || aiSaving || testingScope !== null}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {testingScope === 'scan' ? 'Testing provider...' : 'Test Shared Provider'}
             </button>
@@ -654,9 +672,10 @@ export default function AISettingsPanel() {
           </Field>
           <div className="flex items-center gap-2 pt-1">
             <button
+              type="button"
               onClick={() => handleTestAISettings('verify')}
               disabled={loading || aiSaving || testingScope !== null}
-              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs"
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-white rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {testingScope === 'verify' ? 'Testing retest AI...' : 'Test Retest AI'}
             </button>

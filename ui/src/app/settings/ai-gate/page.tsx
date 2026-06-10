@@ -5,6 +5,15 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
 import {
+  Button,
+  Card,
+  CardSkeleton,
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  useToast,
+} from '@/components/ui'
+import {
   createAITarget,
   deleteAITarget,
   getAIInventory,
@@ -135,6 +144,42 @@ function parseJsonObject(label: string, raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>
 }
 
+function validateJsonObjectField(label: string, raw: string, optional = false): string | undefined {
+  if (optional && !raw.trim()) return undefined
+  try {
+    parseJsonObject(label, raw)
+    return undefined
+  } catch (err) {
+    if (err instanceof SyntaxError) return `${label} is not valid JSON`
+    return err instanceof Error ? err.message : `${label} is invalid`
+  }
+}
+
+function validateEndpointUrl(raw: string): string | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed) return 'Endpoint URL is required'
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'Endpoint URL must use http or https'
+    }
+  } catch {
+    return 'Endpoint URL must be a valid http(s) URL'
+  }
+  return undefined
+}
+
+function invalidFieldClass(base: string) {
+  return base.replace('border-gray-700', 'border-red-500/50')
+}
+
+interface TargetFormErrors {
+  endpointUrl?: string
+  headersTemplate?: string
+  requestTemplate?: string
+  controlMetadata?: string
+}
+
 function parseList(raw: string): string[] {
   return raw
     .split(/[\n,]/)
@@ -233,9 +278,11 @@ function summarizeRequestTemplate(template: Record<string, unknown> | null | und
 
 export default function AIGateSettingsPage() {
   const router = useRouter()
+  const toast = useToast()
   const initialType = TARGET_TYPES[0]
   const [targets, setTargets] = useState<AITarget[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [scanning, setScanning] = useState<string | null>(null)
   const [testingTarget, setTestingTarget] = useState<string | null>(null)
@@ -243,7 +290,10 @@ export default function AIGateSettingsPage() {
   const [connectivityResults, setConnectivityResults] = useState<Record<string, AITargetConnectivityResult>>({})
   const [mcpReadinessResults, setMCPReadinessResults] = useState<Record<string, AIMCPLiveReadinessResult>>({})
   const [error, setError] = useState<string | null>(null)
-  const [message, setMessage] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<TargetFormErrors>({})
+  const [confirmDisableTarget, setConfirmDisableTarget] = useState<AITarget | null>(null)
+  const [disabling, setDisabling] = useState(false)
+  const [confirmProductionTarget, setConfirmProductionTarget] = useState<AITarget | null>(null)
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
   const [inventory, setInventory] = useState<AIInventory | null>(null)
@@ -290,9 +340,9 @@ export default function AIGateSettingsPage() {
         }
         return next
       })
-      setError(null)
+      setLoadError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load AI targets')
+      setLoadError(err instanceof Error ? err.message : 'Failed to load AI targets')
     } finally {
       setLoading(false)
     }
@@ -332,6 +382,7 @@ export default function AIGateSettingsPage() {
   function applyTargetType(nextType: AITargetType) {
     const definition = TARGET_TYPES.find((type) => type.value === nextType) || TARGET_TYPES[0]
     setTargetType(nextType)
+    setFieldErrors((prev) => ({ ...prev, requestTemplate: undefined, headersTemplate: undefined }))
     setRequestTemplate(jsonText(definition.template))
     setResponsePath(definition.responsePath)
     setMethod('POST')
@@ -356,10 +407,12 @@ export default function AIGateSettingsPage() {
     setControlMetadata('')
     setProductionMode(false)
     setShowAdvancedTarget(false)
+    setFieldErrors({})
     applyTargetType('api_chat')
   }
 
   function applyScenarioTemplate(template: AITestTargetTemplate) {
+    setFieldErrors({})
     setName(template.name)
     setTargetType(template.target_type)
     setEndpointUrl(template.endpoint_url)
@@ -382,8 +435,35 @@ export default function AIGateSettingsPage() {
       setCopied('target-payload')
       setTimeout(() => setCopied(null), 1500)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to copy payload')
+      const msg = err instanceof Error ? err.message : 'Failed to copy payload'
+      setError(msg)
+      toast.error(msg)
     }
+  }
+
+  function validateField(field: keyof TargetFormErrors) {
+    setFieldErrors((prev) => ({
+      ...prev,
+      [field]:
+        field === 'endpointUrl'
+          ? validateEndpointUrl(endpointUrl)
+          : field === 'headersTemplate'
+            ? validateJsonObjectField('Headers template', headersTemplate)
+            : field === 'requestTemplate'
+              ? validateJsonObjectField('Request template', requestTemplate)
+              : validateJsonObjectField('Control metadata', controlMetadata, true),
+    }))
+  }
+
+  function validateTargetForm(): boolean {
+    const errors: TargetFormErrors = {
+      endpointUrl: validateEndpointUrl(endpointUrl),
+      headersTemplate: validateJsonObjectField('Headers template', headersTemplate),
+      requestTemplate: validateJsonObjectField('Request template', requestTemplate),
+      controlMetadata: validateJsonObjectField('Control metadata', controlMetadata, true),
+    }
+    setFieldErrors(errors)
+    return !Object.values(errors).some(Boolean)
   }
 
   function buildPayload(): AITargetPayload {
@@ -429,42 +509,52 @@ export default function AIGateSettingsPage() {
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault()
+    if (!validateTargetForm()) {
+      setError('Fix the highlighted fields before saving.')
+      return
+    }
     setSaving(true)
     setError(null)
-    setMessage(null)
     try {
       const payload = buildPayload()
       const result = await createAITarget(payload)
-      setMessage(`Saved ${result.target.name}.`)
+      toast.success(`Saved ${result.target.name}.`)
       resetForm()
       setShowAddTarget(false)
       await loadTargets()
       await loadInventory()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save AI target')
+      const msg = err instanceof Error ? err.message : 'Failed to save AI target'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setSaving(false)
     }
   }
 
-  async function handleDelete(target: AITarget) {
-    if (!confirm(`Disable ${target.name}?`)) return
+  async function handleDisableConfirmed() {
+    const target = confirmDisableTarget
+    if (!target) return
+    setDisabling(true)
     setError(null)
     try {
       await deleteAITarget(target.id)
-      setMessage(`${target.name} disabled.`)
+      toast.success(`${target.name} disabled.`)
+      setConfirmDisableTarget(null)
       await loadTargets()
       await loadInventory()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to disable AI target')
+      const msg = err instanceof Error ? err.message : 'Failed to disable AI target'
+      setError(msg)
+      toast.error(msg)
+      setConfirmDisableTarget(null)
+    } finally {
+      setDisabling(false)
     }
   }
 
-  async function handleRun(target: AITarget) {
+  async function executeRun(target: AITarget) {
     const config = runConfigs[target.id] || defaultRunConfig(target)
-    if (target.production_mode && !confirm(`Run ${config.probe_pack} against production target ${target.name}?`)) {
-      return
-    }
     setScanning(target.id)
     setError(null)
     try {
@@ -472,25 +562,45 @@ export default function AIGateSettingsPage() {
         ...config,
         confirm_production: target.production_mode,
       })
+      if (result.scan_id) {
+        toast.success('AI Gate scan queued.', { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } })
+      } else {
+        toast.success('AI Gate scan queued.')
+      }
       router.push(`/scans/${result.scan_id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to queue AI Gate scan')
+      const msg = err instanceof Error ? err.message : 'Failed to queue AI Gate scan'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setScanning(null)
     }
+  }
+
+  async function handleRun(target: AITarget) {
+    if (target.production_mode) {
+      setConfirmProductionTarget(target)
+      return
+    }
+    await executeRun(target)
   }
 
   async function handleConnectivityTest(target: AITarget) {
     if (testingTarget) return
     setTestingTarget(target.id)
     setError(null)
-    setMessage(null)
     try {
       const result = await testAITargetConnectivity(target.id)
       setConnectivityResults((prev) => ({ ...prev, [target.id]: result }))
-      setMessage(result.ok ? `${target.name} connectivity passed.` : `${target.name} connectivity needs attention.`)
+      if (result.ok) {
+        toast.success(`${target.name} connectivity passed.`)
+      } else {
+        toast.error(`${target.name} connectivity needs attention.`)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to test AI target')
+      const msg = err instanceof Error ? err.message : 'Failed to test AI target'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setTestingTarget(null)
     }
@@ -500,14 +610,19 @@ export default function AIGateSettingsPage() {
     if (testingMCP) return
     setTestingMCP(target.id)
     setError(null)
-    setMessage(null)
     try {
       const result = await testMCPReadiness(target.id)
       setMCPReadinessResults((prev) => ({ ...prev, [target.id]: result }))
       const warnings = result.summary?.warnings ?? 0
-      setMessage(warnings === 0 ? `${target.name} MCP readiness passed.` : `${target.name} has ${warnings} MCP readiness warning${warnings === 1 ? '' : 's'}.`)
+      if (warnings === 0) {
+        toast.success(`${target.name} MCP readiness passed.`)
+      } else {
+        toast.error(`${target.name} has ${warnings} MCP readiness warning${warnings === 1 ? '' : 's'}.`)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to test MCP readiness')
+      const msg = err instanceof Error ? err.message : 'Failed to test MCP readiness'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setTestingMCP(null)
     }
@@ -515,6 +630,7 @@ export default function AIGateSettingsPage() {
 
   function applyInventoryCandidate(candidate: AIInventoryCandidate) {
     const payload = candidate.suggested_target
+    setFieldErrors({})
     setName(payload.name || `Discovered ${candidate.target_type}`)
     setTargetType(payload.target_type)
     setEndpointUrl(payload.endpoint_url)
@@ -533,26 +649,30 @@ export default function AIGateSettingsPage() {
     setProductionMode(false)
     setShowAddTarget(true)
     setShowAdvancedTarget(true)
-    setMessage(`Loaded discovered ${candidate.target_type} candidate into the form.`)
+    toast.info(`Loaded discovered ${candidate.target_type} candidate into the form.`)
   }
 
   async function handleRunDemo() {
     if (demoRunning) return
     setDemoRunning(true)
     setError(null)
-    setMessage(null)
     setDemoResult(null)
     try {
       const result = await runAIDemo({ scan_profile: 'smoke', request_budget: 1 })
       setDemoResult(result)
       const failedCount = result.failed?.length || 0
-      setMessage(
-        failedCount
-          ? `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}; ${failedCount} scenario${failedCount === 1 ? '' : 's'} failed to queue.`
-          : `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}.`
-      )
+      const summary = failedCount
+        ? `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}; ${failedCount} scenario${failedCount === 1 ? '' : 's'} failed to queue.`
+        : `Queued ${result.queued.length} Honey demo scan${result.queued.length === 1 ? '' : 's'}.`
+      if (failedCount && result.queued.length === 0) {
+        toast.error(summary)
+      } else {
+        toast.success(summary)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to queue Honey demo')
+      const msg = err instanceof Error ? err.message : 'Failed to queue Honey demo'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setDemoRunning(false)
     }
@@ -584,6 +704,11 @@ export default function AIGateSettingsPage() {
   )
   const hiddenCalibrationCount = targets.length - visibleTargets.length
   const shouldShowCreate = showAddTarget
+  const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
+  const promptWarning = targetType === 'api_chat' && !requestTemplate.includes('{{prompt}}')
+  const confirmProductionConfig = confirmProductionTarget
+    ? runConfigs[confirmProductionTarget.id] || defaultRunConfig(confirmProductionTarget)
+    : null
 
   return (
     <div className="space-y-6">
@@ -596,22 +721,17 @@ export default function AIGateSettingsPage() {
           <p className="mt-1 text-gray-400">Manage AI chat, RAG, agent trace, and MCP targets.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowAddTarget((value) => !value)}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
-          >
-            <Plus className="h-4 w-4" />
+          <Button onClick={() => setShowAddTarget((value) => !value)}>
+            <Plus className="h-4 w-4" aria-hidden="true" />
             {showAddTarget ? 'Close' : 'Add Target'}
-          </button>
-          <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+          </Button>
+          <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
             Settings
           </Link>
         </div>
       </div>
 
-      {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
-      {message && <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-400">{message}</div>}
+      {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
       {aiSettings?.demo_mode_enabled && (
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
@@ -625,7 +745,7 @@ export default function AIGateSettingsPage() {
       )}
 
       {inventory && (
-        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <Card className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2 text-white">
@@ -665,7 +785,7 @@ export default function AIGateSettingsPage() {
               ))}
             </div>
           )}
-        </section>
+        </Card>
       )}
 
       {shouldShowCreate && (
@@ -693,7 +813,16 @@ export default function AIGateSettingsPage() {
 
           <label className="grid gap-1 text-sm text-gray-300">
             Endpoint URL
-            <input value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} className={inputClass} placeholder="https://example.com/api/chat" required />
+            <input
+              value={endpointUrl}
+              onChange={(e) => setEndpointUrl(e.target.value)}
+              onBlur={() => validateField('endpointUrl')}
+              aria-invalid={fieldErrors.endpointUrl ? true : undefined}
+              className={fieldErrors.endpointUrl ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="https://example.com/api/chat"
+              required
+            />
+            {fieldErrors.endpointUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.endpointUrl}</span>}
           </label>
 
           <div className="grid gap-3 md:grid-cols-3">
@@ -761,11 +890,30 @@ export default function AIGateSettingsPage() {
                 <div className="grid gap-3 md:grid-cols-2">
                   <label className="grid gap-1 text-sm text-gray-300">
                     Request template JSON
-                    <textarea value={requestTemplate} onChange={(e) => setRequestTemplate(e.target.value)} className={textareaClass} rows={7} />
+                    <textarea
+                      value={requestTemplate}
+                      onChange={(e) => setRequestTemplate(e.target.value)}
+                      onBlur={() => validateField('requestTemplate')}
+                      aria-invalid={fieldErrors.requestTemplate ? true : undefined}
+                      className={fieldErrors.requestTemplate ? invalidFieldClass(textareaClass) : textareaClass}
+                      rows={7}
+                    />
+                    {fieldErrors.requestTemplate && <span role="alert" className="text-sm text-red-400">{fieldErrors.requestTemplate}</span>}
+                    {!fieldErrors.requestTemplate && promptWarning && (
+                      <span className="text-sm text-amber-400">Chat API targets usually need {'{{prompt}}'} in the request template so probes can inject prompts.</span>
+                    )}
                   </label>
                   <label className="grid gap-1 text-sm text-gray-300">
                     Headers template JSON
-                    <textarea value={headersTemplate} onChange={(e) => setHeadersTemplate(e.target.value)} className={textareaClass} rows={7} />
+                    <textarea
+                      value={headersTemplate}
+                      onChange={(e) => setHeadersTemplate(e.target.value)}
+                      onBlur={() => validateField('headersTemplate')}
+                      aria-invalid={fieldErrors.headersTemplate ? true : undefined}
+                      className={fieldErrors.headersTemplate ? invalidFieldClass(textareaClass) : textareaClass}
+                      rows={7}
+                    />
+                    {fieldErrors.headersTemplate && <span role="alert" className="text-sm text-red-400">{fieldErrors.headersTemplate}</span>}
                   </label>
                 </div>
 
@@ -794,10 +942,13 @@ export default function AIGateSettingsPage() {
                   <textarea
                     value={controlMetadata}
                     onChange={(e) => setControlMetadata(e.target.value)}
-                    className={textareaClass}
+                    onBlur={() => validateField('controlMetadata')}
+                    aria-invalid={fieldErrors.controlMetadata ? true : undefined}
+                    className={fieldErrors.controlMetadata ? invalidFieldClass(textareaClass) : textareaClass}
                     rows={5}
                     placeholder='{"asset_owner":"security","risk_tier":"high","data_classification":"restricted","retrieval_acl_matrix":"tenant-user-doc","tool_inventory":["refund"],"enforce_ai_control_baseline":true}'
                   />
+                  {fieldErrors.controlMetadata && <span role="alert" className="text-sm text-red-400">{fieldErrors.controlMetadata}</span>}
                 </label>
 
                 <label className="flex items-center gap-2 text-sm text-gray-300">
@@ -809,19 +960,22 @@ export default function AIGateSettingsPage() {
           </div>
 
           <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-            <button type="submit" disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
-              {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            <Button type="submit" disabled={saving || hasFieldErrors} className="w-full">
+              {saving ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Plus className="h-4 w-4" aria-hidden="true" />}
               Save AI Target
-            </button>
+            </Button>
             <button type="button" onClick={copyCurrentPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
-              <Clipboard className="h-4 w-4" />
+              <Clipboard className="h-4 w-4" aria-hidden="true" />
               {copied === 'target-payload' ? 'Copied' : 'Copy payload'}
             </button>
           </div>
+          {hasFieldErrors && (
+            <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to save this target.</p>
+          )}
         </form>
 
         {scenario && (
-          <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+          <Card className="p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 text-white">
@@ -874,7 +1028,7 @@ export default function AIGateSettingsPage() {
                 </div>
               </div>
             </div>
-          </section>
+          </Card>
         )}
       </div>
       )}
@@ -905,23 +1059,21 @@ export default function AIGateSettingsPage() {
           </div>
 
           {hiddenCalibrationCount > 0 && !showDemoTargets && (
-            <div className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3 text-sm text-gray-400">
+            <Card className="px-4 py-3 text-sm text-gray-400">
               Hidden {hiddenCalibrationCount} demo/lab target{hiddenCalibrationCount === 1 ? '' : 's'} from the normal list.
-            </div>
+            </Card>
           )}
 
-          {visibleTargets.length === 0 && !loading && !showAddTarget ? (
-            <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 text-center text-sm text-gray-500">
-              <div>No AI Gate targets yet.</div>
-              <button
-                type="button"
-                onClick={() => setShowAddTarget(true)}
-                className="mt-3 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
-              >
-                <Plus className="h-4 w-4" />
-                Add Target
-              </button>
-            </div>
+          {loadError ? (
+            <ErrorState message={loadError} onRetry={loadTargets} />
+          ) : loading && visibleTargets.length === 0 ? (
+            <CardSkeleton count={3} />
+          ) : visibleTargets.length === 0 && !showAddTarget ? (
+            <EmptyState
+              message="No AI Gate targets yet."
+              hint="Add a chat, RAG, agent trace, or MCP surface to start probing."
+              action={{ label: 'Add Target', onClick: () => setShowAddTarget(true) }}
+            />
           ) : (
             visibleTargets.map((target) => {
               const config = runConfigs[target.id] || defaultRunConfig(target)
@@ -930,7 +1082,7 @@ export default function AIGateSettingsPage() {
                 : null
               const isDemoTarget = isCalibrationLikeTarget(target, true)
               return (
-                <div key={target.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+                <Card key={target.id} className="p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -989,8 +1141,13 @@ export default function AIGateSettingsPage() {
                         </div>
                       </div>
                     </div>
-                    <button onClick={() => handleDelete(target)} className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400" title="Disable target">
-                      <Trash2 className="h-4 w-4" />
+                    <button
+                      onClick={() => setConfirmDisableTarget(target)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400"
+                      aria-label={`Disable ${target.name}`}
+                      title="Disable target"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
                       Disable
                     </button>
                   </div>
@@ -1073,13 +1230,13 @@ export default function AIGateSettingsPage() {
                       </div>
                     </div>
                   )}
-                </div>
+                </Card>
               )
             })
           )}
         </div>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+      <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2 text-white">
@@ -1104,7 +1261,7 @@ export default function AIGateSettingsPage() {
             ))}
           </div>
         </div>
-      </section>
+      </Card>
 
       {aiSettings?.demo_mode_enabled && (
         <section className="rounded-lg border border-emerald-500/20 bg-gray-900 p-4">
@@ -1162,6 +1319,36 @@ export default function AIGateSettingsPage() {
           )}
         </section>
       )}
+
+      <ConfirmDialog
+        open={confirmDisableTarget !== null}
+        title={confirmDisableTarget ? `Disable ${confirmDisableTarget.name}?` : 'Disable target?'}
+        message="The target will be removed from the active list."
+        confirmLabel="Disable"
+        danger
+        busy={disabling}
+        onConfirm={handleDisableConfirmed}
+        onCancel={() => {
+          if (!disabling) setConfirmDisableTarget(null)
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmProductionTarget !== null}
+        title="Run production scan?"
+        message={
+          confirmProductionTarget && confirmProductionConfig
+            ? `Run ${confirmProductionConfig.probe_pack} against production target ${confirmProductionTarget.name}?`
+            : undefined
+        }
+        confirmLabel="Run Scan"
+        onConfirm={() => {
+          const target = confirmProductionTarget
+          setConfirmProductionTarget(null)
+          if (target) executeRun(target)
+        }}
+        onCancel={() => setConfirmProductionTarget(null)}
+      />
     </div>
   )
 }

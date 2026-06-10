@@ -13,25 +13,7 @@ body {
   font-family: system-ui, -apple-system, sans-serif;
 }
 
-/* Severity Colors */
-.severity-critical { color: #ef4444; }
-.severity-high { color: #f97316; }
-.severity-medium { color: #eab308; }
-.severity-low { color: #3b82f6; }
-.severity-info { color: #6b7280; }
-
-.bg-severity-critical { background-color: #7f1d1d; }
-.bg-severity-high { background-color: #7c2d12; }
-.bg-severity-medium { background-color: #713f12; }
-.bg-severity-low { background-color: #1e3a5f; }
-.bg-severity-info { background-color: #374151; }
-
-/* Grade Colors */
-.grade-a { color: #22c55e; }
-.grade-b { color: #84cc16; }
-.grade-c { color: #eab308; }
-.grade-d { color: #f97316; }
-.grade-f { color: #ef4444; }
+/* Severity/grade colors live in src/lib/constants.ts as Tailwind class maps. */
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {

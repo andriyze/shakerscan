@@ -5,6 +5,17 @@ import Link from 'next/link'
 import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
+import {
+  Card,
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  FindingStatusBadge,
+  SeverityBadge,
+  SourceTypeBadge,
+  TableSkeleton,
+  useToast,
+} from '@/components/ui'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -55,12 +66,6 @@ function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' 
   return 'DAST'
 }
 
-function getSourceTypeClass(type: 'AI' | 'DAST' | 'Model Intake'): string {
-  if (type === 'AI') return 'bg-purple-500/20 text-purple-300'
-  if (type === 'Model Intake') return 'bg-cyan-500/20 text-cyan-300'
-  return 'bg-blue-500/20 text-blue-300'
-}
-
 function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
   if (sortBy === 'last_seen' || sortBy === 'first_seen') {
     return sortOrder === 'desc' ? 'Newest first' : 'Oldest first'
@@ -75,9 +80,12 @@ function FindingsContent() {
   const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
     defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
   })
+  const toast = useToast()
 
   const [findings, setFindings] = useState<Finding[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const hasLoadedRef = useRef(false)
   const [domains, setDomains] = useState<string[]>([])
   const [total, setTotal] = useState(0)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
@@ -88,6 +96,7 @@ function FindingsContent() {
   const [cleanupDomain, setCleanupDomain] = useState('')
   const [cleanupPreview, setCleanupPreview] = useState<number | null>(null)
   const [cleanupLoading, setCleanupLoading] = useState(false)
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
 
   const severityFilter = filters.severity || ''
   const statusFilter = filters.status || ''
@@ -104,6 +113,12 @@ function FindingsContent() {
   const sortOrder = (filters.sort_order || 'desc') as SortOrder
   // Page is 1-based in URL (page=1 is first page)
   const rawPage = Math.max(1, filters.page || 1)
+
+  const hasActiveFilters = Boolean(
+    severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
+    scanIdFilter || targetIdFilter || searchQuery || lastSeenFilter ||
+    verificationVerdictFilter || verificationModeFilter || verifiedOnlyFilter
+  )
 
   useEffect(() => {
     getDomains().then(data => setDomains(data.domains || [])).catch(() => {})
@@ -137,7 +152,6 @@ function FindingsContent() {
 
   async function fetchFindings() {
     try {
-      setLoading(true)
       const data = await getFindings({
         severity: severityFilter || undefined,
         status: statusFilter || undefined,
@@ -167,9 +181,17 @@ function FindingsContent() {
 
       setFindings(data.findings || [])
       setTotal(fetchedTotal)
+      setLoadError(false)
+      hasLoadedRef.current = true
       setLoading(false)
     } catch (err) {
       console.error('Failed to fetch findings:', err)
+      if (hasLoadedRef.current) {
+        // Keep existing data on background refresh failures
+        toast.error('Failed to refresh findings')
+      } else {
+        setLoadError(true)
+      }
       setLoading(false)
     }
   }
@@ -186,6 +208,7 @@ function FindingsContent() {
       setCleanupPreview(result.would_delete ?? 0)
     } catch (err) {
       console.error('Cleanup preview failed:', err)
+      toast.error('Failed to preview cleanup')
     } finally {
       setCleanupLoading(false)
     }
@@ -193,20 +216,23 @@ function FindingsContent() {
 
   async function handleCleanupDelete() {
     if (cleanupPreview === null || cleanupPreview === 0) return
-    if (!confirm(`Delete ${cleanupPreview} finding${cleanupPreview !== 1 ? 's' : ''} permanently?`)) return
     setCleanupLoading(true)
     try {
-      await cleanupFindings({
+      const result = await cleanupFindings({
         older_than_days: cleanupDays,
         status: cleanupStatus || undefined,
         root_domain: cleanupDomain || undefined,
         dry_run: false
       })
+      const deletedCount = result.deleted ?? cleanupPreview
+      setCleanupConfirmOpen(false)
       setShowCleanup(false)
       setCleanupPreview(null)
+      toast.success(`Deleted ${deletedCount} finding${deletedCount !== 1 ? 's' : ''}`)
       await fetchFindings()
     } catch (err) {
       console.error('Cleanup failed:', err)
+      toast.error('Failed to delete findings')
     } finally {
       setCleanupLoading(false)
     }
@@ -282,7 +308,7 @@ function FindingsContent() {
 
       {/* Cleanup Panel */}
       {showCleanup && (
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 space-y-4">
+        <Card className="p-4 space-y-4">
           <h3 className="text-sm font-medium text-white">Cleanup Old Findings</h3>
           <div className="flex flex-wrap items-end gap-4">
             <div>
@@ -290,6 +316,7 @@ function FindingsContent() {
               <select
                 value={cleanupDays}
                 onChange={(e) => { setCleanupDays(Number(e.target.value)); setCleanupPreview(null) }}
+                aria-label="Cleanup findings not seen in"
                 className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
               >
                 {CLEANUP_AGE_OPTIONS.map((opt) => (
@@ -302,6 +329,7 @@ function FindingsContent() {
               <select
                 value={cleanupStatus}
                 onChange={(e) => { setCleanupStatus(e.target.value); setCleanupPreview(null) }}
+                aria-label="Cleanup status filter"
                 className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
               >
                 <option value="">Any status</option>
@@ -316,6 +344,7 @@ function FindingsContent() {
                 <select
                   value={cleanupDomain}
                   onChange={(e) => { setCleanupDomain(e.target.value); setCleanupPreview(null) }}
+                  aria-label="Cleanup domain filter"
                   className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
                 >
                   <option value="">All domains</option>
@@ -341,7 +370,7 @@ function FindingsContent() {
                 </span>
                 {cleanupPreview > 0 && (
                   <button
-                    onClick={handleCleanupDelete}
+                    onClick={() => setCleanupConfirmOpen(true)}
                     disabled={cleanupLoading}
                     className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 disabled:opacity-50"
                   >
@@ -351,8 +380,19 @@ function FindingsContent() {
               </>
             )}
           </div>
-        </div>
+        </Card>
       )}
+
+      <ConfirmDialog
+        open={cleanupConfirmOpen}
+        title="Delete old findings"
+        message={`Delete ${cleanupPreview ?? 0} finding${cleanupPreview !== 1 ? 's' : ''} permanently? This cannot be undone.`}
+        confirmLabel="Delete"
+        danger
+        busy={cleanupLoading}
+        onConfirm={handleCleanupDelete}
+        onCancel={() => setCleanupConfirmOpen(false)}
+      />
 
       {/* Filters Row */}
       <div className="flex flex-wrap items-center gap-4">
@@ -384,6 +424,7 @@ function FindingsContent() {
             <select
               value={domainFilter}
               onChange={(e) => setFilter('domain', e.target.value || undefined)}
+              aria-label="Filter by domain"
               className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
             >
               <option value="">All domains</option>
@@ -400,6 +441,7 @@ function FindingsContent() {
           <select
             value={lastSeenFilter || ''}
             onChange={(e) => setFilter('last_seen', e.target.value ? Number(e.target.value) : undefined)}
+            aria-label="Filter by last seen"
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All time</option>
@@ -415,6 +457,7 @@ function FindingsContent() {
           <select
             value={sortBy}
             onChange={(e) => setFilter('sort_by', e.target.value)}
+            aria-label="Sort by"
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             {SORT_OPTIONS.map((opt) => (
@@ -424,6 +467,7 @@ function FindingsContent() {
           <button
             onClick={() => setFilter('sort_order', sortOrder === 'desc' ? 'asc' : 'desc')}
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
+            aria-label={`Toggle sort direction: ${getSortOrderLabel(sortBy, sortOrder)}`}
             title={`Toggle sort direction: ${getSortOrderLabel(sortBy, sortOrder)}`}
           >
             {getSortOrderLabel(sortBy, sortOrder)}
@@ -436,6 +480,7 @@ function FindingsContent() {
           <select
             value={verificationVerdictFilter}
             onChange={(e) => setFilter('verification_verdict', e.target.value || undefined)}
+            aria-label="Filter by verification verdict"
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All</option>
@@ -451,6 +496,7 @@ function FindingsContent() {
           <select
             value={verificationModeFilter}
             onChange={(e) => setFilter('verification_mode', e.target.value || undefined)}
+            aria-label="Filter by verification mode"
             className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All</option>
@@ -477,6 +523,7 @@ function FindingsContent() {
             placeholder="Search by title or URL..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
+            aria-label="Search findings by title or URL"
             className="w-full px-4 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
           />
           <svg className="absolute right-3 top-2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -556,16 +603,27 @@ function FindingsContent() {
       )}
 
       {/* Findings List */}
-      <div className="bg-gray-900 rounded-lg border border-gray-800">
-        {loading ? (
-          <div className="flex items-center justify-center h-32">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-          </div>
-        ) : findings.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            No findings found matching your filters.
-          </div>
+      {loading && !loadError ? (
+        <Card>
+          <TableSkeleton />
+        </Card>
+      ) : loadError ? (
+        <ErrorState
+          message="Failed to load findings. Is the API running?"
+          onRetry={() => { setLoading(true); setLoadError(false); fetchFindings() }}
+        />
+      ) : findings.length === 0 ? (
+        hasActiveFilters ? (
+          <EmptyState message="No findings found matching your filters." />
         ) : (
+          <EmptyState
+            message="No findings yet."
+            hint="Run a scan to discover vulnerabilities."
+            action={{ label: 'New Scan', href: '/scan/new' }}
+          />
+        )
+      ) : (
+        <Card>
           <div className="divide-y divide-gray-800">
             {findings.map((finding) => {
               const sourceType = getFindingSourceType(finding)
@@ -576,12 +634,10 @@ function FindingsContent() {
                   className="block p-4 hover:bg-gray-800/50 transition-colors"
                 >
                   <div className="flex items-start gap-3">
-                    <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSeverityBg(finding.severity)}`}>
-                      {finding.severity}
-                    </span>
-                    <span className={`px-2 py-0.5 text-xs font-medium rounded shrink-0 ${getSourceTypeClass(sourceType)}`}>
-                      {sourceType}
-                    </span>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <SeverityBadge severity={finding.severity} />
+                      <SourceTypeBadge type={sourceType} />
+                    </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="text-sm font-medium text-white">{finding.title}</h3>
                       <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
@@ -597,14 +653,14 @@ function FindingsContent() {
                         <p className="text-xs text-gray-600 truncate mt-1">{finding.url}</p>
                       )}
                     </div>
-                    <StatusBadge status={finding.status} />
+                    <FindingStatusBadge status={finding.status} />
                   </div>
                 </Link>
               )
             })}
           </div>
-        )}
-      </div>
+        </Card>
+      )}
 
       {/* Bottom Pagination */}
       {total > 0 && (
@@ -623,27 +679,12 @@ function FindingsContent() {
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    active: 'bg-yellow-500/20 text-yellow-400',
-    resolved: 'bg-green-500/20 text-green-400',
-    false_positive: 'bg-gray-500/20 text-gray-400',
-    accepted_risk: 'bg-purple-500/20 text-purple-400'
-  }
-
-  return (
-    <span className={`px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.active}`}>
-      {status.replace('_', ' ')}
-    </span>
-  )
-}
-
 export default function FindingsPage() {
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center h-32">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-      </div>
+      <Card>
+        <TableSkeleton />
+      </Card>
     }>
       <FindingsContent />
     </Suspense>

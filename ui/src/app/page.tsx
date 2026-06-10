@@ -2,7 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getGungnirStatus, startGungnir, stopGungnir, getSeverityBg, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type GungnirStatus } from '@/lib/api'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type GungnirStatus } from '@/lib/api'
+import {
+  Card,
+  ErrorState,
+  LastUpdated,
+  ScanStatusBadge,
+  SeverityBadge,
+  Skeleton,
+  TableSkeleton,
+  useToast,
+} from '@/components/ui'
 
 interface DashboardData {
   metrics: {
@@ -23,34 +33,46 @@ const QUEUE_REFRESH_MS = 15000
 const WORKERS_REFRESH_MS = 30000
 const GUNGNIR_REFRESH_MS = 30000
 
+const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+
 export default function Dashboard() {
+  const toast = useToast()
   const [data, setData] = useState<DashboardData | null>(null)
   const [queue, setQueue] = useState<QueueStats | null>(null)
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
   const [gungnir, setGungnir] = useState<GungnirStatus | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(true)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [queueError, setQueueError] = useState<string | null>(null)
   const [workersError, setWorkersError] = useState<string | null>(null)
-  const [gungnirError, setGungnirError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
 
   const dashboardInFlight = useRef(false)
+  const dashboardLoadedOnce = useRef(false)
   const queueInFlight = useRef(false)
   const workersInFlight = useRef(false)
   const gungnirInFlight = useRef(false)
 
-  const fetchDashboard = async (showLoading = false) => {
-    if (dashboardInFlight.current) return
+  const fetchDashboard = async (showLoading = false): Promise<boolean | undefined> => {
+    if (dashboardInFlight.current) return undefined
     dashboardInFlight.current = true
     if (showLoading) setDashboardLoading(true)
     try {
       const dashboardData = await getDashboard()
       setData(dashboardData)
       setDashboardError(null)
+      setLastUpdated(new Date())
+      dashboardLoadedOnce.current = true
+      return true
     } catch (err) {
-      setDashboardError('Failed to load dashboard. Is the API running?')
+      console.error('Failed to load dashboard:', err)
+      if (!dashboardLoadedOnce.current) {
+        setDashboardError('Failed to load dashboard. Is the API running?')
+      }
+      return false
     } finally {
       dashboardInFlight.current = false
       setDashboardLoading(false)
@@ -122,14 +144,26 @@ export default function Dashboard() {
     return () => clearInterval(interval)
   }, [])
 
+  const handleManualRefresh = async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    const ok = await fetchDashboard(false)
+    setRefreshing(false)
+    if (ok === false) {
+      toast.error('Failed to refresh dashboard')
+    }
+  }
+
   const handleScale = async (count: number) => {
     if (scaling) return
     setScaling(true)
     try {
       await scaleWorkers(count)
       await fetchWorkers(true)
+      toast.success(`Scaled workers to ${count}`)
     } catch (err) {
       console.error('Failed to scale workers:', err)
+      toast.error(err instanceof Error ? err.message : 'Failed to scale workers')
     } finally {
       setScaling(false)
     }
@@ -137,18 +171,19 @@ export default function Dashboard() {
 
   const handleGungnirToggle = async () => {
     if (gungnirActionLoading) return
-    setGungnirError(null)
     setGungnirActionLoading(true)
+    const wasRunning = Boolean(gungnir?.running)
     try {
-      if (gungnir?.running) {
+      if (wasRunning) {
         await stopGungnir()
       } else {
         await startGungnir()
       }
       await fetchGungnirStatus(true)
+      toast.success(wasRunning ? 'Gungnir CT monitor stopped' : 'Gungnir CT monitor started')
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to toggle gungnir'
-      setGungnirError(message)
+      console.error('Failed to toggle gungnir:', err)
+      toast.error(err instanceof Error ? err.message : 'Failed to toggle Gungnir CT monitor')
     } finally {
       setGungnirActionLoading(false)
     }
@@ -156,6 +191,8 @@ export default function Dashboard() {
 
   const metrics = data?.metrics
   const metricsReady = Boolean(metrics)
+  const metricsLoading = dashboardLoading && !metricsReady
+  const metricSkeleton = <Skeleton className="h-8 w-12" />
   const totalTargets = metricsReady ? metrics?.total_targets || 0 : '--'
   const totalScans = metricsReady ? metrics?.total_scans || 0 : '--'
   const activeFindings = metricsReady ? metrics?.active_findings || 0 : '--'
@@ -180,44 +217,45 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-        <p className="text-gray-400 mt-1">Security scanning overview</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+          <p className="text-gray-400 mt-1">Security scanning overview</p>
+        </div>
+        <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
       </div>
 
       {dashboardError && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-red-400">
-          {dashboardError}
-        </div>
+        <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
       )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           title="Total Targets"
-          value={totalTargets}
+          value={metricsLoading ? metricSkeleton : totalTargets}
           icon={<TargetIcon />}
           color="blue"
           href="/targets"
         />
         <StatCard
           title="Total Scans"
-          value={totalScans}
+          value={metricsLoading ? metricSkeleton : totalScans}
           icon={<ScanIcon />}
           color="green"
           href="/scans"
         />
         <StatCard
           title="Active Findings"
-          value={activeFindings}
+          value={metricsLoading ? metricSkeleton : activeFindings}
           icon={<AlertIcon />}
           color="yellow"
-          subtitle={metricsReady ? `${criticalFindings} critical, ${highFindings} high` : '--'}
+          subtitle={metricsReady ? `${criticalFindings} critical, ${highFindings} high` : metricsLoading ? undefined : '--'}
           href="/findings?status=active"
         />
         <StatCard
           title="Avg Score"
-          value={avgScore}
+          value={metricsLoading ? metricSkeleton : avgScore}
           icon={<ScoreIcon />}
           color="purple"
         />
@@ -226,22 +264,22 @@ export default function Dashboard() {
       {/* Queue Status & Worker Control */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Queue Status */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <Card className="p-4">
           <h2 className="text-sm font-medium text-gray-400 mb-3">Queue Status</h2>
           <div className="flex flex-wrap gap-4">
-            <Link href="/scans?status=pending" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <Link href="/scans?status=pending" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
               <div className={`w-2 h-2 rounded-full bg-yellow-500 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`}></div>
               <span className="text-sm">{queuePending} pending</span>
             </Link>
-            <Link href="/scans?status=running" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <Link href="/scans?status=running" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
               <div className={`w-2 h-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`}></div>
               <span className="text-sm">{queueRunning} running</span>
             </Link>
-            <Link href="/scans?status=completed" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <Link href="/scans?status=completed" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
               <div className="w-2 h-2 rounded-full bg-green-500"></div>
               <span className="text-sm">{queueCompleted} completed</span>
             </Link>
-            <Link href="/scans?status=failed" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <Link href="/scans?status=failed" className={`flex items-center gap-2 hover:opacity-80 transition-opacity rounded ${FOCUS_RING}`}>
               <div className="w-2 h-2 rounded-full bg-red-500"></div>
               <span className="text-sm">{queueFailed} failed</span>
             </Link>
@@ -249,10 +287,10 @@ export default function Dashboard() {
           {queueError && (
             <p className="text-xs text-red-400 mt-3">{queueError}</p>
           )}
-        </div>
+        </Card>
 
         {/* Worker Control */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <Card className="p-4">
           <h2 className="text-sm font-medium text-gray-400 mb-3">Worker Control</h2>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -261,17 +299,21 @@ export default function Dashboard() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                type="button"
                 onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
                 disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
-                className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm"
+                aria-label="Decrease worker count"
+                className={`px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm ${FOCUS_RING}`}
               >
                 -
               </button>
               <span className="text-sm font-medium w-8 text-center">{workersKnown ? workerCount : '?'}</span>
               <button
+                type="button"
                 onClick={() => handleScale(Math.min(20, (workerCount || 1) + 1))}
                 disabled={scaling || !workersKnown || (workerCount || 0) >= 20}
-                className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm"
+                aria-label="Increase worker count"
+                className={`px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm ${FOCUS_RING}`}
               >
                 +
               </button>
@@ -279,7 +321,8 @@ export default function Dashboard() {
                 value=""
                 onChange={(e) => handleScale(parseInt(e.target.value))}
                 disabled={scaling || !workersKnown}
-                className="ml-2 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm disabled:opacity-50"
+                aria-label="Scale workers to a specific count"
+                className={`ml-2 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm disabled:opacity-50 ${FOCUS_RING}`}
               >
                 <option value="">Scale to...</option>
                 {[1, 2, 3, 5, 10, 15, 20].map(n => (
@@ -291,11 +334,11 @@ export default function Dashboard() {
           {scaling && (
             <p className="text-xs text-blue-400 mt-2">Scaling workers...</p>
           )}
-        </div>
+        </Card>
       </div>
 
       {/* Gungnir CT Monitor */}
-      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+      <Card className="p-4">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-medium text-gray-400">Gungnir CT Monitor</h2>
@@ -316,9 +359,10 @@ export default function Dashboard() {
               )}
             </div>
             <button
+              type="button"
               onClick={handleGungnirToggle}
               disabled={gungnirActionLoading}
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 ${
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
                 gungnir?.running
                   ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
                   : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
@@ -338,15 +382,12 @@ export default function Dashboard() {
             Total subdomains discovered: <span className="text-gray-400">{gungnir.subdomains_found}</span>
           </p>
         ) : null}
-        {gungnirError && (
-          <p className="text-xs text-red-400 mt-2">{gungnirError}</p>
-        )}
-      </div>
+      </Card>
 
       {/* Recent Scans & Findings */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recent Scans */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800">
+        <Card>
           <div className="p-4 border-b border-gray-800">
             <h2 className="font-medium text-white">Recent Scans</h2>
           </div>
@@ -356,7 +397,7 @@ export default function Dashboard() {
                 <Link
                   key={scan.id}
                   href={`/scans/${scan.id}`}
-                  className="flex items-center justify-between p-4 hover:bg-gray-800/50 transition-colors"
+                  className={`flex items-center justify-between p-4 hover:bg-gray-800/50 transition-colors ${FOCUS_RING} focus-visible:ring-inset`}
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-white truncate">{scan.target_url}</p>
@@ -368,25 +409,25 @@ export default function Dashboard() {
                         {scan.grade}
                       </span>
                     )}
-                    <StatusBadge status={scan.status} />
+                    <ScanStatusBadge status={scan.status} />
                   </div>
                 </Link>
               ))
             ) : dashboardLoading ? (
-              <p className="p-4 text-sm text-gray-500">Loading scans...</p>
+              <TableSkeleton rows={5} cols={3} />
             ) : (
               <p className="p-4 text-sm text-gray-500">No scans yet</p>
             )}
           </div>
           <div className="p-3 border-t border-gray-800">
-            <Link href="/scans" className="text-sm text-blue-400 hover:text-blue-300">
+            <Link href="/scans" className={`text-sm text-blue-400 hover:text-blue-300 rounded ${FOCUS_RING}`}>
               View all scans &rarr;
             </Link>
           </div>
-        </div>
+        </Card>
 
         {/* Recent Findings */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800">
+        <Card>
           <div className="p-4 border-b border-gray-800">
             <h2 className="font-medium text-white">Critical & High Findings</h2>
           </div>
@@ -396,11 +437,9 @@ export default function Dashboard() {
                 <Link
                   key={finding.id}
                   href={`/findings/${finding.id}`}
-                  className="flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors"
+                  className={`flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors ${FOCUS_RING} focus-visible:ring-inset`}
                 >
-                  <span className={`px-2 py-0.5 text-xs font-medium rounded ${getSeverityBg(finding.severity)}`}>
-                    {finding.severity}
-                  </span>
+                  <SeverityBadge severity={finding.severity} />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-white truncate">{finding.title}</p>
                     <p className="text-xs text-gray-500 truncate">{finding.tool}</p>
@@ -408,17 +447,17 @@ export default function Dashboard() {
                 </Link>
               ))
             ) : dashboardLoading ? (
-              <p className="p-4 text-sm text-gray-500">Loading findings...</p>
+              <TableSkeleton rows={5} cols={3} />
             ) : (
               <p className="p-4 text-sm text-gray-500">No critical or high findings</p>
             )}
           </div>
           <div className="p-3 border-t border-gray-800">
-            <Link href="/findings" className="text-sm text-blue-400 hover:text-blue-300">
+            <Link href="/findings" className={`text-sm text-blue-400 hover:text-blue-300 rounded ${FOCUS_RING}`}>
               View all findings &rarr;
             </Link>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   )
@@ -433,7 +472,7 @@ function StatCard({
   href
 }: {
   title: string
-  value: number | string
+  value: React.ReactNode
   icon: React.ReactNode
   color: 'blue' | 'green' | 'yellow' | 'purple'
   subtitle?: string
@@ -453,7 +492,7 @@ function StatCard({
       </div>
       <div>
         <p className="text-sm text-gray-400">{title}</p>
-        <p className="text-2xl font-bold text-white">{value}</p>
+        <div className="text-2xl font-bold text-white">{value}</div>
         {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
       </div>
     </div>
@@ -463,7 +502,7 @@ function StatCard({
     return (
       <Link
         href={href}
-        className="bg-gray-900 rounded-lg border border-gray-800 p-4 hover:bg-gray-800/50 transition-colors"
+        className={`block bg-gray-900 rounded-lg border border-gray-800 p-4 hover:bg-gray-800/50 transition-colors ${FOCUS_RING}`}
       >
         {content}
       </Link>
@@ -471,31 +510,16 @@ function StatCard({
   }
 
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+    <Card className="p-4">
       {content}
-    </div>
-  )
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    pending: 'bg-gray-500/20 text-gray-400',
-    running: 'bg-blue-500/20 text-blue-400',
-    completed: 'bg-green-500/20 text-green-400',
-    failed: 'bg-red-500/20 text-red-400'
-  }
-
-  return (
-    <span className={`px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.pending}`}>
-      {status}
-    </span>
+    </Card>
   )
 }
 
 // Icons
 function TargetIcon() {
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
     </svg>
   )
@@ -503,7 +527,7 @@ function TargetIcon() {
 
 function ScanIcon() {
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
     </svg>
   )
@@ -511,7 +535,7 @@ function ScanIcon() {
 
 function AlertIcon() {
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
     </svg>
   )
@@ -519,7 +543,7 @@ function AlertIcon() {
 
 function ScoreIcon() {
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
     </svg>
   )
@@ -527,7 +551,7 @@ function ScoreIcon() {
 
 function WorkerIcon() {
   return (
-    <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
     </svg>
   )

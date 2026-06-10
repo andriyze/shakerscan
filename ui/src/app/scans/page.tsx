@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES, SCAN_TYPES } from '@/lib/constants'
+import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -70,12 +71,17 @@ function ScansContent() {
   const { filters, setFilter, setFilters, buildUrl } = useUrlFilters<ScansFilters>({
     defaults: { page: 1 }
   })
+  const toast = useToast()
 
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const [domains, setDomains] = useState<string[]>([])
   const [cancelling, setCancelling] = useState<Set<string>>(new Set())
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
   const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
   const [durationTickMs, setDurationTickMs] = useState<number>(Date.now())
@@ -103,6 +109,18 @@ function ScansContent() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  // Close scan menu on Escape
+  useEffect(() => {
+    if (!openScanMenu) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setOpenScanMenu(null)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [openScanMenu])
+
   // Sync searchInput with URL when filters change externally (e.g., browser back)
   useEffect(() => {
     setSearchInput(searchQuery)
@@ -125,8 +143,8 @@ function ScansContent() {
     }
   }, [searchInput, searchQuery, setFilter])
 
-  const fetchScans = useCallback(async (isPolling = false) => {
-    // Only show loading spinner on initial load, not polling refreshes
+  const fetchScans = useCallback(async (isPolling = false): Promise<boolean> => {
+    // Only show loading skeleton on initial load, not polling refreshes
     if (!isPolling) {
       setLoading(true)
     }
@@ -145,15 +163,23 @@ function ScansContent() {
       if (rawPage > maxPage && fetchedTotal > 0) {
         // Don't update state - keep loading while redirecting
         setFilter('page', maxPage > 1 ? maxPage : undefined)
-        return
+        return true
       }
 
       setScans(data.scans || [])
       setTotal(fetchedTotal)
+      setLoadError(false)
+      setLastUpdated(new Date())
       setLoading(false)
+      return true
     } catch (err) {
       console.error('Failed to fetch scans:', err)
-      setLoading(false)
+      // Background poll failures keep existing rows; only non-polling loads surface the error state
+      if (!isPolling) {
+        setLoadError(true)
+        setLoading(false)
+      }
+      return false
     }
   }, [statusFilter, domainFilter, searchQuery, rawPage, setFilter])
 
@@ -181,13 +207,26 @@ function ScansContent() {
     return scan.duration_seconds ? formatDuration(scan.duration_seconds) : '-'
   }, [durationTickMs])
 
+  async function handleManualRefresh() {
+    setRefreshing(true)
+    const ok = await fetchScans(true)
+    setRefreshing(false)
+    if (!ok) {
+      toast.error('Failed to refresh scans')
+    }
+  }
+
   async function handleCancel(scanId: string) {
     setCancelling(prev => new Set(prev).add(scanId))
     try {
       await cancelScan(scanId)
-      fetchScans()
+      setConfirmCancelId(null)
+      toast.success('Scan cancelled')
+      fetchScans(true)
     } catch (err) {
       console.error('Failed to cancel scan:', err)
+      setConfirmCancelId(null)
+      toast.error('Failed to cancel scan')
     } finally {
       setCancelling(prev => {
         const next = new Set(prev)
@@ -201,11 +240,18 @@ function ScansContent() {
     const type = SCAN_TYPES.find(t => t.value === scanType)
     if (!type) return
     try {
-      await submitScan(targetUrl, { ...type.options, scan_type: scanType })
+      const result = await submitScan(targetUrl, { ...type.options, scan_type: scanType })
       setOpenScanMenu(null)
-      fetchScans()
+      toast.success(
+        'Scan started',
+        result?.scan_id
+          ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
+          : undefined
+      )
+      fetchScans(true)
     } catch (err) {
       console.error('Failed to start scan:', err)
+      toast.error('Failed to start scan')
     }
   }
 
@@ -245,15 +291,18 @@ function ScansContent() {
           <h1 className="text-2xl font-bold text-white">Scans</h1>
           <p className="text-gray-400 mt-1">View all security scans</p>
         </div>
-        <Link
-          href="/scan/new"
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Scan
-        </Link>
+        <div className="flex items-center gap-4">
+          <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
+          <Link
+            href="/scan/new"
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Scan
+          </Link>
+        </div>
       </div>
 
       {/* Filters */}
@@ -318,12 +367,16 @@ function ScansContent() {
         </div>
       )}
 
+      {/* Load Error */}
+      {loadError && (
+        <ErrorState onRetry={() => fetchScans()} />
+      )}
+
       {/* Scans Table */}
-      <div className="bg-gray-900 rounded-lg border border-gray-800">
+      {!(loadError && scans.length === 0) && (
+      <Card>
         {loading ? (
-          <div className="flex items-center justify-center h-32">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-          </div>
+          <TableSkeleton rows={8} cols={6} />
         ) : scans.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
             {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
@@ -400,7 +453,7 @@ function ScansContent() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <StatusBadge status={scan.status} />
+                    <ScanStatusBadge status={scan.status} />
                   </td>
                   <td className="px-4 py-3">
                     {scan.grade ? (
@@ -435,9 +488,9 @@ function ScansContent() {
                   <td className="px-4 py-3">
                     {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
                       <button
-                        onClick={() => handleCancel(scan.id)}
+                        onClick={() => setConfirmCancelId(scan.id)}
                         disabled={cancelling.has(scan.id)}
-                        className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50"
+                        className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                       </button>
@@ -452,7 +505,9 @@ function ScansContent() {
                       <div className={`relative ${openScanMenu === scan.id ? 'z-[100]' : ''}`} ref={openScanMenu === scan.id ? scanMenuRef : null}>
                         <button
                           onClick={() => setOpenScanMenu(openScanMenu === scan.id ? null : scan.id)}
-                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                          aria-haspopup="menu"
+                          aria-expanded={openScanMenu === scan.id}
+                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Scan
                           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -460,12 +515,13 @@ function ScansContent() {
                           </svg>
                         </button>
                         {openScanMenu === scan.id && (
-                          <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                          <div role="menu" className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
                             {SCAN_TYPES.map((type) => (
                               <button
                                 key={type.value}
+                                role="menuitem"
                                 onClick={() => handleScan(scan.target_url, type.value)}
-                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors"
+                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
                               >
                                 <div className="flex items-center justify-between">
                                   <span className="text-sm text-white font-medium">{type.label}</span>
@@ -489,7 +545,8 @@ function ScansContent() {
           </table>
           </div>
         )}
-      </div>
+      </Card>
+      )}
 
       {/* Bottom Pagination */}
       {total > 0 && (
@@ -503,27 +560,19 @@ function ScansContent() {
           <PaginationControls />
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmCancelId !== null}
+        title="Cancel scan?"
+        message="The scan will be stopped and cannot be resumed."
+        confirmLabel="Cancel scan"
+        cancelLabel="Keep running"
+        danger
+        busy={confirmCancelId !== null && cancelling.has(confirmCancelId)}
+        onConfirm={() => { if (confirmCancelId) handleCancel(confirmCancelId) }}
+        onCancel={() => setConfirmCancelId(null)}
+      />
     </div>
-  )
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    pending: 'bg-gray-500/20 text-gray-400',
-    queued: 'bg-gray-500/20 text-gray-400',
-    running: 'bg-blue-500/20 text-blue-400',
-    completed: 'bg-green-500/20 text-green-400',
-    failed: 'bg-red-500/20 text-red-400',
-    cancelled: 'bg-orange-500/20 text-orange-400'
-  }
-
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.pending}`}>
-      {status === 'running' && (
-        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse"></span>
-      )}
-      {status}
-    </span>
   )
 }
 

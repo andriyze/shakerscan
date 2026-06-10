@@ -13,27 +13,21 @@ import {
   retestAiFinding,
   updateFinding,
   deleteFinding,
-  getSeverityBg,
   type Finding,
   type RetestRecord
 } from '@/lib/api'
 import { FINDING_STATUSES } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
-
-function StatusBadge({ status }: { status: Finding['status'] }) {
-  const styles: Record<string, string> = {
-    active: 'bg-yellow-500/20 text-yellow-400',
-    resolved: 'bg-green-500/20 text-green-400',
-    false_positive: 'bg-gray-500/20 text-gray-400',
-    accepted_risk: 'bg-purple-500/20 text-purple-400'
-  }
-
-  return (
-    <span className={`px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.active}`}>
-      {status.replace('_', ' ')}
-    </span>
-  )
-}
+import {
+  Card,
+  ConfirmDialog,
+  ErrorState,
+  FindingStatusBadge,
+  SectionCard,
+  SeverityBadge,
+  SourceTypeBadge,
+  useToast,
+} from '@/components/ui'
 
 function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
@@ -43,30 +37,6 @@ function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' 
     return 'AI'
   }
   return 'DAST'
-}
-
-function SourceTypeBadge({ finding }: { finding: Finding }) {
-  const type = getFindingSourceType(finding)
-  const styles: Record<'AI' | 'DAST' | 'Model Intake', string> = {
-    AI: 'bg-purple-500/20 text-purple-300',
-    DAST: 'bg-blue-500/20 text-blue-300',
-    'Model Intake': 'bg-cyan-500/20 text-cyan-300'
-  }
-
-  return (
-    <span className={`px-2 py-0.5 text-xs font-medium rounded ${styles[type]}`}>
-      {type}
-    </span>
-  )
-}
-
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-      <h2 className="text-sm font-medium text-gray-400 mb-3">{title}</h2>
-      {children}
-    </div>
-  )
 }
 
 function InfoItem({ label, children }: { label: string; children: React.ReactNode }) {
@@ -230,6 +200,7 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
       onClick={handleCopy}
       className="p-1 rounded hover:bg-gray-800 transition-colors"
       title={label || 'Copy'}
+      aria-label={label || 'Copy'}
       type="button"
     >
       {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
@@ -241,11 +212,14 @@ function FindingDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
   const router = useRouter()
+  const toast = useToast()
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [retestLoading, setRetestLoading] = useState(false)
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
@@ -291,8 +265,10 @@ function FindingDetailContent() {
       setStatusUpdating(true)
       await updateFinding(finding.id, newStatus, undefined, finding.scan_id)
       await fetchFinding()
+      toast.success(`Status updated to ${newStatus.replaceAll('_', ' ')}`)
     } catch (err) {
       console.error('Failed to update finding:', err)
+      toast.error('Failed to update finding status')
     } finally {
       setStatusUpdating(false)
     }
@@ -304,21 +280,27 @@ function FindingDetailContent() {
       setStatusUpdating(true)
       await updateFinding(finding.id, verdict.status, finding.notes, finding.scan_id, verdict.value)
       await fetchFinding()
+      toast.success(`Analyst verdict set to ${verdict.label.toLowerCase()}`)
     } catch (err) {
       console.error('Failed to update analyst verdict:', err)
+      toast.error('Failed to update analyst verdict')
     } finally {
       setStatusUpdating(false)
     }
   }
 
   async function handleDelete() {
-    if (!finding) return
-    if (!confirm('Delete this finding permanently? This cannot be undone.')) return
+    if (!finding || deleting) return
     try {
+      setDeleting(true)
       await deleteFinding(finding.id)
+      setDeleteConfirmOpen(false)
+      toast.success('Finding deleted')
       router.push(backUrl)
     } catch (err) {
       console.error('Failed to delete finding:', err)
+      toast.error('Failed to delete finding')
+      setDeleting(false)
     }
   }
 
@@ -343,12 +325,14 @@ function FindingDetailContent() {
               : retestMode as 'ai' | 'deterministic'
           )
       setRetestMessage(`${aiFinding ? 'AI Gate replay' : 'Retest'} queued (${queued.retest_id.slice(0, 8)}...)`)
+      toast.success(`${aiFinding ? 'AI Gate replay' : 'Retest'} queued`)
       const history = await getFindingRetests(finding.id, 10)
       setRetestHistory(history.retests || [])
       await fetchFinding()
     } catch (err) {
       console.error('Failed to queue retest:', err)
       setRetestMessage('Failed to queue retest')
+      toast.error('Failed to queue retest')
     } finally {
       setRetestLoading(false)
     }
@@ -402,9 +386,10 @@ function FindingDetailContent() {
 
   if (error || !finding) {
     return (
-      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-red-400">
-        {error || 'Finding not found'}
-      </div>
+      <ErrorState
+        message={error || 'Finding not found'}
+        onRetry={() => { setLoading(true); fetchFinding() }}
+      />
     )
   }
 
@@ -425,6 +410,7 @@ function FindingDetailContent() {
             onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
             className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
             title="Retest mode"
+            aria-label="Retest mode"
           >
             {retestOptions.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
@@ -438,7 +424,7 @@ function FindingDetailContent() {
             {retestLoading ? 'Queueing...' : 'Retest Finding'}
           </button>
           <button
-            onClick={handleDelete}
+            onClick={() => setDeleteConfirmOpen(true)}
             className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
           >
             Delete
@@ -446,16 +432,25 @@ function FindingDetailContent() {
         </div>
       </div>
 
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title="Delete finding"
+        message="Delete this finding permanently? This cannot be undone."
+        confirmLabel="Delete"
+        danger
+        busy={deleting}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteConfirmOpen(false)}
+      />
+
       <SectionCard title="Overview">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className={`px-2 py-0.5 text-xs font-medium rounded ${getSeverityBg(finding.severity)}`}>
-                  {finding.severity}
-                </span>
-                <StatusBadge status={finding.status} />
-                <SourceTypeBadge finding={finding} />
+                <SeverityBadge severity={finding.severity} />
+                <FindingStatusBadge status={finding.status} />
+                <SourceTypeBadge type={getFindingSourceType(finding)} />
                 {finding.cvss_score !== undefined && (
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}
@@ -918,12 +913,12 @@ function FindingDetailContent() {
       )}
 
       {rawEvidence && !hasAiProbeEvidence && (
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <Card className="p-4">
           <details>
             <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
             <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
           </details>
-        </div>
+        </Card>
       )}
     </div>
   )

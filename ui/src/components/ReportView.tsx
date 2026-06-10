@@ -7,6 +7,8 @@ import RemediationSummary from '@/components/RemediationSummary'
 import FindingActions from '@/components/FindingActions'
 import FindingCard from '@/components/FindingCard'
 import { getApiUrl } from '@/lib/api'
+import { gradeTextColor } from '@/components/ui'
+import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2 } from 'lucide-react'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
@@ -26,16 +28,8 @@ type Props = {
 }
 
 function getSeverityPill(severity?: string) {
-  const s = (severity || '').toLowerCase()
-  return s === 'critical'
-    ? 'bg-red-900 text-red-200'
-    : s === 'high'
-    ? 'bg-orange-900 text-orange-200'
-    : s === 'medium'
-    ? 'bg-yellow-900 text-yellow-200'
-    : s === 'low'
-    ? 'bg-blue-900 text-blue-200'
-    : 'bg-slate-700 text-slate-300'
+  const s = (severity || 'info').toLowerCase()
+  return SEVERITY_BADGE_STYLES[s as SeverityLevel] ?? SEVERITY_BADGE_STYLES.info
 }
 
 function getSeverityBorderClass(severity?: string) {
@@ -310,17 +304,6 @@ function getAIProbeOutcome(
     explanation: wasSemanticallyReviewed
       ? 'No attack evidence was accepted; semantic review also did not create a finding.'
       : 'No attack evidence was accepted; the target stayed within the expected safe behavior.',
-  }
-}
-
-function getGradeColor(grade?: string) {
-  switch (grade) {
-    case 'A': case 'A+': return 'text-green-500'
-    case 'B': return 'text-lime-500'
-    case 'C': return 'text-yellow-500'
-    case 'D': return 'text-orange-500'
-    case 'F': return 'text-red-500'
-    default: return 'text-gray-500'
   }
 }
 
@@ -675,22 +658,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <ExportPDFButton />
               {isAuthenticated && (isAIScan || isModelIntakeScan) && (
                 <>
-                  <button onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
                     AI Report MD
                   </button>
-                  <button onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
                     AI Report JSON
                   </button>
                 </>
               )}
               {isAuthenticated && (
-                <button onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10">
+                <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
                   Download JSON
                 </button>
               )}
             </div>
             {(scan.grade || result.grade) && (
-              <div className={`text-5xl font-bold ${getGradeColor(scan.grade || result.grade)}`}>
+              <div className={`text-5xl font-bold ${gradeTextColor(scan.grade || result.grade)}`}>
                 {scan.grade || result.grade}
               </div>
             )}
@@ -1129,7 +1112,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           <button
                             type="button"
                             onClick={() => toggleAIDetails(transcriptKey)}
-                            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800"
+                            aria-expanded={isExpanded}
+                            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           >
                             {isExpanded ? 'Collapse' : 'Open chat'}
                           </button>
@@ -1141,7 +1125,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           <button
                             type="button"
                             onClick={() => toggleAIRubric(transcriptKey)}
-                            className="text-xs text-blue-300 hover:text-blue-200"
+                            aria-expanded={isRubricExpanded}
+                            className="rounded text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           >
                             {isRubricExpanded ? 'Hide expected/fail behavior' : 'Show expected/fail behavior'}
                           </button>
@@ -1216,7 +1201,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         <button
                           type="button"
                           onClick={() => toggleAIDetails(transcriptKey)}
-                          className="mt-3 text-xs text-blue-300 hover:text-blue-200"
+                          aria-expanded={isExpanded}
+                          className="mt-3 rounded text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Show {turns.length - 1} more turn{turns.length - 1 === 1 ? '' : 's'}
                         </button>
@@ -1850,14 +1836,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           {ciphers.map((cipher: any, i: number) => (
                             <div key={i} className="flex items-center gap-2 text-xs">
                               {/* Grade badge */}
-                              <span className={`px-1.5 py-0.5 rounded font-bold min-w-[24px] text-center ${
-                                cipher.grade === 'A' ? 'bg-green-900 text-green-200' :
-                                cipher.grade === 'B' ? 'bg-lime-900 text-lime-200' :
-                                cipher.grade === 'C' ? 'bg-yellow-900 text-yellow-200' :
-                                cipher.grade === 'D' ? 'bg-orange-900 text-orange-200' :
-                                cipher.grade === 'F' ? 'bg-red-900 text-red-200' :
-                                'bg-gray-700 text-gray-300'
-                              }`}>
+                              <span className={`px-1.5 py-0.5 rounded font-bold min-w-[24px] text-center bg-gray-800 ${gradeTextColor(cipher.grade)}`}>
                                 {cipher.grade || '?'}
                               </span>
                               {/* Security indicator */}
@@ -2108,7 +2087,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-bold">Content Security Policy</h2>
             <div className="flex items-center gap-3">
-              <span className={`text-3xl font-bold ${http.csp_evaluation.grade === 'A' || http.csp_evaluation.grade === 'A+' ? 'text-green-500' : http.csp_evaluation.grade === 'B' ? 'text-lime-500' : http.csp_evaluation.grade === 'C' ? 'text-yellow-500' : http.csp_evaluation.grade === 'D' ? 'text-orange-500' : 'text-red-500'}`}>
+              <span className={`text-3xl font-bold ${gradeTextColor(http.csp_evaluation.grade)}`}>
                 {http.csp_evaluation.grade}
               </span>
               <span className="text-gray-400 text-sm">{http.csp_evaluation.score}/100</span>
@@ -2350,11 +2329,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           cloud_metadata: 'Cloud Metadata',
         }
         const sevColors: Record<string, string> = {
-          critical: 'bg-red-500/20 text-red-400 border-red-500/40',
-          high: 'bg-orange-500/20 text-orange-400 border-orange-500/40',
-          medium: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40',
-          low: 'bg-blue-500/20 text-blue-400 border-blue-500/40',
-          info: 'bg-gray-500/20 text-gray-400 border-gray-500/40',
+          critical: `${SEVERITY_BADGE_STYLES.critical} border-red-500/40`,
+          high: `${SEVERITY_BADGE_STYLES.high} border-orange-500/40`,
+          medium: `${SEVERITY_BADGE_STYLES.medium} border-yellow-500/40`,
+          low: `${SEVERITY_BADGE_STYLES.low} border-blue-500/40`,
+          info: `${SEVERITY_BADGE_STYLES.info} border-gray-500/40`,
         }
 
         return (
@@ -2423,8 +2402,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {(fpFindings.length > 0 || otherFindings.length > 0) && (
                   <div className="mt-3 border-t border-gray-700/50 pt-3">
                     <button
+                      type="button"
                       onClick={() => setFbShowAllFindings(!fbShowAllFindings)}
-                      className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                      aria-expanded={fbShowAllFindings}
+                      className="flex items-center gap-2 rounded text-xs text-gray-500 hover:text-gray-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       <svg className={`w-3 h-3 transition-transform ${fbShowAllFindings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -2436,6 +2417,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         {Object.entries(fpByCategory).sort(([,a], [,b]) => b.length - a.length).map(([cat, items]) => (
                           <div key={cat} className="bg-gray-800/50 rounded-lg overflow-hidden">
                             <button
+                              type="button"
                               onClick={() => {
                                 setFbExpandedCategories(prev => {
                                   const next = new Set(prev)
@@ -2443,7 +2425,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                                   return next
                                 })
                               }}
-                              className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-gray-700/30 transition-colors"
+                              aria-expanded={fbExpandedCategories.has(cat)}
+                              className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-gray-700/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                             >
                               <span className="text-gray-400 font-medium">{categoryLabels[cat] || cat}</span>
                               <span className="flex items-center gap-2">
@@ -2592,7 +2575,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               if (count === 0) return null
               const isActive = severityFilter.has(severity)
               return (
-                <button key={severity} onClick={() => toggleSeverityFilter(severity)} className={`px-2 py-1 rounded text-xs font-medium transition-all ${isActive ? severity === 'critical' ? 'bg-red-600 text-white' : severity === 'high' ? 'bg-orange-600 text-white' : severity === 'medium' ? 'bg-yellow-600 text-black' : severity === 'low' ? 'bg-blue-600 text-white' : 'bg-slate-600 text-white' : 'bg-gray-700/50 text-gray-500 line-through'}`}>
+                <button key={severity} type="button" onClick={() => toggleSeverityFilter(severity)} aria-pressed={isActive} className={`px-2 py-1 rounded text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${isActive ? SEVERITY_BADGE_STYLES[severity] : 'bg-gray-700/50 text-gray-500 line-through'}`}>
                   {severity} ({count})
                 </button>
               )
@@ -2650,11 +2633,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <span className="text-yellow-400 font-medium">
                     {finding.type?.replace(/_/g, ' ')}
                   </span>
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    finding.severity === 'high' ? 'bg-red-500/20 text-red-400' :
-                    finding.severity === 'medium' ? 'bg-orange-500/20 text-orange-400' :
-                    'bg-yellow-500/20 text-yellow-400'
-                  }`}>
+                  <span className={`text-xs px-2 py-1 rounded ${getSeverityPill(finding.severity)}`}>
                     {finding.severity}
                   </span>
                 </div>
@@ -3109,17 +3088,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   const evidenceFindings = chain.evidence?.supporting_findings || []
 
                   return (
-                    <div key={idx} className={`bg-gray-900 rounded-lg p-4 border-l-4 ${
-                      chain.severity === 'critical' ? 'border-red-500' :
-                      chain.severity === 'high' ? 'border-orange-500' : 'border-yellow-500'
-                    }`}>
+                    <div key={idx} className={`bg-gray-900 rounded-lg p-4 border-l-4 ${getSeverityBorderClass(chain.severity)}`}>
                       <div className="flex items-center justify-between mb-2">
                         <h4 className="font-semibold text-white">{chain.chain_type?.replace(/_/g, ' ').toUpperCase()}</h4>
                         <div className="flex items-center gap-2">
-                          <span className={`px-2 py-1 rounded text-xs font-bold ${
-                            chain.severity === 'critical' ? 'bg-red-900 text-red-200' :
-                            chain.severity === 'high' ? 'bg-orange-900 text-orange-200' : 'bg-yellow-900 text-yellow-200'
-                          }`}>{chain.severity?.toUpperCase()}</span>
+                          <span className={`px-2 py-1 rounded text-xs font-bold ${getSeverityPill(chain.severity)}`}>{chain.severity?.toUpperCase()}</span>
                           <span className="px-2 py-1 rounded text-xs bg-gray-800 text-gray-300">
                             Confidence {Math.round(getChainConfidence(chain) * 100)}%
                           </span>
@@ -3231,11 +3204,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                       <div key={idx} className="bg-gray-900/50 rounded-lg p-3 border border-gray-700">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-gray-300 font-medium">{chain.name || chain.chain_type?.replace(/_/g, ' ')}</span>
-                          <span className={`text-xs px-2 py-1 rounded ${
-                            chain.severity === 'critical' ? 'bg-red-500/20 text-red-400' :
-                            chain.severity === 'high' ? 'bg-orange-500/20 text-orange-400' :
-                            'bg-yellow-500/20 text-yellow-400'
-                          }`}>
+                          <span className={`text-xs px-2 py-1 rounded ${getSeverityPill(chain.severity)}`}>
                             {chain.severity} ({Math.round(getChainConfidence(chain) * 100)}% conf)
                           </span>
                         </div>

@@ -8,6 +8,8 @@ import {
   type Schedule, type Target
 } from '@/lib/api'
 import { SCAN_TYPES, type ScanType } from '@/lib/constants'
+import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, useToast } from '@/components/ui'
+import { utcTimeToLocalLabel } from '@/lib/format'
 
 const DAYS_OF_WEEK = [
   { value: 0, label: 'Monday' },
@@ -45,13 +47,16 @@ function formatRelativeTime(dateStr: string): string {
 function SchedulesContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
+  const toast = useToast()
 
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [targets, setTargets] = useState<Target[]>([])
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<Schedule | null>(null)
 
   // Create form state
   const [formTargetId, setFormTargetId] = useState('')
@@ -63,24 +68,26 @@ function SchedulesContent() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
-  const fetchSchedules = useCallback(async () => {
-    setLoading(true)
+  const fetchSchedules = useCallback(async (opts?: { background?: boolean }) => {
+    if (!opts?.background) setLoading(true)
     try {
       const params: { is_active?: boolean } = {}
       if (statusFilter === 'active') params.is_active = true
       if (statusFilter === 'disabled') params.is_active = false
       const data = await getSchedules(params)
       setSchedules(data.schedules || [])
+      setFetchError(false)
     } catch (err) {
       console.error('Failed to fetch schedules:', err)
+      if (!opts?.background) setFetchError(true)
     } finally {
-      setLoading(false)
+      if (!opts?.background) setLoading(false)
     }
   }, [statusFilter])
 
   useEffect(() => {
     fetchSchedules()
-    const interval = setInterval(fetchSchedules, 30000)
+    const interval = setInterval(() => fetchSchedules({ background: true }), 30000)
     return () => clearInterval(interval)
   }, [fetchSchedules])
 
@@ -108,6 +115,18 @@ function SchedulesContent() {
     }
   }, [showCreateModal, formTargetId])
 
+  useEffect(() => {
+    if (!showCreateModal) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setShowCreateModal(false)
+        resetForm()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [showCreateModal])
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
     if (!formTargetId) return
@@ -125,7 +144,8 @@ function SchedulesContent() {
       })
       setShowCreateModal(false)
       resetForm()
-      fetchSchedules()
+      toast.success('Schedule created')
+      fetchSchedules({ background: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create schedule')
     } finally {
@@ -136,19 +156,24 @@ function SchedulesContent() {
   async function handleToggle(schedule: Schedule) {
     try {
       await updateSchedule(schedule.id, { is_active: !schedule.is_active })
-      fetchSchedules()
+      toast.success(schedule.is_active ? 'Schedule paused' : 'Schedule resumed')
+      fetchSchedules({ background: true })
     } catch (err) {
       console.error('Failed to toggle schedule:', err)
+      toast.error('Failed to update schedule')
     }
   }
 
-  async function handleDelete(id: string) {
-    setDeleting(id)
+  async function handleDelete(schedule: Schedule) {
+    setDeleting(schedule.id)
     try {
-      await deleteSchedule(id)
-      fetchSchedules()
+      await deleteSchedule(schedule.id)
+      toast.success('Schedule deleted')
+      setConfirmDelete(null)
+      fetchSchedules({ background: true })
     } catch (err) {
       console.error('Failed to delete schedule:', err)
+      toast.error('Failed to delete schedule')
     } finally {
       setDeleting(null)
     }
@@ -169,6 +194,8 @@ function SchedulesContent() {
     return found?.label || type
   }
 
+  const formLocalTime = utcTimeToLocalLabel(formTime)
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -176,15 +203,12 @@ function SchedulesContent() {
           <h1 className="text-2xl font-bold text-white">Schedules</h1>
           <p className="text-gray-400 mt-1">Manage recurring scans</p>
         </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-        >
+        <Button onClick={() => setShowCreateModal(true)}>
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
           New Schedule
-        </button>
+        </Button>
       </div>
 
       {/* Status Filter */}
@@ -203,19 +227,21 @@ function SchedulesContent() {
 
       {/* Schedule Cards */}
       {loading ? (
-        <div className="flex items-center justify-center h-32">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-        </div>
+        <CardSkeleton count={3} />
+      ) : fetchError ? (
+        <ErrorState message="Failed to load schedules. Is the API running?" onRetry={() => fetchSchedules()} />
       ) : schedules.length === 0 ? (
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
-          <svg className="w-12 h-12 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <p className="text-gray-500">No schedules yet. Create one to automate your scans.</p>
-        </div>
+        <EmptyState
+          message="No schedules yet. Create one to automate your scans."
+          action={{ label: 'Create schedule', onClick: () => setShowCreateModal(true) }}
+        />
       ) : (
         <div className="space-y-3">
-          {schedules.map((schedule) => (
+          {schedules.map((schedule) => {
+            const localTime = (schedule.timezone || 'UTC') === 'UTC'
+              ? utcTimeToLocalLabel(schedule.time_of_day.slice(0, 5))
+              : null
+            return (
             <div
               key={schedule.id}
               className={`bg-gray-900 rounded-lg border ${schedule.is_active ? 'border-gray-800' : 'border-gray-800/50 opacity-60'} p-4`}
@@ -223,8 +249,12 @@ function SchedulesContent() {
               <div className="flex items-start gap-4">
                 {/* Toggle */}
                 <button
+                  type="button"
                   onClick={() => handleToggle(schedule)}
-                  className={`mt-1 relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  role="switch"
+                  aria-checked={schedule.is_active}
+                  aria-label={schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
+                  className={`mt-1 relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     schedule.is_active ? 'bg-blue-600' : 'bg-gray-700'
                   }`}
                   title={schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
@@ -257,7 +287,10 @@ function SchedulesContent() {
                         ? `Weekly ${DAYS_OF_WEEK.find(d => d.value === schedule.day_of_week)?.label || ''}`
                         : 'Daily'}
                     </span>
-                    <span>{schedule.time_of_day} {schedule.timezone || 'UTC'}</span>
+                    <span>
+                      {schedule.time_of_day} {schedule.timezone || 'UTC'}
+                      {localTime && <span className="text-gray-500"> (= {localTime} local)</span>}
+                    </span>
                   </div>
                   <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                     {schedule.next_run_at && (
@@ -274,10 +307,12 @@ function SchedulesContent() {
 
                 {/* Delete */}
                 <button
-                  onClick={() => handleDelete(schedule.id)}
+                  type="button"
+                  onClick={() => setConfirmDelete(schedule)}
                   disabled={deleting === schedule.id}
-                  className="text-gray-500 hover:text-red-400 transition-colors p-1"
+                  className="text-gray-500 hover:text-red-400 transition-colors p-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
                   title="Delete schedule"
+                  aria-label="Delete schedule"
                 >
                   {deleting === schedule.id ? (
                     <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-red-400"></div>
@@ -289,18 +324,21 @@ function SchedulesContent() {
                 </button>
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
       {/* Create Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-lg border border-gray-800 max-w-md w-full">
+          <Card className="max-w-md w-full">
             <div className="p-4 border-b border-gray-800 flex items-center justify-between">
               <h2 className="font-medium text-white">New Schedule</h2>
               <button
+                type="button"
                 onClick={() => { setShowCreateModal(false); resetForm() }}
+                aria-label="Close"
                 className="text-gray-400 hover:text-white"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -394,6 +432,9 @@ function SchedulesContent() {
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                   required
                 />
+                {formLocalTime && (
+                  <p className="mt-1 text-xs text-gray-500">= {formLocalTime} your local time</p>
+                )}
               </div>
 
               {/* Scan Type */}
@@ -433,20 +474,29 @@ function SchedulesContent() {
                 </button>
               </div>
             </form>
-          </div>
+          </Card>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete schedule?"
+        message={confirmDelete ? (
+          <>This will permanently delete the schedule for <span className="text-gray-200">{confirmDelete.target_url?.replace(/^https?:\/\//, '')}</span>.</>
+        ) : undefined}
+        confirmLabel="Delete"
+        danger
+        busy={confirmDelete !== null && deleting === confirmDelete.id}
+        onConfirm={() => { if (confirmDelete) handleDelete(confirmDelete) }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   )
 }
 
 export default function SchedulesPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center h-32">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-      </div>
-    }>
+    <Suspense fallback={<CardSkeleton count={3} />}>
       <SchedulesContent />
     </Suspense>
   )

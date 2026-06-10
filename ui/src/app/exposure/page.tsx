@@ -22,12 +22,15 @@ import {
   formatDate,
   getDomains,
   getExposureGraph,
-  getSeverityBg,
   type ExposureEdge,
   type ExposureGraph,
   type ExposureNode,
   type ExposureNodeType,
 } from '@/lib/api'
+import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
+import { Button, Card, CardSkeleton, EmptyState, ErrorState } from '@/components/ui'
+
+const MAX_VISIBLE_EDGES = 80
 
 const NODE_LABELS: Record<string, string> = {
   domain: 'Domains',
@@ -80,7 +83,7 @@ function nodeIcon(type: ExposureNodeType) {
 
 function severityClass(severity?: string | null) {
   if (!severity) return 'bg-gray-700 text-gray-300'
-  return getSeverityBg(severity)
+  return SEVERITY_BADGE_STYLES[severity as SeverityLevel] ?? SEVERITY_BADGE_STYLES.info
 }
 
 function metaString(node: ExposureNode, key: string) {
@@ -107,14 +110,21 @@ function NodePill({ node }: { node: ExposureNode }) {
   )
 
   if (node.href) {
-    return <Link href={node.href}>{body}</Link>
+    return (
+      <Link
+        href={node.href}
+        className="block rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      >
+        {body}
+      </Link>
+    )
   }
   return body
 }
 
 function StatPanel({ label, value, icon }: { label: string; value: string | number; icon: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+    <Card className="p-4">
       <div className="flex items-center justify-between">
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
@@ -122,7 +132,7 @@ function StatPanel({ label, value, icon }: { label: string; value: string | numb
         </div>
         <div className="rounded-lg bg-gray-800 p-2 text-gray-300">{icon}</div>
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -190,13 +200,15 @@ export default function ExposurePage() {
   const findingCounts = graph?.summary.severity_counts || {}
   const criticalHigh = (findingCounts.critical || 0) + (findingCounts.high || 0)
 
-  const visibleEdges = useMemo(() => {
+  const filteredEdges = useMemo(() => {
     const edges = graph?.edges || []
-    if (!selectedType) return edges.slice(0, 80)
-    return edges
-      .filter((edge) => byId.get(edge.source)?.type === selectedType || byId.get(edge.target)?.type === selectedType)
-      .slice(0, 80)
+    if (!selectedType) return edges
+    return edges.filter(
+      (edge) => byId.get(edge.source)?.type === selectedType || byId.get(edge.target)?.type === selectedType
+    )
   }, [graph, selectedType, byId])
+
+  const visibleEdges = useMemo(() => filteredEdges.slice(0, MAX_VISIBLE_EDGES), [filteredEdges])
 
   const recentScans = useMemo(
     () =>
@@ -208,6 +220,7 @@ export default function ExposurePage() {
   )
 
   const hotspots = graph?.summary.hotspots || []
+  const graphIsEmpty = !loading && (graph?.edges?.length ?? 0) === 0
 
   return (
     <div className="space-y-6">
@@ -220,6 +233,7 @@ export default function ExposurePage() {
           <select
             value={domain}
             onChange={(event) => setDomain(event.target.value)}
+            aria-label="Filter by domain"
             className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
           >
             <option value="">All domains</option>
@@ -236,22 +250,14 @@ export default function ExposurePage() {
             />
             Include resolved
           </label>
-          <button
-            onClick={loadGraph}
-            disabled={loading}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-60"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <Button onClick={() => void loadGraph()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-red-300">
-          {error}
-        </div>
-      )}
+      {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatPanel label="Nodes" value={graph?.summary.node_count ?? '--'} icon={<Network className="h-5 w-5" />} />
@@ -261,15 +267,20 @@ export default function ExposurePage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
-        <section className="rounded-lg border border-gray-800 bg-gray-900">
+        <Card>
           <div className="flex flex-col gap-3 border-b border-gray-800 p-4 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="font-semibold text-white">Relationships</h2>
-              <p className="mt-1 text-sm text-gray-500">{visibleEdges.length} visible relationships</p>
+              <p className="mt-1 text-sm text-gray-500">
+                {filteredEdges.length > visibleEdges.length
+                  ? `Showing ${visibleEdges.length} of ${filteredEdges.length} relationships`
+                  : `${visibleEdges.length} visible relationships`}
+              </p>
             </div>
             <select
               value={selectedType}
               onChange={(event) => setSelectedType(event.target.value)}
+              aria-label="Filter by node type"
               className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
             >
               <option value="">All node types</option>
@@ -279,9 +290,21 @@ export default function ExposurePage() {
             </select>
           </div>
           {loading ? (
-            <div className="p-8 text-center text-gray-500">Loading exposure graph...</div>
+            <div className="p-4">
+              <CardSkeleton count={3} />
+            </div>
+          ) : graphIsEmpty ? (
+            <div className="p-4">
+              <EmptyState
+                message="No exposure data yet."
+                hint="Run scans to build the exposure graph."
+                action={{ label: 'New Scan', href: '/scan/new' }}
+              />
+            </div>
           ) : visibleEdges.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">No relationships found.</div>
+            <div className="p-4">
+              <EmptyState message="No relationships found." hint="Try a different node type filter." />
+            </div>
           ) : (
             <div>
               {visibleEdges.map((edge, index) => (
@@ -289,10 +312,10 @@ export default function ExposurePage() {
               ))}
             </div>
           )}
-        </section>
+        </Card>
 
         <div className="space-y-6">
-          <section className="rounded-lg border border-gray-800 bg-gray-900">
+          <Card>
             <div className="border-b border-gray-800 p-4">
               <h2 className="font-semibold text-white">Hotspots</h2>
             </div>
@@ -313,18 +336,20 @@ export default function ExposurePage() {
                 ))
               )}
             </div>
-          </section>
+          </Card>
 
-          <section className="rounded-lg border border-gray-800 bg-gray-900">
+          <Card>
             <div className="border-b border-gray-800 p-4">
               <h2 className="font-semibold text-white">Inventory</h2>
             </div>
             <div className="grid grid-cols-2 gap-3 p-4">
               {Object.entries(NODE_LABELS).map(([type, label]) => (
                 <button
+                  type="button"
                   key={type}
                   onClick={() => setSelectedType(selectedType === type ? '' : type)}
-                  className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                  aria-pressed={selectedType === type}
+                  className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     selectedType === type
                       ? 'border-blue-500 bg-blue-500/10 text-blue-200'
                       : 'border-gray-800 bg-gray-950 text-gray-300 hover:border-gray-700'
@@ -335,9 +360,9 @@ export default function ExposurePage() {
                 </button>
               ))}
             </div>
-          </section>
+          </Card>
 
-          <section className="rounded-lg border border-gray-800 bg-gray-900">
+          <Card>
             <div className="border-b border-gray-800 p-4">
               <h2 className="font-semibold text-white">Recent Scans</h2>
             </div>
@@ -346,7 +371,11 @@ export default function ExposurePage() {
                 <div className="p-4 text-sm text-gray-500">No scans in graph.</div>
               ) : (
                 recentScans.map((scan) => (
-                  <Link key={scan.id} href={scan.href || '#'} className="block p-4 hover:bg-gray-800/50">
+                  <Link
+                    key={scan.id}
+                    href={scan.href || '#'}
+                    className="block p-4 hover:bg-gray-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  >
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium text-white">{scan.label}</div>
@@ -363,7 +392,7 @@ export default function ExposurePage() {
                 ))
               )}
             </div>
-          </section>
+          </Card>
         </div>
       </div>
     </div>

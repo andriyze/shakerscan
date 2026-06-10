@@ -16,6 +16,7 @@ import {
   type InteractiveSessionSummary,
 } from '@/lib/api'
 import { SEVERITY_LEVELS } from '@/lib/constants'
+import { Badge, Button, Card, ErrorState, useToast } from '@/components/ui'
 
 type UserKey = 'user1' | 'user2'
 
@@ -40,6 +41,9 @@ type FindingFormState = {
 }
 
 const REQUEST_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+
+const OUTLINE_BUTTON_CLASSES =
+  'rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
 
 function parseJsonInput(value: string): Record<string, unknown> | undefined {
   if (!value.trim()) return undefined
@@ -67,10 +71,12 @@ function getOriginFromUrl(url: string): string {
 }
 
 export default function InteractiveSessionPage() {
+  const toast = useToast()
   const [target, setTarget] = useState('https://cr.shakerscan.com')
   const [sessionInput, setSessionInput] = useState('')
   const [session, setSession] = useState<InteractiveSessionState | null>(null)
   const [activeSessions, setActiveSessions] = useState<InteractiveSessionSummary[]>([])
+  const [sessionsError, setSessionsError] = useState<string | null>(null)
 
   const [endpoint, setEndpoint] = useState('/identity/api/v2/user/dashboard')
   const [method, setMethod] = useState('GET')
@@ -103,8 +109,6 @@ export default function InteractiveSessionPage() {
   const [screenshotUser, setScreenshotUser] = useState<string>('default')
 
   const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
 
   const currentSessionId = session?.session_id || ''
 
@@ -112,8 +116,10 @@ export default function InteractiveSessionPage() {
     try {
       const data = await listInteractiveSessions()
       setActiveSessions(data.sessions || [])
-    } catch {
+      setSessionsError(null)
+    } catch (err) {
       setActiveSessions([])
+      setSessionsError(err instanceof Error ? err.message : 'Failed to load active sessions')
     }
   }, [])
 
@@ -127,16 +133,17 @@ export default function InteractiveSessionPage() {
       setSession(data)
       setSessionInput(data.session_id)
       setTarget(data.target_url)
-      setError(null)
     } catch (err) {
       setSession(null)
-      setError(err instanceof Error ? err.message : 'Failed to load session')
+      if (!silent) {
+        toast.error(err instanceof Error ? err.message : 'Failed to load session')
+      }
     } finally {
       if (!silent) {
         setBusyAction(null)
       }
     }
-  }, [])
+  }, [toast])
 
   useEffect(() => {
     void fetchActiveSessions()
@@ -158,20 +165,18 @@ export default function InteractiveSessionPage() {
 
   async function handleStartSession() {
     if (!target.trim()) {
-      setError('Target URL is required')
+      toast.error('Target URL is required')
       return
     }
 
     setBusyAction('start-session')
-    setError(null)
-    setNotice(null)
     try {
       const res = await startInteractiveSession(target.trim())
-      setNotice(`Session started: ${res.session_id}`)
+      toast.success(`Session started: ${res.session_id}`)
       await loadSessionState(res.session_id)
       await fetchActiveSessions()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start session')
+      toast.error(err instanceof Error ? err.message : 'Failed to start session')
     } finally {
       setBusyAction(null)
     }
@@ -180,12 +185,10 @@ export default function InteractiveSessionPage() {
   async function handleAttachSession() {
     const id = sessionInput.trim()
     if (!id) {
-      setError('Session ID is required')
+      toast.error('Session ID is required')
       return
     }
 
-    setError(null)
-    setNotice(null)
     await loadSessionState(id)
   }
 
@@ -193,17 +196,15 @@ export default function InteractiveSessionPage() {
     if (!currentSessionId) return
 
     setBusyAction('end-session')
-    setError(null)
-    setNotice(null)
     try {
       await endInteractiveSession(currentSessionId)
-      setNotice(`Session closed: ${currentSessionId}`)
+      toast.success(`Session closed: ${currentSessionId}`)
       setSession(null)
       setEndpointResult(null)
       setScreenshot(null)
       await fetchActiveSessions()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to close session')
+      toast.error(err instanceof Error ? err.message : 'Failed to close session')
     } finally {
       setBusyAction(null)
     }
@@ -211,13 +212,13 @@ export default function InteractiveSessionPage() {
 
   async function handleApplyAuth(user: UserKey) {
     if (!currentSessionId) {
-      setError('Start or attach a session first')
+      toast.error('Start or attach a session first')
       return
     }
 
     const form = authForms[user]
     if (!form.token.trim() && !form.authHeader.trim() && !form.cookies.trim()) {
-      setError(`Provide token/auth header/cookies for ${user}`)
+      toast.error(`Provide token/auth header/cookies for ${user}`)
       return
     }
 
@@ -227,18 +228,16 @@ export default function InteractiveSessionPage() {
     if (form.cookies.trim()) data.cookie_string = form.cookies.trim()
 
     setBusyAction(`auth-${user}`)
-    setError(null)
-    setNotice(null)
     try {
       const res = await runInteractiveAction(currentSessionId, {
         action: 'set_auth',
         user,
         data,
       })
-      setNotice(`${user} auth applied (${res.auth_method || 'unknown method'})`)
+      toast.success(`${user} auth applied (${res.auth_method || 'unknown method'})`)
       await loadSessionState(currentSessionId, true)
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to apply auth for ${user}`)
+      toast.error(err instanceof Error ? err.message : `Failed to apply auth for ${user}`)
     } finally {
       setBusyAction(null)
     }
@@ -246,13 +245,11 @@ export default function InteractiveSessionPage() {
 
   async function handleCaptureScreenshot() {
     if (!currentSessionId) {
-      setError('Start or attach a session first')
+      toast.error('Start or attach a session first')
       return
     }
 
     setBusyAction('capture-screenshot')
-    setError(null)
-    setNotice(null)
     try {
       const res = await captureInteractiveScreenshot(currentSessionId, {
         full_page: true,
@@ -263,9 +260,9 @@ export default function InteractiveSessionPage() {
         url: res.url,
         user: res.user,
       })
-      setNotice(`Screenshot captured for ${res.user}`)
+      toast.success(`Screenshot captured for ${res.user}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to capture screenshot')
+      toast.error(err instanceof Error ? err.message : 'Failed to capture screenshot')
     } finally {
       setBusyAction(null)
     }
@@ -273,11 +270,11 @@ export default function InteractiveSessionPage() {
 
   async function handleTestEndpoint() {
     if (!currentSessionId) {
-      setError('Start or attach a session first')
+      toast.error('Start or attach a session first')
       return
     }
     if (!endpoint.trim()) {
-      setError('Endpoint is required')
+      toast.error('Endpoint is required')
       return
     }
 
@@ -285,13 +282,11 @@ export default function InteractiveSessionPage() {
     try {
       parsedBody = parseJsonInput(endpointBody)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid JSON body')
+      toast.error(err instanceof Error ? err.message : 'Invalid JSON body')
       return
     }
 
     setBusyAction('test-endpoint')
-    setError(null)
-    setNotice(null)
     try {
       const result = await testInteractiveEndpoint(currentSessionId, {
         endpoint: endpoint.trim(),
@@ -301,9 +296,9 @@ export default function InteractiveSessionPage() {
         allow_out_of_scope: allowOutOfScope,
       })
       setEndpointResult(result)
-      setNotice(`Endpoint tested as ${asUser}: ${result.status || 'no-status'}`)
+      toast.success(`Endpoint tested as ${asUser}: ${result.status || 'no-status'}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Endpoint test failed')
+      toast.error(err instanceof Error ? err.message : 'Endpoint test failed')
     } finally {
       setBusyAction(null)
     }
@@ -311,7 +306,7 @@ export default function InteractiveSessionPage() {
 
   function handlePrefillFindingFromEndpoint() {
     if (!endpointResult) {
-      setError('Run an endpoint test first')
+      toast.error('Run an endpoint test first')
       return
     }
 
@@ -327,19 +322,18 @@ export default function InteractiveSessionPage() {
       request: prev.request || `${method} ${endpoint.trim()}`,
       response: prev.response || (endpointResult.body ? endpointResult.body.slice(0, 3000) : ''),
     }))
-    setNotice('Finding form prefilled from latest endpoint test')
-    setError(null)
+    toast.info('Finding form prefilled from latest endpoint test')
   }
 
   async function handleCreateFinding() {
     if (!currentSessionId) {
-      setError('Start or attach a session first')
+      toast.error('Start or attach a session first')
       return
     }
 
     const title = findingForm.title.trim()
     if (!title) {
-      setError('Finding title is required')
+      toast.error('Finding title is required')
       return
     }
 
@@ -371,14 +365,16 @@ export default function InteractiveSessionPage() {
     if (findingForm.notes.trim()) payload.notes = findingForm.notes.trim()
 
     setBusyAction('create-finding')
-    setError(null)
-    setNotice(null)
     try {
       const result = await createInteractiveSessionFinding(currentSessionId, payload)
       setCreatedFindingId(result.id)
-      setNotice(`Finding created: ${result.id}`)
+      if (result.id) {
+        toast.success('Finding saved', { link: { href: `/findings/${result.id}`, label: 'View finding' } })
+      } else {
+        toast.success('Finding saved')
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create finding')
+      toast.error(err instanceof Error ? err.message : 'Failed to create finding')
     } finally {
       setBusyAction(null)
     }
@@ -395,20 +391,13 @@ export default function InteractiveSessionPage() {
         </div>
         <Link
           href="/findings"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-blue-500 hover:text-blue-300"
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:border-blue-500 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Open Findings
         </Link>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-4 py-3 text-sm text-green-300">{notice}</div>
-      )}
-
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-4">
+      <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 1. Session Setup</h2>
         <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
           <div className="space-y-3">
@@ -420,27 +409,28 @@ export default function InteractiveSessionPage() {
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <div className="flex flex-wrap items-center gap-2">
-              <button
+              <Button
                 onClick={handleStartSession}
                 disabled={busyAction === 'start-session'}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {busyAction === 'start-session' ? 'Starting...' : 'Start Session'}
-              </button>
+              </Button>
               <button
+                type="button"
                 onClick={() => {
                   if (!currentSessionId) return
                   void loadSessionState(currentSessionId)
                 }}
                 disabled={!currentSessionId || busyAction === 'load-session'}
-                className="rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className={OUTLINE_BUTTON_CLASSES}
               >
                 Refresh State
               </button>
               <button
+                type="button"
                 onClick={handleEndSession}
                 disabled={!currentSessionId || busyAction === 'end-session'}
-                className="rounded-lg border border-red-500/50 px-4 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-lg border border-red-500/50 px-4 py-2 text-sm text-red-300 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {busyAction === 'end-session' ? 'Closing...' : 'Close Session'}
               </button>
@@ -456,9 +446,10 @@ export default function InteractiveSessionPage() {
                   className="flex-1 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                 />
                 <button
+                  type="button"
                   onClick={handleAttachSession}
                   disabled={busyAction === 'load-session'}
-                  className="rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  className={OUTLINE_BUTTON_CLASSES}
                 >
                   Attach
                 </button>
@@ -469,20 +460,27 @@ export default function InteractiveSessionPage() {
           <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
             <h3 className="text-sm font-medium text-gray-200">Active Sessions</h3>
             <div className="mt-2 max-h-40 space-y-2 overflow-auto pr-1">
-              {activeSessions.length === 0 && <p className="text-xs text-gray-500">No active sessions</p>}
-              {activeSessions.map((item) => (
-                <button
-                  key={item.session_id}
-                  onClick={() => {
-                    setSessionInput(item.session_id)
-                    void loadSessionState(item.session_id)
-                  }}
-                  className="w-full rounded-md border border-gray-800 px-2 py-2 text-left text-xs text-gray-300 hover:border-blue-500 hover:bg-blue-500/5"
-                >
-                  <p className="font-mono text-[11px] text-blue-300">{item.session_id}</p>
-                  <p className="truncate text-gray-400">{item.target_url}</p>
-                </button>
-              ))}
+              {sessionsError ? (
+                <ErrorState message={sessionsError} onRetry={() => void fetchActiveSessions()} />
+              ) : (
+                <>
+                  {activeSessions.length === 0 && <p className="text-xs text-gray-500">No active sessions</p>}
+                  {activeSessions.map((item) => (
+                    <button
+                      type="button"
+                      key={item.session_id}
+                      onClick={() => {
+                        setSessionInput(item.session_id)
+                        void loadSessionState(item.session_id)
+                      }}
+                      className="w-full rounded-md border border-gray-800 px-2 py-2 text-left text-xs text-gray-300 hover:border-blue-500 hover:bg-blue-500/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
+                      <p className="font-mono text-[11px] text-blue-300">{item.session_id}</p>
+                      <p className="truncate text-gray-400">{item.target_url}</p>
+                    </button>
+                  ))}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -497,9 +495,9 @@ export default function InteractiveSessionPage() {
             <p><span className="text-gray-500">Last Activity:</span> {new Date(session.last_activity).toLocaleString()}</p>
           </div>
         )}
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-4">
+      <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 2. Configure Two User Contexts</h2>
         <div className="grid gap-4 lg:grid-cols-2">
           {(['user1', 'user2'] as UserKey[]).map((user) => {
@@ -508,9 +506,9 @@ export default function InteractiveSessionPage() {
               <div key={user} className="rounded-lg border border-gray-800 bg-gray-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-white uppercase tracking-wide">{user}</h3>
-                  <span className={`rounded px-2 py-0.5 text-xs ${userState?.is_authenticated ? 'bg-green-500/20 text-green-300' : 'bg-gray-700 text-gray-400'}`}>
+                  <Badge className={userState?.is_authenticated ? 'bg-green-500/20 text-green-300' : 'bg-gray-700 text-gray-400'}>
                     {userState?.is_authenticated ? `${userState.auth_method || 'auth'} ready` : 'not authenticated'}
-                  </span>
+                  </Badge>
                 </div>
 
                 <div className="space-y-2">
@@ -535,20 +533,20 @@ export default function InteractiveSessionPage() {
                   />
                 </div>
 
-                <button
+                <Button
                   onClick={() => void handleApplyAuth(user)}
                   disabled={!currentSessionId || busyAction === `auth-${user}`}
-                  className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="w-full"
                 >
                   {busyAction === `auth-${user}` ? `Applying ${user}...` : `Apply ${user} Auth`}
-                </button>
+                </Button>
               </div>
             )
           })}
         </div>
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-4">
+      <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 3. Endpoint Validation</h2>
         <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
           <div className="space-y-3">
@@ -562,6 +560,7 @@ export default function InteractiveSessionPage() {
               <select
                 value={method}
                 onChange={(e) => setMethod(e.target.value)}
+                aria-label="Request method"
                 className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
               >
                 {REQUEST_METHODS.map((option) => (
@@ -571,6 +570,7 @@ export default function InteractiveSessionPage() {
               <select
                 value={asUser}
                 onChange={(e) => setAsUser(e.target.value as UserKey)}
+                aria-label="Test as user"
                 className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
               >
                 <option value="user1">as user1</option>
@@ -597,17 +597,17 @@ export default function InteractiveSessionPage() {
             </label>
 
             <div className="flex flex-wrap gap-2">
-              <button
+              <Button
                 onClick={() => void handleTestEndpoint()}
                 disabled={!currentSessionId || busyAction === 'test-endpoint'}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {busyAction === 'test-endpoint' ? 'Testing...' : 'Run Endpoint Test'}
-              </button>
+              </Button>
               <button
+                type="button"
                 onClick={handlePrefillFindingFromEndpoint}
                 disabled={!endpointResult}
-                className="rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className={OUTLINE_BUTTON_CLASSES}
               >
                 Prefill Finding from Result
               </button>
@@ -618,7 +618,7 @@ export default function InteractiveSessionPage() {
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium text-gray-200">Latest Result</h3>
               {endpointResult?.status !== undefined && (
-                <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">HTTP {endpointResult.status}</span>
+                <Badge className="bg-gray-800 text-gray-300">HTTP {endpointResult.status}</Badge>
               )}
             </div>
             {!endpointResult && <p className="text-xs text-gray-500">No result yet</p>}
@@ -633,9 +633,9 @@ export default function InteractiveSessionPage() {
             )}
           </div>
         </div>
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-4">
+      <Card className="p-5 space-y-4">
         <h2 className="text-lg font-semibold text-white">Step 4. Save Verified Finding</h2>
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="space-y-3">
@@ -649,6 +649,7 @@ export default function InteractiveSessionPage() {
               <select
                 value={findingForm.severity}
                 onChange={(e) => setFindingForm(prev => ({ ...prev, severity: e.target.value as typeof SEVERITY_LEVELS[number] }))}
+                aria-label="Finding severity"
                 className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
               >
                 {SEVERITY_LEVELS.map(level => (
@@ -723,30 +724,30 @@ export default function InteractiveSessionPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <button
+          <Button
             onClick={() => void handleCreateFinding()}
             disabled={!currentSessionId || busyAction === 'create-finding'}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {busyAction === 'create-finding' ? 'Saving...' : 'Save Finding'}
-          </button>
+          </Button>
           {createdFindingId && (
             <Link
               href={`/findings/${createdFindingId}`}
-              className="rounded-lg border border-green-500/40 px-3 py-2 text-sm text-green-300 hover:bg-green-500/10"
+              className="rounded-lg border border-green-500/40 px-3 py-2 text-sm text-green-300 hover:bg-green-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               Open Finding {createdFindingId.slice(0, 8)}
             </Link>
           )}
         </div>
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-3">
+      <Card className="p-5 space-y-3">
         <h2 className="text-lg font-semibold text-white">Step 5. Visual + Discovery Context</h2>
         <div className="flex flex-wrap items-center gap-2">
           <select
             value={screenshotUser}
             onChange={(e) => setScreenshotUser(e.target.value)}
+            aria-label="Screenshot user context"
             className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
           >
             {userList.map((user) => (
@@ -754,9 +755,10 @@ export default function InteractiveSessionPage() {
             ))}
           </select>
           <button
+            type="button"
             onClick={() => void handleCaptureScreenshot()}
             disabled={!currentSessionId || busyAction === 'capture-screenshot'}
-            className="rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+            className={OUTLINE_BUTTON_CLASSES}
           >
             {busyAction === 'capture-screenshot' ? 'Capturing...' : 'Capture Screenshot'}
           </button>
@@ -800,7 +802,7 @@ export default function InteractiveSessionPage() {
             <p className="text-xs text-gray-500">No endpoints discovered yet.</p>
           )}
         </div>
-      </section>
+      </Card>
     </div>
   )
 }

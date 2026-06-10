@@ -4,14 +4,50 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { submitScan } from '@/lib/api'
 import { BUDGET_PROFILES, SCAN_TYPES, getScanOptions, type BudgetProfile, type ScanType } from '@/lib/constants'
+import { Button, Card, useToast } from '@/components/ui'
+
+const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
+const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
+
+function validateTarget(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return 'Please enter a target URL'
+  }
+  if (/\s/.test(trimmed)) {
+    return 'Target cannot contain spaces'
+  }
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  let url: URL
+  try {
+    url = new URL(candidate)
+  } catch {
+    return 'Enter a valid URL or domain (e.g., https://example.com)'
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return 'Only http(s) targets are supported'
+  }
+  const host = url.hostname
+  if (!host) {
+    return 'Enter a valid URL or domain (e.g., https://example.com)'
+  }
+  const isLocalhost = host === 'localhost'
+  const isIPv6 = host.startsWith('[') || host.includes(':')
+  const isIPv4 = IPV4_PATTERN.test(host)
+  if (!isLocalhost && !isIPv4 && !isIPv6 && (!HOSTNAME_PATTERN.test(host) || !host.includes('.'))) {
+    return 'Enter a valid URL or domain (e.g., https://example.com)'
+  }
+  return null
+}
 
 export default function NewScanPage() {
   const router = useRouter()
+  const toast = useToast()
   const [target, setTarget] = useState('')
+  const [targetError, setTargetError] = useState<string | null>(null)
   const [scanType, setScanType] = useState<ScanType>('quick')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   // Advanced options
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -41,13 +77,14 @@ export default function NewScanPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!target.trim()) {
-      setError('Please enter a target URL')
+    const validationError = validateTarget(target)
+    if (validationError) {
+      setTargetError(validationError)
       return
     }
 
     setLoading(true)
-    setError(null)
+    setTargetError(null)
 
     try {
       // Combine scan type options with advanced options
@@ -67,10 +104,15 @@ export default function NewScanPage() {
       }
 
       const result = await submitScan(target.trim(), scanOptions)
+      toast.success(
+        'Scan started',
+        result?.scan_id
+          ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
+          : undefined
+      )
       router.push(`/scans`)
     } catch (err) {
-      setError('Failed to submit scan. Is the API running?')
-    } finally {
+      toast.error(err instanceof Error && err.message ? err.message : 'Failed to submit scan. Is the API running?')
       setLoading(false)
     }
   }
@@ -84,24 +126,37 @@ export default function NewScanPage() {
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Target Input */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <label className="block text-sm font-medium text-gray-400 mb-2">
+        <Card className="p-4">
+          <label htmlFor="scan-target" className="block text-sm font-medium text-gray-400 mb-2">
             Target URL
           </label>
           <input
+            id="scan-target"
             type="text"
             value={target}
-            onChange={(e) => setTarget(e.target.value)}
+            onChange={(e) => {
+              setTarget(e.target.value)
+              if (targetError) setTargetError(null)
+            }}
             placeholder="https://example.com"
-            className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-lg"
+            aria-invalid={targetError ? true : undefined}
+            aria-describedby={targetError ? 'scan-target-error' : undefined}
+            className={`w-full px-4 py-3 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-lg ${
+              targetError ? 'border-red-500/50' : 'border-gray-700'
+            }`}
           />
+          {targetError && (
+            <p id="scan-target-error" className="text-sm text-red-400 mt-2">
+              {targetError}
+            </p>
+          )}
           <p className="text-xs text-gray-500 mt-2">
             Enter a URL or domain to scan (e.g., https://example.com or example.com)
           </p>
-        </div>
+        </Card>
 
         {/* Coverage Budget */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <Card className="p-4">
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Coverage Budget
           </label>
@@ -122,10 +177,10 @@ export default function NewScanPage() {
               </button>
             ))}
           </div>
-        </div>
+        </Card>
 
         {/* Scan Type Selection */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <Card className="p-4">
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Scan Type
           </label>
@@ -153,10 +208,10 @@ export default function NewScanPage() {
               </button>
             ))}
           </div>
-        </div>
+        </Card>
 
         {/* Advanced Options */}
-        <div className="bg-gray-900 rounded-lg border border-gray-800">
+        <Card>
           <button
             type="button"
             onClick={() => setShowAdvanced(!showAdvanced)}
@@ -237,20 +292,13 @@ export default function NewScanPage() {
               )}
             </div>
           )}
-        </div>
-
-        {/* Error Message */}
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-red-400 text-sm">
-            {error}
-          </div>
-        )}
+        </Card>
 
         {/* Submit Button */}
-        <button
+        <Button
           type="submit"
           disabled={loading}
-          className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+          className="w-full py-3 text-base"
         >
           {loading ? (
             <>
@@ -265,7 +313,7 @@ export default function NewScanPage() {
               Start Scan
             </>
           )}
-        </button>
+        </Button>
 
         {/* Warning for Active Testing */}
         {(SCAN_TYPES.find(t => t.value === scanType)?.requiresPermission || options.active) && (

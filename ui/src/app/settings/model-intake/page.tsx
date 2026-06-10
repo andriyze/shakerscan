@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -148,6 +149,57 @@ function optionalText(value: string): string | undefined {
   return trimmed || undefined
 }
 
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i
+const ARTIFACT_PROTOCOLS = ['http:', 'https:', 'hf:', 's3:', 'gs:', 'azure:', 'oci:']
+
+function validateHttpUrlField(raw: string): string | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'Must be an http(s) URL'
+    }
+  } catch {
+    return 'Must be a valid http(s) URL'
+  }
+  return undefined
+}
+
+function validateArtifactUrlField(raw: string): string | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  if (trimmed.startsWith('models:/')) return undefined
+  try {
+    const parsed = new URL(trimmed)
+    if (!ARTIFACT_PROTOCOLS.includes(parsed.protocol)) {
+      return 'Must be an http(s) URL or supported reference (hf://, s3://, gs://, azure://, oci://, models:/)'
+    }
+  } catch {
+    return 'Must be a valid http(s) URL or supported artifact reference'
+  }
+  return undefined
+}
+
+function validateSha256Field(raw: string): string | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  if (!SHA256_PATTERN.test(trimmed)) return 'Must be a 64-character hex SHA-256 digest'
+  return undefined
+}
+
+function invalidFieldClass(base: string) {
+  return base.replace('border-gray-700', 'border-red-500/50')
+}
+
+interface IntakeFormErrors {
+  artifactUrl?: string
+  metadataUrl?: string
+  signatureUrl?: string
+  modelCardUrl?: string
+  expectedSha256?: string
+}
+
 function hasMetadataKey(metadata: Record<string, unknown> | undefined, keys: string[]) {
   if (!metadata) return false
   return keys.some((key) => {
@@ -178,6 +230,7 @@ function metadataString(metadata: Record<string, unknown> | undefined, key: stri
 
 export default function ModelIntakeSettingsPage() {
   const router = useRouter()
+  const toast = useToast()
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [sourceRef, setSourceRef] = useState('')
   const [revision, setRevision] = useState('')
@@ -202,16 +255,29 @@ export default function ModelIntakeSettingsPage() {
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('production')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<IntakeFormErrors>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
+  const [scenarioLoading, setScenarioLoading] = useState(true)
+  const [scenarioError, setScenarioError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
-  useEffect(() => {
-    getAITestScenarios()
-      .then((payload) => {
-        setScenario(payload.scenarios.find((item) => item.id === 'model-intake-pipeline') || null)
-      })
-      .catch(() => setScenario(null))
+  const loadScenario = useCallback(async () => {
+    setScenarioLoading(true)
+    try {
+      const payload = await getAITestScenarios()
+      setScenario(payload.scenarios.find((item) => item.id === 'model-intake-pipeline') || null)
+      setScenarioError(null)
+    } catch (err) {
+      setScenario(null)
+      setScenarioError(err instanceof Error ? err.message : 'Failed to load model intake presets')
+    } finally {
+      setScenarioLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    loadScenario()
+  }, [loadScenario])
 
   const selectedPlatform = platform === 'auto'
     ? AUTO_PLATFORM_OPTION
@@ -226,6 +292,7 @@ export default function ModelIntakeSettingsPage() {
   const metadataPreview = parsedMetadata ? Object.keys(parsedMetadata).length : metadataJson.trim() ? null : 0
 
   function applyScanPayload(payload: ModelIntakeScanRequest) {
+    setFieldErrors({})
     setArtifactUrl(payload.artifact_url || '')
     setName(payload.name || '')
     setMetadataUrl(payload.metadata_url || '')
@@ -241,6 +308,34 @@ export default function ModelIntakeSettingsPage() {
     setRequireModelGovernance(payload.require_model_governance ?? true)
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
+  }
+
+  function validateField(field: keyof IntakeFormErrors) {
+    setFieldErrors((prev) => ({
+      ...prev,
+      [field]:
+        field === 'artifactUrl'
+          ? validateArtifactUrlField(artifactUrl)
+          : field === 'metadataUrl'
+            ? validateHttpUrlField(metadataUrl)
+            : field === 'signatureUrl'
+              ? validateHttpUrlField(signatureUrl)
+              : field === 'modelCardUrl'
+                ? validateHttpUrlField(modelCardUrl)
+                : validateSha256Field(expectedSha256),
+    }))
+  }
+
+  function validateIntakeForm(): boolean {
+    const errors: IntakeFormErrors = {
+      artifactUrl: validateArtifactUrlField(artifactUrl),
+      metadataUrl: validateHttpUrlField(metadataUrl),
+      signatureUrl: validateHttpUrlField(signatureUrl),
+      modelCardUrl: validateHttpUrlField(modelCardUrl),
+      expectedSha256: validateSha256Field(expectedSha256),
+    }
+    setFieldErrors(errors)
+    return !Object.values(errors).some(Boolean)
   }
 
   function buildPayload(): ModelIntakeScanRequest {
@@ -360,7 +455,9 @@ export default function ModelIntakeSettingsPage() {
       if (result.selected_file?.path) setFilename(result.selected_file.path)
       else if (!result.scan_payload) setFilename('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to resolve model reference')
+      const msg = err instanceof Error ? err.message : 'Failed to resolve model reference'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setResolving(false)
     }
@@ -372,19 +469,30 @@ export default function ModelIntakeSettingsPage() {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to copy payload')
+      const msg = err instanceof Error ? err.message : 'Failed to copy payload'
+      setError(msg)
+      toast.error(msg)
     }
   }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
+    if (!validateIntakeForm()) {
+      setError('Fix the highlighted fields before queueing.')
+      return
+    }
     setSubmitting(true)
     setError(null)
     try {
       const result = await submitModelIntakeScan(buildPayload())
+      toast.success('Model intake scan started', {
+        link: { href: `/scans/${result.scan_id}`, label: 'View scan' },
+      })
       router.push(`/scans/${result.scan_id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to queue model intake scan')
+      const msg = err instanceof Error ? err.message : 'Failed to queue model intake scan'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
@@ -418,6 +526,7 @@ export default function ModelIntakeSettingsPage() {
       : 'bg-green-900/50 text-green-200'
   const evidenceBadgeText = !hasIntakeInput ? 'Not started' : `${presentControls}/${readinessControls.length}`
   const scanBlockedByResolver = Boolean(resolverResult && !resolverResult.scan_payload && !artifactUrl.trim())
+  const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
 
   return (
     <div className="space-y-6">
@@ -429,14 +538,14 @@ export default function ModelIntakeSettingsPage() {
           </div>
           <p className="mt-1 text-gray-400">Resolve model artifacts, collect supply-chain evidence, and queue deployment checks.</p>
         </div>
-        <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+        <Link href="/settings" className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
           Settings
         </Link>
       </div>
 
-      {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
+      {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+      <Card className="p-4">
         <div className="flex items-center gap-2 text-white">
           <Wand2 className="h-4 w-4 text-cyan-300" />
           <h2 className="text-sm font-semibold">1. Model Reference</h2>
@@ -565,9 +674,9 @@ export default function ModelIntakeSettingsPage() {
             </div>
           </div>
         )}
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+      <Card className="p-4">
         <div className="flex items-center gap-2 text-white">
           <ShieldCheck className="h-4 w-4 text-cyan-300" />
           <h2 className="text-sm font-semibold">2. Policy Profile</h2>
@@ -587,7 +696,7 @@ export default function ModelIntakeSettingsPage() {
             </button>
           ))}
         </div>
-      </section>
+      </Card>
 
       <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
@@ -598,7 +707,16 @@ export default function ModelIntakeSettingsPage() {
         <div className="grid gap-3 md:grid-cols-[1.3fr_0.7fr]">
           <label className="grid gap-1 text-sm text-gray-300">
             Artifact URL
-            <input value={artifactUrl} onChange={(e) => setArtifactUrl(e.target.value)} className={inputClass} placeholder="https://.../model.safetensors" required />
+            <input
+              value={artifactUrl}
+              onChange={(e) => setArtifactUrl(e.target.value)}
+              onBlur={() => validateField('artifactUrl')}
+              aria-invalid={fieldErrors.artifactUrl ? true : undefined}
+              className={fieldErrors.artifactUrl ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="https://.../model.safetensors"
+              required
+            />
+            {fieldErrors.artifactUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.artifactUrl}</span>}
             <span className="text-xs text-gray-500">Resolved HTTP(S), hf://, and public cloud object references are supported. Use signed HTTPS URLs for private artifacts.</span>
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
@@ -610,22 +728,54 @@ export default function ModelIntakeSettingsPage() {
         <div className="grid gap-3 md:grid-cols-2">
           <label className="grid gap-1 text-sm text-gray-300">
             Metadata URL
-            <input value={metadataUrl} onChange={(e) => setMetadataUrl(e.target.value)} className={inputClass} placeholder="https://.../manifest.json" />
+            <input
+              value={metadataUrl}
+              onChange={(e) => setMetadataUrl(e.target.value)}
+              onBlur={() => validateField('metadataUrl')}
+              aria-invalid={fieldErrors.metadataUrl ? true : undefined}
+              className={fieldErrors.metadataUrl ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="https://.../manifest.json"
+            />
+            {fieldErrors.metadataUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.metadataUrl}</span>}
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Expected SHA-256
-            <input value={expectedSha256} onChange={(e) => setExpectedSha256(e.target.value)} className={inputClass} placeholder="optional digest pin" />
+            <input
+              value={expectedSha256}
+              onChange={(e) => setExpectedSha256(e.target.value)}
+              onBlur={() => validateField('expectedSha256')}
+              aria-invalid={fieldErrors.expectedSha256 ? true : undefined}
+              className={fieldErrors.expectedSha256 ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="optional digest pin"
+            />
+            {fieldErrors.expectedSha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.expectedSha256}</span>}
           </label>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
           <label className="grid gap-1 text-sm text-gray-300">
             Signature URL
-            <input value={signatureUrl} onChange={(e) => setSignatureUrl(e.target.value)} className={inputClass} placeholder="https://.../model.sig" />
+            <input
+              value={signatureUrl}
+              onChange={(e) => setSignatureUrl(e.target.value)}
+              onBlur={() => validateField('signatureUrl')}
+              aria-invalid={fieldErrors.signatureUrl ? true : undefined}
+              className={fieldErrors.signatureUrl ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="https://.../model.sig"
+            />
+            {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Model Card URL
-            <input value={modelCardUrl} onChange={(e) => setModelCardUrl(e.target.value)} className={inputClass} placeholder="https://.../model-card.md" />
+            <input
+              value={modelCardUrl}
+              onChange={(e) => setModelCardUrl(e.target.value)}
+              onBlur={() => validateField('modelCardUrl')}
+              aria-invalid={fieldErrors.modelCardUrl ? true : undefined}
+              className={fieldErrors.modelCardUrl ? invalidFieldClass(inputClass) : inputClass}
+              placeholder="https://.../model-card.md"
+            />
+            {fieldErrors.modelCardUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.modelCardUrl}</span>}
           </label>
         </div>
 
@@ -734,19 +884,25 @@ export default function ModelIntakeSettingsPage() {
         </div>
 
         <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-          <button type="submit" disabled={submitting || scanBlockedByResolver} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
-            {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+            {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
             {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
           </button>
           <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
-            <Clipboard className="h-4 w-4" />
+            <Clipboard className="h-4 w-4" aria-hidden="true" />
             {copied ? 'Copied' : 'Copy payload'}
           </button>
         </div>
+        {hasFieldErrors && (
+          <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>
+        )}
       </form>
 
+      {scenarioLoading && <CardSkeleton count={2} />}
+      {!scenarioLoading && scenarioError && <ErrorState message={scenarioError} onRetry={loadScenario} />}
+
       {scenario && (scenario.request_presets || []).length > 0 && (
-        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <Card className="p-4">
           <div className="flex items-center gap-2 text-white">
             <Wand2 className="h-4 w-4 text-cyan-300" />
             <h2 className="text-sm font-semibold">Starter Presets</h2>
@@ -770,11 +926,11 @@ export default function ModelIntakeSettingsPage() {
               </button>
             ))}
           </div>
-        </section>
+        </Card>
       )}
 
       {scenario && readinessControls.length > 0 && (
-        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <Card className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2 text-white">
@@ -805,7 +961,7 @@ export default function ModelIntakeSettingsPage() {
               })}
             </div>
           )}
-        </section>
+        </Card>
       )}
     </div>
   )

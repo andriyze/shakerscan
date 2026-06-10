@@ -2,11 +2,30 @@
 
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, formatDate, type Target, type GroupedDomain } from '@/lib/api'
+import { useRouter } from 'next/navigation'
+import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
 import { SCAN_TYPES, getScanOptions, DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type ScanType, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
 
 const SEARCH_DEBOUNCE_MS = 300
+
+function isPlausibleTargetUrl(value: string): boolean {
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value) ? value : `https://${value}`
+  let url: URL
+  try {
+    url = new URL(candidate)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  const host = url.hostname
+  if (!host) return false
+  if (host === 'localhost') return true
+  if (host.startsWith('[') && host.endsWith(']')) return true
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
+  return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(host)
+}
 
 interface TargetsFilters {
   [key: string]: string | number | undefined
@@ -23,11 +42,16 @@ function TargetsContent() {
     defaults: { sort_by: 'root_domain', sort_order: 'asc' }
   })
 
+  const router = useRouter()
+  const toast = useToast()
+
   const [domains, setDomains] = useState<GroupedDomain[]>([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
   const [showAddModal, setShowAddModal] = useState(false)
   const [newTargetUrl, setNewTargetUrl] = useState('')
   const [newTargetName, setNewTargetName] = useState('')
+  const [urlError, setUrlError] = useState('')
   const [adding, setAdding] = useState(false)
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
   const [openScanMenu, setOpenScanMenu] = useState<string | null>(null)
@@ -102,6 +126,7 @@ function TargetsContent() {
       setDomains(data.domains || [])
       setTotalRootDomains(data.total_root_domains || 0)
       setTotalTargets(data.total_targets || 0)
+      setFetchError(false)
       // Auto-expand domains with subdomains
       const toExpand = new Set<string>()
       data.domains?.forEach(d => {
@@ -110,6 +135,7 @@ function TargetsContent() {
       setExpandedDomains(toExpand)
     } catch (err) {
       console.error('Failed to fetch targets:', err)
+      setFetchError(true)
     } finally {
       setLoading(false)
     }
@@ -119,32 +145,63 @@ function TargetsContent() {
     fetchTargets()
   }, [fetchTargets])
 
+  function closeAddModal() {
+    setShowAddModal(false)
+    setUrlError('')
+  }
+
+  useEffect(() => {
+    if (!showAddModal) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setShowAddModal(false)
+        setUrlError('')
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [showAddModal])
+
   async function handleAddTarget(e: React.FormEvent) {
     e.preventDefault()
-    if (!newTargetUrl.trim()) return
+    const url = newTargetUrl.trim()
+    if (!url) return
+    if (!isPlausibleTargetUrl(url)) {
+      setUrlError('Enter a valid URL or hostname, e.g. https://example.com')
+      return
+    }
 
     setAdding(true)
     try {
-      await createTarget(newTargetUrl.trim(), newTargetName.trim() || undefined)
+      await createTarget(url, newTargetName.trim() || undefined)
       setNewTargetUrl('')
       setNewTargetName('')
+      setUrlError('')
       setShowAddModal(false)
+      toast.success('Target added')
       fetchTargets()
     } catch (err) {
       console.error('Failed to add target:', err)
+      toast.error('Failed to add target')
     } finally {
       setAdding(false)
     }
   }
 
   async function handleScan(targetId: string, scanType: ScanType) {
+    setOpenScanMenu(null)
     try {
       const options = getScanOptions(scanType)
-      await scanTarget(targetId, options)
-      setOpenScanMenu(null)
-      window.location.href = '/scans'
+      const res = await scanTarget(targetId, options)
+      const scanId = res?.scan_id
+      toast.success(
+        'Scan started',
+        scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
+      )
+      router.push('/scans')
     } catch (err) {
       console.error('Failed to start scan:', err)
+      toast.error('Failed to start scan')
     }
   }
 
@@ -156,7 +213,7 @@ function TargetsContent() {
     allTargets.push(...domain.subdomains)
 
     if (allTargets.length === 0) {
-      console.error('No targets to scan')
+      toast.info('No targets to scan')
       return
     }
 
@@ -166,10 +223,16 @@ function TargetsContent() {
     try {
       const options = getScanOptions(scanType)
       // Submit scans for all targets in parallel
-      await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
-      window.location.href = '/scans'
+      const results = await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
+      const scanId = allTargets.length === 1 ? results[0]?.scan_id : undefined
+      toast.success(
+        `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`,
+        scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
+      )
+      router.push('/scans')
     } catch (err) {
       console.error('Failed to start domain set scan:', err)
+      toast.error(`Failed to start scans for ${domain.root_domain}`)
       setScanningDomains(prev => {
         const next = new Set(prev)
         next.delete(domain.root_domain)
@@ -182,6 +245,7 @@ function TargetsContent() {
     setDiscoveringDomains(prev => new Set(prev).add(rootDomain))
     try {
       await discoverSubdomains(rootDomain)
+      toast.success(`Subdomain discovery started for ${rootDomain}`)
       // Refresh targets after a short delay to allow discovery to start
       setTimeout(() => {
         fetchTargets()
@@ -193,6 +257,7 @@ function TargetsContent() {
       }, 2000)
     } catch (err) {
       console.error('Failed to start discovery:', err)
+      toast.error(`Failed to start discovery for ${rootDomain}`)
       setDiscoveringDomains(prev => {
         const next = new Set(prev)
         next.delete(rootDomain)
@@ -320,6 +385,7 @@ function TargetsContent() {
             onClick={toggleSortOrder}
             className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
             title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
+            aria-label={sortOrder === 'asc' ? 'Sort ascending' : 'Sort descending'}
           >
             {sortOrder === 'asc' ? (
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -365,60 +431,66 @@ function TargetsContent() {
 
       {/* Targets List - Hierarchical */}
       {loading ? (
-        <div className="flex items-center justify-center h-32">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-        </div>
+        <CardSkeleton count={4} />
+      ) : fetchError ? (
+        <ErrorState message="Failed to load targets. Is the API running?" onRetry={fetchTargets} />
       ) : domains.length === 0 ? (
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center">
+        <Card className="p-8 text-center">
           <svg className="w-12 h-12 text-gray-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
           </svg>
           <p className="text-gray-500">
             {hasActiveFilters ? 'No targets found matching your filters.' : 'No targets yet. Add a target to get started.'}
           </p>
-        </div>
+        </Card>
       ) : (
         <div className="space-y-3">
-          {domains.map((domain) => (
-            <div
-              key={domain.root_domain}
-              className="bg-gray-900 rounded-lg border border-gray-800"
-            >
-              {/* Root Domain Header */}
-              <div
-                className="flex items-center gap-3 p-4 cursor-pointer hover:bg-gray-800/50 transition-colors"
-                onClick={() => domain.subdomain_count > 0 && toggleExpand(domain.root_domain)}
-              >
-                {/* Expand/Collapse Icon */}
-                {domain.subdomain_count > 0 ? (
-                  <button className="text-gray-500 hover:text-white">
-                    <svg
-                      className={`w-4 h-4 transition-transform ${expandedDomains.has(domain.root_domain) ? 'rotate-90' : ''}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                ) : (
-                  <div className="w-4" />
-                )}
-
-                {/* Domain Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-white">{domain.root_domain}</span>
-                    {domain.subdomain_count > 0 && (
-                      <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
-                        +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </div>
-                  {domain.root_target && (
-                    <p className="text-xs text-gray-500 truncate">{domain.root_target.url}</p>
+          {domains.map((domain) => {
+            const domainInfo = (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-white">{domain.root_domain}</span>
+                  {domain.subdomain_count > 0 && (
+                    <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
+                      +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
+                    </span>
                   )}
                 </div>
+                {domain.root_target && (
+                  <p className="text-xs text-gray-500 truncate">{domain.root_target.url}</p>
+                )}
+              </div>
+            )
+            return (
+            <Card key={domain.root_domain}>
+              {/* Root Domain Header */}
+              <div className="flex items-center gap-3 p-4 hover:bg-gray-800/50 transition-colors">
+                {domain.subdomain_count > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => toggleExpand(domain.root_domain)}
+                    aria-expanded={expandedDomains.has(domain.root_domain)}
+                    className="flex w-full flex-1 min-w-0 items-center gap-3 text-left rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  >
+                    {/* Expand/Collapse Icon */}
+                    <span className="text-gray-500 hover:text-white">
+                      <svg
+                        className={`w-4 h-4 transition-transform ${expandedDomains.has(domain.root_domain) ? 'rotate-90' : ''}`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                    {domainInfo}
+                  </button>
+                ) : (
+                  <div className="flex w-full flex-1 min-w-0 items-center gap-3">
+                    <div className="w-4" />
+                    {domainInfo}
+                  </div>
+                )}
 
                 {/* Root Target Stats */}
                 {domain.root_target && (
@@ -452,6 +524,7 @@ function TargetsContent() {
                       onClick={(e) => e.stopPropagation()}
                       className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
                       title="Create schedule"
+                      aria-label={`Create schedule for ${domain.root_domain}`}
                     >
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -639,6 +712,7 @@ function TargetsContent() {
                         href={`/schedules?create=true&target_id=${subdomain.id}`}
                         className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
                         title="Create schedule"
+                        aria-label={`Create schedule for ${subdomain.url.replace(/^https?:\/\//, '')}`}
                       >
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -687,19 +761,22 @@ function TargetsContent() {
                   ))}
                 </div>
               )}
-            </div>
-          ))}
+            </Card>
+            )
+          })}
         </div>
       )}
 
       {/* Add Target Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-lg border border-gray-800 max-w-md w-full">
+          <Card className="max-w-md w-full">
             <div className="p-4 border-b border-gray-800 flex items-center justify-between">
               <h2 className="font-medium text-white">Add Target</h2>
               <button
-                onClick={() => setShowAddModal(false)}
+                type="button"
+                onClick={closeAddModal}
+                aria-label="Close"
                 className="text-gray-400 hover:text-white"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -713,11 +790,20 @@ function TargetsContent() {
                 <input
                   type="text"
                   value={newTargetUrl}
-                  onChange={(e) => setNewTargetUrl(e.target.value)}
+                  onChange={(e) => {
+                    setNewTargetUrl(e.target.value)
+                    if (urlError) setUrlError('')
+                  }}
                   placeholder="https://example.com"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  aria-invalid={urlError ? true : undefined}
+                  className={`w-full px-3 py-2 bg-gray-800 border rounded-lg text-white placeholder-gray-500 focus:outline-none ${
+                    urlError ? 'border-red-500 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
+                  }`}
                   required
                 />
+                {urlError && (
+                  <p className="mt-1 text-sm text-red-400">{urlError}</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">Name (optional)</label>
@@ -732,7 +818,7 @@ function TargetsContent() {
               <div className="flex gap-3">
                 <button
                   type="button"
-                  onClick={() => setShowAddModal(false)}
+                  onClick={closeAddModal}
                   className="flex-1 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition-colors"
                 >
                   Cancel
@@ -746,7 +832,7 @@ function TargetsContent() {
                 </button>
               </div>
             </form>
-          </div>
+          </Card>
         </div>
       )}
     </div>
@@ -755,11 +841,7 @@ function TargetsContent() {
 
 export default function TargetsPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center h-32">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
-      </div>
-    }>
+    <Suspense fallback={<CardSkeleton count={4} />}>
       <TargetsContent />
     </Suspense>
   )

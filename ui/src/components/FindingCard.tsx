@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { ChevronDown, ChevronRight, Copy, Check, ExternalLink, AlertTriangle, Shield, Bug, Zap } from 'lucide-react'
 import { parseEvidence, extractEndpoint, formatAnomaly, decodePayload, type ParsedEvidence } from '@/lib/evidence-parser'
+import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 
 interface Finding {
   id?: string
@@ -74,17 +75,18 @@ interface FindingCardProps {
 
 function getSeverityConfig(severity: string) {
   const s = (severity || 'info').toLowerCase()
+  const badge = SEVERITY_BADGE_STYLES[s as SeverityLevel] ?? SEVERITY_BADGE_STYLES.info
   switch (s) {
     case 'critical':
-      return { bg: 'bg-red-900/80', text: 'text-red-200', border: 'border-red-500', icon: AlertTriangle }
+      return { badge, border: 'border-red-500', icon: AlertTriangle }
     case 'high':
-      return { bg: 'bg-orange-900/80', text: 'text-orange-200', border: 'border-orange-500', icon: AlertTriangle }
+      return { badge, border: 'border-orange-500', icon: AlertTriangle }
     case 'medium':
-      return { bg: 'bg-yellow-900/80', text: 'text-yellow-200', border: 'border-yellow-500', icon: Shield }
+      return { badge, border: 'border-yellow-500', icon: Shield }
     case 'low':
-      return { bg: 'bg-blue-900/80', text: 'text-blue-200', border: 'border-blue-500', icon: Bug }
+      return { badge, border: 'border-blue-500', icon: Bug }
     default:
-      return { bg: 'bg-slate-700', text: 'text-slate-300', border: 'border-slate-500', icon: Zap }
+      return { badge, border: 'border-slate-500', icon: Zap }
   }
 }
 
@@ -104,9 +106,11 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
 
   return (
     <button
+      type="button"
       onClick={handleCopy}
-      className="p-1.5 rounded hover:bg-gray-700 transition-colors group"
+      className="p-1.5 rounded hover:bg-gray-700 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       title={label || 'Copy to clipboard'}
+      aria-label={label || 'Copy to clipboard'}
     >
       {copied ? (
         <Check className="w-4 h-4 text-green-400" />
@@ -133,8 +137,10 @@ function CollapsibleSection({
   return (
     <div className="border-t border-gray-700/50">
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between py-3 px-1 hover:bg-gray-800/30 transition-colors"
+        aria-expanded={isOpen}
+        className="w-full flex items-center justify-between py-3 px-1 text-left hover:bg-gray-800/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <div className="flex items-center gap-2">
           {isOpen ? (
@@ -174,8 +180,9 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="p-1.5 rounded hover:bg-gray-700 transition-colors"
+                className="p-1.5 rounded hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                 title="Open in new tab"
+                aria-label="Open in new tab"
                 onClick={(e) => e.stopPropagation()}
               >
                 <ExternalLink className="w-4 h-4 text-gray-400 hover:text-white" />
@@ -186,16 +193,20 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
       })}
       {urls.length > 5 && !showAll && (
         <button
+          type="button"
           onClick={() => setShowAll(true)}
-          className="text-sm text-blue-400 hover:text-blue-300"
+          aria-expanded={false}
+          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show all {urls.length} URLs
         </button>
       )}
       {showAll && urls.length > 5 && (
         <button
+          type="button"
           onClick={() => setShowAll(false)}
-          className="text-sm text-blue-400 hover:text-blue-300"
+          aria-expanded={true}
+          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show less
         </button>
@@ -221,8 +232,10 @@ function PayloadList({ payloads }: { payloads: string[] }) {
       })}
       {payloads.length > 5 && !showAll && (
         <button
+          type="button"
           onClick={() => setShowAll(true)}
-          className="text-sm text-blue-400 hover:text-blue-300"
+          aria-expanded={false}
+          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show all {payloads.length} payloads
         </button>
@@ -271,7 +284,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
           <div className="flex-1 min-w-0">
             {/* Severity + Title */}
             <div className="flex items-center gap-3 mb-2">
-              <span className={`px-2.5 py-1 text-xs font-semibold rounded flex items-center gap-1.5 ${severityConfig.bg} ${severityConfig.text}`}>
+              <span className={`px-2.5 py-1 text-xs font-semibold rounded flex items-center gap-1.5 ${severityConfig.badge}`}>
                 <SeverityIcon className="w-3.5 h-3.5" />
                 {finding.severity?.toUpperCase()}
               </span>
@@ -412,8 +425,10 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               </span>
             )}
             <button
+              type="button"
               onClick={() => setIsExpanded(!isExpanded)}
-              className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-900/50 text-blue-300 hover:bg-blue-800/50 transition-colors"
+              aria-expanded={isExpanded}
+              className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-900/50 text-blue-300 hover:bg-blue-800/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {isExpanded ? (
                 <>
