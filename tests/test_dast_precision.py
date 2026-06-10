@@ -12,6 +12,7 @@ from findings import apply_dast_precision_policy  # noqa: E402
 from grading import grade  # noqa: E402
 from reporting import _ai_rule_verdict, _generate_fallback_executive_summary  # noqa: E402
 from scanner_tools import active_checks  # noqa: E402
+from scanner_tools import nuclei as nuclei_module  # noqa: E402
 from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
@@ -38,6 +39,21 @@ def test_scanner_unraisablehook_filters_asyncio_subprocess_shutdown_noise():
 
     assert scanner_main._is_asyncio_subprocess_shutdown_unraisable(noisy) is True
     assert scanner_main._is_asyncio_subprocess_shutdown_unraisable(real_error) is False
+
+
+def test_nuclei_wave_counts_attempted_tags_when_stats_are_absent(monkeypatch):
+    async def fake_run(cmd, timeout=60):
+        return "", "timeout after 1s", 124
+
+    monkeypatch.setattr(nuclei_module, "run", fake_run)
+    monkeypatch.setattr(nuclei_module.os.path, "isdir", lambda path: True)
+
+    result = asyncio.run(
+        nuclei_module._run_nuclei_wave("https://example.com", ["cve", "rce", "takeover"], timeout=1)
+    )
+
+    assert result["scan_completed"] is False
+    assert result["templates_executed"] == 3
 
 
 def _healthy_grade_report(findings):

@@ -1262,6 +1262,12 @@ async def _run_nuclei_wave(
             if result["templates_executed"] == 0 and matched_templates:
                 result["templates_executed"] = len(matched_templates)
 
+    if tags and result["templates_executed"] == 0:
+        # Nuclei stats may be absent on wave timeout or no-finding runs. Still
+        # record a conservative lower bound so coverage does not say Nuclei
+        # never executed after a timed wave.
+        result["templates_executed"] = max(result["templates_loaded"], len(tags))
+
     return result
 
 
