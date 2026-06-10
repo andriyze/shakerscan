@@ -2741,6 +2741,8 @@ def _build_exposure_graph(
         if ai_target_id:
             findings_by_ai_target.setdefault(ai_target_id, []).append(finding)
 
+    model_supply_chain_id = "group:model-supply-chain"
+
     for target in targets:
         target_id = str(target.get("id"))
         node_id = f"target:{target_id}"
@@ -2757,7 +2759,10 @@ def _build_exposure_graph(
             href=f"/targets?search={urllib.parse.quote(str(target.get('url') or ''))}",
             meta={
                 "url": target.get("url"),
-                "root_domain": root_domain,
+                # Model artifacts record the hosting platform as an origin, not
+                # a root domain — huggingface.co is not part of the user's
+                # attack surface, the artifact pulled from it is.
+                "origin" if is_model_artifact else "root_domain": root_domain,
                 "last_score": target.get("last_score"),
                 "last_grade": target.get("last_grade"),
                 "active_findings_count": active_findings,
@@ -2765,9 +2770,19 @@ def _build_exposure_graph(
                 "discovery_source": target.get("discovery_source"),
             },
         ))
-        domain_id = add_domain(root_domain)
-        if domain_id:
-            edges.append(_graph_edge(domain_id, node_id, "contains", label="contains target"))
+        if is_model_artifact:
+            add_node(_graph_node(
+                model_supply_chain_id,
+                "model_supply_chain",
+                "Model supply chain",
+                subtitle="External model artifacts",
+                href="/settings/model-intake",
+            ))
+            edges.append(_graph_edge(model_supply_chain_id, node_id, "contains_artifact", label="supply chain artifact"))
+        else:
+            domain_id = add_domain(root_domain)
+            if domain_id:
+                edges.append(_graph_edge(domain_id, node_id, "contains", label="contains target"))
 
     for ai_target in ai_targets:
         ai_id = str(ai_target.get("id"))
@@ -2810,26 +2825,10 @@ def _build_exposure_graph(
             subject_id = target_node_by_id.get(str(scan.get("target_id")))
         if not subject_id:
             continue
-        scan_node_id = f"scan:{scan_id}"
+        # Scans are events, not exposure: they contribute derived assets and
+        # linkage below but are not emitted as graph nodes themselves. Scan
+        # context lives in the asset detail panels instead.
         scan_subject_by_id[scan_id] = subject_id
-        add_node(_graph_node(
-            scan_node_id,
-            "scan",
-            f"{scan.get('scan_type') or scan.get('run_kind') or 'scan'} scan",
-            subtitle=_short_url_label(scan.get("target_url")),
-            status=scan.get("status"),
-            href=f"/scans/{scan_id}",
-            meta={
-                "scan_type": scan.get("scan_type"),
-                "run_kind": scan.get("run_kind"),
-                "score": scan.get("score"),
-                "grade": scan.get("grade"),
-                "findings_count": scan.get("findings_count") or 0,
-                "created_at": scan.get("created_at"),
-                "completed_at": scan.get("completed_at"),
-            },
-        ))
-        edges.append(_graph_edge(subject_id, scan_node_id, "scanned_by", label="scanned by"))
 
         result = _parse_graph_json(scan.get("result"))
         subject_root_domain = scan.get("root_domain") or extract_root_domain(scan.get("target_url") or scan.get("ai_endpoint_url") or "")
@@ -2852,7 +2851,6 @@ def _build_exposure_graph(
                 },
             ))
             edges.append(_graph_edge(subject_id, api_node_id, "exposes_api", label="exposes API"))
-            edges.append(_graph_edge(scan_node_id, api_node_id, "observed_api", label="observed API"))
 
             for endpoint in openapi_endpoints[:120]:
                 method = str(endpoint.get("method") or "GET").upper()
@@ -2970,7 +2968,6 @@ def _build_exposure_graph(
                     "deployment_approved": model_summary.get("deployment_approved"),
                 },
             ))
-            edges.append(_graph_edge(scan_node_id, subject_id, "inspected_model_artifact", label="inspected model artifact"))
 
         vendor_risk = _parse_graph_json(result.get("vendor_risk"))
         for domain in (vendor_risk.get("third_party_domains") or [])[:20]:
@@ -3040,7 +3037,7 @@ def _build_exposure_graph(
                     "business_impact": chain.get("business_impact"),
                 },
             ))
-            edges.append(_graph_edge(scan_node_id, chain_node_id, "produced_chain", label="produced chain", severity=severity))
+            edges.append(_graph_edge(subject_id, chain_node_id, "exploit_path", label="exploit path", severity=severity))
 
     for finding in findings:
         finding_id = str(finding.get("id"))
@@ -3083,10 +3080,11 @@ def _build_exposure_graph(
         finding_path = _endpoint_path_key(finding.get("url"))
         for endpoint_node_id in endpoint_node_by_path.get((root_domain, finding_path), [])[:5]:
             edges.append(_graph_edge(endpoint_node_id, finding_node_id, "affected_by", label="affected by", severity=severity))
-        if finding.get("scan_id"):
-            scan_node_id = f"scan:{finding.get('scan_id')}"
-            if scan_node_id in nodes:
-                edges.append(_graph_edge(scan_node_id, finding_node_id, "reported_finding", label="reported finding", severity=severity))
+            # Risk-bearing endpoints inherit their worst finding's severity so
+            # they rank into fan-out budgets and render with severity rings.
+            endpoint_node = nodes.get(endpoint_node_id)
+            if endpoint_node and _severity_sort_value(severity) > _severity_sort_value(endpoint_node.get("severity")):
+                endpoint_node["severity"] = severity
         if root_domain:
             domain_severities.setdefault(str(root_domain), []).append(severity)
 
@@ -3159,14 +3157,25 @@ def _focus_exposure_subgraph(
     if include_endpoints:
         active_edges = edges
     else:
+        # Finding-free endpoints are enumeration noise and stay collapsed into
+        # API-surface counts; endpoints that carry findings are the connective
+        # tissue between asset and vulnerability and stay in the default view.
         endpoint_ids = {n["id"] for n in nodes if n["type"] == "endpoint"}
-        active_edges = [
-            e
-            for e in edges
-            if e["type"] not in _EXPOSURE_STRUCTURAL_EDGE_TYPES
-            and e["source"] not in endpoint_ids
-            and e["target"] not in endpoint_ids
-        ]
+        risky_endpoint_ids = {
+            e["source"] for e in edges if e["type"] == "affected_by" and e["source"] in endpoint_ids
+        }
+
+        def _keep_edge(e: dict[str, Any]) -> bool:
+            touches_endpoint = e["source"] in endpoint_ids or e["target"] in endpoint_ids
+            if not touches_endpoint:
+                return e["type"] not in _EXPOSURE_STRUCTURAL_EDGE_TYPES
+            if e["type"] == "affected_by":
+                return e["source"] in risky_endpoint_ids
+            if e["type"] in ("exposes_endpoint", "observed_endpoint"):
+                return e["target"] in risky_endpoint_ids
+            return False
+
+        active_edges = [e for e in edges if _keep_edge(e)]
 
     adjacency: dict[str, list[str]] = {}
     for edge in active_edges:
@@ -3190,8 +3199,8 @@ def _focus_exposure_subgraph(
         if hotspot_ids:
             seeds = list(dict.fromkeys(hotspot_ids))
         else:
-            domain_ids = [n["id"] for n in nodes if n["type"] == "domain"]
-            seeds = domain_ids or [n["id"] for n in sorted(nodes, key=_risk_key, reverse=True)[:25]]
+            anchor_ids = [n["id"] for n in nodes if n["type"] in ("domain", "model_supply_chain")]
+            seeds = anchor_ids or [n["id"] for n in sorted(nodes, key=_risk_key, reverse=True)[:25]]
 
     # Cap per-node fan-out so hub nodes (a domain wired to hundreds of AI
     # surfaces) cannot explode the rendered graph; keep the riskiest neighbours.

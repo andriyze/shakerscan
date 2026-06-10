@@ -521,6 +521,7 @@ export type ExposureNodeType =
   | 'domain'
   | 'web_target'
   | 'model_artifact'
+  | 'model_supply_chain'
   | 'endpoint'
   | 'api_surface'
   | 'auth_role'

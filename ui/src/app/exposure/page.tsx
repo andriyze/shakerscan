@@ -16,6 +16,7 @@ import {
   KeyRound,
   Layers,
   Loader2,
+  Package,
   RefreshCw,
   Route,
   Search,
@@ -56,6 +57,7 @@ const NODE_LABELS: Record<string, string> = {
   domain: 'Domains',
   web_target: 'Web targets',
   model_artifact: 'Model artifacts',
+  model_supply_chain: 'Supply chain',
   endpoint: 'Endpoints',
   api_surface: 'APIs',
   auth_role: 'Auth roles',
@@ -63,7 +65,6 @@ const NODE_LABELS: Record<string, string> = {
   cloud_hint: 'Cloud hints',
   ai_target: 'AI surfaces',
   mcp_tool: 'MCP tools',
-  scan: 'Scans',
   finding: 'Findings',
   finding_group: 'Finding groups',
   vendor: 'Vendors',
@@ -84,6 +85,7 @@ const NODE_SINGULAR: Record<string, string> = {
   scan: 'Scan',
   finding: 'Finding',
   finding_group: 'Grouped findings',
+  model_supply_chain: 'Model supply chain',
   vendor: 'Vendor',
   attack_chain: 'Attack chain',
 }
@@ -92,6 +94,7 @@ const NODE_STYLES: Record<string, string> = {
   domain: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200',
   web_target: 'border-blue-500/30 bg-blue-500/10 text-blue-200',
   model_artifact: 'border-teal-500/30 bg-teal-500/10 text-teal-200',
+  model_supply_chain: 'border-slate-400/30 bg-slate-400/10 text-slate-200',
   endpoint: 'border-sky-500/30 bg-sky-500/10 text-sky-200',
   api_surface: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-200',
   auth_role: 'border-lime-500/30 bg-lime-500/10 text-lime-200',
@@ -124,6 +127,7 @@ const DETAIL_FIELDS: Partial<Record<ExposureNodeType, Array<[string, string]>>> 
     ['last_scanned_at', 'Last scanned'],
   ],
   model_artifact: [
+    ['origin', 'Origin'],
     ['format_posture', 'Format posture'],
     ['signature_present', 'Signature'],
     ['provenance_present', 'Provenance'],
@@ -159,6 +163,7 @@ function nodeIcon(type: ExposureNodeType) {
   if (type === 'domain') return <Globe2 className={className} />
   if (type === 'web_target') return <Target className={className} />
   if (type === 'model_artifact') return <Boxes className={className} />
+  if (type === 'model_supply_chain') return <Package className={className} />
   if (type === 'endpoint') return <Route className={className} />
   if (type === 'api_surface') return <Code2 className={className} />
   if (type === 'auth_role') return <KeyRound className={className} />
@@ -404,6 +409,7 @@ export default function ExposurePage() {
   const [focusId, setFocusId] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
   const [depth, setDepth] = useState(1)
+  const [showEndpoints, setShowEndpoints] = useState(false)
   const [selectedType, setSelectedType] = useState('')
   const [highlightType, setHighlightType] = useState<string | null>(null)
   const [listPage, setListPage] = useState(1)
@@ -426,6 +432,7 @@ export default function ExposurePage() {
         limitScans: 150,
         focus: focusId,
         depth,
+        includeEndpoints: Boolean(focusId) && showEndpoints,
       })
       setGraph(payload)
       setError(null)
@@ -452,7 +459,7 @@ export default function ExposurePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     loadGraph()
-  }, [domain, includeResolved, focusId, depth])
+  }, [domain, includeResolved, focusId, depth, showEndpoints])
 
   // Filters that change the domain/scope reset the focus back to the overview.
   function changeScope(next: () => void) {
@@ -482,6 +489,7 @@ export default function ExposurePage() {
   function handleClear() {
     setSelectedNode(null)
     setFocusId(null)
+    setShowEndpoints(false)
   }
 
   const searchMatches = useMemo(() => {
@@ -670,12 +678,23 @@ export default function ExposurePage() {
                   value={depth}
                   onChange={(event) => setDepth(Number(event.target.value))}
                   aria-label="Neighborhood depth"
-                  className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  className={`px-3 py-2 text-sm text-white ${styles.input}`}
                 >
                   <option value={1}>Depth 1</option>
                   <option value={2}>Depth 2</option>
                   <option value={3}>Depth 3</option>
                 </select>
+              )}
+              {focusId && (
+                <label className={`flex items-center gap-2 px-3 py-2 text-xs text-gray-300 ${styles.input}`}>
+                  <input
+                    type="checkbox"
+                    checked={showEndpoints}
+                    onChange={(event) => setShowEndpoints(event.target.checked)}
+                    className="rounded border-gray-700 bg-gray-800"
+                  />
+                  All endpoints
+                </label>
               )}
               {view === 'list' && (
                 <select

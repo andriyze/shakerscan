@@ -13,6 +13,7 @@ export const NODE_HEX: Record<string, string> = {
   domain: '#22d3ee',
   web_target: '#60a5fa',
   model_artifact: '#5eead4',
+  model_supply_chain: '#94a3b8',
   endpoint: '#0ea5e9',
   api_surface: '#818cf8',
   auth_role: '#a3e635',
