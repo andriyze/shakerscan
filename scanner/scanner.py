@@ -70,6 +70,23 @@ REPORT_SCHEMA_VERSION = "2026-01-28"
 SCANNER_VERSION = os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
 
+
+def _is_asyncio_subprocess_shutdown_unraisable(unraisable: Any) -> bool:
+    exc = getattr(unraisable, "exc_value", None)
+    if not isinstance(exc, RuntimeError) or "Event loop is closed" not in str(exc):
+        return False
+    obj_text = repr(getattr(unraisable, "object", ""))
+    return "BaseSubprocessTransport.__del__" in obj_text
+
+
+def _scanner_unraisablehook(unraisable: Any) -> None:
+    if _is_asyncio_subprocess_shutdown_unraisable(unraisable):
+        return
+    sys.__unraisablehook__(unraisable)
+
+
+sys.unraisablehook = _scanner_unraisablehook
+
 # Enable stack dumps on SIGUSR1/SIGUSR2 for debugging hangs (best-effort).
 if os.environ.get("SCAN_FAULTHANDLER", "1") != "0":
     try:

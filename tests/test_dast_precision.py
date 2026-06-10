@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+import types
 
 
 SCANNER_DIR = os.path.join(os.path.dirname(__file__), "..", "scanner")
@@ -23,6 +24,20 @@ assert SCANNER_MAIN_SPEC and SCANNER_MAIN_SPEC.loader
 SCANNER_MAIN_SPEC.loader.exec_module(scanner_main)
 _refresh_ai_quality_metrics = scanner_main._refresh_ai_quality_metrics
 apply_post_ai_precision_policy = scanner_main.apply_post_ai_precision_policy
+
+
+def test_scanner_unraisablehook_filters_asyncio_subprocess_shutdown_noise():
+    noisy = types.SimpleNamespace(
+        exc_value=RuntimeError("Event loop is closed"),
+        object="<function BaseSubprocessTransport.__del__ at 0xabc>",
+    )
+    real_error = types.SimpleNamespace(
+        exc_value=RuntimeError("different failure"),
+        object="<function BaseSubprocessTransport.__del__ at 0xabc>",
+    )
+
+    assert scanner_main._is_asyncio_subprocess_shutdown_unraisable(noisy) is True
+    assert scanner_main._is_asyncio_subprocess_shutdown_unraisable(real_error) is False
 
 
 def _healthy_grade_report(findings):
