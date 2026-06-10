@@ -38,7 +38,15 @@ export const API_URL = getApiUrl()
 async function getApiErrorMessage(res: Response, fallback: string): Promise<string> {
   try {
     const data = await res.json()
-    if (typeof data?.detail === 'string') return data.detail
+    const detail = data?.detail
+    if (typeof detail === 'string') return detail
+    // FastAPI validation errors: detail is an array of { msg, loc }.
+    if (Array.isArray(detail)) {
+      const msgs = detail.map((d) => (typeof d?.msg === 'string' ? d.msg : null)).filter(Boolean)
+      if (msgs.length) return msgs.join('; ')
+    }
+    // Structured errors raised as { detail: { error, message, ... } }.
+    if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message
     if (typeof data?.message === 'string') return data.message
   } catch {
     // Ignore JSON parse errors and use fallback.

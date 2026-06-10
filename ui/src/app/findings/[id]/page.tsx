@@ -330,9 +330,10 @@ function FindingDetailContent() {
       setRetestHistory(history.retests || [])
       await fetchFinding()
     } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to queue retest'
       console.error('Failed to queue retest:', err)
-      setRetestMessage('Failed to queue retest')
-      toast.error('Failed to queue retest')
+      setRetestMessage(message)
+      toast.error(message)
     } finally {
       setRetestLoading(false)
     }
