@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
+import { Chakra_Petch, Spline_Sans_Mono } from 'next/font/google'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -33,8 +34,21 @@ import {
   type ExposureSearchNode,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { Button, Card, CardSkeleton, EmptyState, ErrorState } from '@/components/ui'
+import { Button, CardSkeleton, EmptyState, ErrorState } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
+import styles from './exposure.module.css'
+
+const displayFont = Chakra_Petch({
+  weight: ['500', '600', '700'],
+  subsets: ['latin'],
+  variable: '--font-display',
+})
+
+const monoFont = Spline_Sans_Mono({
+  weight: ['400', '500', '600'],
+  subsets: ['latin'],
+  variable: '--font-mono',
+})
 
 const LIST_PAGE_SIZE = 40
 
@@ -202,17 +216,31 @@ function NodePill({ node, onFocus }: { node: ExposureNode; onFocus?: (node: Expo
   return body
 }
 
-function StatPanel({ label, value, icon }: { label: string; value: string | number; icon: React.ReactNode }) {
+function Panel({ className = '', children }: { className?: string; children: React.ReactNode }) {
+  return <div className={`${styles.module} ${styles.corners} ${className}`}>{children}</div>
+}
+
+function StatPanel({
+  label,
+  value,
+  icon,
+  alert = false,
+}: {
+  label: string
+  value: string | number
+  icon: React.ReactNode
+  alert?: boolean
+}) {
   return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between">
+    <Panel className="p-4">
+      <div className="flex items-start justify-between">
         <div>
-          <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-          <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
+          <div className={styles.statLabel}>{label}</div>
+          <div className={`${styles.statValue} ${alert ? styles.statAlert : ''}`}>{value}</div>
         </div>
-        <div className="rounded-lg bg-gray-800 p-2 text-gray-300">{icon}</div>
+        <div className="p-1 text-teal-200/40">{icon}</div>
       </div>
-    </Card>
+    </Panel>
   )
 }
 
@@ -251,9 +279,9 @@ function NodeDetailPanel({
     : []
 
   return (
-    <Card>
-      <div className="flex items-center justify-between gap-2 border-b border-gray-800 p-4">
-        <h2 className="font-semibold text-white">Selected node</h2>
+    <Panel>
+      <div className={`flex items-center justify-between gap-2 p-4 ${styles.moduleHeader}`}>
+        <h2 className={`${styles.displayTitle} text-sm text-white`}>Selected node</h2>
         <button
           type="button"
           onClick={onClear}
@@ -336,7 +364,7 @@ function NodeDetailPanel({
           )}
         </div>
       </div>
-    </Card>
+    </Panel>
   )
 }
 
@@ -512,11 +540,17 @@ export default function ExposurePage() {
   const totalNodes = summary?.node_count ?? renderedNodes
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <div className={`${displayFont.variable} ${monoFont.variable} ${styles.page}`}>
+      <div className={styles.pageGlow} aria-hidden="true" />
+      <div className={`${styles.content} space-y-6`}>
+      <div className={`flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between ${styles.rise} ${styles.d1}`}>
         <div>
-          <h1 className="text-2xl font-bold text-white">Exposure Graph</h1>
-          <p className="mt-1 text-gray-400">
+          <div className="flex items-center gap-2.5">
+            <span className={styles.liveDot} aria-hidden="true" />
+            <span className={styles.kicker}>Attack surface · live</span>
+          </div>
+          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure Graph</h1>
+          <p className="mt-1 text-sm text-gray-400">
             Connected view of targets, AI surfaces, findings, vendors, and attack chains. Click a node to focus its neighborhood.
           </p>
         </div>
@@ -531,10 +565,10 @@ export default function ExposurePage() {
               onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
               placeholder="Search assets & findings…"
               aria-label="Search exposure nodes"
-              className="w-56 rounded-lg border border-gray-700 bg-gray-900 py-2 pl-8 pr-3 text-sm text-white placeholder:text-gray-500 focus:border-blue-500 focus:outline-none"
+              className={`w-56 py-2 pl-8 pr-3 text-sm text-white placeholder:text-gray-500 ${styles.input}`}
             />
             {searchOpen && searchMatches.length > 0 && (
-              <div className="absolute z-20 mt-1 max-h-72 w-72 overflow-auto rounded-lg border border-gray-700 bg-gray-900 py-1 shadow-xl">
+              <div className={`absolute z-20 mt-1 max-h-72 w-72 overflow-auto py-1 shadow-xl ${styles.input}`}>
                 {searchMatches.map((match) => (
                   <button
                     key={match.id}
@@ -550,7 +584,7 @@ export default function ExposurePage() {
               </div>
             )}
           </div>
-          <div className="inline-flex rounded-lg border border-gray-700 bg-gray-900 p-0.5" role="tablist" aria-label="View mode">
+          <div className={`inline-flex p-0.5 ${styles.input}`} role="tablist" aria-label="View mode">
             {(['graph', 'list'] as const).map((mode) => (
               <button
                 key={mode}
@@ -559,7 +593,7 @@ export default function ExposurePage() {
                 aria-selected={view === mode}
                 onClick={() => setView(mode)}
                 className={`rounded-md px-3 py-1.5 text-sm capitalize focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                  view === mode ? 'bg-blue-600 text-white' : 'text-gray-300 hover:text-white'
+                  view === mode ? 'bg-teal-500/20 text-teal-200' : 'text-gray-300 hover:text-white'
                 }`}
               >
                 {mode}
@@ -570,14 +604,14 @@ export default function ExposurePage() {
             value={domain}
             onChange={(event) => changeScope(() => setDomain(event.target.value))}
             aria-label="Filter by domain"
-            className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            className={`px-3 py-2 text-sm text-white ${styles.input}`}
           >
             <option value="">All domains</option>
             {domains.map((item) => (
               <option key={item} value={item}>{item}</option>
             ))}
           </select>
-          <label className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-300">
+          <label className={`flex items-center gap-2 px-3 py-2 text-sm text-gray-300 ${styles.input}`}>
             <input
               type="checkbox"
               checked={includeResolved}
@@ -595,18 +629,23 @@ export default function ExposurePage() {
 
       {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
         <StatPanel label="Assets" value={metrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
-        <StatPanel label="Active Critical / High" value={metrics ? `${metrics.active_critical} / ${metrics.active_high}` : '--'} icon={<AlertTriangle className="h-5 w-5" />} />
+        <StatPanel
+          label="Active Critical / High"
+          value={metrics ? `${metrics.active_critical} / ${metrics.active_high}` : '--'}
+          icon={<AlertTriangle className="h-5 w-5" />}
+          alert={Boolean(metrics && metrics.active_critical > 0)}
+        />
         <StatPanel label="Attack Chains" value={metrics?.attack_chains ?? '--'} icon={<GitBranch className="h-5 w-5" />} />
         <StatPanel label="AI Surfaces" value={metrics?.ai_surfaces ?? nodeTypeCounts.ai_target ?? '--'} icon={<Bot className="h-5 w-5" />} />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
-        <Card className="overflow-hidden">
-          <div className="flex flex-col gap-3 border-b border-gray-800 p-4 md:flex-row md:items-center md:justify-between">
+        <Panel className={`overflow-hidden ${styles.rise} ${styles.d4}`}>
+          <div className={`flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between ${styles.moduleHeader}`}>
             <div>
-              <h2 className="font-semibold text-white">{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
+              <h2 className={`${styles.displayTitle} text-sm text-white`}>{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
               <p className="mt-1 text-sm text-gray-500">
                 {view === 'graph'
                   ? focusId
@@ -668,7 +707,9 @@ export default function ExposurePage() {
             </div>
           ) : view === 'graph' ? (
             <div>
-              <div className="relative h-[560px] w-full bg-[#0a0a0a]">
+              <div className={`relative h-[560px] w-full ${styles.graphBackdrop}`}>
+                <div className={styles.radarRings} aria-hidden="true" />
+                <div className={styles.sweep} aria-hidden="true" />
                 <ExposureGraphCanvas
                   nodes={graph?.nodes || []}
                   edges={graph?.edges || []}
@@ -677,6 +718,7 @@ export default function ExposurePage() {
                   onNodeClick={handleFocus}
                   height={560}
                 />
+                <div className={styles.grain} aria-hidden="true" />
                 {refetching && (
                   <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-2 rounded-full border border-gray-700 bg-gray-900/90 px-3 py-1 text-xs text-gray-300">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -722,39 +764,42 @@ export default function ExposurePage() {
               )}
             </div>
           )}
-        </Card>
+        </Panel>
 
         <div className="space-y-6">
           {selectedNode ? (
             <NodeDetailPanel node={selectedNode} neighbors={neighbors} onFocus={handleFocus} onClear={handleClear} />
           ) : (
             <>
-              <Card>
-                <div className="border-b border-gray-800 p-4">
-                  <h2 className="font-semibold text-white">Hotspots</h2>
+              <Panel className={`${styles.rise} ${styles.d5}`}>
+                <div className={`p-4 ${styles.moduleHeader}`}>
+                  <h2 className={`${styles.displayTitle} text-sm text-white`}>Priority targets</h2>
                   <p className="mt-1 text-xs text-gray-500">Riskiest assets — click to explore</p>
                 </div>
-                <div className="divide-y divide-gray-800">
+                <div className="divide-y divide-gray-800/60">
                   {hotspots.length === 0 ? (
                     <div className="p-4 text-sm text-gray-500">No active high-risk nodes.</div>
                   ) : (
-                    hotspots.map((node) => (
-                      <div key={node.id} className="p-4">
-                        <NodePill node={node} onFocus={handleFocus} />
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
-                          {node.meta?.active_findings_count ? <span>{String(node.meta.active_findings_count)} active findings</span> : null}
-                          {node.meta?.last_grade ? <span>Grade {String(node.meta.last_grade)}</span> : null}
-                          {node.meta?.blast_radius_tier ? <span>{String(node.meta.blast_radius_tier)} blast</span> : null}
+                    hotspots.map((node, index) => (
+                      <div key={node.id} className="flex gap-3 p-4">
+                        <span className={`${styles.rank} pt-2.5`}>{String(index + 1).padStart(2, '0')}</span>
+                        <div className="min-w-0 flex-1">
+                          <NodePill node={node} onFocus={handleFocus} />
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                            {node.meta?.active_findings_count ? <span>{String(node.meta.active_findings_count)} active findings</span> : null}
+                            {node.meta?.last_grade ? <span>Grade {String(node.meta.last_grade)}</span> : null}
+                            {node.meta?.blast_radius_tier ? <span>{String(node.meta.blast_radius_tier)} blast</span> : null}
+                          </div>
                         </div>
                       </div>
                     ))
                   )}
                 </div>
-              </Card>
+              </Panel>
 
-              <Card>
-                <div className="border-b border-gray-800 p-4">
-                  <h2 className="font-semibold text-white">Inventory</h2>
+              <Panel>
+                <div className={`p-4 ${styles.moduleHeader}`}>
+                  <h2 className={`${styles.displayTitle} text-sm text-white`}>Inventory</h2>
                   <p className="mt-1 text-xs text-gray-500">Click a type to highlight it in the graph</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 p-4">
@@ -781,10 +826,11 @@ export default function ExposurePage() {
                       )
                     })}
                 </div>
-              </Card>
+              </Panel>
             </>
           )}
         </div>
+      </div>
       </div>
     </div>
   )

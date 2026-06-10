@@ -188,10 +188,18 @@ export function ExposureGraph({
 
       ctx.globalAlpha = dimmed ? 0.15 : 1
 
+      // Phosphor glow for severe nodes — reads as "hot" on the radar backdrop.
+      const glow = !dimmed && (node.__sev === 'critical' || node.__sev === 'high')
+      if (glow) {
+        ctx.shadowColor = SEVERITY_HEX[node.__sev as string]
+        ctx.shadowBlur = node.__sev === 'critical' ? 14 : 9
+      }
+
       ctx.beginPath()
       ctx.arc(x, y, r, 0, 2 * Math.PI)
       ctx.fillStyle = NODE_HEX[node.type] ?? '#9ca3af'
       ctx.fill()
+      ctx.shadowBlur = 0
 
       if (node.__sev && SEVERITY_HEX[node.__sev]) {
         ctx.lineWidth = Math.max(1, r * 0.3)
@@ -209,7 +217,7 @@ export function ExposureGraph({
         const count = Number(node.meta?.count || 0)
         if (count && globalScale > 0.8) {
           ctx.fillStyle = '#0a0a0a'
-          ctx.font = `${Math.min(r, 7 / globalScale + r * 0.4)}px system-ui, sans-serif`
+          ctx.font = `${Math.min(r, 7 / globalScale + r * 0.4)}px 'Spline Sans Mono', ui-monospace, monospace`
           ctx.textAlign = 'center'
           ctx.textBaseline = 'middle'
           ctx.fillText(String(count), x, y)
@@ -229,7 +237,7 @@ export function ExposureGraph({
         const label = node.label || node.id
         const text = label.length > 22 ? `${label.slice(0, 21)}…` : label
         const fontSize = 12 / globalScale
-        ctx.font = `${fontSize}px system-ui, sans-serif`
+        ctx.font = `${fontSize}px 'Spline Sans Mono', ui-monospace, monospace`
         ctx.textAlign = 'center'
         ctx.textBaseline = 'top'
         const labelY = y + r + 4 / globalScale
@@ -263,7 +271,7 @@ export function ExposureGraph({
       node.type === 'finding_group'
         ? `${node.meta?.count ?? ''} similar findings`
         : node.subtitle || ''
-    return `<div style="background:#111827;border:1px solid #374151;border-radius:8px;padding:8px 10px;max-width:280px;font-family:system-ui,sans-serif">
+    return `<div style="background:rgba(8,11,19,0.95);border:1px solid rgba(94,234,212,0.25);border-radius:2px;padding:8px 10px;max-width:280px;font-family:'Spline Sans Mono',ui-monospace,monospace;box-shadow:0 0 24px rgba(0,0,0,0.6)">
       <div style="display:flex;align-items:center;gap:6px">
         <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
         <span style="color:#9ca3af;font-size:10px;text-transform:uppercase;letter-spacing:.04em">${escapeHtml(typeLabel)}</span>
@@ -271,7 +279,7 @@ export function ExposureGraph({
       <div style="color:#f3f4f6;font-size:13px;font-weight:500;margin-top:3px;word-break:break-word">${escapeHtml(node.label)}</div>
       ${detail ? `<div style="color:#6b7280;font-size:11px;margin-top:2px">${escapeHtml(String(detail))}</div>` : ''}
       ${sevRow}
-      <div style="color:#60a5fa;font-size:10px;margin-top:4px">Click to focus</div>
+      <div style="color:#5eead4;font-size:10px;margin-top:4px;letter-spacing:.08em;text-transform:uppercase">Click to focus</div>
     </div>`
   }, [])
 
@@ -282,7 +290,7 @@ export function ExposureGraph({
         graphData={graphData}
         width={width}
         height={height}
-        backgroundColor="#0a0a0a"
+        backgroundColor="rgba(0,0,0,0)"
         nodeRelSize={1}
         nodeCanvasObject={paintNode}
         nodePointerAreaPaint={paintPointerArea}

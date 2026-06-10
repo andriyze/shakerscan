@@ -1,0 +1,238 @@
+/* Tactical-console theme for the Exposure Graph page.
+   HUD chrome is teal; severity colors are owned by lib/constants. */
+
+.page {
+  --hud: rgba(94, 234, 212, 0.6);
+  --hud-dim: rgba(94, 234, 212, 0.16);
+  --hud-faint: rgba(94, 234, 212, 0.07);
+  --hud-text: #99f6e4;
+  --panel-top: rgba(13, 18, 28, 0.92);
+  --panel-bottom: rgba(8, 11, 19, 0.97);
+  font-family: var(--font-mono), ui-monospace, 'SFMono-Regular', monospace;
+  position: relative;
+}
+
+.pageGlow {
+  position: absolute;
+  inset: -1.5rem;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 70% 0%, rgba(94, 234, 212, 0.05), transparent 70%),
+    radial-gradient(45% 35% at 10% 100%, rgba(59, 130, 246, 0.04), transparent 70%);
+  z-index: 0;
+}
+
+.content {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- type ---- */
+
+.displayTitle {
+  font-family: var(--font-display), system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.kicker {
+  font-size: 10px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--hud-text);
+  opacity: 0.75;
+}
+
+.statLabel {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.statValue {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 1.9rem;
+  line-height: 1.15;
+  margin-top: 0.4rem;
+  color: #f1f5f9;
+  font-variant-numeric: tabular-nums;
+}
+
+.statAlert {
+  color: #fca5a5;
+  text-shadow: 0 0 18px rgba(239, 68, 68, 0.45);
+}
+
+/* ---- panels ---- */
+
+.module {
+  position: relative;
+  background: linear-gradient(180deg, var(--panel-top), var(--panel-bottom));
+  border: 1px solid var(--hud-dim);
+  border-radius: 2px;
+}
+
+.corners::before,
+.corners::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+
+.corners::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid var(--hud);
+  border-left: 2px solid var(--hud);
+}
+
+.corners::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid var(--hud);
+  border-right: 2px solid var(--hud);
+}
+
+.moduleHeader {
+  border-bottom: 1px solid var(--hud-faint);
+}
+
+/* ---- radar backdrop ---- */
+
+.graphBackdrop {
+  background-color: #04070d;
+  background-image:
+    linear-gradient(var(--hud-faint) 1px, transparent 1px),
+    linear-gradient(90deg, var(--hud-faint) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: center center;
+  overflow: hidden;
+}
+
+.radarRings {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-radial-gradient(
+    circle at 50% 50%,
+    rgba(94, 234, 212, 0.08) 0,
+    rgba(94, 234, 212, 0.08) 1px,
+    transparent 1px,
+    transparent 96px
+  );
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, black 0%, transparent 78%);
+  mask-image: radial-gradient(circle at 50% 50%, black 0%, transparent 78%);
+}
+
+.sweep {
+  position: absolute;
+  inset: -25%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(94, 234, 212, 0.05) 32deg,
+    rgba(94, 234, 212, 0.012) 60deg,
+    transparent 78deg
+  );
+  animation: sweepSpin 16s linear infinite;
+}
+
+@keyframes sweepSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
+}
+
+/* ---- live dot / status ---- */
+
+.liveDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: #5eead4;
+  box-shadow: 0 0 10px rgba(94, 234, 212, 0.9);
+  animation: livePulse 2.4s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ---- inputs ---- */
+
+.input {
+  background: rgba(8, 11, 19, 0.85);
+  border: 1px solid var(--hud-dim);
+  border-radius: 2px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.input:focus-within,
+.input:focus {
+  border-color: var(--hud);
+  box-shadow: 0 0 0 1px var(--hud-faint), 0 0 16px rgba(94, 234, 212, 0.12);
+  outline: none;
+}
+
+/* ---- rank index for priority targets ---- */
+
+.rank {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--hud-text);
+  opacity: 0.6;
+}
+
+/* ---- staggered load reveal ---- */
+
+.rise {
+  opacity: 0;
+  animation: riseIn 540ms cubic-bezier(0.22, 0.9, 0.3, 1) forwards;
+}
+
+.d1 { animation-delay: 40ms; }
+.d2 { animation-delay: 110ms; }
+.d3 { animation-delay: 180ms; }
+.d4 { animation-delay: 250ms; }
+.d5 { animation-delay: 330ms; }
+
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep,
+  .liveDot {
+    animation: none;
+  }
+  .rise {
+    animation-duration: 1ms;
+  }
+}
