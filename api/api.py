@@ -46,6 +46,13 @@ except ModuleNotFoundError as exc:
         raise
     from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
 
+try:
+    from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
+except ModuleNotFoundError as exc:
+    if exc.name != "scan_verification_state":
+        raise
+    from api.scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
+
 from retest_contract import (
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
@@ -581,51 +588,6 @@ def generate_finding_fingerprint(finding: dict) -> str:
     ]
     key_string = '|'.join(str(p) for p in key_parts)
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
-
-
-def _scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(finding, dict):
-        return None
-
-    validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
-    poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
-    poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
-    verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
-    result_status = str(finding.get("result_status") or "").strip().lower()
-    confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
-
-    has_fresh_proof = (
-        finding.get("verified") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-        or poe.get("proven") is True
-        or poe_result.get("proven") is True
-        or verdict in {"exploited", "likely_vulnerable"}
-        or result_status in {"still_vulnerable", "verified_vulnerable"}
-        or confidence_tier == "verified"
-    )
-    if not has_fresh_proof:
-        return None
-
-    confidence = None
-    for value in (
-        finding.get("verification_confidence"),
-        finding.get("confidence"),
-        validation.get("confidence"),
-        poe.get("confidence"),
-        poe_result.get("confidence"),
-    ):
-        try:
-            confidence = float(value)
-            break
-        except (TypeError, ValueError):
-            continue
-
-    return {
-        "last_verification_status": "still_vulnerable",
-        "last_verification_verdict": "exploited",
-        "last_verification_confidence": confidence,
-    }
 
 
 def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

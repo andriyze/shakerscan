@@ -70,6 +70,7 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402
+from scan_verification_state import scan_time_verification_fields  # noqa: E402
 
 sys.path.pop(0)
 
@@ -185,6 +186,15 @@ def test_scan_result_verification_overrides_ignore_stale_false_positive_without_
     })
 
     assert overrides == {}
+
+
+def test_scan_time_verification_fields_preserves_zero_confidence():
+    fields = scan_time_verification_fields(
+        {"verified": True, "verification_confidence": 0.0, "confidence": 0.95}
+    )
+
+    assert fields["last_verification_verdict"] == "exploited"
+    assert fields["last_verification_confidence"] == 0.0
 
 
 # ----- run_due_schedules --------------------------------------------------

@@ -125,6 +125,13 @@ except ModuleNotFoundError as exc:
         raise
     from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
 
+try:
+    from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields_dict
+except ModuleNotFoundError as exc:
+    if exc.name != "scan_verification_state":
+        raise
+    from api.scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields_dict
+
 # Database pool (initialized in main)
 db_pool = None
 ASYNC_PG_ERROR = getattr(asyncpg, "PostgresError", Exception)
@@ -148,52 +155,15 @@ def _canonicalize_jsonish(value: Any) -> str | None:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _coerce_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _scan_time_verification_fields(finding: dict[str, Any]) -> tuple[str | None, str | None, float | None]:
-    """Return DB verification fields implied by fresh scan-time proof.
-
-    Post-scan retests persist their latest verdict on the canonical finding row.
-    A later smart scan can independently prove the same fingerprint again; that
-    fresh proof must override stale `false_positive` or `likely_fixed` state so
-    scan detail pages and verified-only filters do not contradict the raw report.
-    """
-    if not isinstance(finding, dict):
+    fields = _scan_time_verification_fields_dict(finding)
+    if not fields:
         return None, None, None
-
-    validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
-    poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
-    poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
-    verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
-    result_status = str(finding.get("result_status") or "").strip().lower()
-    confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
-
-    has_fresh_proof = (
-        finding.get("verified") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-        or poe.get("proven") is True
-        or poe_result.get("proven") is True
-        or verdict in {"exploited", "likely_vulnerable"}
-        or result_status in {"still_vulnerable", "verified_vulnerable"}
-        or confidence_tier == "verified"
+    return (
+        fields.get("last_verification_status"),
+        fields.get("last_verification_verdict"),
+        fields.get("last_verification_confidence"),
     )
-    if not has_fresh_proof:
-        return None, None, None
-
-    confidence = (
-        _coerce_float(finding.get("verification_confidence"))
-        or _coerce_float(finding.get("confidence"))
-        or _coerce_float(validation.get("confidence"))
-        or _coerce_float(poe.get("confidence"))
-        or _coerce_float(poe_result.get("confidence"))
-    )
-    return "still_vulnerable", "exploited", confidence
 
 
 def run_worker_preflight() -> None:
