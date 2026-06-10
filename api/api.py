@@ -3125,6 +3125,121 @@ def _build_exposure_graph(
     }
 
 
+# Edge types that are pure structural plumbing (endpoint enumeration). They
+# dominate edge volume and carry no exposure signal, so they are collapsed out
+# of the rendered subgraph unless endpoints are explicitly requested.
+_EXPOSURE_STRUCTURAL_EDGE_TYPES = {
+    "defines_endpoint",
+    "exposes_endpoint",
+    "observed_endpoint",
+}
+
+
+def _focus_exposure_subgraph(
+    graph: dict[str, Any],
+    *,
+    focus: str | None,
+    depth: int,
+    include_endpoints: bool,
+    max_nodes: int = 350,
+    max_fanout: int = 15,
+) -> dict[str, Any]:
+    """Reduce a full exposure graph to a focused, renderable subgraph.
+
+    Without a focus node we return a seed view (risk hotspots + domains and
+    their immediate neighbours). With a focus node we return its neighbourhood
+    out to ``depth``. Endpoint plumbing is collapsed unless explicitly
+    requested. The full-graph summary is preserved so overview stats stay
+    accurate, with rendered counts and a ``truncated`` flag added.
+    """
+    nodes: list[dict[str, Any]] = graph.get("nodes", [])
+    edges: list[dict[str, Any]] = graph.get("edges", [])
+    nodes_by_id = {node["id"]: node for node in nodes}
+
+    if include_endpoints:
+        active_edges = edges
+    else:
+        endpoint_ids = {n["id"] for n in nodes if n["type"] == "endpoint"}
+        active_edges = [
+            e
+            for e in edges
+            if e["type"] not in _EXPOSURE_STRUCTURAL_EDGE_TYPES
+            and e["source"] not in endpoint_ids
+            and e["target"] not in endpoint_ids
+        ]
+
+    adjacency: dict[str, list[str]] = {}
+    for edge in active_edges:
+        adjacency.setdefault(edge["source"], []).append(edge["target"])
+        adjacency.setdefault(edge["target"], []).append(edge["source"])
+
+    def _risk_key(node_id: str) -> tuple[int, int]:
+        node = nodes_by_id[node_id]
+        return (
+            _severity_sort_value(node.get("severity")),
+            int(node.get("meta", {}).get("active_findings_count") or 0),
+        )
+
+    if focus and focus in nodes_by_id:
+        seeds = [focus]
+    else:
+        focus = None
+        # Lead the overview with risk: seed from hotspots and let BFS pull in
+        # their neighbourhoods. Domains surface naturally as hotspot neighbours.
+        hotspot_ids = [n["id"] for n in graph.get("summary", {}).get("hotspots", []) if n["id"] in nodes_by_id]
+        if hotspot_ids:
+            seeds = list(dict.fromkeys(hotspot_ids))
+        else:
+            domain_ids = [n["id"] for n in nodes if n["type"] == "domain"]
+            seeds = domain_ids or [n["id"] for n in sorted(nodes, key=_risk_key, reverse=True)[:25]]
+
+    # Cap per-node fan-out so hub nodes (a domain wired to hundreds of AI
+    # surfaces) cannot explode the rendered graph; keep the riskiest neighbours.
+    capped = False
+    visited: set[str] = {s for s in seeds if s in nodes_by_id}
+    queue: list[tuple[str, int]] = [(s, 0) for s in list(visited)]
+    while queue:
+        node_id, dist = queue.pop(0)
+        if dist >= depth:
+            continue
+        neighbors = [n for n in dict.fromkeys(adjacency.get(node_id, [])) if n in nodes_by_id]
+        if len(neighbors) > max_fanout:
+            capped = True
+            neighbors = sorted(neighbors, key=_risk_key, reverse=True)[:max_fanout]
+        for neighbor in neighbors:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            queue.append((neighbor, dist + 1))
+
+    truncated = capped
+    if len(visited) > max_nodes:
+        truncated = True
+        seed_set = set(seeds)
+        ranked = sorted(
+            visited,
+            key=lambda nid: (
+                nid in seed_set,
+                _severity_sort_value(nodes_by_id[nid].get("severity")),
+                int(nodes_by_id[nid].get("meta", {}).get("active_findings_count") or 0),
+            ),
+            reverse=True,
+        )
+        visited = set(ranked[:max_nodes])
+
+    sub_nodes = [nodes_by_id[nid] for nid in visited]
+    sub_edges = [e for e in active_edges if e["source"] in visited and e["target"] in visited]
+
+    summary = dict(graph.get("summary", {}))
+    summary["rendered_node_count"] = len(sub_nodes)
+    summary["rendered_edge_count"] = len(sub_edges)
+    summary["truncated"] = truncated
+    summary["focus"] = focus
+    summary["include_endpoints"] = include_endpoints
+
+    return {"nodes": sub_nodes, "edges": sub_edges, "summary": summary}
+
+
 def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not row or row.get("auth_kind") == "none":
         return {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": {}}
@@ -5029,6 +5144,9 @@ async def exposure_graph(
     include_resolved: bool = False,
     limit_findings: int = Query(250, ge=1, le=500),
     limit_scans: int = Query(150, ge=1, le=300),
+    focus: Optional[str] = None,
+    depth: int = Query(1, ge=1, le=3),
+    include_endpoints: bool = False,
 ):
     """Return a derived exposure graph across web targets, AI targets, scans, findings, vendors, and chains."""
     async with db_pool.acquire() as conn:
@@ -5112,11 +5230,18 @@ async def exposure_graph(
             for row in await conn.fetch(findings_query, include_resolved, root_domain, limit_findings)
         ]
 
-    return _build_exposure_graph(
+    graph = _build_exposure_graph(
         targets=targets,
         ai_targets=ai_targets,
         scans=scans,
         findings=findings,
+    )
+
+    return _focus_exposure_subgraph(
+        graph,
+        focus=focus,
+        depth=depth,
+        include_endpoints=include_endpoints,
     )
 
 

@@ -520,6 +520,7 @@ export interface AITargetPayload {
 export type ExposureNodeType =
   | 'domain'
   | 'web_target'
+  | 'model_artifact'
   | 'endpoint'
   | 'api_surface'
   | 'auth_role'
@@ -561,6 +562,11 @@ export interface ExposureGraph {
     node_type_counts: Record<string, number>
     severity_counts: Record<string, number>
     hotspots: ExposureNode[]
+    rendered_node_count?: number
+    rendered_edge_count?: number
+    truncated?: boolean
+    focus?: string | null
+    include_endpoints?: boolean
   }
 }
 
@@ -577,6 +583,9 @@ export async function getExposureGraph(params?: {
   includeResolved?: boolean
   limitFindings?: number
   limitScans?: number
+  focus?: string | null
+  depth?: number
+  includeEndpoints?: boolean
 }): Promise<ExposureGraph> {
   const searchParams = new URLSearchParams()
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
@@ -584,6 +593,9 @@ export async function getExposureGraph(params?: {
   if (params?.includeResolved) searchParams.set('include_resolved', 'true')
   if (params?.limitFindings) searchParams.set('limit_findings', String(params.limitFindings))
   if (params?.limitScans) searchParams.set('limit_scans', String(params.limitScans))
+  if (params?.focus) searchParams.set('focus', params.focus)
+  if (params?.depth) searchParams.set('depth', String(params.depth))
+  if (params?.includeEndpoints) searchParams.set('include_endpoints', 'true')
 
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/graph${query ? `?${query}` : ''}`)
