@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertTriangle,
@@ -13,21 +13,24 @@ import {
   GitBranch,
   Globe2,
   KeyRound,
-  Network,
+  Layers,
+  Loader2,
   RefreshCw,
   Route,
   Search,
   ShieldAlert,
   Target,
+  X,
 } from 'lucide-react'
 import {
-  formatDate,
   getDomains,
   getExposureGraph,
+  getExposureNodes,
   type ExposureEdge,
   type ExposureGraph,
   type ExposureNode,
   type ExposureNodeType,
+  type ExposureSearchNode,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { Button, Card, CardSkeleton, EmptyState, ErrorState } from '@/components/ui'
@@ -48,6 +51,7 @@ const NODE_LABELS: Record<string, string> = {
   mcp_tool: 'MCP tools',
   scan: 'Scans',
   finding: 'Findings',
+  finding_group: 'Finding groups',
   vendor: 'Vendors',
   attack_chain: 'Attack chains',
 }
@@ -65,6 +69,7 @@ const NODE_SINGULAR: Record<string, string> = {
   mcp_tool: 'MCP tool',
   scan: 'Scan',
   finding: 'Finding',
+  finding_group: 'Grouped findings',
   vendor: 'Vendor',
   attack_chain: 'Attack chain',
 }
@@ -82,6 +87,7 @@ const NODE_STYLES: Record<string, string> = {
   mcp_tool: 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200',
   scan: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
   finding: 'border-orange-500/30 bg-orange-500/10 text-orange-200',
+  finding_group: 'border-orange-500/30 bg-orange-500/10 text-orange-200',
   vendor: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
   attack_chain: 'border-red-500/30 bg-red-500/10 text-red-200',
 }
@@ -148,6 +154,7 @@ function nodeIcon(type: ExposureNodeType) {
   if (type === 'mcp_tool') return <Boxes className={className} />
   if (type === 'scan') return <Search className={className} />
   if (type === 'finding') return <ShieldAlert className={className} />
+  if (type === 'finding_group') return <Layers className={className} />
   if (type === 'vendor') return <Boxes className={className} />
   return <GitBranch className={className} />
 }
@@ -239,6 +246,9 @@ function NodeDetailPanel({
     const v = node.meta?.[key]
     return v !== undefined && v !== null && v !== ''
   })
+  const members = node.type === 'finding_group' && Array.isArray(node.meta?.members)
+    ? (node.meta.members as Array<{ id: string; title: string; severity?: string | null; status?: string | null; href?: string | null }>)
+    : []
 
   return (
     <Card>
@@ -247,10 +257,10 @@ function NodeDetailPanel({
         <button
           type="button"
           onClick={onClear}
-          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          aria-label="Clear selection"
+          className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-          Overview
+          <X className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
       <div className="space-y-4 p-4">
@@ -288,6 +298,26 @@ function NodeDetailPanel({
           </dl>
         )}
 
+        {members.length > 0 && (
+          <div>
+            <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">Findings in this group ({members.length})</div>
+            <div className="max-h-64 space-y-1.5 overflow-auto pr-1">
+              {members.map((m) => (
+                <Link
+                  key={m.id}
+                  href={m.href || '#'}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 hover:bg-gray-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  <span className="truncate text-xs text-gray-200">{m.title}</span>
+                  {m.severity && (
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(m.severity)}`}>{m.severity}</span>
+                  )}
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div>
           <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">
             Connected ({neighbors.length})
@@ -313,14 +343,26 @@ function NodeDetailPanel({
 function Legend() {
   const items: ExposureNodeType[] = ['domain', 'web_target', 'ai_target', 'model_artifact', 'api_surface', 'finding', 'attack_chain', 'vendor']
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-3 text-xs text-gray-400">
-      {items.map((type) => (
-        <span key={type} className="inline-flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: NODE_HEX[type] }} aria-hidden="true" />
-          {NODE_SINGULAR[type] || type}
+    <div className="space-y-2 px-4 py-3 text-xs text-gray-400">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        {items.map((type) => (
+          <span key={type} className="inline-flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: NODE_HEX[type] }} aria-hidden="true" />
+            {NODE_SINGULAR[type] || type}
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-gray-600">
+        <span>Larger = more findings</span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-full ring-2 ring-red-500" aria-hidden="true" />
+          Ring = severity
         </span>
-      ))}
-      <span className="ml-auto text-gray-600">Hover a node for its label · scroll to zoom</span>
+        <span className="inline-flex items-center gap-1.5">
+          <Layers className="h-3 w-3" aria-hidden="true" /> Numbered = grouped findings
+        </span>
+        <span className="ml-auto">Hover for label · scroll to zoom · click to focus</span>
+      </div>
     </div>
   )
 }
@@ -335,12 +377,19 @@ export default function ExposurePage() {
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
   const [depth, setDepth] = useState(1)
   const [selectedType, setSelectedType] = useState('')
+  const [highlightType, setHighlightType] = useState<string | null>(null)
   const [listPage, setListPage] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [refetching, setRefetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [searchIndex, setSearchIndex] = useState<ExposureSearchNode[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const hasLoadedRef = useRef(false)
 
   async function loadGraph() {
-    setLoading(true)
+    if (hasLoadedRef.current) setRefetching(true)
+    else setLoading(true)
     try {
       const payload = await getExposureGraph({
         root_domain: domain || undefined,
@@ -352,16 +401,25 @@ export default function ExposurePage() {
       })
       setGraph(payload)
       setError(null)
+      hasLoadedRef.current = true
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load exposure graph')
     } finally {
       setLoading(false)
+      setRefetching(false)
     }
   }
 
   useEffect(() => {
     getDomains().then((payload) => setDomains(payload.domains || [])).catch(() => {})
   }, [])
+
+  // Search index: refetched whenever the domain/resolved scope changes.
+  useEffect(() => {
+    getExposureNodes({ root_domain: domain || undefined, includeResolved })
+      .then((payload) => setSearchIndex(payload.nodes || []))
+      .catch(() => setSearchIndex([]))
+  }, [domain, includeResolved])
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -372,12 +430,24 @@ export default function ExposurePage() {
   function changeScope(next: () => void) {
     setFocusId(null)
     setSelectedNode(null)
+    setHighlightType(null)
     next()
   }
 
   function handleFocus(node: ExposureNode) {
     setSelectedNode(node)
+    setHighlightType(null)
+    // Grouped findings are synthetic (not addressable by the backend), so show
+    // their detail without re-focusing the graph.
+    if (node.type === 'finding_group') return
     setFocusId(node.id)
+    setView('graph')
+  }
+
+  function focusById(id: string) {
+    setFocusId(id)
+    setSelectedNode(null)
+    setHighlightType(null)
     setView('graph')
   }
 
@@ -386,11 +456,16 @@ export default function ExposurePage() {
     setFocusId(null)
   }
 
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return []
+    return searchIndex.filter((n) => n.label.toLowerCase().includes(q)).slice(0, 12)
+  }, [searchQuery, searchIndex])
+
   const byId = useMemo(() => new Map((graph?.nodes || []).map((node) => [node.id, node])), [graph])
   const summary = graph?.summary
   const nodeTypeCounts = summary?.node_type_counts || {}
-  const findingCounts = summary?.severity_counts || {}
-  const criticalHigh = (findingCounts.critical || 0) + (findingCounts.high || 0)
+  const metrics = summary?.metrics
   const hotspots = summary?.hotspots || []
 
   const neighbors = useMemo(() => {
@@ -446,6 +521,35 @@ export default function ExposurePage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" aria-hidden="true" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => { setSearchQuery(event.target.value); setSearchOpen(true) }}
+              onFocus={() => setSearchOpen(true)}
+              onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+              placeholder="Search assets & findings…"
+              aria-label="Search exposure nodes"
+              className="w-56 rounded-lg border border-gray-700 bg-gray-900 py-2 pl-8 pr-3 text-sm text-white placeholder:text-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+            {searchOpen && searchMatches.length > 0 && (
+              <div className="absolute z-20 mt-1 max-h-72 w-72 overflow-auto rounded-lg border border-gray-700 bg-gray-900 py-1 shadow-xl">
+                {searchMatches.map((match) => (
+                  <button
+                    key={match.id}
+                    type="button"
+                    onMouseDown={(event) => { event.preventDefault(); focusById(match.id); setSearchQuery(''); setSearchOpen(false) }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-800 focus:outline-none focus-visible:bg-gray-800"
+                  >
+                    <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: NODE_HEX[match.type] || '#9ca3af' }} aria-hidden="true" />
+                    <span className="truncate text-gray-200">{match.label}</span>
+                    <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-gray-500">{NODE_SINGULAR[match.type] || match.type}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="inline-flex rounded-lg border border-gray-700 bg-gray-900 p-0.5" role="tablist" aria-label="View mode">
             {(['graph', 'list'] as const).map((mode) => (
               <button
@@ -492,10 +596,10 @@ export default function ExposurePage() {
       {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatPanel label="Nodes" value={summary?.node_count ?? '--'} icon={<Network className="h-5 w-5" />} />
-        <StatPanel label="Edges" value={summary?.edge_count ?? '--'} icon={<GitBranch className="h-5 w-5" />} />
-        <StatPanel label="AI Surfaces" value={nodeTypeCounts.ai_target || 0} icon={<Bot className="h-5 w-5" />} />
-        <StatPanel label="Critical/High" value={criticalHigh} icon={<AlertTriangle className="h-5 w-5" />} />
+        <StatPanel label="Assets" value={metrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
+        <StatPanel label="Active Critical / High" value={metrics ? `${metrics.active_critical} / ${metrics.active_high}` : '--'} icon={<AlertTriangle className="h-5 w-5" />} />
+        <StatPanel label="Attack Chains" value={metrics?.attack_chains ?? '--'} icon={<GitBranch className="h-5 w-5" />} />
+        <StatPanel label="AI Surfaces" value={metrics?.ai_surfaces ?? nodeTypeCounts.ai_target ?? '--'} icon={<Bot className="h-5 w-5" />} />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
@@ -505,7 +609,9 @@ export default function ExposurePage() {
               <h2 className="font-semibold text-white">{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
               <p className="mt-1 text-sm text-gray-500">
                 {view === 'graph'
-                  ? `Showing ${renderedNodes} of ${totalNodes} nodes${summary?.truncated ? ' (capped — refine by domain)' : ''}`
+                  ? focusId
+                    ? `${renderedNodes} connected nodes${summary?.truncated ? ' · riskiest shown' : ''}`
+                    : `Showing the ${renderedNodes} riskiest of ${totalNodes} nodes · search or click to explore more`
                   : `${listEdges.length} relationship${listEdges.length === 1 ? '' : 's'}`}
               </p>
             </div>
@@ -562,14 +668,31 @@ export default function ExposurePage() {
             </div>
           ) : view === 'graph' ? (
             <div>
-              <div className="h-[560px] w-full bg-[#0a0a0a]">
+              <div className="relative h-[560px] w-full bg-[#0a0a0a]">
                 <ExposureGraphCanvas
                   nodes={graph?.nodes || []}
                   edges={graph?.edges || []}
                   focusId={focusId}
+                  highlightType={highlightType}
                   onNodeClick={handleFocus}
                   height={560}
                 />
+                {refetching && (
+                  <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-2 rounded-full border border-gray-700 bg-gray-900/90 px-3 py-1 text-xs text-gray-300">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    Updating…
+                  </div>
+                )}
+                {highlightType && (
+                  <button
+                    type="button"
+                    onClick={() => setHighlightType(null)}
+                    className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  >
+                    Highlighting {NODE_LABELS[highlightType] || highlightType}
+                    <X className="h-3 w-3" aria-hidden="true" />
+                  </button>
+                )}
               </div>
               <div className="border-t border-gray-800">
                 <Legend />
@@ -632,17 +755,31 @@ export default function ExposurePage() {
               <Card>
                 <div className="border-b border-gray-800 p-4">
                   <h2 className="font-semibold text-white">Inventory</h2>
+                  <p className="mt-1 text-xs text-gray-500">Click a type to highlight it in the graph</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 p-4">
-                  {Object.entries(NODE_LABELS).map(([type, label]) => (
-                    <div key={type} className="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2">
-                      <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                        <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: NODE_HEX[type] || '#9ca3af' }} aria-hidden="true" />
-                        {label}
-                      </div>
-                      <div className="mt-1 text-lg font-semibold text-white">{nodeTypeCounts[type] || 0}</div>
-                    </div>
-                  ))}
+                  {Object.entries(NODE_LABELS)
+                    .filter(([type]) => type !== 'finding_group')
+                    .map(([type, label]) => {
+                      const active = highlightType === type
+                      return (
+                        <button
+                          key={type}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => { setHighlightType(active ? null : type); setView('graph') }}
+                          className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                            active ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                            <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: NODE_HEX[type] || '#9ca3af' }} aria-hidden="true" />
+                            {label}
+                          </div>
+                          <div className="mt-1 text-lg font-semibold text-white">{nodeTypeCounts[type] || 0}</div>
+                        </button>
+                      )
+                    })}
                 </div>
               </Card>
             </>

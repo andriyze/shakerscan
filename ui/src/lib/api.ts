@@ -530,8 +530,25 @@ export type ExposureNodeType =
   | 'mcp_tool'
   | 'scan'
   | 'finding'
+  | 'finding_group'
   | 'vendor'
   | 'attack_chain'
+
+export interface ExposureMetrics {
+  asset_count: number
+  web_targets: number
+  ai_surfaces: number
+  active_critical: number
+  active_high: number
+  attack_chains: number
+}
+
+export interface ExposureSearchNode {
+  id: string
+  type: ExposureNodeType
+  label: string
+  severity?: string | null
+}
 
 export interface ExposureNode {
   id: string
@@ -567,6 +584,7 @@ export interface ExposureGraph {
     truncated?: boolean
     focus?: string | null
     include_endpoints?: boolean
+    metrics?: ExposureMetrics
   }
 }
 
@@ -600,6 +618,19 @@ export async function getExposureGraph(params?: {
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/graph${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure graph'))
+  return res.json()
+}
+
+export async function getExposureNodes(params?: {
+  root_domain?: string
+  includeResolved?: boolean
+}): Promise<{ nodes: ExposureSearchNode[]; count: number }> {
+  const searchParams = new URLSearchParams()
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.includeResolved) searchParams.set('include_resolved', 'true')
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/exposure/nodes${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure nodes'))
   return res.json()
 }
 

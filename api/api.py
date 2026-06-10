@@ -3230,6 +3230,8 @@ def _focus_exposure_subgraph(
     sub_nodes = [nodes_by_id[nid] for nid in visited]
     sub_edges = [e for e in active_edges if e["source"] in visited and e["target"] in visited]
 
+    sub_nodes, sub_edges = _cluster_exposure_findings(sub_nodes, sub_edges, protect_id=focus)
+
     summary = dict(graph.get("summary", {}))
     summary["rendered_node_count"] = len(sub_nodes)
     summary["rendered_edge_count"] = len(sub_edges)
@@ -3238,6 +3240,106 @@ def _focus_exposure_subgraph(
     summary["include_endpoints"] = include_endpoints
 
     return {"nodes": sub_nodes, "edges": sub_edges, "summary": summary}
+
+
+def _normalize_finding_title(title: str) -> str:
+    """Collapse instance-specific detail so similar findings group together.
+
+    "Accessible Sensitive File: /.git/config" and ".../wp-config.php.old" both
+    normalise to "Accessible Sensitive File"; "SQL Injection (post id)" to
+    "SQL Injection".
+    """
+    base = re.split(r"[:(]", str(title or ""), maxsplit=1)[0]
+    return base.strip() or str(title or "").strip()
+
+
+def _cluster_exposure_findings(
+    sub_nodes: list[dict[str, Any]],
+    sub_edges: list[dict[str, Any]],
+    *,
+    min_group: int = 3,
+    protect_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collapse repetitive findings on the same asset into one group node.
+
+    Findings that share a parent asset (via a ``has_finding`` edge) and a
+    normalised title are merged into a single ``finding_group`` node carrying
+    the members in ``meta.members``. Groups smaller than ``min_group`` stay as
+    individual nodes. Edges touching grouped members are rewired to the group.
+    ``protect_id`` (the focused node) is never folded into a group so it stays
+    addressable.
+    """
+    nodes_by_id = {n["id"]: n for n in sub_nodes}
+
+    # Parent asset for each finding = source of its has_finding edge.
+    parent_of: dict[str, str] = {}
+    for edge in sub_edges:
+        if edge["type"] == "has_finding" and edge["target"] in nodes_by_id:
+            parent_of.setdefault(edge["target"], edge["source"])
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for node in sub_nodes:
+        if node["type"] != "finding" or node["id"] == protect_id:
+            continue
+        parent = parent_of.get(node["id"])
+        if not parent:
+            continue
+        key = (parent, _normalize_finding_title(node["label"]).lower())
+        groups.setdefault(key, []).append(node)
+
+    member_to_group: dict[str, str] = {}
+    group_nodes: dict[str, dict[str, Any]] = {}
+    for (parent, norm_key), members in groups.items():
+        if len(members) < min_group:
+            continue
+        members_sorted = sorted(members, key=lambda m: _severity_sort_value(m.get("severity")), reverse=True)
+        display_title = _normalize_finding_title(members_sorted[0]["label"])
+        group_id = f"finding_group:{_graph_hash(parent, norm_key)}"
+        top_severity = members_sorted[0].get("severity")
+        for member in members_sorted:
+            member_to_group[member["id"]] = group_id
+        group_nodes[group_id] = _graph_node(
+            group_id,
+            "finding_group",
+            f"{display_title} ×{len(members_sorted)}",
+            subtitle=f"{len(members_sorted)} similar findings",
+            severity=top_severity,
+            meta={
+                "count": len(members_sorted),
+                "normalized_title": display_title,
+                "members": [
+                    {
+                        "id": m["id"],
+                        "title": m["label"],
+                        "severity": m.get("severity"),
+                        "status": m.get("meta", {}).get("status"),
+                        "href": m.get("href"),
+                    }
+                    for m in members_sorted
+                ],
+            },
+        )
+
+    if not group_nodes:
+        return sub_nodes, sub_edges
+
+    new_nodes = [n for n in sub_nodes if n["id"] not in member_to_group]
+    new_nodes.extend(group_nodes.values())
+
+    seen_edges: set[tuple[str, str, str]] = set()
+    new_edges: list[dict[str, Any]] = []
+    for edge in sub_edges:
+        source = member_to_group.get(edge["source"], edge["source"])
+        target = member_to_group.get(edge["target"], edge["target"])
+        if source == target:
+            continue
+        key = (source, target, edge["type"])
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        new_edges.append({**edge, "source": source, "target": target})
+
+    return new_nodes, new_edges
 
 
 def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -5230,6 +5332,35 @@ async def exposure_graph(
             for row in await conn.fetch(findings_query, include_resolved, root_domain, limit_findings)
         ]
 
+        # Real, uncapped security counts for the headline metrics — the graph's
+        # own node counts are limited by the fetch caps above and would
+        # under-report on large datasets.
+        metrics_row = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM targets t
+                   WHERE ($1::boolean = true OR t.is_active = true)
+                     AND ($2::text IS NULL OR t.root_domain = $2::text)) AS web_targets,
+                (SELECT COUNT(*) FROM ai_targets a
+                   WHERE ($1::boolean = true OR a.is_active = true)
+                     AND ($2::text IS NULL OR LOWER(a.endpoint_url) LIKE '%' || LOWER($2::text) || '%')) AS ai_surfaces,
+                (SELECT COUNT(*) FROM findings f
+                   LEFT JOIN targets t ON f.target_id = t.id
+                   LEFT JOIN ai_targets a ON f.ai_target_id = a.id
+                   WHERE f.status = 'active' AND f.severity = 'critical'
+                     AND ($2::text IS NULL OR t.root_domain = $2::text
+                          OR LOWER(a.endpoint_url) LIKE '%' || LOWER($2::text) || '%')) AS active_critical,
+                (SELECT COUNT(*) FROM findings f
+                   LEFT JOIN targets t ON f.target_id = t.id
+                   LEFT JOIN ai_targets a ON f.ai_target_id = a.id
+                   WHERE f.status = 'active' AND f.severity = 'high'
+                     AND ($2::text IS NULL OR t.root_domain = $2::text
+                          OR LOWER(a.endpoint_url) LIKE '%' || LOWER($2::text) || '%')) AS active_high
+            """,
+            include_inactive,
+            root_domain,
+        )
+
     graph = _build_exposure_graph(
         targets=targets,
         ai_targets=ai_targets,
@@ -5237,12 +5368,111 @@ async def exposure_graph(
         findings=findings,
     )
 
+    web_targets = int(metrics_row["web_targets"] or 0)
+    ai_surfaces = int(metrics_row["ai_surfaces"] or 0)
+    graph["summary"]["metrics"] = {
+        "asset_count": web_targets + ai_surfaces,
+        "web_targets": web_targets,
+        "ai_surfaces": ai_surfaces,
+        "active_critical": int(metrics_row["active_critical"] or 0),
+        "active_high": int(metrics_row["active_high"] or 0),
+        "attack_chains": int(graph["summary"]["node_type_counts"].get("attack_chain", 0)),
+    }
+
     return _focus_exposure_subgraph(
         graph,
         focus=focus,
         depth=depth,
         include_endpoints=include_endpoints,
     )
+
+
+@app.get("/exposure/nodes")
+async def exposure_nodes(
+    root_domain: Optional[str] = None,
+    include_inactive: bool = False,
+    include_resolved: bool = False,
+    limit: int = Query(2000, ge=1, le=5000),
+):
+    """Lightweight searchable index of exposure nodes (id/label/type/severity).
+
+    Node ids match those produced by the graph builder so a selected result can
+    be passed straight back as ``focus`` to /exposure/graph. Fetched once by the
+    UI and filtered client-side as the user types.
+    """
+    nodes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def emit(node_id: str, node_type: str, label: str, severity: str | None = None) -> None:
+        if not label or node_id in seen:
+            return
+        seen.add(node_id)
+        nodes.append({"id": node_id, "type": node_type, "label": label, "severity": severity})
+
+    async with db_pool.acquire() as conn:
+        target_rows = await conn.fetch(
+            """
+            SELECT id, url, name, root_domain, discovery_source
+            FROM targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR root_domain = $2::text)
+            ORDER BY active_findings_count DESC NULLS LAST
+            LIMIT $3
+            """,
+            include_inactive,
+            root_domain,
+            limit,
+        )
+        for row in target_rows:
+            row = row_to_dict(row)
+            node_type = "model_artifact" if row.get("discovery_source") == "model-intake" else "web_target"
+            emit(f"target:{row['id']}", node_type, _short_url_label(row.get("url")) or str(row.get("name") or ""))
+            if row.get("root_domain"):
+                emit(f"domain:{row['root_domain']}", "domain", str(row["root_domain"]))
+
+        ai_rows = await conn.fetch(
+            """
+            SELECT id, name, endpoint_url, target_type
+            FROM ai_targets
+            WHERE ($1::boolean = true OR is_active = true)
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY production_mode DESC, updated_at DESC
+            LIMIT $3
+            """,
+            include_inactive,
+            root_domain,
+            limit,
+        )
+        for row in ai_rows:
+            row = row_to_dict(row)
+            emit(f"ai_target:{row['id']}", "ai_target", str(row.get("name") or _short_url_label(row.get("endpoint_url"))))
+
+        finding_rows = await conn.fetch(
+            """
+            SELECT f.id, f.title, f.severity
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets a ON f.ai_target_id = a.id
+            WHERE ($1::boolean = true OR f.status = 'active')
+              AND ($2::text IS NULL OR t.root_domain = $2::text
+                   OR LOWER(a.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY
+                CASE f.severity
+                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
+                    WHEN 'low' THEN 4 ELSE 5
+                END,
+                f.last_seen_at DESC NULLS LAST
+            LIMIT $3
+            """,
+            include_resolved,
+            root_domain,
+            limit,
+        )
+        for row in finding_rows:
+            row = row_to_dict(row)
+            emit(f"finding:{row['id']}", "finding", str(row.get("title") or "Finding"), row.get("severity"))
+
+    return {"nodes": nodes, "count": len(nodes)}
 
 
 # ============================================================
