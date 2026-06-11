@@ -606,6 +606,8 @@ export interface ExposureAsset {
   scan_age_days?: number | null
   action_reasons?: string[]
   needs_action?: boolean
+  action_priority?: 'P1' | 'P2' | 'P3' | null
+  action_score?: number
   first_seen_at?: string | null
   is_new: boolean
   risk_score: number
@@ -625,6 +627,9 @@ export interface ExposureAssetMetrics {
   stale_assets?: number
   incomplete_scans?: number
   needs_action?: number
+  p1_count?: number
+  p2_count?: number
+  p3_count?: number
   prod_ai_surfaces?: number
   high_blast_ai_surfaces?: number
 }
@@ -632,6 +637,8 @@ export interface ExposureAssetMetrics {
 export interface ExposureAssetsResponse {
   assets: ExposureAsset[]
   count: number
+  total?: number
+  offset?: number
   new_count: number
   metrics: ExposureAssetMetrics
 }

@@ -43,8 +43,10 @@ const KIND_FILTERS: Array<{ value: 'all' | ExposureAssetKind; label: string }> =
   { value: 'model', label: 'Model' },
 ]
 
-const POSTURE_FILTERS = [
-  { value: 'needs_action', label: 'Needs action' },
+export const POSTURE_FILTERS = [
+  { value: 'p1', label: 'P1' },
+  { value: 'p2', label: 'P2' },
+  { value: 'p3', label: 'P3' },
   { value: 'public', label: 'Public' },
   { value: 'internal', label: 'Internal' },
   { value: 'unscanned', label: 'Unscanned' },
@@ -52,7 +54,13 @@ const POSTURE_FILTERS = [
   { value: 'incomplete', label: 'Incomplete' },
 ] as const
 
-type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
+export type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
+
+export const PRIORITY_STYLES: Record<string, string> = {
+  P1: 'bg-red-500/20 text-red-300 border border-red-500/40',
+  P2: 'bg-orange-500/15 text-orange-300 border border-orange-500/30',
+  P3: 'bg-slate-500/15 text-slate-300 border border-slate-500/30',
+}
 
 const ACTION_LABELS: Record<string, string> = {
   never_scanned: 'Never scanned',
@@ -90,7 +98,7 @@ function relativeTime(value?: string | null): string {
 
 function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
   if (filter === 'all') return true
-  if (filter === 'needs_action') return Boolean(asset.needs_action)
+  if (filter === 'p1' || filter === 'p2' || filter === 'p3') return asset.action_priority === filter.toUpperCase()
   if (filter === 'public' || filter === 'internal') return asset.exposure_class === filter
   if (filter === 'unscanned') return (asset.action_reasons || []).includes('never_scanned')
   if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
@@ -120,28 +128,45 @@ function ExposureBadge({ asset }: { asset: ExposureAsset }) {
   )
 }
 
-function ScanPostureBadges({ asset }: { asset: ExposureAsset }) {
-  const reasons = asset.action_reasons || []
+function PriorityBadge({ priority }: { priority?: string | null }) {
+  if (!priority) return null
+  return (
+    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${PRIORITY_STYLES[priority] || 'bg-gray-700 text-gray-300'}`}>
+      {priority}
+    </span>
+  )
+}
+
+// Compact posture for the collapsed row: priority + exposure + an issue count.
+// Detail (reasons, coverage, blast, scan link) lives in the expanded row.
+function RowPosture({ asset }: { asset: ExposureAsset }) {
+  const issueCount = (asset.action_reasons || []).length
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <PriorityBadge priority={asset.action_priority} />
       <ExposureBadge asset={asset} />
-      {asset.scan_limited && (
-        <span className="inline-flex items-center gap-1 rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] uppercase text-amber-200">
+      {issueCount > 0 && (
+        <span className="inline-flex items-center gap-1 text-[10px] text-gray-500">
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
-          limited
+          {issueCount} {issueCount === 1 ? 'issue' : 'issues'}
         </span>
       )}
-      {reasons.includes('never_scanned') && (
-        <span className="inline-flex items-center gap-1 rounded border border-red-400/30 bg-red-400/10 px-1.5 py-0.5 text-[10px] uppercase text-red-200">
-          <ScanLine className="h-2.5 w-2.5" aria-hidden="true" />
-          unscanned
+    </div>
+  )
+}
+
+function PostureDetail({ asset }: { asset: ExposureAsset }) {
+  const reasons = asset.action_reasons || []
+  if (reasons.length === 0 && !asset.blast_radius_tier && !asset.latest_scan_href) return null
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-800/40 px-4 py-2">
+      {reasons.map((reason) => (
+        <span key={reason} className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
+          {actionLabel(reason)}
         </span>
-      )}
-      {reasons.includes('stale_scan') && (
-        <span className="inline-flex items-center gap-1 rounded border border-yellow-400/30 bg-yellow-400/10 px-1.5 py-0.5 text-[10px] uppercase text-yellow-200">
-          <Clock3 className="h-2.5 w-2.5" aria-hidden="true" />
-          stale
-        </span>
+      ))}
+      {asset.coverage_status && (
+        <span className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-500">coverage: {asset.coverage_status}</span>
       )}
       {asset.blast_radius_tier && (
         <span className="rounded border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[10px] uppercase text-purple-200">
@@ -151,7 +176,7 @@ function ScanPostureBadges({ asset }: { asset: ExposureAsset }) {
       {asset.latest_scan_href && (
         <Link
           href={asset.latest_scan_href}
-          className="inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-950 px-1.5 py-0.5 text-[10px] text-gray-400 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="ml-auto inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-950 px-1.5 py-0.5 text-[10px] text-gray-400 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <History className="h-2.5 w-2.5" aria-hidden="true" />
           {asset.latest_scan_type || 'scan'}
@@ -172,21 +197,27 @@ function ActionQueue({
   onExplore: (nodeId: string) => void
   scanningIds: Set<string>
 }) {
-  const queue = assets.filter((asset) => asset.needs_action).slice(0, 6)
+  const queue = [...assets.filter((asset) => asset.needs_action)]
+    .sort((a, b) => (b.action_score || 0) - (a.action_score || 0))
+    .slice(0, 6)
   if (queue.length === 0) return null
+  const p1 = assets.filter((a) => a.action_priority === 'P1').length
 
   return (
     <div className={`${styles.module} ${styles.corners} overflow-hidden`}>
       <div className={`flex items-center justify-between gap-3 px-4 py-3 ${styles.moduleHeader}`}>
         <div>
           <h2 className={`${styles.displayTitle} text-sm text-white`}>Action queue</h2>
-          <p className="mt-0.5 text-xs text-gray-500">Assets needing scan coverage, triage, or blast-radius review.</p>
+          <p className="mt-0.5 text-xs text-gray-500">Highest-priority assets to scan, triage, or review first.</p>
         </div>
-        <span className="shrink-0 text-xs text-gray-500">{queue.length} shown</span>
+        {p1 > 0 && (
+          <span className="shrink-0 rounded bg-red-500/15 px-2 py-0.5 text-xs font-semibold text-red-300">{p1} P1</span>
+        )}
       </div>
       <div className="grid divide-y divide-gray-800/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
         {queue.map((asset) => (
           <div key={asset.node_id} className="flex min-w-0 items-center gap-3 p-3">
+            <PriorityBadge priority={asset.action_priority} />
             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm text-gray-100">{asset.label}</div>
@@ -391,7 +422,7 @@ function AssetRow({
           <div className="mt-0.5 truncate text-[11px] text-gray-600">
             {asset.root_domain || asset.origin || asset.url}
           </div>
-          <ScanPostureBadges asset={asset} />
+          <RowPosture asset={asset} />
         </div>
 
         <div className="hidden w-28 shrink-0 items-center gap-2 text-xs sm:flex">
@@ -412,8 +443,7 @@ function AssetRow({
         </div>
 
         <div className="hidden w-24 shrink-0 text-right text-[11px] text-gray-600 lg:block">
-          <div>{relativeTime(asset.last_scanned_at)}</div>
-          {asset.coverage_status && <div className="truncate text-[10px] text-gray-700">{asset.coverage_status}</div>}
+          {relativeTime(asset.last_scanned_at)}
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
@@ -439,6 +469,7 @@ function AssetRow({
       </div>
       {open && (
         <div id={`findings-${asset.id}`} className="bg-black/30">
+          <PostureDetail asset={asset} />
           <InlineFindings asset={asset} />
         </div>
       )}
@@ -448,32 +479,48 @@ function AssetRow({
 
 export function TriageTable({
   assets,
-  metrics,
+  total,
   loading,
   error,
   onRetry,
   onExplore,
   onScan,
   scanningIds,
+  kind,
+  posture,
+  onKindChange,
+  onPostureChange,
 }: {
   assets: ExposureAsset[]
   metrics?: ExposureAssetMetrics | null
+  total?: number
   loading: boolean
   error: string | null
   onRetry: () => void
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
   scanningIds: Set<string>
+  kind: 'all' | ExposureAssetKind
+  posture: PostureFilter
+  onKindChange: (kind: 'all' | ExposureAssetKind) => void
+  onPostureChange: (posture: PostureFilter) => void
 }) {
-  const [kind, setKind] = useState<'all' | ExposureAssetKind>('all')
-  const [posture, setPosture] = useState<PostureFilter>('all')
   const [newOnly, setNewOnly] = useState(false)
+  const [sortBy, setSortBy] = useState<'priority' | 'critical' | 'stale'>('priority')
+  const [renderLimit, setRenderLimit] = useState(60)
 
   const filtered = useMemo(() => {
-    return assets.filter(
+    const rows = assets.filter(
       (a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture) && (!newOnly || a.is_new)
     )
-  }, [assets, kind, posture, newOnly])
+    const sorted = [...rows]
+    if (sortBy === 'critical') sorted.sort((a, b) => b.active_critical - a.active_critical || b.active_high - a.active_high)
+    else if (sortBy === 'stale') sorted.sort((a, b) => (b.scan_age_days ?? -1) - (a.scan_age_days ?? -1))
+    return sorted
+  }, [assets, kind, posture, newOnly, sortBy])
+
+  const visible = filtered.slice(0, renderLimit)
+  const datasetTotal = total ?? assets.length
 
   if (error) return <ErrorState message={error} onRetry={onRetry} />
 
@@ -488,7 +535,7 @@ export function TriageTable({
               key={f.value}
               type="button"
               aria-pressed={kind === f.value}
-              onClick={() => setKind(f.value)}
+              onClick={() => onKindChange(f.value)}
               className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 kind === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
               }`}
@@ -501,19 +548,19 @@ export function TriageTable({
           <button
             type="button"
             aria-pressed={posture === 'all'}
-            onClick={() => setPosture('all')}
+            onClick={() => onPostureChange('all')}
             className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
               posture === 'all' ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
             }`}
           >
-            All posture
+            All
           </button>
           {POSTURE_FILTERS.map((f) => (
             <button
               key={f.value}
               type="button"
               aria-pressed={posture === f.value}
-              onClick={() => setPosture(f.value)}
+              onClick={() => onPostureChange(f.value)}
               className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 posture === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
               }`}
@@ -531,8 +578,19 @@ export function TriageTable({
           />
           New only
         </label>
-        <span className="text-xs text-gray-500">
-          {filtered.length} shown · {metrics?.needs_action ?? assets.filter((a) => a.needs_action).length} total need action
+        <select
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as 'priority' | 'critical' | 'stale')}
+          aria-label="Sort assets"
+          className={`px-2 py-1.5 text-xs text-gray-300 ${styles.input}`}
+        >
+          <option value="priority">Sort: priority</option>
+          <option value="critical">Sort: most critical</option>
+          <option value="stale">Sort: oldest scan</option>
+        </select>
+        <span className="ml-auto text-xs text-gray-500">
+          Showing {Math.min(visible.length, filtered.length)} of {filtered.length}
+          {filtered.length !== datasetTotal && ` · ${datasetTotal} total`}
         </span>
       </div>
 
@@ -555,15 +613,26 @@ export function TriageTable({
         ) : filtered.length === 0 ? (
           <p className="p-8 text-center text-sm text-gray-500">No assets match this filter.</p>
         ) : (
-          filtered.map((asset) => (
-            <AssetRow
-              key={asset.node_id}
-              asset={asset}
-              onExplore={onExplore}
-              onScan={onScan}
-              scanning={scanningIds.has(asset.id)}
-            />
-          ))
+          <>
+            {visible.map((asset) => (
+              <AssetRow
+                key={asset.node_id}
+                asset={asset}
+                onExplore={onExplore}
+                onScan={onScan}
+                scanning={scanningIds.has(asset.id)}
+              />
+            ))}
+            {filtered.length > visible.length && (
+              <button
+                type="button"
+                onClick={() => setRenderLimit((n) => n + 60)}
+                className="w-full px-4 py-3 text-center text-xs text-teal-300 hover:bg-gray-800/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                Show {Math.min(60, filtered.length - visible.length)} more ({filtered.length - visible.length} hidden)
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

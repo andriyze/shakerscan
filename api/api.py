@@ -2894,6 +2894,8 @@ def _build_exposure_graph(
                 # a root domain — huggingface.co is not part of the user's
                 # attack surface, the artifact pulled from it is.
                 "origin" if is_model_artifact else "root_domain": root_domain,
+                "exposure_class": _exposure_class(target.get("url"), kind="model" if is_model_artifact else "web"),
+                "unscanned": int(target.get("total_scans") or 0) <= 0,
                 "last_score": target.get("last_score"),
                 "last_grade": target.get("last_grade"),
                 "active_findings_count": active_findings,
@@ -2932,6 +2934,8 @@ def _build_exposure_graph(
             meta={
                 "endpoint_url": ai_target.get("endpoint_url"),
                 "root_domain": root_domain,
+                "exposure_class": _exposure_class(ai_target.get("endpoint_url"), kind="ai"),
+                "unscanned": not ai_target.get("last_scanned_at"),
                 "target_type": ai_target.get("target_type"),
                 "method": ai_target.get("method"),
                 "production_mode": bool(ai_target.get("production_mode")),
@@ -5672,18 +5676,54 @@ def _exposure_days_since(value: Any) -> int | None:
     return max(0, (datetime.now(timezone.utc) - when).days)
 
 
-def _scan_completion_flags(result: Any) -> dict[str, Any]:
-    parsed = _parse_graph_json(result)
-    status = _parse_graph_json(parsed.get("scan_completion_status"))
+def _scan_completion_flags(completion_status: Any, top_coverage_status: Any = None) -> dict[str, Any]:
+    """Build scan-coverage flags from the small ``scan_completion_status`` object.
+
+    Callers extract only that sub-object (and the top-level coverage string) in
+    SQL so the multi-hundred-KB scan ``result`` blob is never shipped per asset.
+    """
+    status = _parse_graph_json(completion_status)
     complete = status.get("complete")
     limited = bool(status.get("limited") or status.get("budget_exhausted"))
     return {
         "scan_complete": complete if complete is not None else (False if limited else None),
         "scan_limited": limited,
-        "coverage_status": status.get("coverage_status") or parsed.get("coverage_status"),
+        "coverage_status": status.get("coverage_status") or top_coverage_status,
         "skipped_modules_count": len(status.get("skipped_modules") or []) if isinstance(status.get("skipped_modules"), list) else 0,
         "capped_lists_count": len(status.get("capped_lists") or {}) if isinstance(status.get("capped_lists"), dict) else 0,
     }
+
+
+# Action priority tiers, so the triage queue ranks the genuinely urgent few
+# instead of flagging the majority of assets with an undifferentiated boolean.
+_EXPOSURE_PRIORITY_WEIGHT = {"P1": 300, "P2": 200, "P3": 100}
+
+
+def _exposure_action_priority(
+    reasons: list[str],
+    *,
+    exposure_class: str,
+    active_critical: int,
+    active_high: int,
+) -> tuple[str | None, int]:
+    """Return ``(priority, score)`` for ranking. ``None`` when no action needed.
+
+    P1 = exploitable risk on an exposed/production surface, P2 = high-severity or
+    high-blast exposure, P3 = scan-hygiene only (stale / incomplete / unscanned).
+    """
+    rs = set(reasons)
+    if not rs:
+        return None, 0
+    if active_critical > 0 or "production_ai_risk" in rs:
+        priority = "P1"
+    elif "public_high_risk" in rs or "high_blast_radius" in rs or active_high > 0:
+        priority = "P2"
+    else:
+        priority = "P3"
+    score = _EXPOSURE_PRIORITY_WEIGHT[priority] + active_critical * 10 + active_high
+    if exposure_class == "public":
+        score += 25
+    return priority, score
 
 
 def _exposure_action_reasons(
@@ -5726,7 +5766,8 @@ def _exposure_action_reasons(
 async def exposure_assets(
     root_domain: Optional[str] = None,
     kind: Optional[str] = None,
-    limit: int = Query(300, ge=1, le=1000),
+    limit: int = Query(1000, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
 ):
     """Unified, risk-ranked asset inventory for the triage view.
 
@@ -5741,14 +5782,16 @@ async def exposure_assets(
             SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
                    t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
                    ls.id AS latest_scan_id, ls.status AS latest_scan_status,
-                   ls.scan_type AS latest_scan_type, ls.result AS latest_scan_result,
+                   ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
                    ls.completed_at AS latest_scan_completed_at,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
                    COALESCE(fc.active_high, 0) AS active_high
             FROM targets t
             LEFT JOIN LATERAL (
-                SELECT id, status, scan_type, result, completed_at
+                SELECT id, status, scan_type, completed_at,
+                       result -> 'scan_completion_status' AS completion_status,
+                       result ->> 'coverage_status' AS top_coverage_status
                 FROM scans s
                 WHERE s.target_id = t.id
                 ORDER BY s.created_at DESC
@@ -5772,19 +5815,26 @@ async def exposure_assets(
             SELECT a.id, a.name, a.endpoint_url, a.target_type, a.production_mode,
                    a.last_scanned_at, a.created_at, a.metadata_json,
                    ls.id AS latest_scan_id, ls.status AS latest_scan_status,
-                   ls.scan_type AS latest_scan_type, ls.result AS latest_scan_result,
+                   ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
                    ls.completed_at AS latest_scan_completed_at,
+                   COALESCE(sc.scan_count, 0) AS scan_count,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
                    COALESCE(fc.active_high, 0) AS active_high
             FROM ai_targets a
             LEFT JOIN LATERAL (
-                SELECT id, status, scan_type, result, completed_at
+                SELECT id, status, scan_type, completed_at,
+                       result -> 'scan_completion_status' AS completion_status,
+                       result ->> 'coverage_status' AS top_coverage_status
                 FROM scans s
                 WHERE s.ai_target_id = a.id
                 ORDER BY s.created_at DESC
                 LIMIT 1
             ) ls ON true
+            LEFT JOIN (
+                SELECT ai_target_id, COUNT(*) AS scan_count
+                FROM scans WHERE ai_target_id IS NOT NULL GROUP BY ai_target_id
+            ) sc ON sc.ai_target_id = a.id
             LEFT JOIN (
                 SELECT ai_target_id,
                     COUNT(*) FILTER (WHERE status = 'active') AS active_total,
@@ -5809,7 +5859,7 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
-        completion = _scan_completion_flags(row.get("latest_scan_result"))
+        completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("url"), kind=asset_kind)
         total_scans = int(row.get("total_scans") or 0)
         last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
@@ -5822,6 +5872,9 @@ async def exposure_assets(
             last_scanned_at=last_scanned_at,
             scan_limited=bool(completion["scan_limited"]),
             deployment_approved=None,
+        )
+        action_priority, action_score = _exposure_action_priority(
+            action_reasons, exposure_class=exposure_class, active_critical=crit, active_high=high
         )
         assets.append({
             "id": str(row["id"]),
@@ -5851,6 +5904,8 @@ async def exposure_assets(
             "scan_age_days": _exposure_days_since(last_scanned_at),
             "action_reasons": action_reasons,
             "needs_action": bool(action_reasons),
+            "action_priority": action_priority,
+            "action_score": action_score,
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5864,9 +5919,9 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
-        completion = _scan_completion_flags(row.get("latest_scan_result"))
+        completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("endpoint_url"), kind="ai")
-        total_scans = 1 if row.get("latest_scan_id") or row.get("last_scanned_at") else 0
+        total_scans = int(row.get("scan_count") or 0)
         last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
         blast_radius = build_agent_blast_radius(row, [{"status": "active"} for _ in range(total)])
         blast_radius_tier = str(blast_radius.get("tier") or "")
@@ -5880,6 +5935,9 @@ async def exposure_assets(
             scan_limited=bool(completion["scan_limited"]),
             production_mode=bool(row.get("production_mode")),
             blast_radius_tier=blast_radius_tier,
+        )
+        action_priority, action_score = _exposure_action_priority(
+            action_reasons, exposure_class=exposure_class, active_critical=crit, active_high=high
         )
         assets.append({
             "id": str(row["id"]),
@@ -5916,6 +5974,8 @@ async def exposure_assets(
             "scan_age_days": _exposure_days_since(last_scanned_at),
             "action_reasons": action_reasons,
             "needs_action": bool(action_reasons),
+            "action_priority": action_priority,
+            "action_score": action_score,
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5938,17 +5998,24 @@ async def exposure_assets(
         "stale_assets": sum(1 for a in assets if "stale_scan" in a.get("action_reasons", [])),
         "incomplete_scans": sum(1 for a in assets if "incomplete_scan" in a.get("action_reasons", [])),
         "needs_action": sum(1 for a in assets if a.get("needs_action")),
+        "p1_count": sum(1 for a in assets if a.get("action_priority") == "P1"),
+        "p2_count": sum(1 for a in assets if a.get("action_priority") == "P2"),
+        "p3_count": sum(1 for a in assets if a.get("action_priority") == "P3"),
         "prod_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("production_mode")),
         "high_blast_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("blast_radius_tier") in {"high", "critical"}),
     }
     new_count = sum(1 for a in assets if a["is_new"])
 
-    # Stable, deterministic ordering: risk, then newness, then id as a tiebreak.
-    assets.sort(key=lambda a: (a["risk_score"], a["is_new"], a["id"]), reverse=True)
-    assets = assets[:limit]
+    # Rank by action priority first, then raw risk — so the urgent few surface
+    # above the long tail. Stable id tiebreak keeps ordering deterministic.
+    assets.sort(key=lambda a: (a.get("action_score") or 0, a["risk_score"], a["is_new"], a["id"]), reverse=True)
+    total = len(assets)
+    assets = assets[offset:offset + limit]
     return {
         "assets": assets,
         "count": len(assets),
+        "total": total,
+        "offset": offset,
         "new_count": new_count,
         "metrics": metrics,
     }

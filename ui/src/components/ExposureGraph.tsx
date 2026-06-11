@@ -217,6 +217,23 @@ export function ExposureGraph({
         ctx.stroke()
       }
 
+      // Exposure posture parity with the triage list: an amber dotted ring marks
+      // unscanned assets, a dashed gray ring marks internal-only assets. Drawn
+      // just outside the node so it never competes with the severity ring.
+      if (ASSET_TYPES.has(node.type) && !dimmed) {
+        const unscanned = node.meta?.unscanned === true
+        const internal = node.meta?.exposure_class === 'internal'
+        if (unscanned || internal) {
+          ctx.beginPath()
+          ctx.arc(x, y, r + 2, 0, 2 * Math.PI)
+          ctx.setLineDash(unscanned ? [2 / globalScale, 2 / globalScale] : [3 / globalScale, 2 / globalScale])
+          ctx.lineWidth = 1 / globalScale
+          ctx.strokeStyle = unscanned ? '#fbbf24' : 'rgba(148,163,184,0.75)'
+          ctx.stroke()
+          ctx.setLineDash([])
+        }
+      }
+
       // Grouped findings get an inner ring + count to read as "many".
       if (node.type === 'finding_group') {
         ctx.beginPath()

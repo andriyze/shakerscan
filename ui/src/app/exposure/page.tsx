@@ -34,6 +34,7 @@ import {
   getExposureNodes,
   scanTarget,
   type ExposureAsset,
+  type ExposureAssetKind,
   type ExposureAssetMetrics,
   type ExposureAttackPath,
   type ExposureGraph,
@@ -44,7 +45,7 @@ import {
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
-import { TriageTable } from './TriageTable'
+import { TriageTable, POSTURE_FILTERS, type PostureFilter } from './TriageTable'
 import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
 
@@ -264,33 +265,65 @@ function StatPanel({
   )
 }
 
-function PostureSummary({ metrics }: { metrics: ExposureAssetMetrics | null }) {
-  const items = [
-    { label: 'Web', value: metrics?.web_targets ?? 0, tone: 'text-blue-300' },
-    { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-purple-300' },
-    { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-teal-300' },
-    { label: 'Public', value: metrics?.public_assets ?? 0, tone: 'text-cyan-300' },
-    { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300' },
-    { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300' },
-    { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300' },
-    { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300' },
-    { label: 'Prod AI', value: metrics?.prod_ai_surfaces ?? 0, tone: 'text-fuchsia-300' },
-    { label: 'High blast AI', value: metrics?.high_blast_ai_surfaces ?? 0, tone: 'text-orange-300' },
+function PostureSummary({
+  metrics,
+  kind,
+  posture,
+  onKind,
+  onPosture,
+}: {
+  metrics: ExposureAssetMetrics | null
+  kind: 'all' | ExposureAssetKind
+  posture: PostureFilter
+  onKind: (kind: 'all' | ExposureAssetKind) => void
+  onPosture: (posture: PostureFilter) => void
+}) {
+  // Curated, clickable filters — lead with priority, hide always-zero counts.
+  const priorityItems: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
+    { label: 'P1', value: metrics?.p1_count ?? 0, tone: 'text-red-300', posture: 'p1' },
+    { label: 'P2', value: metrics?.p2_count ?? 0, tone: 'text-orange-300', posture: 'p2' },
+    { label: 'P3', value: metrics?.p3_count ?? 0, tone: 'text-slate-300', posture: 'p3' },
   ]
+  const kindItems: Array<{ label: string; value: number; tone: string; kind: ExposureAssetKind }> = [
+    { label: 'Web', value: metrics?.web_targets ?? 0, tone: 'text-blue-300', kind: 'web' },
+    { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-purple-300', kind: 'ai' },
+    { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-teal-300', kind: 'model' },
+  ]
+  const postureItemsAll: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
+    { label: 'Public', value: metrics?.public_assets ?? 0, tone: 'text-cyan-300', posture: 'public' },
+    { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300', posture: 'unscanned' },
+    { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300', posture: 'stale' },
+    { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300', posture: 'incomplete' },
+  ]
+  const postureItems = postureItemsAll.filter((item) => item.value > 0)
+
+  const tile = (key: string, label: string, value: number, tone: string, active: boolean, onClick: () => void) => (
+    <button
+      key={key}
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`min-w-0 rounded px-2 py-1 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+        active ? 'bg-teal-500/15' : 'hover:bg-gray-800/60'
+      }`}
+    >
+      <div className={`text-sm font-semibold ${tone}`}>{value}</div>
+      <div className="text-[10px] uppercase tracking-wide text-gray-600">{label}</div>
+    </button>
+  )
 
   return (
     <Panel className="p-3">
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="mr-1 shrink-0">
           <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Exposure posture</div>
-          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} assets need action</div>
+          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} assets need action · click to filter</div>
         </div>
-        {items.map((item) => (
-          <div key={item.label} className="min-w-0">
-            <div className={`text-sm font-semibold ${item.tone}`}>{item.value}</div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-600">{item.label}</div>
-          </div>
-        ))}
+        {priorityItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
+        <span className="h-8 w-px bg-gray-800" aria-hidden="true" />
+        {kindItems.map((item) => tile(item.label, item.label, item.value, item.tone, kind === item.kind, () => onKind(kind === item.kind ? 'all' : item.kind)))}
+        {postureItems.length > 0 && <span className="h-8 w-px bg-gray-800" aria-hidden="true" />}
+        {postureItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture !== 'all' && posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
       </div>
     </Panel>
   )
@@ -426,6 +459,12 @@ function Legend() {
         <span className="inline-flex items-center gap-1.5">
           <Layers className="h-3 w-3" aria-hidden="true" /> Numbered = grouped findings
         </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-slate-400" aria-hidden="true" /> Dashed = internal
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-full border border-dotted border-amber-400" aria-hidden="true" /> Dotted = unscanned
+        </span>
         <span className="ml-auto">Hover for label · scroll to zoom · click to focus</span>
       </div>
     </div>
@@ -454,10 +493,13 @@ export default function ExposurePage() {
   // Triage lens
   const [assets, setAssets] = useState<ExposureAsset[]>([])
   const [assetMetrics, setAssetMetrics] = useState<ExposureAssetMetrics | null>(null)
+  const [assetTotal, setAssetTotal] = useState(0)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [newCount, setNewCount] = useState(0)
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set())
+  const [triageKind, setTriageKind] = useState<'all' | ExposureAssetKind>('all')
+  const [triagePosture, setTriagePosture] = useState<PostureFilter>('all')
   const graphKeyRef = useRef<string | null>(null)
   const pathsKeyRef = useRef<string | null>(null)
 
@@ -498,6 +540,7 @@ export default function ExposurePage() {
       const res = await getExposureAssets({ root_domain: domain || undefined })
       setAssets(res.assets || [])
       setAssetMetrics(res.metrics || null)
+      setAssetTotal(res.total ?? res.assets?.length ?? 0)
       setNewCount(res.new_count || 0)
       setAssetsError(null)
     } catch (err) {
@@ -740,10 +783,10 @@ export default function ExposurePage() {
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
         <StatPanel label="Assets" value={assetMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
         <StatPanel
-          label="Need Action"
-          value={assetMetrics?.needs_action ?? '--'}
+          label="P1 Priorities"
+          value={assetMetrics?.p1_count ?? '--'}
           icon={<Radar className="h-5 w-5" />}
-          alert={Boolean(assetMetrics && (assetMetrics.needs_action || 0) > 0)}
+          alert={Boolean(assetMetrics && (assetMetrics.p1_count || 0) > 0)}
         />
         <StatPanel
           label="Active Critical"
@@ -755,7 +798,13 @@ export default function ExposurePage() {
       </div>
 
       <div className={`${styles.rise} ${styles.d2}`}>
-        <PostureSummary metrics={assetMetrics} />
+        <PostureSummary
+          metrics={assetMetrics}
+          kind={triageKind}
+          posture={triagePosture}
+          onKind={(k) => { setTriageKind(k); setLens('triage') }}
+          onPosture={(p) => { setTriagePosture(p); setLens('triage') }}
+        />
       </div>
 
       {lens === 'triage' && (
@@ -763,12 +812,17 @@ export default function ExposurePage() {
           <TriageTable
             assets={assets}
             metrics={assetMetrics}
+            total={assetTotal}
             loading={assetsLoading}
             error={assetsError}
             onRetry={loadAssets}
             onExplore={focusById}
             onScan={handleScan}
             scanningIds={scanningIds}
+            kind={triageKind}
+            posture={triagePosture}
+            onKindChange={setTriageKind}
+            onPostureChange={setTriagePosture}
           />
         </div>
       )}
