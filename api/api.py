@@ -7,6 +7,7 @@ FastAPI server with PostgreSQL persistence and Redis queue.
 import asyncio
 import copy
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -5614,15 +5615,111 @@ async def exposure_nodes(
     return {"nodes": nodes, "count": len(nodes)}
 
 
+def _exposure_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
 def _exposure_is_new(created: Any, *, days: int = 7) -> bool:
-    if not isinstance(created, datetime):
+    when = _exposure_datetime(created)
+    if not when:
         return False
-    when = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - when) < timedelta(days=days)
 
 
 def _exposure_risk_score(critical: int, high: int, total: int) -> int:
     return critical * 1000 + high * 50 + total
+
+
+def _exposure_hostname(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw if "://" in raw else f"//{raw}")
+    return (parsed.hostname or "").lower()
+
+
+def _exposure_class(value: str | None, *, kind: str = "web") -> str:
+    if kind == "model":
+        return "supply_chain"
+    host = _exposure_hostname(value)
+    if not host:
+        return "unknown"
+    if host in {"localhost", "host.docker.internal"} or host.endswith(".internal") or host.endswith(".local"):
+        return "internal"
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            return "internal"
+    except ValueError:
+        pass
+    if "." not in host:
+        return "internal"
+    return "public"
+
+
+def _exposure_days_since(value: Any) -> int | None:
+    when = _exposure_datetime(value)
+    if not when:
+        return None
+    return max(0, (datetime.now(timezone.utc) - when).days)
+
+
+def _scan_completion_flags(result: Any) -> dict[str, Any]:
+    parsed = _parse_graph_json(result)
+    status = _parse_graph_json(parsed.get("scan_completion_status"))
+    complete = status.get("complete")
+    limited = bool(status.get("limited") or status.get("budget_exhausted"))
+    return {
+        "scan_complete": complete if complete is not None else (False if limited else None),
+        "scan_limited": limited,
+        "coverage_status": status.get("coverage_status") or parsed.get("coverage_status"),
+        "skipped_modules_count": len(status.get("skipped_modules") or []) if isinstance(status.get("skipped_modules"), list) else 0,
+        "capped_lists_count": len(status.get("capped_lists") or {}) if isinstance(status.get("capped_lists"), dict) else 0,
+    }
+
+
+def _exposure_action_reasons(
+    *,
+    kind: str,
+    exposure_class: str,
+    active_critical: int,
+    active_high: int,
+    total_scans: int,
+    last_scanned_at: Any,
+    scan_limited: bool,
+    production_mode: bool = False,
+    blast_radius_tier: str | None = None,
+    deployment_approved: bool | None = None,
+) -> list[str]:
+    reasons: list[str] = []
+    days = _exposure_days_since(last_scanned_at)
+    if total_scans <= 0 or not last_scanned_at:
+        reasons.append("never_scanned")
+    elif days is not None and days >= 30:
+        reasons.append("stale_scan")
+    if scan_limited:
+        reasons.append("incomplete_scan")
+    if active_critical > 0:
+        reasons.append("critical_findings")
+    elif active_high > 0:
+        reasons.append("high_findings")
+    if exposure_class == "public" and (active_critical > 0 or active_high > 0):
+        reasons.append("public_high_risk")
+    if kind == "ai" and production_mode and (active_critical > 0 or active_high > 0):
+        reasons.append("production_ai_risk")
+    if kind == "ai" and blast_radius_tier in {"high", "critical"}:
+        reasons.append("high_blast_radius")
+    if kind == "model" and deployment_approved is False:
+        reasons.append("model_not_approved")
+    return reasons
 
 
 @app.get("/exposure/assets")
@@ -5643,10 +5740,20 @@ async def exposure_assets(
             """
             SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
                    t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
+                   ls.id AS latest_scan_id, ls.status AS latest_scan_status,
+                   ls.scan_type AS latest_scan_type, ls.result AS latest_scan_result,
+                   ls.completed_at AS latest_scan_completed_at,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
                    COALESCE(fc.active_high, 0) AS active_high
             FROM targets t
+            LEFT JOIN LATERAL (
+                SELECT id, status, scan_type, result, completed_at
+                FROM scans s
+                WHERE s.target_id = t.id
+                ORDER BY s.created_at DESC
+                LIMIT 1
+            ) ls ON true
             LEFT JOIN (
                 SELECT target_id,
                     COUNT(*) FILTER (WHERE status = 'active') AS active_total,
@@ -5663,11 +5770,21 @@ async def exposure_assets(
         ai_rows = await conn.fetch(
             """
             SELECT a.id, a.name, a.endpoint_url, a.target_type, a.production_mode,
-                   a.last_scanned_at, a.created_at,
+                   a.last_scanned_at, a.created_at, a.metadata_json,
+                   ls.id AS latest_scan_id, ls.status AS latest_scan_status,
+                   ls.scan_type AS latest_scan_type, ls.result AS latest_scan_result,
+                   ls.completed_at AS latest_scan_completed_at,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
                    COALESCE(fc.active_high, 0) AS active_high
             FROM ai_targets a
+            LEFT JOIN LATERAL (
+                SELECT id, status, scan_type, result, completed_at
+                FROM scans s
+                WHERE s.ai_target_id = a.id
+                ORDER BY s.created_at DESC
+                LIMIT 1
+            ) ls ON true
             LEFT JOIN (
                 SELECT ai_target_id,
                     COUNT(*) FILTER (WHERE status = 'active') AS active_total,
@@ -5692,6 +5809,20 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
+        completion = _scan_completion_flags(row.get("latest_scan_result"))
+        exposure_class = _exposure_class(row.get("url"), kind=asset_kind)
+        total_scans = int(row.get("total_scans") or 0)
+        last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
+        action_reasons = _exposure_action_reasons(
+            kind=asset_kind,
+            exposure_class=exposure_class,
+            active_critical=crit,
+            active_high=high,
+            total_scans=total_scans,
+            last_scanned_at=last_scanned_at,
+            scan_limited=bool(completion["scan_limited"]),
+            deployment_approved=None,
+        )
         assets.append({
             "id": str(row["id"]),
             "node_id": f"target:{row['id']}",
@@ -5700,13 +5831,26 @@ async def exposure_assets(
             "url": row.get("url"),
             "root_domain": None if is_model else row.get("root_domain"),
             "origin": row.get("root_domain") if is_model else None,
+            "exposure_class": exposure_class,
             "grade": row.get("last_grade"),
             "score": row.get("last_score"),
             "active_total": total,
             "active_critical": crit,
             "active_high": high,
-            "total_scans": row.get("total_scans") or 0,
-            "last_scanned_at": row.get("last_scanned_at"),
+            "total_scans": total_scans,
+            "last_scanned_at": last_scanned_at,
+            "latest_scan_id": str(row["latest_scan_id"]) if row.get("latest_scan_id") else None,
+            "latest_scan_status": row.get("latest_scan_status"),
+            "latest_scan_type": row.get("latest_scan_type"),
+            "latest_scan_href": f"/scans/{row['latest_scan_id']}" if row.get("latest_scan_id") else None,
+            "scan_complete": completion["scan_complete"],
+            "scan_limited": completion["scan_limited"],
+            "coverage_status": completion["coverage_status"],
+            "skipped_modules_count": completion["skipped_modules_count"],
+            "capped_lists_count": completion["capped_lists_count"],
+            "scan_age_days": _exposure_days_since(last_scanned_at),
+            "action_reasons": action_reasons,
+            "needs_action": bool(action_reasons),
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5720,6 +5864,23 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
+        completion = _scan_completion_flags(row.get("latest_scan_result"))
+        exposure_class = _exposure_class(row.get("endpoint_url"), kind="ai")
+        total_scans = 1 if row.get("latest_scan_id") or row.get("last_scanned_at") else 0
+        last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
+        blast_radius = build_agent_blast_radius(row, [{"status": "active"} for _ in range(total)])
+        blast_radius_tier = str(blast_radius.get("tier") or "")
+        action_reasons = _exposure_action_reasons(
+            kind="ai",
+            exposure_class=exposure_class,
+            active_critical=crit,
+            active_high=high,
+            total_scans=total_scans,
+            last_scanned_at=last_scanned_at,
+            scan_limited=bool(completion["scan_limited"]),
+            production_mode=bool(row.get("production_mode")),
+            blast_radius_tier=blast_radius_tier,
+        )
         assets.append({
             "id": str(row["id"]),
             "node_id": f"ai_target:{row['id']}",
@@ -5729,12 +5890,32 @@ async def exposure_assets(
             "root_domain": extract_root_domain(row.get("endpoint_url") or ""),
             "target_type": row.get("target_type"),
             "production_mode": bool(row.get("production_mode")),
+            "exposure_class": exposure_class,
+            "blast_radius_score": blast_radius.get("score"),
+            "blast_radius_tier": blast_radius.get("tier"),
+            "blast_radius_factors": blast_radius.get("factors") or [],
+            "data_classification": blast_radius.get("data_classification"),
+            "risk_tier": blast_radius.get("risk_tier"),
+            "missing_runtime_controls": blast_radius.get("missing_runtime_controls") or [],
             "grade": None,
             "score": None,
             "active_total": total,
             "active_critical": crit,
             "active_high": high,
-            "last_scanned_at": row.get("last_scanned_at"),
+            "total_scans": total_scans,
+            "last_scanned_at": last_scanned_at,
+            "latest_scan_id": str(row["latest_scan_id"]) if row.get("latest_scan_id") else None,
+            "latest_scan_status": row.get("latest_scan_status"),
+            "latest_scan_type": row.get("latest_scan_type"),
+            "latest_scan_href": f"/scans/{row['latest_scan_id']}" if row.get("latest_scan_id") else None,
+            "scan_complete": completion["scan_complete"],
+            "scan_limited": completion["scan_limited"],
+            "coverage_status": completion["coverage_status"],
+            "skipped_modules_count": completion["skipped_modules_count"],
+            "capped_lists_count": completion["capped_lists_count"],
+            "scan_age_days": _exposure_days_since(last_scanned_at),
+            "action_reasons": action_reasons,
+            "needs_action": bool(action_reasons),
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5749,6 +5930,16 @@ async def exposure_assets(
         "active_critical": sum(a["active_critical"] for a in assets),
         "active_high": sum(a["active_high"] for a in assets),
         "ai_surfaces": sum(1 for a in assets if a["kind"] == "ai"),
+        "web_targets": sum(1 for a in assets if a["kind"] == "web"),
+        "model_artifacts": sum(1 for a in assets if a["kind"] == "model"),
+        "public_assets": sum(1 for a in assets if a.get("exposure_class") == "public"),
+        "internal_assets": sum(1 for a in assets if a.get("exposure_class") == "internal"),
+        "unscanned_assets": sum(1 for a in assets if "never_scanned" in a.get("action_reasons", [])),
+        "stale_assets": sum(1 for a in assets if "stale_scan" in a.get("action_reasons", [])),
+        "incomplete_scans": sum(1 for a in assets if "incomplete_scan" in a.get("action_reasons", [])),
+        "needs_action": sum(1 for a in assets if a.get("needs_action")),
+        "prod_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("production_mode")),
+        "high_blast_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("blast_radius_tier") in {"high", "critical"}),
     }
     new_count = sum(1 for a in assets if a["is_new"])
 
@@ -5825,11 +6016,18 @@ async def exposure_attack_paths(
                     "description": st.get("description"),
                     "impact": st.get("impact"),
                     "finding_type": st.get("finding_type"),
+                    "finding_id": st.get("finding_id") or st.get("source_finding_id"),
+                    "evidence": st.get("evidence"),
                 }
                 for st in (chain.get("steps") or [])
                 if isinstance(st, dict)
             ]
             severity = str(chain.get("severity") or "").lower() or None
+            missing_required = chain.get("missing_required") or chain.get("missing_steps") or []
+            if isinstance(missing_required, str):
+                missing_required = [missing_required]
+            elif not isinstance(missing_required, list):
+                missing_required = []
             paths.append({
                 "id": f"{row['id']}:{chain_type}:{idx}",
                 "name": chain.get("name") or chain_type,
@@ -5838,6 +6036,7 @@ async def exposure_attack_paths(
                 "status": chain.get("status"),
                 "confidence": chain.get("confidence"),
                 "completeness": chain.get("completeness"),
+                "missing_required": missing_required,
                 "business_impact": chain.get("business_impact"),
                 "description": chain.get("description"),
                 "remediation": chain.get("remediation"),

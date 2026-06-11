@@ -2,12 +2,27 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Bot, Boxes, ChevronRight, Loader2, Radar, ScanLine, ShieldAlert, Target } from 'lucide-react'
+import {
+  AlertTriangle,
+  Bot,
+  Boxes,
+  ChevronRight,
+  Clock3,
+  ExternalLink,
+  History,
+  Loader2,
+  Radar,
+  RadioTower,
+  ScanLine,
+  ShieldAlert,
+  Target,
+} from 'lucide-react'
 import {
   getFindings,
   updateFinding,
   type ExposureAsset,
   type ExposureAssetKind,
+  type ExposureAssetMetrics,
   type Finding,
 } from '@/lib/api'
 import { FINDING_STATUSES, SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
@@ -27,6 +42,29 @@ const KIND_FILTERS: Array<{ value: 'all' | ExposureAssetKind; label: string }> =
   { value: 'ai', label: 'AI' },
   { value: 'model', label: 'Model' },
 ]
+
+const POSTURE_FILTERS = [
+  { value: 'needs_action', label: 'Needs action' },
+  { value: 'public', label: 'Public' },
+  { value: 'internal', label: 'Internal' },
+  { value: 'unscanned', label: 'Unscanned' },
+  { value: 'stale', label: 'Stale' },
+  { value: 'incomplete', label: 'Incomplete' },
+] as const
+
+type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
+
+const ACTION_LABELS: Record<string, string> = {
+  never_scanned: 'Never scanned',
+  stale_scan: 'Stale scan',
+  incomplete_scan: 'Incomplete scan',
+  critical_findings: 'Critical findings',
+  high_findings: 'High findings',
+  public_high_risk: 'Public high risk',
+  production_ai_risk: 'Production AI risk',
+  high_blast_radius: 'High blast radius',
+  model_not_approved: 'Model not approved',
+}
 
 function riskDot(asset: ExposureAsset): string {
   if (asset.active_critical > 0) return 'bg-red-500'
@@ -48,6 +86,151 @@ function relativeTime(value?: string | null): string {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
   return `${Math.floor(secs / 86400)}d ago`
+}
+
+function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'needs_action') return Boolean(asset.needs_action)
+  if (filter === 'public' || filter === 'internal') return asset.exposure_class === filter
+  if (filter === 'unscanned') return (asset.action_reasons || []).includes('never_scanned')
+  if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
+  if (filter === 'incomplete') return Boolean(asset.scan_limited)
+  return true
+}
+
+function actionLabel(reason: string): string {
+  return ACTION_LABELS[reason] || reason.replace(/_/g, ' ')
+}
+
+function ExposureBadge({ asset }: { asset: ExposureAsset }) {
+  const exposure = asset.exposure_class || 'unknown'
+  const className =
+    exposure === 'public'
+      ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200'
+      : exposure === 'internal'
+        ? 'border-slate-500/40 bg-slate-500/10 text-slate-300'
+        : exposure === 'supply_chain'
+          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+          : 'border-gray-700 bg-gray-800 text-gray-400'
+  return (
+    <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] uppercase ${className}`}>
+      <RadioTower className="h-2.5 w-2.5" aria-hidden="true" />
+      {exposure === 'supply_chain' ? 'supply chain' : exposure}
+    </span>
+  )
+}
+
+function ScanPostureBadges({ asset }: { asset: ExposureAsset }) {
+  const reasons = asset.action_reasons || []
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <ExposureBadge asset={asset} />
+      {asset.scan_limited && (
+        <span className="inline-flex items-center gap-1 rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] uppercase text-amber-200">
+          <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+          limited
+        </span>
+      )}
+      {reasons.includes('never_scanned') && (
+        <span className="inline-flex items-center gap-1 rounded border border-red-400/30 bg-red-400/10 px-1.5 py-0.5 text-[10px] uppercase text-red-200">
+          <ScanLine className="h-2.5 w-2.5" aria-hidden="true" />
+          unscanned
+        </span>
+      )}
+      {reasons.includes('stale_scan') && (
+        <span className="inline-flex items-center gap-1 rounded border border-yellow-400/30 bg-yellow-400/10 px-1.5 py-0.5 text-[10px] uppercase text-yellow-200">
+          <Clock3 className="h-2.5 w-2.5" aria-hidden="true" />
+          stale
+        </span>
+      )}
+      {asset.blast_radius_tier && (
+        <span className="rounded border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[10px] uppercase text-purple-200">
+          {asset.blast_radius_tier} blast
+        </span>
+      )}
+      {asset.latest_scan_href && (
+        <Link
+          href={asset.latest_scan_href}
+          className="inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-950 px-1.5 py-0.5 text-[10px] text-gray-400 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <History className="h-2.5 w-2.5" aria-hidden="true" />
+          {asset.latest_scan_type || 'scan'}
+        </Link>
+      )}
+    </div>
+  )
+}
+
+function ActionQueue({
+  assets,
+  onScan,
+  onExplore,
+  scanningIds,
+}: {
+  assets: ExposureAsset[]
+  onScan: (asset: ExposureAsset) => void
+  onExplore: (nodeId: string) => void
+  scanningIds: Set<string>
+}) {
+  const queue = assets.filter((asset) => asset.needs_action).slice(0, 6)
+  if (queue.length === 0) return null
+
+  return (
+    <div className={`${styles.module} ${styles.corners} overflow-hidden`}>
+      <div className={`flex items-center justify-between gap-3 px-4 py-3 ${styles.moduleHeader}`}>
+        <div>
+          <h2 className={`${styles.displayTitle} text-sm text-white`}>Action queue</h2>
+          <p className="mt-0.5 text-xs text-gray-500">Assets needing scan coverage, triage, or blast-radius review.</p>
+        </div>
+        <span className="shrink-0 text-xs text-gray-500">{queue.length} shown</span>
+      </div>
+      <div className="grid divide-y divide-gray-800/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+        {queue.map((asset) => (
+          <div key={asset.node_id} className="flex min-w-0 items-center gap-3 p-3">
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm text-gray-100">{asset.label}</div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {(asset.action_reasons || []).slice(0, 3).map((reason) => (
+                  <span key={reason} className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
+                    {actionLabel(reason)}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {asset.kind === 'web' && (
+                <button
+                  type="button"
+                  onClick={() => onScan(asset)}
+                  disabled={scanningIds.has(asset.id)}
+                  aria-label={`Start quick scan for ${asset.label}`}
+                  className="rounded border border-teal-400/30 bg-teal-400/10 p-1.5 text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  {scanningIds.has(asset.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onExplore(asset.node_id)}
+                aria-label={`Explore ${asset.label}`}
+                className="rounded border border-gray-700 p-1.5 text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                <Radar className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+              <Link
+                href={asset.findings_href}
+                aria-label={`Open findings for ${asset.label}`}
+                className="rounded border border-gray-700 p-1.5 text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+              </Link>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function InlineFindings({ asset }: { asset: ExposureAsset }) {
@@ -208,6 +391,7 @@ function AssetRow({
           <div className="mt-0.5 truncate text-[11px] text-gray-600">
             {asset.root_domain || asset.origin || asset.url}
           </div>
+          <ScanPostureBadges asset={asset} />
         </div>
 
         <div className="hidden w-28 shrink-0 items-center gap-2 text-xs sm:flex">
@@ -227,7 +411,10 @@ function AssetRow({
           )}
         </div>
 
-        <div className="hidden w-20 shrink-0 text-right text-[11px] text-gray-600 lg:block">{relativeTime(asset.last_scanned_at)}</div>
+        <div className="hidden w-24 shrink-0 text-right text-[11px] text-gray-600 lg:block">
+          <div>{relativeTime(asset.last_scanned_at)}</div>
+          {asset.coverage_status && <div className="truncate text-[10px] text-gray-700">{asset.coverage_status}</div>}
+        </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
           {primaryAction}
@@ -261,6 +448,7 @@ function AssetRow({
 
 export function TriageTable({
   assets,
+  metrics,
   loading,
   error,
   onRetry,
@@ -269,6 +457,7 @@ export function TriageTable({
   scanningIds,
 }: {
   assets: ExposureAsset[]
+  metrics?: ExposureAssetMetrics | null
   loading: boolean
   error: string | null
   onRetry: () => void
@@ -277,16 +466,21 @@ export function TriageTable({
   scanningIds: Set<string>
 }) {
   const [kind, setKind] = useState<'all' | ExposureAssetKind>('all')
+  const [posture, setPosture] = useState<PostureFilter>('all')
   const [newOnly, setNewOnly] = useState(false)
 
   const filtered = useMemo(() => {
-    return assets.filter((a) => (kind === 'all' || a.kind === kind) && (!newOnly || a.is_new))
-  }, [assets, kind, newOnly])
+    return assets.filter(
+      (a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture) && (!newOnly || a.is_new)
+    )
+  }, [assets, kind, posture, newOnly])
 
   if (error) return <ErrorState message={error} onRetry={onRetry} />
 
   return (
     <div className="space-y-3">
+      <ActionQueue assets={assets} onScan={onScan} onExplore={onExplore} scanningIds={scanningIds} />
+
       <div className="flex flex-wrap items-center gap-3">
         <div className={`inline-flex p-0.5 ${styles.input}`} role="group" aria-label="Filter by asset kind">
           {KIND_FILTERS.map((f) => (
@@ -303,6 +497,31 @@ export function TriageTable({
             </button>
           ))}
         </div>
+        <div className={`inline-flex p-0.5 ${styles.input}`} role="group" aria-label="Filter by exposure posture">
+          <button
+            type="button"
+            aria-pressed={posture === 'all'}
+            onClick={() => setPosture('all')}
+            className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              posture === 'all' ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            All posture
+          </button>
+          {POSTURE_FILTERS.map((f) => (
+            <button
+              key={f.value}
+              type="button"
+              aria-pressed={posture === f.value}
+              onClick={() => setPosture(f.value)}
+              className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                posture === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
         <label className={`flex items-center gap-2 px-3 py-1.5 text-xs text-gray-300 ${styles.input}`}>
           <input
             type="checkbox"
@@ -312,7 +531,9 @@ export function TriageTable({
           />
           New only
         </label>
-        <span className="text-xs text-gray-500">{filtered.length} assets · ranked by risk</span>
+        <span className="text-xs text-gray-500">
+          {filtered.length} shown · {metrics?.needs_action ?? assets.filter((a) => a.needs_action).length} total need action
+        </span>
       </div>
 
       <div className={`${styles.module} ${styles.corners} overflow-hidden`}>
@@ -322,7 +543,7 @@ export function TriageTable({
           <span className="flex-1">Asset</span>
           <span className="w-28 shrink-0">Crit / High</span>
           <span className="hidden w-10 shrink-0 text-center md:block">Grade</span>
-          <span className="hidden w-20 shrink-0 text-right lg:block">Scanned</span>
+          <span className="hidden w-24 shrink-0 text-right lg:block">Scanned</span>
           <span className="shrink-0">Actions</span>
         </div>
         {loading ? (

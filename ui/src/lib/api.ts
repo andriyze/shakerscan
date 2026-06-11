@@ -546,10 +546,19 @@ export type ExposureNodeType =
 export interface ExposureMetrics {
   asset_count: number
   web_targets: number
+  model_artifacts?: number
   ai_surfaces: number
   active_critical: number
   active_high: number
   attack_chains: number
+  public_assets?: number
+  internal_assets?: number
+  unscanned_assets?: number
+  stale_assets?: number
+  incomplete_scans?: number
+  needs_action?: number
+  prod_ai_surfaces?: number
+  high_blast_ai_surfaces?: number
 }
 
 export interface ExposureSearchNode {
@@ -569,8 +578,15 @@ export interface ExposureAsset {
   url?: string | null
   root_domain?: string | null
   origin?: string | null
+  exposure_class?: 'public' | 'internal' | 'supply_chain' | 'unknown' | string | null
   target_type?: string | null
   production_mode?: boolean
+  blast_radius_score?: number | null
+  blast_radius_tier?: string | null
+  blast_radius_factors?: string[]
+  data_classification?: string | null
+  risk_tier?: string | null
+  missing_runtime_controls?: string[]
   grade?: string | null
   score?: number | null
   active_total: number
@@ -578,6 +594,18 @@ export interface ExposureAsset {
   active_high: number
   total_scans?: number
   last_scanned_at?: string | null
+  latest_scan_id?: string | null
+  latest_scan_status?: string | null
+  latest_scan_type?: string | null
+  latest_scan_href?: string | null
+  scan_complete?: boolean | null
+  scan_limited?: boolean
+  coverage_status?: string | null
+  skipped_modules_count?: number
+  capped_lists_count?: number
+  scan_age_days?: number | null
+  action_reasons?: string[]
+  needs_action?: boolean
   first_seen_at?: string | null
   is_new: boolean
   risk_score: number
@@ -589,6 +617,16 @@ export interface ExposureAssetMetrics {
   active_critical: number
   active_high: number
   ai_surfaces: number
+  web_targets?: number
+  model_artifacts?: number
+  public_assets?: number
+  internal_assets?: number
+  unscanned_assets?: number
+  stale_assets?: number
+  incomplete_scans?: number
+  needs_action?: number
+  prod_ai_surfaces?: number
+  high_blast_ai_surfaces?: number
 }
 
 export interface ExposureAssetsResponse {
@@ -603,6 +641,8 @@ export interface ExposureAttackStep {
   description?: string | null
   impact?: string | null
   finding_type?: string | null
+  finding_id?: string | null
+  evidence?: unknown
 }
 
 export interface ExposureAttackPath {
@@ -615,7 +655,8 @@ export interface ExposureAttackPath {
   completeness?: number | null
   business_impact?: string | null
   description?: string | null
-  remediation?: string | null
+  remediation?: string | string[] | null
+  missing_required?: string[]
   steps: ExposureAttackStep[]
   asset_label?: string | null
   asset_node_id?: string | null

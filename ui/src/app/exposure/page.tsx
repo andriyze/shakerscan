@@ -264,6 +264,38 @@ function StatPanel({
   )
 }
 
+function PostureSummary({ metrics }: { metrics: ExposureAssetMetrics | null }) {
+  const items = [
+    { label: 'Web', value: metrics?.web_targets ?? 0, tone: 'text-blue-300' },
+    { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-purple-300' },
+    { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-teal-300' },
+    { label: 'Public', value: metrics?.public_assets ?? 0, tone: 'text-cyan-300' },
+    { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300' },
+    { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300' },
+    { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300' },
+    { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300' },
+    { label: 'Prod AI', value: metrics?.prod_ai_surfaces ?? 0, tone: 'text-fuchsia-300' },
+    { label: 'High blast AI', value: metrics?.high_blast_ai_surfaces ?? 0, tone: 'text-orange-300' },
+  ]
+
+  return (
+    <Panel className="p-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <div className="mr-1 shrink-0">
+          <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Exposure posture</div>
+          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} assets need action</div>
+        </div>
+        {items.map((item) => (
+          <div key={item.label} className="min-w-0">
+            <div className={`text-sm font-semibold ${item.tone}`}>{item.value}</div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-600">{item.label}</div>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  )
+}
+
 function NodeDetailPanel({
   node,
   neighbors,
@@ -708,19 +740,29 @@ export default function ExposurePage() {
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
         <StatPanel label="Assets" value={assetMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
         <StatPanel
+          label="Need Action"
+          value={assetMetrics?.needs_action ?? '--'}
+          icon={<Radar className="h-5 w-5" />}
+          alert={Boolean(assetMetrics && (assetMetrics.needs_action || 0) > 0)}
+        />
+        <StatPanel
           label="Active Critical"
           value={assetMetrics?.active_critical ?? '--'}
           icon={<AlertTriangle className="h-5 w-5" />}
           alert={Boolean(assetMetrics && assetMetrics.active_critical > 0)}
         />
         <StatPanel label="Active High" value={assetMetrics?.active_high ?? '--'} icon={<ShieldAlert className="h-5 w-5" />} />
-        <StatPanel label="AI Surfaces" value={assetMetrics?.ai_surfaces ?? '--'} icon={<Bot className="h-5 w-5" />} />
+      </div>
+
+      <div className={`${styles.rise} ${styles.d2}`}>
+        <PostureSummary metrics={assetMetrics} />
       </div>
 
       {lens === 'triage' && (
         <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3}`}>
           <TriageTable
             assets={assets}
+            metrics={assetMetrics}
             loading={assetsLoading}
             error={assetsError}
             onRetry={loadAssets}
