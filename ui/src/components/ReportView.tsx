@@ -433,6 +433,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
+  const nucleiTemplates = smart_coverage.nuclei_templates || {}
+  const nucleiRunApproximate = Boolean(nucleiTemplates.run_approximate)
   const attack_chains = scanData.attack_chains || scanData.result?.attack_chains || null
   const client_side_vulns = scanData.client_side_vulns || {}
   const auth_checks = scanData.auth_checks || {}
@@ -2886,20 +2888,27 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-semibold text-gray-400">Template Hit Rate</h3>
                   <span className="text-lg font-bold text-white">
-                    {Math.round((smart_coverage.nuclei_templates.hit_rate || 0) * 100)}%
+                    {Math.round((nucleiTemplates.hit_rate || 0) * 100)}%
                   </span>
                 </div>
                 <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
                   <div
                     className={`h-2 rounded-full transition-all ${
-                      (smart_coverage.nuclei_templates.hit_rate || 0) > 0.1 ? 'bg-red-500' :
-                      (smart_coverage.nuclei_templates.hit_rate || 0) > 0.05 ? 'bg-yellow-500' : 'bg-green-500'
+                      (nucleiTemplates.hit_rate || 0) > 0.1 ? 'bg-red-500' :
+                      (nucleiTemplates.hit_rate || 0) > 0.05 ? 'bg-yellow-500' : 'bg-green-500'
                     }`}
-                    style={{ width: `${Math.min((smart_coverage.nuclei_templates.hit_rate || 0) * 100, 100)}%` }}
+                    style={{ width: `${Math.min((nucleiTemplates.hit_rate || 0) * 100, 100)}%` }}
                   />
                 </div>
-                <p className="text-xs text-gray-500">
-                  {smart_coverage.nuclei_templates.matched || 0} matched / {smart_coverage.nuclei_templates.run || 0} run
+                <p className="flex items-center gap-2 text-xs text-gray-500">
+                  <span>
+                    {nucleiTemplates.matched || 0} matched / {nucleiRunApproximate ? '~' : ''}{nucleiTemplates.run || 0} run
+                  </span>
+                  {nucleiRunApproximate && (
+                    <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                      estimated
+                    </span>
+                  )}
                 </p>
               </div>
             )}
