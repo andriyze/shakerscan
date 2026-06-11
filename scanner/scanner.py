@@ -316,6 +316,23 @@ except ImportError:
 
 # ---------- utility functions ----------
 
+def _empty_vendor_risk_result(target: str):
+    """Return an empty VendorRiskResult so vendor-risk failures do not abort scans."""
+    from scanner_tools.vendor_risk import VendorRiskResult
+
+    return VendorRiskResult(
+        target=target,
+        assessed_at="",
+        total_third_parties=0,
+        third_party_domains=[],
+        resources=[],
+        risk_score=0,
+        risk_level="unknown",
+        findings=[],
+        summary={},
+    )
+
+
 def normalize_host(target: str) -> tuple[str,int,str]:
     """Enhanced host normalization with protocol auto-detection"""
     try:
@@ -3328,18 +3345,7 @@ async def build_report(target: str,
         ))
     else:
         async def dummy_vendor():
-            from scanner_tools.vendor_risk import VendorRiskResult
-            return VendorRiskResult(
-                target=base_url,
-                assessed_at="",
-                total_third_parties=0,
-                third_party_domains=[],
-                resources=[],
-                risk_score=0,
-                risk_level="unknown",
-                findings=[],
-                summary={}
-            )
+            return _empty_vendor_risk_result(base_url)
         vendor_risk_task = asyncio.create_task(dummy_vendor())
 
     # discovery + browser
@@ -4897,7 +4903,12 @@ async def build_report(target: str,
     emit_progress("phase_4", 85, "priority and enhancement checks complete")
     registry_results = await await_with_timeout(registry_task, _phase4_timeout(60, "registry"), {"registrar": None, "creation_date": None, "expiration_date": None}, "registry")
     breach_check_results = await await_with_timeout(breach_check_task, _phase4_timeout(60, "breach_check"), {"breaches": [], "exposed_emails": []}, "breach_check")
-    vendor_risk_results = await await_with_timeout(vendor_risk_task, _phase4_timeout(60, "vendor_risk"), {"risk_score": None, "vendors": []}, "vendor_risk")
+    vendor_risk_results = await await_with_timeout(
+        vendor_risk_task,
+        _phase4_timeout(60, "vendor_risk"),
+        _empty_vendor_risk_result(base_url),
+        "vendor_risk",
+    )
 
     # IP Reputation: Now run with actual resolved IP (after DNS resolution)
     # Re-create IP reputation task with actual IP if enabled
@@ -5410,33 +5421,70 @@ async def build_report(target: str,
         for finding in breach_findings:
             report["findings"].append(finding)
 
-    # Add vendor risk results
-    if vendor_risk and vendor_risk_results is not None and vendor_risk_results.total_third_parties > 0:
+    # Add vendor risk results. Phase-4 timeouts/failures should degrade to an
+    # empty result, not abort the whole scan after active testing has finished.
+    vendor_total = 0
+    if vendor_risk_results is not None:
+        try:
+            if isinstance(vendor_risk_results, dict):
+                vendor_total = int(vendor_risk_results.get("total_third_parties") or 0)
+            else:
+                vendor_total = int(getattr(vendor_risk_results, "total_third_parties", 0) or 0)
+        except (TypeError, ValueError):
+            vendor_total = 0
+
+    if vendor_risk and vendor_risk_results is not None and vendor_total > 0:
+        if isinstance(vendor_risk_results, dict):
+            vendor_resources = vendor_risk_results.get("resources") or []
+            vendor_domains = vendor_risk_results.get("third_party_domains") or []
+            vendor_findings = vendor_risk_results.get("findings") or []
+            vendor_target = vendor_risk_results.get("target") or base_url
+            vendor_assessed_at = vendor_risk_results.get("assessed_at") or ""
+            vendor_score = vendor_risk_results.get("risk_score")
+            vendor_level = vendor_risk_results.get("risk_level") or "unknown"
+            vendor_summary = vendor_risk_results.get("summary") or {}
+        else:
+            vendor_resources = getattr(vendor_risk_results, "resources", []) or []
+            vendor_domains = getattr(vendor_risk_results, "third_party_domains", []) or []
+            vendor_findings = getattr(vendor_risk_results, "findings", []) or []
+            vendor_target = getattr(vendor_risk_results, "target", base_url)
+            vendor_assessed_at = getattr(vendor_risk_results, "assessed_at", "")
+            vendor_score = getattr(vendor_risk_results, "risk_score", None)
+            vendor_level = getattr(vendor_risk_results, "risk_level", "unknown")
+            vendor_summary = getattr(vendor_risk_results, "summary", {}) or {}
+
+        def _vendor_resource_value(resource: Any, key: str, default: Any = None) -> Any:
+            if isinstance(resource, dict):
+                if key == "resource_type":
+                    return resource.get("resource_type") or resource.get("type") or default
+                return resource.get(key, default)
+            return getattr(resource, key, default)
+
         report["vendor_risk"] = {
-            "target": vendor_risk_results.target,
-            "assessed_at": vendor_risk_results.assessed_at,
-            "total_third_parties": vendor_risk_results.total_third_parties,
-            "third_party_domains": vendor_risk_results.third_party_domains[:20],  # Limit to 20
-            "risk_score": vendor_risk_results.risk_score,
-            "risk_level": vendor_risk_results.risk_level,
-            "summary": vendor_risk_results.summary,
+            "target": vendor_target,
+            "assessed_at": vendor_assessed_at,
+            "total_third_parties": vendor_total,
+            "third_party_domains": vendor_domains[:20],  # Limit to 20
+            "risk_score": vendor_score,
+            "risk_level": vendor_level,
+            "summary": vendor_summary,
             "resources": [
                 {
-                    "url": r.url,
-                    "domain": r.domain,
-                    "type": r.resource_type,
-                    "provider": r.provider,
-                    "category": r.category,
-                    "trust_level": r.trust_level,
-                    "security_score": r.security_score,
-                    "risk_factors": r.risk_factors[:3] if r.risk_factors else [],
+                    "url": _vendor_resource_value(r, "url"),
+                    "domain": _vendor_resource_value(r, "domain"),
+                    "type": _vendor_resource_value(r, "resource_type"),
+                    "provider": _vendor_resource_value(r, "provider"),
+                    "category": _vendor_resource_value(r, "category"),
+                    "trust_level": _vendor_resource_value(r, "trust_level"),
+                    "security_score": _vendor_resource_value(r, "security_score"),
+                    "risk_factors": (_vendor_resource_value(r, "risk_factors", []) or [])[:3],
                 }
-                for r in vendor_risk_results.resources[:20]  # Limit to 20 resources
+                for r in vendor_resources[:20]  # Limit to 20 resources
             ]
         }
 
         # Add vendor risk findings to main findings list
-        for finding in vendor_risk_results.findings:
+        for finding in vendor_findings:
             report["findings"].append(finding)
 
     # Add findings from security checks

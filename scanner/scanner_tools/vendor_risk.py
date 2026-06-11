@@ -660,6 +660,7 @@ async def vendor_risk_assessment(
         VendorRiskResult with assessment details
     """
     base_domain = extract_domain(base_url)
+    base_root = get_registrable_domain(base_domain) if base_domain else ""
     resources: list[ThirdPartyResource] = []
 
     # Fetch page content if not provided
