@@ -259,6 +259,13 @@ def test_normalize_scan_result_backfills_staged_nuclei_coverage():
     ]
 
 
+def test_scan_worker_container_name_filter_excludes_gungnir_worker():
+    assert api_module._is_scan_worker_container_name("shakerscan-worker-1") is True
+    assert api_module._is_scan_worker_container_name("/shakerscan-worker-5") is True
+    assert api_module._is_scan_worker_container_name("shakerscan-gungnir-worker-1") is False
+    assert api_module._is_scan_worker_container_name("other-worker-1") is False
+
+
 # ----- run_due_schedules --------------------------------------------------
 
 class _FakeAcquire:

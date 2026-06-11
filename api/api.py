@@ -8054,6 +8054,11 @@ def get_compose_context(containers: list) -> tuple[Optional[str], Optional[str],
     return None, None, None
 
 
+def _is_scan_worker_container_name(name: str) -> bool:
+    normalized = str(name or "").lstrip("/").lower()
+    return "shakerscan" in normalized and "worker" in normalized and "gungnir" not in normalized
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
@@ -8109,7 +8114,7 @@ async def get_workers():
         for c in containers:
             names = c.get('Names', [])
             name = names[0].lstrip('/') if names else 'unknown'
-            if 'shakerscan' in name.lower() and 'worker' in name.lower():
+            if _is_scan_worker_container_name(name):
                 state = c.get('State', 'unknown')
                 worker_list.append({
                     "name": name,
@@ -8163,7 +8168,7 @@ async def scale_workers(request: WorkerScaleRequest):
         for c in containers if isinstance(containers, list) else []:
             names = c.get('Names', [])
             name = names[0].lstrip('/') if names else ''
-            if 'shakerscan' in name.lower() and 'worker' in name.lower() and 'gungnir' not in name.lower():
+            if _is_scan_worker_container_name(name):
                 workers.append(c)
 
         running = [c for c in workers if c.get('State') == 'running']
