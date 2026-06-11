@@ -15,7 +15,7 @@ import sys
 import threading
 import urllib.parse
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,17 @@ MAX_SCAN_DURATION = {
 }
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+
+
+def utc_now() -> datetime:
+    """Return UTC as a naive datetime to match existing DB timestamp columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat()
+
+
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 RETEST_MAX_PARALLEL = max(1, int(os.environ.get("RETEST_MAX_PARALLEL", "2")))
@@ -884,7 +895,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                         get_redis().hset,
                         f"job:{job_id}",
                         "heartbeat",
-                        datetime.utcnow().isoformat(),
+                        utc_now_iso(),
                     )
                 except Exception as exc:
                     # Heartbeat is best-effort; log so a sustained Redis outage is
@@ -1866,7 +1877,7 @@ def _current_retest_capabilities() -> dict[str, bool]:
 
 async def run_finding_retest(verification: dict) -> dict:
     """Execute a proof-based retest for a finding verification record."""
-    started_at = datetime.utcnow()
+    started_at = utc_now()
     capabilities = _current_retest_capabilities()
     try:
         from scanner_tools.proof_of_exploit import (
@@ -1900,7 +1911,7 @@ async def run_finding_retest(verification: dict) -> dict:
             "replay_commands": replay_commands,
             "artifacts": {
                 "started_at": started_at.isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": utc_now_iso(),
                 "failure_stage": "module_import",
                 "tool_capabilities": capabilities,
             },
@@ -1927,7 +1938,7 @@ async def run_finding_retest(verification: dict) -> dict:
             "replay_commands": replay_commands,
             "artifacts": {
                 "started_at": started_at.isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": utc_now_iso(),
                 "failure_stage": "type_check",
                 "finding_type": finding_type,
                 "tool_capabilities": capabilities,
@@ -1952,7 +1963,7 @@ async def run_finding_retest(verification: dict) -> dict:
             "replay_commands": replay_commands,
             "artifacts": {
                 "started_at": started_at.isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": utc_now_iso(),
                 "failure_stage": "input_validation",
                 "tool_capabilities": capabilities,
             },
@@ -1966,7 +1977,7 @@ async def run_finding_retest(verification: dict) -> dict:
     # 2FA bypass currently relies on AI reasoning (Tier 2) rather than a deterministic prover.
     # Return a deterministic "inconclusive" base result that explicitly allows AI escalation.
     if finding_type == "2fa_bypass":
-        completed_at = datetime.utcnow()
+        completed_at = utc_now()
         has_ai_step = "ai_reasoning" in attempt_ladder
         return {
             "status": "completed",
@@ -2104,7 +2115,7 @@ async def run_finding_retest(verification: dict) -> dict:
             "replay_commands": replay_commands,
             "artifacts": {
                 "started_at": started_at.isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": utc_now_iso(),
                 "failure_stage": "execution",
                 "finding_type": finding_type,
                 "tool_capabilities": capabilities,
@@ -2139,7 +2150,7 @@ async def run_finding_retest(verification: dict) -> dict:
     # Check if AI step is available but not yet tried
     has_ai_step = "ai_reasoning" in attempt_ladder
 
-    completed_at = datetime.utcnow()
+    completed_at = utc_now()
     artifacts = {
         "started_at": started_at.isoformat(),
         "completed_at": completed_at.isoformat(),
@@ -2202,7 +2213,7 @@ async def process_finding_retest_job(job_data: dict):
         return
 
     print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
-    now = datetime.utcnow()
+    now = utc_now()
     if not _try_acquire_retest_slot(r):
         # Wait with bounded backoff/time budget; do not consume retest attempt
         # counters just because global worker slots are currently saturated.
@@ -2410,7 +2421,7 @@ async def process_finding_retest_job(job_data: dict):
             )
 
             if should_try_ai and severity_ok:
-                circuit_state = _get_ai_circuit_state(r, datetime.utcnow())
+                circuit_state = _get_ai_circuit_state(r, utc_now())
                 if circuit_state.get("is_open"):
                     open_until = circuit_state.get("open_until")
                     open_until_text = open_until.isoformat() if isinstance(open_until, datetime) else "unknown"
@@ -2488,7 +2499,7 @@ async def process_finding_retest_job(job_data: dict):
                         print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
 
                     if ai_failure_error and _is_retryable_ai_error(ai_failure_error):
-                        opened, error_count = _register_ai_circuit_failure(r, ai_failure_error, datetime.utcnow())
+                        opened, error_count = _register_ai_circuit_failure(r, ai_failure_error, utc_now())
                         result["retry_class"] = "transient"
                         result["retryable"] = True
                         result["attempts_exhausted"] = False
@@ -2525,7 +2536,7 @@ async def process_finding_retest_job(job_data: dict):
                     result["result_status"] = _result_status_for_verdict(result["verdict"])
                     print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
 
-            completed_at = datetime.utcnow()
+            completed_at = utc_now()
             verification_mode = result.get("verification_mode", "deterministic")
             ai_plan_json = json.dumps(ai_result.get("ai_plan")) if ai_result and ai_result.get("ai_plan") else None
             ai_reasoning = ai_result.get("reasoning") if ai_result else None
@@ -2778,7 +2789,7 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                 job_id=job_id,
                 verification_id=str(verification_id),
                 finding_id=str(finding["id"]),
-                submitted_at=datetime.utcnow().isoformat(),
+                submitted_at=utc_now_iso(),
                 trigger=AUTO_RETEST_REQUESTED_BY,
             )
             valid, reason = validate_retest_job_payload(job_payload)
@@ -2824,7 +2835,7 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
     if RETEST_RUNNING_STALE_SECONDS <= 0:
         return {"requeued": 0, "failed": 0}
 
-    now = now or datetime.utcnow()
+    now = now or utc_now()
     cutoff = now - timedelta(seconds=RETEST_RUNNING_STALE_SECONDS)
     r = get_redis()
 
@@ -3011,7 +3022,7 @@ async def requeue_circuit_recovered_retests() -> dict[str, int]:
     requeued = 0
     try:
         async with db_pool.acquire() as conn:
-            cutoff = datetime.utcnow() - timedelta(hours=RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS)
+            cutoff = utc_now() - timedelta(hours=RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS)
             rows = await conn.fetch("""
                 SELECT fv.id, fv.finding_id, fv.retry_class, fv.attempt_count
                 FROM finding_verifications fv
@@ -3027,7 +3038,7 @@ async def requeue_circuit_recovered_retests() -> dict[str, int]:
                 verification_id = str(row["id"])
                 finding_id = str(row["finding_id"])
                 job_id = f"circuit-recovery-{uuid.uuid4().hex[:12]}"
-                now_iso = datetime.utcnow().isoformat()
+                now_iso = utc_now_iso()
                 payload = build_retest_job_payload(
                     job_id=job_id,
                     verification_id=verification_id,
@@ -3054,7 +3065,7 @@ def save_result_file(result: dict, job_id: str) -> str:
     target_dir = RESULTS_DIR / target_safe
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    timestamp = utc_now().strftime('%Y%m%d_%H%M%S')
     filename = f"{timestamp}_{job_id[:8]}.json"
     filepath = target_dir / filename
 
@@ -3083,7 +3094,7 @@ def send_heartbeats(job_id: str, stop_event: threading.Event):
     r = get_redis()
     while not stop_event.is_set():
         try:
-            r.hset(f"job:{job_id}", 'heartbeat', datetime.utcnow().isoformat())
+            r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
         except Exception as e:
             print(f"[{job_id[:8]}] Heartbeat error: {e}", flush=True)
         stop_event.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
@@ -3099,7 +3110,7 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
     if job_id:
         try:
             r = get_redis()
-            now_iso = datetime.utcnow().isoformat()
+            now_iso = utc_now_iso()
             r.hset(
                 f"job:{job_id}",
                 mapping={
@@ -3125,7 +3136,7 @@ async def process_scan_job(job_data: dict):
     print(f"[{job_id[:8]}] custom_endpoints: {len(options.get('custom_endpoints') or [])} endpoints", flush=True)
 
     r = get_redis()
-    now = datetime.utcnow()
+    now = utc_now()
 
     # Update Redis status
     r.hset(f"job:{job_id}", mapping={
@@ -3190,7 +3201,7 @@ async def process_scan_job(job_data: dict):
         filepath = save_result_file(result, job_id)
 
         # Calculate duration
-        completed_at = datetime.utcnow()
+        completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
 
         # Update database - but check if scan was already marked failed by stale checker
@@ -3318,7 +3329,7 @@ async def process_discovery_job(job_data: dict):
     print(f"[{job_id[:8]}] Starting discovery: {root_domain}", flush=True)
 
     r = get_redis()
-    now = datetime.utcnow()
+    now = utc_now()
 
     # Update status
     r.hset(f"job:{job_id}", mapping={'status': 'running', 'started_at': now.isoformat()})
@@ -3332,7 +3343,7 @@ async def process_discovery_job(job_data: dict):
     # Run discovery
     result = await run_discovery(root_domain)
 
-    completed_at = datetime.utcnow()
+    completed_at = utc_now()
     error = result.get('error')
 
     # Update database

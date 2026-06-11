@@ -39,6 +39,15 @@ except ModuleNotFoundError as exc:
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 
+
+def utc_now() -> datetime:
+    """Return UTC as a naive datetime to match existing DB timestamp columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat()
+
 try:
     from evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
 except ModuleNotFoundError as exc:
@@ -979,7 +988,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     2. Running longer than MAX_SCAN_DURATION for its scan type
     """
     r = get_redis()
-    now = datetime.utcnow()
+    now = utc_now()
 
     async with pool.acquire() as conn:
         # Get all running scans
@@ -1167,7 +1176,7 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
     except (KeyError, Exception):
         tz = ZoneInfo('UTC')
 
-    now_utc = datetime.utcnow()
+    now_utc = utc_now()
     now_local = now_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(tz)
 
     hour, minute = 2, 0
@@ -1211,7 +1220,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
     fire together or when a single schedule got slow (e.g. Redis push delay).
     """
     r = get_redis()
-    now = datetime.utcnow()
+    now = utc_now()
 
     async with pool.acquire() as conn:
         due_schedules = await conn.fetch("""
@@ -1273,7 +1282,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             'scan_id': scan_id,
             'target': target_url,
             'options': scan_options,
-            'submitted_at': datetime.utcnow().isoformat(),
+            'submitted_at': utc_now_iso(),
             'scheduled': True,
             'schedule_id': str(schedule_id)
         }
@@ -2303,7 +2312,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
         "scan_id": scan_id,
         "target": target["endpoint_url"],
         "options": worker_options,
-        "submitted_at": datetime.utcnow().isoformat(),
+        "submitted_at": utc_now_iso(),
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
@@ -3710,7 +3719,7 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
         data = json.dumps(body).encode("utf-8")
         headers.setdefault("Content-Type", "application/json")
     request = urllib.request.Request(request_url, data=data, headers=headers, method=method)
-    started = datetime.utcnow()
+    started = utc_now()
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - user-configured local scanner target
             raw_bytes = response.read(100_000)
@@ -3725,7 +3734,7 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
         response_text = ai_extract_response_text(raw_text, content_type, target.get("response_path"))
         status_code = int(exc.code)
     except Exception as exc:  # noqa: BLE001 - surface precise connectivity errors to the operator
-        elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
+        elapsed_ms = round((utc_now() - started).total_seconds() * 1000, 1)
         return {
             "ok": False,
             "supported": True,
@@ -3740,7 +3749,7 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
             "latency_ms": elapsed_ms,
         }
 
-    elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
+    elapsed_ms = round((utc_now() - started).total_seconds() * 1000, 1)
     response_path_ok = bool(str(response_text or "").strip())
     ok = 200 <= status_code < 400 and response_path_ok
     return {
@@ -3872,7 +3881,7 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
         "agent": ("agent_trace", "$", "shaker-agent-abuse"),
         "mcp": ("mcp_trace", "$.result", "shaker-mcp-security"),
     }
-    run_id = f"demo-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    run_id = f"demo-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     queued: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
 
@@ -4698,7 +4707,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "scan_id": scan_id,
         "target": artifact_ref,
         "options": options,
-        "submitted_at": datetime.utcnow().isoformat(),
+        "submitted_at": utc_now_iso(),
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
@@ -5977,7 +5986,7 @@ async def submit_scan(request: ScanRequest):
         'scan_id': scan_id,
         'target': scan_target,
         'options': _attach_target_note(options_payload, request.target, target_note, scheme_inferred),
-        'submitted_at': datetime.utcnow().isoformat()
+        'submitted_at': utc_now_iso()
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
@@ -6964,7 +6973,7 @@ async def retest_finding(
         job_id=job_id,
         verification_id=str(retest_id),
         finding_id=str(finding_data["id"]),
-        submitted_at=datetime.utcnow().isoformat(),
+        submitted_at=utc_now_iso(),
         trigger=request.requested_by or "api",
     )
     # Pass mode through to the worker
@@ -7388,7 +7397,7 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 job_id=job_id,
                 verification_id=str(retest_id),
                 finding_id=str(finding_data["id"]),
-                submitted_at=datetime.utcnow().isoformat(),
+                submitted_at=utc_now_iso(),
                 trigger=request.requested_by or "api",
             )
             if request.mode:
@@ -7858,7 +7867,7 @@ async def start_discovery(root_domain: str):
         'discovery_id': discovery_id,
         'type': 'discovery',
         'root_domain': root_domain,
-        'submitted_at': datetime.utcnow().isoformat()
+        'submitted_at': utc_now_iso()
     }
     r.rpush(QUEUE_NAME, json.dumps(job_data))
 
@@ -9029,7 +9038,7 @@ async def queue_stats():
             return json.loads(cached)
         except Exception:
             pass
-    now = datetime.utcnow()
+    now = utc_now()
 
     completed = 0
     running = 0

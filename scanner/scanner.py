@@ -2547,7 +2547,7 @@ async def build_report(target: str,
             f"[scope] Manual endpoints kept={manual_scope['kept']} dropped={manual_scope['dropped']}",
             file=sys.stderr,
         )
-    if manual_endpoints_norm:
+    if manual_endpoints_norm and _is_truthy_env(os.environ.get("SCANNER_DEBUG_ENDPOINTS")):
         print(f"[DEBUG] Normalized {len(manual_endpoints_norm)} manual endpoints:", file=sys.stderr)
         for i, ep in enumerate(manual_endpoints_norm[:5]):
             print(
@@ -7241,7 +7241,7 @@ async def build_report(target: str,
                         ]
                         if filtered:
                             options_methods_by_url[normalized] = filtered
-                debug_endpoint_discovery = os.environ.get("SCANNER_DEBUG_ENDPOINTS", "").lower() in ("1", "true", "yes")
+                debug_endpoint_discovery = _is_truthy_env(os.environ.get("SCANNER_DEBUG_ENDPOINTS"))
                 if debug_endpoint_discovery and options_methods_by_url:
                     print(
                         f"[DEBUG OPTIONS] methods_by_url={len(options_methods_by_url)}",
@@ -10981,8 +10981,7 @@ async def cli_main():
             print(f"Warning: Failed to read endpoints file: {e}", file=sys.stderr)
     manual_endpoints = parse_manual_endpoints(raw_endpoint_lines)
 
-    # DEBUG: Log parsed manual endpoints
-    if manual_endpoints:
+    if manual_endpoints and _is_truthy_env(os.environ.get("SCANNER_DEBUG_ENDPOINTS")):
         print(f"[DEBUG] Parsed {len(manual_endpoints)} manual endpoints:", file=sys.stderr)
         for i, ep in enumerate(manual_endpoints[:5]):
             print(f"[DEBUG]   {i}: method={ep.get('method')} url={ep.get('url')} body_params={ep.get('body_params')} body_template={ep.get('body_template')}", file=sys.stderr)

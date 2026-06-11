@@ -7,8 +7,13 @@ consistent return formats and error handling across all scanner components.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
+
+
+def utc_now_iso_z() -> str:
+    """Return a UTC timestamp with the existing trailing-Z format."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
 @dataclass
@@ -116,7 +121,7 @@ class ToolResult:
     # Additional metadata
     target: str = ""
     scan_type: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(default_factory=utc_now_iso_z)
 
     # Raw output for debugging
     raw_output: Any = None

@@ -24,7 +24,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -62,6 +62,15 @@ CROSS_ORIGIN_ALLOWED_RESOURCE_TYPES = {
     "texttrack",
     "manifest",
 }
+
+
+def utc_now() -> datetime:
+    """Return UTC as a naive datetime for existing session timestamp fields."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat()
 
 
 @dataclass
@@ -118,8 +127,8 @@ class InteractiveSession:
         self.state = SessionState(
             session_id=session_id,
             target_url=target_url,
-            created_at=datetime.utcnow(),
-            last_activity=datetime.utcnow(),
+            created_at=utc_now(),
+            last_activity=utc_now(),
             screenshots_dir=self.results_dir / "sessions" / session_id
         )
 
@@ -254,7 +263,7 @@ class InteractiveSession:
                     if len(self._network_log) >= MAX_NETWORK_LOG_ENTRIES:
                         self._network_log.pop(0)
                     self._network_log.append({
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": utc_now_iso(),
                         "user": user_name,
                         "method": response.request.method,
                         "url": url,
@@ -327,11 +336,11 @@ class InteractiveSession:
 
     def _update_activity(self):
         """Update last activity timestamp."""
-        self.state.last_activity = datetime.utcnow()
+        self.state.last_activity = utc_now()
 
     def is_expired(self) -> bool:
         """Check if session has timed out."""
-        elapsed = (datetime.utcnow() - self.state.last_activity).total_seconds()
+        elapsed = (utc_now() - self.state.last_activity).total_seconds()
         return elapsed > SESSION_TIMEOUT_SECONDS
 
     async def screenshot(self, full_page: bool = False, user: str = "default") -> dict[str, Any]:
