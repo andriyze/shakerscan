@@ -38,6 +38,18 @@ const SEVERITY_HEX: Record<string, string> = {
 
 const ASSET_TYPES = new Set<ExposureNodeType>(['domain', 'web_target', 'model_artifact', 'ai_target'])
 
+// Node types that carry a permanent label. These are the anchors users orient
+// by (roughly one per cluster); finding/endpoint swarms label on hover/zoom so
+// the overview doesn't drown in text.
+const LABELED_TYPES = new Set<ExposureNodeType>([
+  'domain',
+  'web_target',
+  'ai_target',
+  'model_artifact',
+  'vendor',
+  'attack_chain',
+])
+
 function nodeRadius(node: ExposureNode): number {
   if (node.type === 'finding_group') {
     const count = Number((node.meta?.count as number) || 2)
@@ -101,6 +113,13 @@ export function ExposureGraph({
   const firstFitRef = useRef(true)
   const [width, setWidth] = useState(800)
   const [hoverId, setHoverId] = useState<string | null>(null)
+  // Per-frame label collision registry: the canvas repaints every node each
+  // frame, so the rect list resets when the paint counter wraps. Persistent
+  // labels that would overlap an already-drawn label are skipped — dense
+  // clusters show one readable label instead of a text pileup.
+  const labelRectsRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number }>>([])
+  const paintCounterRef = useRef(0)
+  const nodeTotalRef = useRef(0)
 
   useEffect(() => {
     const el = containerRef.current
@@ -165,6 +184,8 @@ export function ExposureGraph({
     const links: GraphLink[] = edges
       .filter((e) => incomingIds.has(e.source) && incomingIds.has(e.target))
       .map((e) => ({ source: e.source, target: e.target, type: e.type, severity: e.severity }))
+    nodeTotalRef.current = graphNodes.length
+    paintCounterRef.current = 0
     return { nodes: graphNodes, links }
   }, [nodes, edges])
 
@@ -189,6 +210,12 @@ export function ExposureGraph({
 
   const paintNode = useCallback(
     (node: GraphNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
+      // Frame boundary: every node paints once per frame, so wrapping the
+      // counter marks a new frame and resets the label collision registry.
+      paintCounterRef.current += 1
+      if (paintCounterRef.current > nodeTotalRef.current) paintCounterRef.current = 1
+      if (paintCounterRef.current === 1) labelRectsRef.current = []
+
       const x = node.x ?? 0
       const y = node.y ?? 0
       const r = node.__r
@@ -259,20 +286,39 @@ export function ExposureGraph({
         ctx.stroke()
       }
 
-      const showLabel = isFocus || isHover || globalScale > 3.5
+      // Anchor nodes are always labeled — unlabeled circles mean nothing on an
+      // attack-surface map. Other node types label on hover/focus or zoom-in.
+      const persistent = LABELED_TYPES.has(node.type) && !isFocus && !isHover
+      const showLabel = !dimmed && (isFocus || isHover || persistent || globalScale > 2)
       if (showLabel) {
         const label = node.label || node.id
-        const text = label.length > 22 ? `${label.slice(0, 21)}…` : label
-        const fontSize = 12 / globalScale
+        // Tighter truncation for the always-on labels at overview zoom, where
+        // clusters sit close together in screen space.
+        const max = persistent && globalScale < 1.5 ? 16 : 22
+        const text = label.length > max ? `${label.slice(0, max - 1)}…` : label
+        const fontSize = (persistent ? 10.5 : 12) / globalScale
         ctx.font = `${fontSize}px 'Spline Sans Mono', ui-monospace, monospace`
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'top'
         const labelY = y + r + 4 / globalScale
-        ctx.lineWidth = 3 / globalScale
-        ctx.strokeStyle = 'rgba(10,10,10,0.9)'
-        ctx.strokeText(text, x, labelY)
-        ctx.fillStyle = '#e5e7eb'
-        ctx.fillText(text, x, labelY)
+
+        // Collision check (graph coords, consistent within a frame): focused
+        // and hovered labels always draw; persistent/zoom labels skip if they
+        // would overlap one already placed this frame.
+        const halfW = ctx.measureText(text).width / 2 + 2 / globalScale
+        const rect = { x1: x - halfW, y1: labelY - 1 / globalScale, x2: x + halfW, y2: labelY + fontSize + 1 / globalScale }
+        const mustDraw = isFocus || isHover
+        const collides = labelRectsRef.current.some(
+          (other) => rect.x1 < other.x2 && rect.x2 > other.x1 && rect.y1 < other.y2 && rect.y2 > other.y1
+        )
+        if (mustDraw || !collides) {
+          labelRectsRef.current.push(rect)
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'top'
+          ctx.lineWidth = 3 / globalScale
+          ctx.strokeStyle = 'rgba(10,10,10,0.9)'
+          ctx.strokeText(text, x, labelY)
+          ctx.fillStyle = isFocus || isHover ? '#f3f4f6' : '#cbd5e1'
+          ctx.fillText(text, x, labelY)
+        }
       }
 
       ctx.globalAlpha = 1

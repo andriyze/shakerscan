@@ -495,7 +495,7 @@ function Legend() {
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-full border border-dotted border-amber-400" aria-hidden="true" /> Dotted = unscanned
         </span>
-        <span className="ml-auto">Hover for label · scroll to zoom · click to focus</span>
+        <span className="ml-auto">Hover for details · scroll to zoom · click to focus</span>
       </div>
     </div>
   )
