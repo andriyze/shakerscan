@@ -611,7 +611,7 @@ export interface ExposureAsset {
   needs_action?: boolean
   action_priority?: 'P1' | 'P2' | 'P3' | null
   action_score?: number
-  recommended_actions?: string[]
+  recommended_actions?: Array<{ label: string; kind: 'scan' | 'findings' | 'latest_scan' | 'map' | 'none' | string }>
   first_seen_at?: string | null
   is_new: boolean
   risk_score: number
@@ -634,6 +634,7 @@ export interface ExposureAssetMetrics {
   incomplete_scans?: number
   failed_scans?: number
   fresh_scans?: number
+  verified_assets?: number
   needs_action?: number
   p1_count?: number
   p2_count?: number

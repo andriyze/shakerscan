@@ -1,13 +1,12 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertTriangle,
   Bot,
   Boxes,
   ChevronRight,
-  Clock3,
   ExternalLink,
   History,
   Loader2,
@@ -22,14 +21,13 @@ import {
 import {
   getFindings,
   extractFindingTriage,
-  updateFinding,
   type ExposureAsset,
   type ExposureAssetKind,
   type ExposureAssetMetrics,
   type Finding,
 } from '@/lib/api'
-import { FINDING_STATUSES, SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { gradeTextColor, useToast } from '@/components/ui'
+import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
+import { gradeTextColor } from '@/components/ui'
 import { ErrorState } from '@/components/ui'
 import styles from './exposure.module.css'
 
@@ -49,8 +47,8 @@ export const POSTURE_FILTERS = [
   { value: 'failed', label: 'Failed' },
   { value: 'stale', label: 'Stale' },
   { value: 'incomplete', label: 'Incomplete' },
+  { value: 'verified', label: 'Proven risk' },
   { value: 'needs_verification', label: 'Needs verification' },
-  { value: 'new', label: 'New' },
 ] as const
 
 export type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
@@ -104,8 +102,8 @@ function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
   if (filter === 'failed') return (asset.action_reasons || []).includes('failed_scan')
   if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
   if (filter === 'incomplete') return Boolean(asset.scan_limited)
+  if (filter === 'verified') return (asset.active_verified || 0) > 0
   if (filter === 'needs_verification') return (asset.active_needs_verification || 0) > 0
-  if (filter === 'new') return Boolean(asset.is_new)
   return true
 }
 
@@ -210,51 +208,6 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
   )
 }
 
-function PostureDetail({ asset }: { asset: ExposureAsset }) {
-  const reasons = asset.action_reasons || []
-  // Blast tier is shown in the collapsed row now; the expanded detail adds the
-  // *which* — the specific missing runtime controls and data sensitivity.
-  const missingControls = asset.kind === 'ai' ? asset.missing_runtime_controls || [] : []
-  const hasDetail =
-    reasons.length > 0 || missingControls.length > 0 || asset.data_classification || asset.coverage_status || asset.latest_scan_href
-  if (!hasDetail) return null
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-800/40 px-4 py-2">
-      {reasons.map((reason) => (
-        <span key={reason} className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
-          {actionLabel(reason)}
-        </span>
-      ))}
-      {asset.data_classification && (
-        <span className="rounded border border-fuchsia-400/25 bg-fuchsia-400/5 px-1.5 py-0.5 text-[10px] uppercase text-fuchsia-200/90">
-          {asset.data_classification.replace(/_/g, ' ')}
-        </span>
-      )}
-      {missingControls.map((control) => (
-        <span
-          key={control}
-          className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/5 px-1.5 py-0.5 text-[10px] text-amber-200/90"
-        >
-          <ShieldOff className="h-2.5 w-2.5" aria-hidden="true" />
-          {control.replace(/_/g, ' ')}
-        </span>
-      ))}
-      {asset.coverage_status && (
-        <span className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-500">coverage: {asset.coverage_status}</span>
-      )}
-      {asset.latest_scan_href && (
-        <Link
-          href={asset.latest_scan_href}
-          className="ml-auto inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-950 px-1.5 py-0.5 text-[10px] text-gray-400 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-        >
-          <History className="h-2.5 w-2.5" aria-hidden="true" />
-          {asset.latest_scan_type || 'scan'}
-        </Link>
-      )}
-    </div>
-  )
-}
-
 function AssetDetailDrawer({
   asset,
   onClose,
@@ -270,6 +223,7 @@ function AssetDetailDrawer({
 }) {
   const [findings, setFindings] = useState<Finding[] | null>(null)
   const [error, setError] = useState(false)
+  const closeRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!asset) return
@@ -292,11 +246,35 @@ function AssetDetailDrawer({
     }
   }, [asset])
 
+  // Modal behaviour: focus the panel on open and close on Escape.
+  useEffect(() => {
+    if (!asset) return
+    closeRef.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [asset, onClose])
+
   if (!asset) return null
   const KindIcon = KIND_META[asset.kind].icon
   const recommended = asset.recommended_actions || []
-  const verificationTotal = (asset.active_verified || 0) + (asset.active_needs_verification || 0)
-  const verifiedPct = verificationTotal > 0 ? Math.round(((asset.active_verified || 0) / verificationTotal) * 100) : null
+  const missingControls = asset.kind === 'ai' ? asset.missing_runtime_controls || [] : []
+  const verified = asset.active_verified || 0
+  const needsVerification = asset.active_needs_verification || 0
+
+  // Map a recommendation to the action it performs, so it renders as a real CTA.
+  function recTarget(rkind: string): { href?: string; onClick?: () => void } {
+    if (rkind === 'findings') return { href: asset!.findings_href }
+    if (rkind === 'latest_scan' && asset!.latest_scan_href) return { href: asset!.latest_scan_href }
+    if (rkind === 'scan') {
+      if (asset!.kind === 'web') return { onClick: () => onScan(asset!) }
+      if (asset!.kind === 'ai') return { href: '/settings/ai-gate' }
+      if (asset!.kind === 'model') return { href: '/settings/model-intake' }
+    }
+    return {}
+  }
 
   return (
     <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
@@ -312,6 +290,7 @@ function AssetDetailDrawer({
             <div className="mt-1 break-all text-xs text-gray-500">{asset.url || asset.root_domain || asset.origin}</div>
           </div>
           <button
+            ref={closeRef}
             type="button"
             onClick={onClose}
             aria-label="Close asset details"
@@ -334,10 +313,13 @@ function AssetDetailDrawer({
             </div>
             <div className="rounded border border-gray-800 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-gray-600">Validation</div>
-              <div className="mt-1 text-sm text-gray-200">
-                {(asset.active_verified || 0)} verified · {(asset.active_needs_verification || 0)} need review
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className={`text-lg font-semibold ${verified > 0 ? 'text-red-300' : 'text-gray-400'}`}>{verified}</span>
+                <span className="text-xs text-gray-500">proven{verified === 1 ? '' : ''}</span>
               </div>
-              {verifiedPct !== null && <div className="mt-1 text-[11px] text-gray-500">{verifiedPct}% verified signal</div>}
+              <div className="mt-0.5 text-[11px] text-gray-600">
+                {needsVerification > 0 ? `${needsVerification} unverified` : 'all findings reviewed'}
+              </div>
             </div>
             <div className="rounded border border-gray-800 bg-black/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-gray-600">Coverage</div>
@@ -359,8 +341,43 @@ function AssetDetailDrawer({
             <section className="rounded border border-teal-400/20 bg-teal-400/5 p-3">
               <div className="text-[10px] uppercase tracking-wide text-teal-300">Recommended next actions</div>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {recommended.map((action) => (
-                  <span key={action} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-200">{action}</span>
+                {recommended.map((action) => {
+                  const target = recTarget(action.kind)
+                  const chip = 'rounded px-2 py-1 text-xs'
+                  const actionable = 'border border-teal-400/30 bg-gray-900 text-teal-100 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+                  if (target.href) {
+                    return (
+                      <Link key={action.label} href={target.href} className={`${chip} ${actionable}`}>
+                        {action.label}
+                      </Link>
+                    )
+                  }
+                  if (target.onClick) {
+                    return (
+                      <button key={action.label} type="button" onClick={target.onClick} className={`${chip} ${actionable}`}>
+                        {action.label}
+                      </button>
+                    )
+                  }
+                  return (
+                    <span key={action.label} className={`${chip} bg-gray-900 text-gray-300`}>
+                      {action.label}
+                    </span>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
+          {missingControls.length > 0 && (
+            <section className="rounded border border-amber-400/20 bg-amber-400/5 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-amber-300">Missing AI runtime controls</div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {missingControls.map((control) => (
+                  <span key={control} className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-gray-900 px-1.5 py-0.5 text-[11px] text-amber-200/90">
+                    <ShieldOff className="h-3 w-3" aria-hidden="true" />
+                    {control.replace(/_/g, ' ')}
+                  </span>
                 ))}
               </div>
             </section>
@@ -525,93 +542,6 @@ function ActionQueue({
   )
 }
 
-function InlineFindings({ asset }: { asset: ExposureAsset }) {
-  const toast = useToast()
-  const [findings, setFindings] = useState<Finding[] | null>(null)
-  const [error, setError] = useState(false)
-  const [busyId, setBusyId] = useState<string | null>(null)
-
-  useEffect(() => {
-    let active = true
-    const params =
-      asset.kind === 'ai'
-        ? { ai_target_id: asset.id, status: 'active', limit: 8, sort_by: 'severity' as const }
-        : { target_id: asset.id, status: 'active', limit: 8, sort_by: 'severity' as const }
-    getFindings(params)
-      .then((res) => {
-        if (active) setFindings(res.findings || [])
-      })
-      .catch(() => {
-        if (active) setError(true)
-      })
-    return () => {
-      active = false
-    }
-  }, [asset.id, asset.kind, asset.label])
-
-  async function setStatus(finding: Finding, status: string) {
-    setBusyId(finding.id)
-    try {
-      await updateFinding(finding.id, status)
-      // The list shows active findings; drop this one unless it stays active.
-      setFindings((prev) => (prev ? prev.filter((f) => f.id !== finding.id || status === 'active') : prev))
-      toast.success(`Finding marked ${status.replace(/_/g, ' ')}`)
-    } catch {
-      toast.error('Failed to update finding')
-    } finally {
-      setBusyId(null)
-    }
-  }
-
-  if (error) return <p className="px-4 py-3 text-xs text-gray-500">Could not load findings for this asset.</p>
-  if (!findings) {
-    return (
-      <div className="space-y-2 px-4 py-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="h-7 animate-pulse rounded bg-gray-800/60" />
-        ))}
-      </div>
-    )
-  }
-  if (findings.length === 0) {
-    return <p className="px-4 py-3 text-xs text-gray-500">No active findings on this asset.</p>
-  }
-
-  return (
-    <div className="divide-y divide-gray-800/40">
-      {findings.map((finding) => (
-        <div key={finding.id} className="flex items-center gap-3 px-4 py-2">
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>
-            {finding.severity}
-          </span>
-          <Link
-            href={`/findings/${finding.id}`}
-            className="min-w-0 flex-1 truncate text-xs text-gray-200 hover:text-white focus:outline-none focus-visible:underline"
-          >
-            {finding.title}
-          </Link>
-          {busyId === finding.id ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-gray-500" aria-hidden="true" />
-          ) : (
-            <select
-              value={finding.status}
-              onChange={(e) => setStatus(finding, e.target.value)}
-              aria-label={`Set status for ${finding.title}`}
-              className="shrink-0 rounded border border-gray-700 bg-gray-950 px-1.5 py-1 text-[11px] text-gray-300 focus:border-blue-500 focus:outline-none"
-            >
-              {FINDING_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s.replace(/_/g, ' ')}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      ))}
-    </div>
-  )
-}
-
 function AssetRow({
   asset,
   onExplore,
@@ -625,7 +555,6 @@ function AssetRow({
   onDetails: (asset: ExposureAsset) => void
   scanning: boolean
 }) {
-  const [open, setOpen] = useState(false)
   const KindIcon = KIND_META[asset.kind].icon
 
   const primaryAction =
@@ -652,98 +581,76 @@ function AssetRow({
         )
 
   return (
-    <div className="border-b border-gray-800/50 last:border-b-0">
-      <div className="flex items-center gap-3 px-3 py-2.5">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          aria-controls={`findings-${asset.id}`}
-          aria-label={`Toggle findings for ${asset.label}`}
-          className="shrink-0 rounded p-0.5 text-gray-500 hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-        >
-          <ChevronRight className={`h-4 w-4 transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
-        </button>
+    <div className="flex items-center gap-3 border-b border-gray-800/50 px-3 py-2.5 last:border-b-0 hover:bg-gray-900/40">
+      <button
+        type="button"
+        onClick={() => onDetails(asset)}
+        aria-label={`Open details for ${asset.label}`}
+        className="flex min-w-0 flex-1 items-center gap-3 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      >
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
 
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
             <KindIcon className="h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="truncate text-sm text-gray-100">{asset.label}</span>
             <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${KIND_META[asset.kind].badge}`}>
               {KIND_META[asset.kind].label}
             </span>
-            {asset.is_new && (
-              <span className="shrink-0 rounded bg-teal-400/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-teal-300">
-                new
-              </span>
-            )}
             {asset.production_mode && (
               <span className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] uppercase text-red-300">prod</span>
             )}
-          </div>
-          <div className="mt-0.5 truncate text-[11px] text-gray-600">
+          </span>
+          <span className="mt-0.5 block truncate text-[11px] text-gray-600">
             {asset.root_domain || asset.origin || asset.url}
-          </div>
+          </span>
           <RowPosture asset={asset} />
-        </div>
+        </span>
 
-        <div className="hidden w-28 shrink-0 items-center gap-2 text-xs sm:flex">
+        <span className="hidden w-28 shrink-0 items-center gap-2 text-xs sm:flex">
           {asset.active_critical > 0 && <span className="text-red-400">{asset.active_critical}C</span>}
           {asset.active_high > 0 && <span className="text-orange-400">{asset.active_high}H</span>}
           {asset.active_total === 0 && <span className="text-emerald-500/70">clean</span>}
           {asset.active_total > 0 && (asset.active_critical + asset.active_high) === 0 && (
             <span className="text-gray-500">{asset.active_total}</span>
           )}
-        </div>
+        </span>
 
-        <div className="hidden w-10 shrink-0 text-center md:block">
+        <span className="hidden w-10 shrink-0 text-center md:block">
           {asset.grade ? (
             <span className={`${styles.displayTitle} text-base font-bold ${gradeTextColor(asset.grade)}`}>{asset.grade}</span>
           ) : (
             <span className="text-xs text-gray-600">—</span>
           )}
-        </div>
+        </span>
 
-        <div className="hidden w-24 shrink-0 text-right text-[11px] text-gray-600 lg:block">
+        <span className="hidden w-24 shrink-0 text-right text-[11px] text-gray-600 lg:block">
           {relativeTime(asset.last_scanned_at)}
-        </div>
+        </span>
 
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => onDetails(asset)}
-            aria-label={`Open details for ${asset.label}`}
-            className="inline-flex items-center gap-1 rounded border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-200 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            Details
-          </button>
-          {primaryAction}
-          <Link
-            href={asset.findings_href}
-            aria-label="View findings"
-            className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <ShieldAlert className="h-3 w-3" aria-hidden="true" />
-            <span className="hidden lg:inline">Findings</span>
-          </Link>
-          <button
-            type="button"
-            onClick={() => onExplore(asset.node_id)}
-            aria-label="Explore connections in the map"
-            className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <Radar className="h-3 w-3" aria-hidden="true" />
-            <span className="hidden lg:inline">Explore</span>
-          </button>
-        </div>
+        <ChevronRight className="h-4 w-4 shrink-0 text-gray-600" aria-hidden="true" />
+      </button>
+
+      <div className="flex shrink-0 items-center gap-1.5">
+        {primaryAction}
+        <Link
+          href={asset.findings_href}
+          aria-label={`View findings for ${asset.label}`}
+          className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <ShieldAlert className="h-3 w-3" aria-hidden="true" />
+          <span className="hidden lg:inline">Findings</span>
+        </Link>
+        <button
+          type="button"
+          onClick={() => onExplore(asset.node_id)}
+          aria-label={`Explore ${asset.label} in the map`}
+          className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <Radar className="h-3 w-3" aria-hidden="true" />
+          <span className="hidden lg:inline">Explore</span>
+        </button>
       </div>
-      {open && (
-        <div id={`findings-${asset.id}`} className="bg-black/30">
-          <PostureDetail asset={asset} />
-          <InlineFindings asset={asset} />
-        </div>
-      )}
     </div>
   )
 }

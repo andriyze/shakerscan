@@ -5778,35 +5778,43 @@ def _exposure_coverage_posture(*, total_scans: int, last_scanned_at: Any, scan_l
     return "fresh"
 
 
-def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verified: int, active_needs_verification: int) -> list[str]:
-    actions: list[str] = []
+def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verified: int, active_needs_verification: int) -> list[dict[str, str]]:
+    """Prioritized, contextual next steps as ``{label, kind}``.
+
+    ``kind`` tells the UI which action the recommendation maps to so it can be
+    rendered as a real CTA: ``scan`` (run/refresh coverage), ``findings``
+    (triage/verify), ``latest_scan`` (open the latest run), or ``none`` (advisory).
+    """
+    actions: list[dict[str, str]] = []
     rs = set(reasons)
     if "never_scanned" in rs:
-        actions.append("Run first scan")
+        actions.append({"label": "Run first scan", "kind": "scan"})
     if "failed_scan" in rs:
-        actions.append("Open latest failed scan")
+        actions.append({"label": "Open latest failed scan", "kind": "latest_scan"})
     if "incomplete_scan" in rs:
-        actions.append("Review skipped scan coverage")
+        actions.append({"label": "Review skipped scan coverage", "kind": "latest_scan"})
     if "stale_scan" in rs:
-        actions.append("Refresh scan")
+        actions.append({"label": "Refresh scan", "kind": "scan"})
     if "critical_findings" in rs:
-        actions.append("Triage critical findings")
+        actions.append({"label": "Triage critical findings", "kind": "findings"})
     elif "high_findings" in rs:
-        actions.append("Triage high findings")
+        actions.append({"label": "Triage high findings", "kind": "findings"})
     if "public_high_risk" in rs:
-        actions.append("Prioritize public exposure")
+        actions.append({"label": "Prioritize public exposure", "kind": "none"})
     if kind == "ai" and "high_blast_radius" in rs:
-        actions.append("Review AI runtime controls")
+        actions.append({"label": "Review AI runtime controls", "kind": "none"})
     if kind == "ai" and "production_ai_risk" in rs:
-        actions.append("Retest production AI surface")
+        actions.append({"label": "Retest production AI surface", "kind": "scan"})
     if kind == "model" and "model_not_approved" in rs:
-        actions.append("Complete model approval")
+        actions.append({"label": "Complete model approval", "kind": "none"})
     if active_verified > 0:
-        actions.append("Fix verified findings")
+        actions.append({"label": "Fix verified findings", "kind": "findings"})
     if active_needs_verification > 0:
-        actions.append("Verify suspected findings")
-    # Stable de-dupe, preserving priority order.
-    return list(dict.fromkeys(actions))[:5]
+        actions.append({"label": "Verify suspected findings", "kind": "findings"})
+    # Stable de-dupe by label, preserving priority order.
+    seen: set[str] = set()
+    unique = [a for a in actions if not (a["label"] in seen or seen.add(a["label"]))]
+    return unique[:5]
 
 
 @app.get("/exposure/assets")
@@ -6108,6 +6116,7 @@ async def exposure_assets(
         "incomplete_scans": sum(1 for a in assets if "incomplete_scan" in a.get("action_reasons", [])),
         "failed_scans": sum(1 for a in assets if "failed_scan" in a.get("action_reasons", [])),
         "fresh_scans": sum(1 for a in assets if a.get("coverage_posture") == "fresh"),
+        "verified_assets": sum(1 for a in assets if (a.get("active_verified") or 0) > 0),
         "needs_action": sum(1 for a in assets if a.get("needs_action")),
         "p1_count": sum(1 for a in assets if a.get("action_priority") == "P1"),
         "p2_count": sum(1 for a in assets if a.get("action_priority") == "P2"),
