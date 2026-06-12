@@ -1,8 +1,9 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, Network, PackageCheck } from 'lucide-react'
+import { Bot, Menu, Network, PackageCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navItems = [
@@ -68,8 +69,15 @@ const navItems = [
   },
 ]
 
-export default function Sidebar() {
-  const pathname = usePathname()
+function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
+  return (
+    <svg className={`${className} text-blue-500`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+    </svg>
+  )
+}
+
+function NavContent({ pathname }: { pathname: string }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION
   const settingsActive = pathname.startsWith('/settings')
 
@@ -81,12 +89,10 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="w-64 bg-gray-900 border-r border-gray-800 p-4 flex flex-col">
+    <>
       <div className="mb-8">
         <h1 className="text-xl font-bold text-white flex items-center gap-2">
-          <svg className="w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
+          <BrandMark />
           ShakerScan
         </h1>
         <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
@@ -165,6 +171,66 @@ export default function Sidebar() {
           </Link>
         </div>
       </div>
-    </aside>
+    </>
+  )
+}
+
+export default function Sidebar() {
+  const pathname = usePathname()
+  const [mobileOpen, setMobileOpen] = useState(false)
+
+  // Close the mobile drawer whenever navigation happens.
+  useEffect(() => {
+    setMobileOpen(false)
+  }, [pathname])
+
+  return (
+    <>
+      {/* Mobile: slim top bar instead of a viewport-eating sidebar. */}
+      <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-800 bg-gray-900 px-4 py-3 md:hidden">
+        <Link href="/" className="flex items-center gap-2 text-base font-bold text-white">
+          <BrandMark className="w-5 h-5" />
+          ShakerScan
+        </Link>
+        <button
+          type="button"
+          onClick={() => setMobileOpen(true)}
+          aria-label="Open navigation"
+          aria-expanded={mobileOpen}
+          className="rounded-lg p-2 text-gray-300 hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <Menu className="h-5 w-5" aria-hidden="true" />
+        </button>
+      </div>
+
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/60"
+            aria-label="Close navigation"
+            onClick={() => setMobileOpen(false)}
+          />
+          <aside className="absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-gray-800 bg-gray-900 p-4">
+            <div className="mb-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setMobileOpen(false)}
+                aria-label="Close navigation"
+                className="rounded-lg p-2 text-gray-300 hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                <X className="h-5 w-5" aria-hidden="true" />
+              </button>
+            </div>
+            <NavContent pathname={pathname} />
+          </aside>
+        </div>
+      )}
+
+      {/* Desktop: persistent sidebar. */}
+      <aside className="hidden w-64 flex-col border-r border-gray-800 bg-gray-900 p-4 md:flex">
+        <NavContent pathname={pathname} />
+      </aside>
+    </>
   )
 }

@@ -6428,7 +6428,7 @@ async def exposure_changes(
             "key": "failed_scans",
             "label": "Failed scans",
             "count": len(failed_scans),
-            "href": href("/scans", status="failed"),
+            "href": href("/scans", status="failed", within=window_days),
             "examples": [
                 {"label": r["label"], "detail": r["scan_type"], "when": fmt_when(r["created_at"])}
                 for r in failed_scans[:examples]
@@ -6438,7 +6438,7 @@ async def exposure_changes(
             "key": "went_stale",
             "label": "Went stale",
             "count": len(went_stale),
-            "href": href("/exposure", posture="stale", sort="stale"),
+            "href": href("/exposure", posture="stale", sort="stale", window=window_days),
             "examples": [
                 {
                     "label": r["label"],
@@ -6727,6 +6727,7 @@ async def list_scans(
     status: Optional[str] = None,
     target: Optional[str] = None,
     root_domain: Optional[str] = None,
+    created_within_days: Optional[int] = Query(None, ge=1),
     limit: int = Query(50, le=200),
     offset: int = 0
 ):
@@ -6775,6 +6776,14 @@ async def list_scans(
             count_query += f" AND t.root_domain = ${count_param_idx}"
             params.append(root_domain)
             count_params.append(root_domain)
+            param_idx += 1
+            count_param_idx += 1
+
+        if created_within_days:
+            query += f" AND s.created_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
+            count_query += f" AND s.created_at >= NOW() - INTERVAL '1 day' * ${count_param_idx}"
+            params.append(created_within_days)
+            count_params.append(created_within_days)
             param_idx += 1
             count_param_idx += 1
 

@@ -49,7 +49,7 @@ import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
-import { TriageTable, PriorityBadge, riskDot, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
+import { TriageTable, PriorityBadge, riskDot, isProductionAIAsset, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
 import { ChangesStrip } from './ChangesStrip'
 import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
@@ -505,12 +505,6 @@ const POSTURE_VALUES = new Set<string>(POSTURE_FILTERS.map((f) => f.value))
 
 const AI_SCAN_ENVIRONMENTS: AIEnvironment[] = ['preview', 'staging', 'development', 'production']
 
-// Single definition of "production AI surface", matching the "prod" posture
-// filter: the explicit flag OR declared environment metadata.
-function isProductionAIAsset(asset: ExposureAsset): boolean {
-  return asset.kind === 'ai' && (Boolean(asset.production_mode) || asset.environment === 'production')
-}
-
 // Named operational views: each is just a triage filter combination, so the
 // URL stays the single source of truth and every view is shareable.
 const PRESET_VIEWS: Array<{ label: string; kind: 'all' | ExposureAssetKind; posture: PostureFilter; sort: TriageSort }> = [
@@ -535,12 +529,7 @@ export default function ExposurePage() {
 function ExposureView() {
   const [graph, setGraph] = useState<ExposureGraph | null>(null)
   const [domains, setDomains] = useState<string[]>([])
-  const [includeResolved, setIncludeResolved] = useState(false)
-  const [focusId, setFocusId] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
-  const [depth, setDepth] = useState(1)
-  const [showEndpoints, setShowEndpoints] = useState(false)
-  const [highlightType, setHighlightType] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refetching, setRefetching] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -569,6 +558,16 @@ function ExposureView() {
   const triagePosture: PostureFilter =
     typeof filters.posture === 'string' && POSTURE_VALUES.has(filters.posture) ? (filters.posture as PostureFilter) : 'all'
   const triageSort: TriageSort = filters.sort === 'critical' || filters.sort === 'stale' ? filters.sort : 'priority'
+  // Committed inventory text filter (?q=...) — distinct from the typeahead,
+  // which only jumps to a node in the map.
+  const triageQuery = typeof filters.q === 'string' ? filters.q : ''
+  // Map investigation state lives in the URL too, so a focused neighborhood
+  // (node + depth + endpoints + resolved scope + highlight) is shareable.
+  const focusId = typeof filters.focus === 'string' && filters.focus ? filters.focus : null
+  const depth = filters.depth === '2' ? 2 : filters.depth === '3' ? 3 : 1
+  const showEndpoints = filters.endpoints === '1'
+  const includeResolved = filters.resolved === '1'
+  const highlightType = typeof filters.highlight === 'string' && filters.highlight ? filters.highlight : null
   // Optional day window for the "new" posture (?posture=new&window=30) so the
   // change strip's links select the same slice they counted; defaults to the
   // server's 7-day is_new flag when absent.
@@ -576,17 +575,22 @@ function ExposureView() {
   const triageNewWindow = Number.isInteger(windowValue) && windowValue > 0 ? windowValue : undefined
 
   const setLens = (next: Lens) => setFilter('lens', next === 'triage' ? undefined : next)
-  const setDomain = (value: string) => setFilter('domain', value || undefined)
 
   // Triage filter updates go through one setFilters call: sequential setFilter
   // calls in a handler would clobber each other (each reads the same URL
   // snapshot). Defaults are stored as absent params to keep URLs clean. Any
   // update also returns to the triage lens, where these filters apply.
-  function applyTriage(updates: { kind?: 'all' | ExposureAssetKind; posture?: PostureFilter; sort?: TriageSort }) {
+  function applyTriage(updates: { kind?: 'all' | ExposureAssetKind; posture?: PostureFilter; sort?: TriageSort; query?: string }) {
     const next: Record<string, string | undefined> = { lens: undefined }
     if (updates.kind !== undefined) next.kind = updates.kind === 'all' ? undefined : updates.kind
-    if (updates.posture !== undefined) next.posture = updates.posture === 'all' ? undefined : updates.posture
+    if (updates.posture !== undefined) {
+      next.posture = updates.posture === 'all' ? undefined : updates.posture
+      // The ?window= cohort arrives via change-strip links scoped to one
+      // posture; a manual posture switch leaves that cohort context.
+      next.window = undefined
+    }
     if (updates.sort !== undefined) next.sort = updates.sort === 'priority' ? undefined : updates.sort
+    if (updates.query !== undefined) next.q = updates.query.trim() || undefined
     setFilters(next)
   }
   const graphKeyRef = useRef<string | null>(null)
@@ -690,36 +694,30 @@ function ExposureView() {
     loadGraph()
   }, [lens, domain, includeResolved, focusId, depth, showEndpoints])
 
-  // Filters that change the domain/scope reset the focus back to the overview.
-  function changeScope(next: () => void) {
-    setFocusId(null)
+  // Scope changes (domain / resolved) reset map focus back to the overview.
+  // All params go through one setFilters call so they don't clobber each other.
+  function changeScope(updates: Record<string, string | undefined>) {
     setSelectedNode(null)
     setSelectedAsset(null)
-    setHighlightType(null)
-    next()
+    setFilters({ focus: undefined, highlight: undefined, endpoints: undefined, ...updates })
   }
 
   function handleFocus(node: ExposureNode) {
     setSelectedNode(node)
-    setHighlightType(null)
     // Grouped findings are synthetic (not addressable by the backend), so show
     // their detail without re-focusing the graph.
     if (node.type === 'finding_group') return
-    setFocusId(node.id)
-    setLens('map')
+    setFilters({ lens: 'map', focus: node.id, highlight: undefined })
   }
 
   function focusById(id: string) {
-    setFocusId(id)
     setSelectedNode(null)
-    setHighlightType(null)
-    setLens('map')
+    setFilters({ lens: 'map', focus: id, highlight: undefined })
   }
 
   function handleClear() {
     setSelectedNode(null)
-    setFocusId(null)
-    setShowEndpoints(false)
+    setFilters({ focus: undefined, endpoints: undefined })
   }
 
   // Every scan action actually queues a scan for its asset kind — web quick
@@ -790,8 +788,9 @@ function ExposureView() {
   // least one scan was queued so the caller can keep the selection on total
   // failure (or cancel) for an easy retry.
   async function handleBulkScan(toScan: ExposureAsset[]): Promise<boolean> {
+    // No window.confirm here — the TriageTable bulk dialog is the confirmation
+    // (including the production-AI warning) for this path.
     if (toScan.length === 0) return false
-    if (!confirmProductionScan(toScan)) return false
     setScanningIds((prev) => new Set([...prev, ...toScan.map((asset) => asset.id)]))
     try {
       const results = await Promise.allSettled(toScan.map((asset) => triggerScan(asset)))
@@ -828,6 +827,13 @@ function ExposureView() {
   }, [searchQuery, searchIndex])
 
   const byId = useMemo(() => new Map((graph?.nodes || []).map((node) => [node.id, node])), [graph])
+
+  // Restore the selected-node panel from a deep-linked ?focus= once the graph
+  // arrives. Never clobbers an interactive selection (handleFocus sets that).
+  useEffect(() => {
+    if (!focusId || !graph) return
+    setSelectedNode((prev) => prev ?? byId.get(focusId) ?? null)
+  }, [focusId, graph, byId])
   const summary = graph?.summary
   const nodeTypeCounts = summary?.node_type_counts || {}
 
@@ -892,12 +898,23 @@ function ExposureView() {
               onChange={(event) => { setSearchQuery(event.target.value); setSearchOpen(true) }}
               onFocus={() => setSearchOpen(true)}
               onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  applyTriage({ query: searchQuery })
+                  setSearchOpen(false)
+                } else if (event.key === 'Escape') {
+                  setSearchOpen(false)
+                }
+              }}
               placeholder="Search assets & findings…"
               aria-label="Search exposure nodes"
               className={`w-56 py-2 pl-8 pr-3 text-sm text-white placeholder:text-gray-500 ${styles.input}`}
             />
             {searchOpen && searchMatches.length > 0 && (
               <div className={`absolute z-20 mt-1 max-h-72 w-72 overflow-auto py-1 shadow-xl ${styles.input}`}>
+                <div className="border-b border-gray-800 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
+                  Click — open in map · Enter — filter inventory
+                </div>
                 {searchMatches.map((match) => (
                   <button
                     key={match.id}
@@ -915,7 +932,7 @@ function ExposureView() {
           </div>
           <select
             value={domain}
-            onChange={(event) => changeScope(() => setDomain(event.target.value))}
+            onChange={(event) => changeScope({ domain: event.target.value || undefined })}
             aria-label="Filter by domain"
             className={`px-3 py-2 text-sm text-white ${styles.input}`}
           >
@@ -1030,6 +1047,8 @@ function ExposureView() {
             onSortChange={(s) => applyTriage({ sort: s })}
             onBulkScan={handleBulkScan}
             newWindowDays={triageNewWindow}
+            query={triageQuery}
+            onQueryChange={(q) => { applyTriage({ query: q }); setSearchQuery(q) }}
           />
         </div>
       )}
@@ -1074,7 +1093,7 @@ function ExposureView() {
               {focusId && (
                 <select
                   value={depth}
-                  onChange={(event) => setDepth(Number(event.target.value))}
+                  onChange={(event) => setFilter('depth', event.target.value === '1' ? undefined : event.target.value)}
                   aria-label="Neighborhood depth"
                   className={`px-3 py-2 text-sm text-white ${styles.input}`}
                 >
@@ -1088,7 +1107,7 @@ function ExposureView() {
                   <input
                     type="checkbox"
                     checked={showEndpoints}
-                    onChange={(event) => setShowEndpoints(event.target.checked)}
+                    onChange={(event) => setFilter('endpoints', event.target.checked ? '1' : undefined)}
                     className="rounded border-gray-700 bg-gray-800"
                   />
                   All endpoints
@@ -1098,7 +1117,7 @@ function ExposureView() {
                 <input
                   type="checkbox"
                   checked={includeResolved}
-                  onChange={(event) => changeScope(() => setIncludeResolved(event.target.checked))}
+                  onChange={(event) => changeScope({ resolved: event.target.checked ? '1' : undefined })}
                   className="rounded border-gray-700 bg-gray-800"
                 />
                 Include resolved
@@ -1141,7 +1160,7 @@ function ExposureView() {
                 {highlightType && (
                   <button
                     type="button"
-                    onClick={() => setHighlightType(null)}
+                    onClick={() => setFilter('highlight', undefined)}
                     className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                   >
                     Highlighting {NODE_LABELS[highlightType] || highlightType}
@@ -1213,7 +1232,7 @@ function ExposureView() {
                           key={type}
                           type="button"
                           aria-pressed={active}
-                          onClick={() => setHighlightType(active ? null : type)}
+                          onClick={() => setFilter('highlight', active ? undefined : type)}
                           className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                             active ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                           }`}

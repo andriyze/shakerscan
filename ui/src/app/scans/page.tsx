@@ -91,6 +91,9 @@ function ScansContent() {
   const statusFilter = filters.status || ''
   const domainFilter = filters.domain || ''
   const searchQuery = filters.search || ''
+  // Time cohort (?within=7) — exposure "What changed" links use it so the
+  // destination shows the same windowed slice the tile counted.
+  const withinFilter = filters.within ? Number(filters.within) : 0
   // Page is 1-based in URL (page=1 is first page), clamped to valid range
   const rawPage = Math.max(1, filters.page || 1)
 
@@ -153,6 +156,7 @@ function ScansContent() {
         status: statusFilter || undefined,
         root_domain: domainFilter || undefined,
         target: searchQuery || undefined,
+        created_within_days: withinFilter || undefined,
         limit: PAGE_SIZE,
         offset: (rawPage - 1) * PAGE_SIZE
       })
@@ -181,7 +185,7 @@ function ScansContent() {
       }
       return false
     }
-  }, [statusFilter, domainFilter, searchQuery, rawPage, setFilter])
+  }, [statusFilter, domainFilter, searchQuery, withinFilter, rawPage, setFilter])
 
   useEffect(() => {
     fetchScans()
@@ -313,6 +317,7 @@ function ScansContent() {
           <select
             value={statusFilter}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
+            aria-label="Filter by scan status"
             className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="">All statuses</option>
@@ -329,6 +334,7 @@ function ScansContent() {
             <select
               value={domainFilter}
               onChange={(e) => setFilter('domain', e.target.value || undefined)}
+              aria-label="Filter by domain"
               className="px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
             >
               <option value="">All domains</option>
@@ -346,12 +352,26 @@ function ScansContent() {
             placeholder="Search by target URL..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
+            aria-label="Search scans by target URL"
             className="w-full px-4 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
           />
           <svg className="absolute right-3 top-2.5 w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
         </div>
+
+        {/* Time cohort chip (deep-linked from exposure "What changed") */}
+        {withinFilter > 0 && (
+          <button
+            type="button"
+            onClick={() => setFilter('within', undefined)}
+            aria-label={`Remove filter: last ${withinFilter} days`}
+            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            Last {withinFilter}d
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
       </div>
 
       {/* Top Pagination */}

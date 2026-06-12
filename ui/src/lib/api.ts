@@ -867,6 +867,7 @@ export async function getScans(params?: {
   offset?: number
   root_domain?: string
   target?: string
+  created_within_days?: number
 }): Promise<{ scans: Scan[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
@@ -874,6 +875,7 @@ export async function getScans(params?: {
   if (params?.offset) searchParams.set('offset', params.offset.toString())
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.target) searchParams.set('target', params.target)
+  if (params?.created_within_days) searchParams.set('created_within_days', params.created_within_days.toString())
 
   const res = await fetch(`${API_URL}/scans?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch scans')

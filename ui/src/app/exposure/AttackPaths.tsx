@@ -52,6 +52,9 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        // Scope the accessible name to the essentials — without this, the name
+        // is every piece of text in the header concatenated.
+        aria-label={`${path.name} — ${path.severity || 'unrated'} ${complete ? 'complete' : 'partial'} chain, ${path.steps.length} steps${path.asset_label ? `, on ${path.asset_label}` : ''}`}
         className="flex w-full items-start gap-3 p-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <ChevronRight className={`mt-0.5 h-4 w-4 shrink-0 text-gray-500 transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />

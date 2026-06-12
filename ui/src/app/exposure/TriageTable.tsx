@@ -31,7 +31,7 @@ import {
   type Finding,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { gradeTextColor, useToast } from '@/components/ui'
+import { ConfirmDialog, gradeTextColor, useToast } from '@/components/ui'
 import { ErrorState } from '@/components/ui'
 import styles from './exposure.module.css'
 
@@ -83,6 +83,13 @@ const ACTION_LABELS: Record<string, string> = {
   failed_scan: 'Failed scan',
 }
 
+// Single definition of "production AI surface", shared with the page so the
+// "prod" posture, scan environment, and confirmation logic always agree: the
+// explicit flag OR declared environment metadata.
+export function isProductionAIAsset(asset: ExposureAsset): boolean {
+  return asset.kind === 'ai' && (Boolean(asset.production_mode) || asset.environment === 'production')
+}
+
 export function riskDot(asset: ExposureAsset): string {
   if (asset.active_critical > 0) return 'bg-red-500'
   if (asset.active_high > 0) return 'bg-orange-500'
@@ -112,7 +119,15 @@ function postureMatches(asset: ExposureAsset, filter: PostureFilter, newWindowDa
   if (filter === 'public_critical') return asset.exposure_class === 'public' && asset.active_critical > 0
   if (filter === 'unscanned') return (asset.action_reasons || []).includes('never_scanned')
   if (filter === 'failed') return (asset.action_reasons || []).includes('failed_scan')
-  if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
+  if (filter === 'stale') {
+    // With a window (?posture=stale&window=30, set by the change strip), show
+    // only assets that *crossed* the 30-day threshold inside that window —
+    // the exact cohort the tile counted — instead of everything stale.
+    if (newWindowDays && typeof asset.scan_age_days === 'number') {
+      return asset.scan_age_days >= 30 && asset.scan_age_days <= 30 + newWindowDays
+    }
+    return (asset.action_reasons || []).includes('stale_scan')
+  }
   if (filter === 'incomplete') return Boolean(asset.scan_limited)
   if (filter === 'verified') return (asset.active_verified || 0) > 0
   if (filter === 'needs_verification') return (asset.active_needs_verification || 0) > 0
@@ -273,6 +288,11 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
         </span>
       ))}
       {hidden > 0 && <span className="text-[10px] text-gray-500">+{hidden} more</span>}
+      {asset.owner ? (
+        <span className="inline-flex items-center rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-300">{asset.owner}</span>
+      ) : (
+        <span className="inline-flex items-center rounded border border-amber-400/25 bg-amber-400/5 px-1.5 py-0.5 text-[10px] text-amber-200/90">unowned</span>
+      )}
     </div>
   )
 }
@@ -295,6 +315,7 @@ function AssetDetailDrawer({
   const [findings, setFindings] = useState<Finding[] | null>(null)
   const [error, setError] = useState(false)
   const closeRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
   const toast = useToast()
   // Ownership is editable for web/model targets (AI surfaces manage it in AI
   // Gate settings). Local copy keeps the drawer current after a save without
@@ -329,15 +350,41 @@ function AssetDetailDrawer({
     }
   }, [asset])
 
-  // Modal behaviour: focus the panel on open and close on Escape.
+  // Modal behaviour: focus the panel on open, trap Tab inside it, close on
+  // Escape, and return focus to the originating control on close.
   useEffect(() => {
     if (!asset) return
+    const previouslyFocused = document.activeElement as HTMLElement | null
     closeRef.current?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab' || !panelRef.current) return
+      const focusables = panelRef.current.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      const inside = panelRef.current.contains(active)
+      if (e.shiftKey) {
+        if (!inside || active === first) {
+          e.preventDefault()
+          last.focus()
+        }
+      } else if (!inside || active === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      previouslyFocused?.focus?.()
+    }
   }, [asset, onClose])
 
   if (!asset) return null
@@ -379,7 +426,7 @@ function AssetDetailDrawer({
   return (
     <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
       <button type="button" className="absolute inset-0 cursor-default" aria-label="Close asset details backdrop" onClick={onClose} />
-      <aside className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-gray-800 bg-gray-950 shadow-2xl">
+      <aside ref={panelRef} className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-gray-800 bg-gray-950 shadow-2xl">
         <div className={`flex items-start justify-between gap-3 p-4 ${styles.moduleHeader}`}>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -693,6 +740,54 @@ function ActionQueue({
   )
 }
 
+// Guardrail before fanning out scans: spell out what gets queued per asset
+// class, how many jobs that is, and call out production AI surfaces.
+function BulkScanConfirm({
+  open,
+  assets,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean
+  assets: ExposureAsset[]
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  const web = assets.filter((a) => a.kind === 'web').length
+  const ai = assets.filter((a) => a.kind === 'ai').length
+  const model = assets.filter((a) => a.kind === 'model').length
+  const prodAI = assets.filter(isProductionAIAsset)
+  return (
+    <ConfirmDialog
+      open={open}
+      title={`Queue ${assets.length} scan${assets.length === 1 ? '' : 's'}?`}
+      message={
+        <div className="space-y-2 text-sm">
+          <ul className="list-disc space-y-1 pl-5 text-gray-300">
+            {web > 0 && <li>{web} web quick scan{web === 1 ? '' : 's'} — passive checks, ~1–2 min each</li>}
+            {ai > 0 && <li>{ai} AI Gate smoke probe{ai === 1 ? '' : 's'} — sends test prompts to the target</li>}
+            {model > 0 && <li>{model} model intake re-check{model === 1 ? '' : 's'} — re-runs the last intake policy</li>}
+          </ul>
+          {prodAI.length > 0 && (
+            <p className="rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">
+              {prodAI.length === 1 ? '1 production AI surface' : `${prodAI.length} production AI surfaces`} (
+              {prodAI.map((a) => a.label).join(', ')}) — probes will run against production.
+            </p>
+          )}
+          <p className="text-xs text-gray-500">Each scan takes one worker slot from the queue.</p>
+        </div>
+      }
+      confirmLabel="Queue scans"
+      danger={prodAI.length > 0}
+      busy={busy}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
+  )
+}
+
 function AssetRow({
   asset,
   onExplore,
@@ -712,6 +807,11 @@ function AssetRow({
 }) {
   const KindIcon = KIND_META[asset.kind].icon
 
+  // Several assets can share a display label (e.g. repeated model artifact
+  // URLs), so accessible names carry a short id to stay distinguishable.
+  const shortId = asset.id.slice(0, 8)
+  const a11yName = `${asset.label} (${shortId})`
+
   // One-click scan for every kind: web quick scan, AI Gate smoke probe, or
   // model intake re-check — the handler queues the right scan type.
   const scanLabel = asset.kind === 'web' ? 'Scan' : asset.kind === 'ai' ? 'Test' : 'Re-check'
@@ -720,6 +820,7 @@ function AssetRow({
       type="button"
       onClick={() => onScan(asset)}
       disabled={scanning}
+      aria-label={`${scanLabel} ${a11yName}`}
       className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-2 py-1 text-[11px] text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
     >
       {scanning ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <ScanLine className="h-3 w-3" aria-hidden="true" />}
@@ -733,13 +834,13 @@ function AssetRow({
         type="checkbox"
         checked={selected}
         onChange={onToggleSelect}
-        aria-label={`Select ${asset.label}`}
+        aria-label={`Select ${a11yName}`}
         className="h-3.5 w-3.5 shrink-0 rounded border-gray-700 bg-gray-800"
       />
       <button
         type="button"
         onClick={() => onDetails(asset)}
-        aria-label={`Open details for ${asset.label}`}
+        aria-label={`Open details for ${a11yName}`}
         className="flex min-w-0 flex-1 items-center gap-3 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
@@ -747,7 +848,7 @@ function AssetRow({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
             <KindIcon className="h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />
-            <span className="truncate text-sm text-gray-100">{asset.label}</span>
+            <span className="truncate text-sm text-gray-100" title={asset.url || undefined}>{asset.label}</span>
             <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${KIND_META[asset.kind].badge}`}>
               {KIND_META[asset.kind].label}
             </span>
@@ -757,6 +858,9 @@ function AssetRow({
           </span>
           <span className="mt-0.5 block truncate text-[11px] text-gray-600">
             {asset.root_domain || asset.origin || asset.url}
+            {/* Model artifacts often repeat the same URL across submissions —
+                short id + first-seen makes each instance identifiable. */}
+            {asset.kind === 'model' && ` · ${shortId} · first seen ${relativeTime(asset.first_seen_at)}`}
           </span>
           <RowPosture asset={asset} />
         </span>
@@ -792,7 +896,7 @@ function AssetRow({
         {primaryAction}
         <Link
           href={asset.findings_href}
-          aria-label={`View findings for ${asset.label}`}
+          aria-label={`View findings for ${a11yName}`}
           className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <ShieldAlert className="h-3 w-3" aria-hidden="true" />
@@ -801,7 +905,7 @@ function AssetRow({
         <button
           type="button"
           onClick={() => onExplore(asset.node_id)}
-          aria-label={`Explore ${asset.label} in the map`}
+          aria-label={`Explore ${a11yName} in the map`}
           className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <Radar className="h-3 w-3" aria-hidden="true" />
@@ -832,6 +936,8 @@ export function TriageTable({
   onSortChange,
   onBulkScan,
   newWindowDays,
+  query = '',
+  onQueryChange,
 }: {
   assets: ExposureAsset[]
   metrics?: ExposureAssetMetrics | null
@@ -853,6 +959,8 @@ export function TriageTable({
   onSortChange: (sort: TriageSort) => void
   onBulkScan: (assets: ExposureAsset[]) => Promise<boolean>
   newWindowDays?: number
+  query?: string
+  onQueryChange?: (query: string) => void
 }) {
   const sortBy = sort
   const [renderLimit, setRenderLimit] = useState(60)
@@ -860,6 +968,8 @@ export function TriageTable({
   const [bulkOwnerOpen, setBulkOwnerOpen] = useState(false)
   const [bulkOwner, setBulkOwner] = useState('')
   const [assigningOwner, setAssigningOwner] = useState(false)
+  const [bulkScanConfirmOpen, setBulkScanConfirmOpen] = useState(false)
+  const [bulkScanning, setBulkScanning] = useState(false)
   const toast = useToast()
 
   // A selection made under one filter is invisible under another — clear it so
@@ -869,12 +979,21 @@ export function TriageTable({
   }, [kind, posture])
 
   const filtered = useMemo(() => {
-    const rows = assets.filter((a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture, newWindowDays))
+    const q = query.trim().toLowerCase()
+    const rows = assets.filter(
+      (a) =>
+        (kind === 'all' || a.kind === kind) &&
+        postureMatches(a, posture, newWindowDays) &&
+        (!q ||
+          a.label.toLowerCase().includes(q) ||
+          (a.url || '').toLowerCase().includes(q) ||
+          (a.root_domain || '').toLowerCase().includes(q))
+    )
     const sorted = [...rows]
     if (sortBy === 'critical') sorted.sort((a, b) => b.active_critical - a.active_critical || b.active_high - a.active_high)
     else if (sortBy === 'stale') sorted.sort((a, b) => (b.scan_age_days ?? -1) - (a.scan_age_days ?? -1))
     return sorted
-  }, [assets, kind, posture, sortBy, newWindowDays])
+  }, [assets, kind, posture, sortBy, newWindowDays, query])
 
   const visible = filtered.slice(0, renderLimit)
   const datasetTotal = total ?? assets.length
@@ -933,6 +1052,9 @@ export function TriageTable({
     const label = POSTURE_FILTERS.find((f) => f.value === posture)?.label ?? posture
     activeFilters.push({ key: 'posture', label, clear: () => onPostureChange('all') })
   }
+  if (query.trim() && onQueryChange) {
+    activeFilters.push({ key: 'query', label: `Search: "${query.trim()}"`, clear: () => onQueryChange('') })
+  }
 
   if (error) return <ErrorState message={error} onRetry={onRetry} />
 
@@ -990,12 +1112,7 @@ export function TriageTable({
           <span className="text-xs font-medium text-teal-200">{selectedAssets.length} selected</span>
           <button
             type="button"
-            onClick={async () => {
-              // Clear the selection only once something was actually queued —
-              // on total failure (or a cancelled confirm) keep it for retry.
-              const queued = await onBulkScan(selectedAssets)
-              if (queued) setSelectedIds(new Set())
-            }}
+            onClick={() => setBulkScanConfirmOpen(true)}
             className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <ScanLine className="h-3 w-3" aria-hidden="true" />
@@ -1112,6 +1229,24 @@ export function TriageTable({
           </>
         )}
       </div>
+      <BulkScanConfirm
+        open={bulkScanConfirmOpen}
+        assets={selectedAssets}
+        busy={bulkScanning}
+        onCancel={() => setBulkScanConfirmOpen(false)}
+        onConfirm={async () => {
+          setBulkScanning(true)
+          try {
+            // Clear the selection only once something was actually queued —
+            // on total failure keep it for retry.
+            const queued = await onBulkScan(selectedAssets)
+            if (queued) setSelectedIds(new Set())
+          } finally {
+            setBulkScanning(false)
+            setBulkScanConfirmOpen(false)
+          }
+        }}
+      />
       <AssetDetailDrawer
         asset={selectedAsset}
         onClose={onCloseDetails}
