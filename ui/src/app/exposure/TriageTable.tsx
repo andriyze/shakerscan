@@ -851,7 +851,7 @@ export function TriageTable({
   onKindChange: (kind: 'all' | ExposureAssetKind) => void
   onPostureChange: (posture: PostureFilter) => void
   onSortChange: (sort: TriageSort) => void
-  onBulkScan: (assets: ExposureAsset[]) => void
+  onBulkScan: (assets: ExposureAsset[]) => Promise<boolean>
   newWindowDays?: number
 }) {
   const sortBy = sort
@@ -990,7 +990,12 @@ export function TriageTable({
           <span className="text-xs font-medium text-teal-200">{selectedAssets.length} selected</span>
           <button
             type="button"
-            onClick={() => { onBulkScan(selectedAssets); setSelectedIds(new Set()) }}
+            onClick={async () => {
+              // Clear the selection only once something was actually queued —
+              // on total failure (or a cancelled confirm) keep it for retry.
+              const queued = await onBulkScan(selectedAssets)
+              if (queued) setSelectedIds(new Set())
+            }}
             className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <ScanLine className="h-3 w-3" aria-hidden="true" />

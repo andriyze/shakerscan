@@ -35,6 +35,7 @@ import {
   rescanModelIntakeTarget,
   scanAITarget,
   scanTarget,
+  type AIEnvironment,
   type ExposureAsset,
   type ExposureAssetKind,
   type ExposureAssetMetrics,
@@ -502,6 +503,14 @@ function Legend() {
 
 const POSTURE_VALUES = new Set<string>(POSTURE_FILTERS.map((f) => f.value))
 
+const AI_SCAN_ENVIRONMENTS: AIEnvironment[] = ['preview', 'staging', 'development', 'production']
+
+// Single definition of "production AI surface", matching the "prod" posture
+// filter: the explicit flag OR declared environment metadata.
+function isProductionAIAsset(asset: ExposureAsset): boolean {
+  return asset.kind === 'ai' && (Boolean(asset.production_mode) || asset.environment === 'production')
+}
+
 // Named operational views: each is just a triage filter combination, so the
 // URL stays the single source of truth and every view is shareable.
 const PRESET_VIEWS: Array<{ label: string; kind: 'all' | ExposureAssetKind; posture: PostureFilter; sort: TriageSort }> = [
@@ -722,11 +731,19 @@ function ExposureView() {
       return res?.scan_id || res?.id
     }
     if (asset.kind === 'ai') {
+      // Scan environment follows the asset's declared environment (the same
+      // signal the "prod" posture uses), not just the production_mode flag —
+      // so an asset with metadata environment "production" is scanned (and
+      // confirmed) as production, not silently probed as preview.
+      const declared = AI_SCAN_ENVIRONMENTS.includes(asset.environment as AIEnvironment)
+        ? (asset.environment as AIEnvironment)
+        : undefined
+      const prod = isProductionAIAsset(asset)
       const res = await scanAITarget(asset.id, {
         probe_pack: 'shaker-ai-smoke',
         scan_profile: 'smoke',
-        environment: asset.production_mode ? 'production' : 'preview',
-        confirm_production: asset.production_mode,
+        environment: declared ?? (prod ? 'production' : 'preview'),
+        confirm_production: prod,
       })
       return res.scan_id
     }
@@ -743,7 +760,7 @@ function ExposureView() {
   // The API hard-requires confirm_production for production AI surfaces; ask
   // the user before sending it instead of silently auto-confirming.
   function confirmProductionScan(toScan: ExposureAsset[]): boolean {
-    const prodAI = toScan.filter((asset) => asset.kind === 'ai' && asset.production_mode)
+    const prodAI = toScan.filter(isProductionAIAsset)
     if (prodAI.length === 0) return true
     const names = prodAI.map((asset) => asset.label).join(', ')
     return window.confirm(
@@ -769,10 +786,12 @@ function ExposureView() {
   }
 
   // Bulk variant of handleScan: fire kind-appropriate scans concurrently and
-  // report one summary toast instead of one per asset.
-  async function handleBulkScan(toScan: ExposureAsset[]) {
-    if (toScan.length === 0) return
-    if (!confirmProductionScan(toScan)) return
+  // report one summary toast instead of one per asset. Returns whether at
+  // least one scan was queued so the caller can keep the selection on total
+  // failure (or cancel) for an easy retry.
+  async function handleBulkScan(toScan: ExposureAsset[]): Promise<boolean> {
+    if (toScan.length === 0) return false
+    if (!confirmProductionScan(toScan)) return false
     setScanningIds((prev) => new Set([...prev, ...toScan.map((asset) => asset.id)]))
     try {
       const results = await Promise.allSettled(toScan.map((asset) => triggerScan(asset)))
@@ -786,6 +805,7 @@ function ExposureView() {
         const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
         toast.error(firstError?.reason instanceof Error ? firstError.reason.message : 'Failed to queue the selected scans')
       }
+      return ok > 0
     } finally {
       setScanningIds((prev) => {
         const next = new Set(prev)

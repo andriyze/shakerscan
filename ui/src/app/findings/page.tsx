@@ -79,6 +79,20 @@ function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
   return sortOrder === 'desc' ? 'Critical first' : 'Info first'
 }
 
+function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      aria-label={`Remove filter: ${label}`}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+    >
+      <span className="max-w-64 truncate">{label}</span>
+      <span aria-hidden="true">×</span>
+    </button>
+  )
+}
+
 function FindingsContent() {
   const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
     defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
@@ -262,6 +276,9 @@ function FindingsContent() {
     if (domainFilter) params.set('return_domain', domainFilter)
     if (scanIdFilter) params.set('return_scan_id', scanIdFilter)
     if (targetIdFilter) params.set('return_target_id', targetIdFilter)
+    if (aiTargetIdFilter) params.set('return_ai_target_id', aiTargetIdFilter)
+    if (firstSeenWithinFilter) params.set('return_first_seen_within', String(firstSeenWithinFilter))
+    if (resolvedWithinFilter) params.set('return_resolved_within', String(resolvedWithinFilter))
     if (searchQuery) params.set('return_search', searchQuery)
     if (verificationVerdictFilter) params.set('return_verification_verdict', verificationVerdictFilter)
     if (verificationModeFilter) params.set('return_verification_mode', verificationModeFilter)
@@ -541,19 +558,37 @@ function FindingsContent() {
           </svg>
         </div>
 
-        {/* Clear Filters */}
-        {(scanIdFilter || targetIdFilter) && (
-          <button
-            onClick={() => {
-              setFilter('scan_id', undefined)
-              setFilter('target_id', undefined)
-            }}
-            className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700"
-          >
-            Clear filters
-          </button>
-        )}
       </div>
+
+      {/* Deep-link filters (arrive via links from scans/targets/exposure and
+          have no visible control above) — surface each as a removable chip so
+          the active scope is obvious and individually clearable. */}
+      {(scanIdFilter || targetIdFilter || aiTargetIdFilter || firstSeenWithinFilter > 0 || resolvedWithinFilter > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500">Filtered by:</span>
+          {scanIdFilter && (
+            <DeepLinkFilterChip label={`Scan ${scanIdFilter.slice(0, 8)}…`} onClear={() => setFilter('scan_id', undefined)} />
+          )}
+          {targetIdFilter && (
+            <DeepLinkFilterChip
+              label={`Target: ${findings[0]?.target_name || findings[0]?.target_url || `${targetIdFilter.slice(0, 8)}…`}`}
+              onClear={() => setFilter('target_id', undefined)}
+            />
+          )}
+          {aiTargetIdFilter && (
+            <DeepLinkFilterChip
+              label={`AI target: ${findings[0]?.ai_target_name || `${aiTargetIdFilter.slice(0, 8)}…`}`}
+              onClear={() => setFilter('ai_target_id', undefined)}
+            />
+          )}
+          {firstSeenWithinFilter > 0 && (
+            <DeepLinkFilterChip label={`First seen ≤ ${firstSeenWithinFilter}d`} onClear={() => setFilter('first_seen_within', undefined)} />
+          )}
+          {resolvedWithinFilter > 0 && (
+            <DeepLinkFilterChip label={`Resolved ≤ ${resolvedWithinFilter}d`} onClear={() => setFilter('resolved_within', undefined)} />
+          )}
+        </div>
+      )}
 
       {/* Severity Filter */}
       <div className="flex gap-2 flex-wrap">
