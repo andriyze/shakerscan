@@ -1083,6 +1083,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         await conn.execute("""
                             UPDATE findings SET
                                 status = 'active',
+                                resolved_at = NULL,
                                 last_seen_at = NOW(),
                                 resurfaced_count = $1,
                                 scan_id = $2,
@@ -1283,6 +1284,7 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
                     await conn.execute("""
                         UPDATE findings SET
                             status = 'active',
+                            resolved_at = NULL,
                             last_seen_at = NOW(),
                             resurfaced_count = $1,
                             scan_id = $2,

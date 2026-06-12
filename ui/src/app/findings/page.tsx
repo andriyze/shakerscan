@@ -28,8 +28,11 @@ interface FindingsFilters {
   domain?: string
   scan_id?: string
   target_id?: string
+  ai_target_id?: string
   search?: string
   last_seen?: number
+  first_seen_within?: number
+  resolved_within?: number
   verification_verdict?: string
   verification_mode?: string
   verified_only?: string
@@ -104,8 +107,11 @@ function FindingsContent() {
   const domainFilter = filters.domain || ''
   const scanIdFilter = filters.scan_id || ''
   const targetIdFilter = filters.target_id || ''
+  const aiTargetIdFilter = filters.ai_target_id || ''
   const searchQuery = filters.search || ''
   const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
+  const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
+  const resolvedWithinFilter = filters.resolved_within ? Number(filters.resolved_within) : 0
   const verificationVerdictFilter = filters.verification_verdict || ''
   const verificationModeFilter = filters.verification_mode || ''
   const verifiedOnlyFilter = filters.verified_only === 'true'
@@ -116,7 +122,8 @@ function FindingsContent() {
 
   const hasActiveFilters = Boolean(
     severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
-    scanIdFilter || targetIdFilter || searchQuery || lastSeenFilter ||
+    scanIdFilter || targetIdFilter || aiTargetIdFilter || searchQuery || lastSeenFilter ||
+    firstSeenWithinFilter || resolvedWithinFilter ||
     verificationVerdictFilter || verificationModeFilter || verifiedOnlyFilter
   )
 
@@ -148,7 +155,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, searchQuery, lastSeenFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -159,8 +166,11 @@ function FindingsContent() {
         root_domain: domainFilter || undefined,
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
+        ai_target_id: aiTargetIdFilter || undefined,
         search: searchQuery || undefined,
         seen_within_days: lastSeenFilter || undefined,
+        first_seen_within_days: firstSeenWithinFilter || undefined,
+        resolved_within_days: resolvedWithinFilter || undefined,
         verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
         verification_mode: verificationModeFilter ? (verificationModeFilter as 'deterministic' | 'ai_driven') : undefined,
         verified_only: verifiedOnlyFilter || undefined,

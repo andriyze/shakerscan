@@ -797,7 +797,6 @@ export interface ExposureChangeCategory {
   label: string
   count: number
   href?: string | null
-  severity_counts?: { critical?: number; high?: number }
   examples: ExposureChangeExample[]
 }
 
@@ -1001,6 +1000,8 @@ export async function getFindings(params?: {
   ai_target_id?: string
   search?: string
   seen_within_days?: number
+  first_seen_within_days?: number
+  resolved_within_days?: number
   verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
   verification_mode?: 'deterministic' | 'ai_driven'
   verified_only?: boolean
@@ -1019,6 +1020,8 @@ export async function getFindings(params?: {
   if (params?.ai_target_id) searchParams.set('ai_target_id', params.ai_target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
+  if (params?.first_seen_within_days) searchParams.set('first_seen_within_days', params.first_seen_within_days.toString())
+  if (params?.resolved_within_days) searchParams.set('resolved_within_days', params.resolved_within_days.toString())
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
   if (params?.verification_mode) searchParams.set('verification_mode', params.verification_mode)
   if (params?.verified_only) searchParams.set('verified_only', 'true')

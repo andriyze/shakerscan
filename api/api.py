@@ -10,6 +10,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -866,6 +867,7 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
                 await conn.execute("""
                     UPDATE findings SET
                         status = 'active',
+                        resolved_at = NULL,
                         last_seen_at = NOW(),
                         resurfaced_count = $1,
                         scan_id = $2,
@@ -6110,7 +6112,7 @@ async def exposure_assets(
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
-            "findings_href": "/findings?source_type=ai&status=active",
+            "findings_href": f"/findings?ai_target_id={row['id']}&status=active",
         })
 
     # Headline metrics from the full (uncapped) set so the stat row stays
@@ -6270,6 +6272,23 @@ async def exposure_changes(
         when = _exposure_datetime(value)
         return when.isoformat() if when else None
 
+    # Each category links to the *same slice it counted*: window, severity, and
+    # domain scope all carry into the target view instead of dropping to a
+    # broader list. Day-based windows pass through exactly; arbitrary `since`
+    # anchors round up to whole days (links may include up to one extra day —
+    # never less than what was counted).
+    if since:
+        window_days = max(1, math.ceil((datetime.now(timezone.utc) - anchor).total_seconds() / 86400))
+    else:
+        window_days = days
+
+    def href(path: str, **params: Any) -> str:
+        from urllib.parse import urlencode
+        clean = {k: v for k, v in params.items() if v not in (None, "")}
+        if root_domain:
+            clean["domain"] = root_domain
+        return f"{path}?{urlencode(clean)}" if clean else path
+
     new_asset_examples = [
         {
             "label": r["label"],
@@ -6283,51 +6302,59 @@ async def exposure_changes(
     ]
     new_asset_examples.sort(key=lambda e: e["when"] or "", reverse=True)
 
+    def finding_examples(rows: list, when_key: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "label": r["title"],
+                "detail": " · ".join(filter(None, [r["severity"], r["subject"]])),
+                "when": fmt_when(r[when_key]),
+            }
+            for r in rows[:examples]
+        ]
+
+    new_critical = [r for r in new_findings if r["severity"] == "critical"]
+    new_high = [r for r in new_findings if r["severity"] == "high"]
+
     categories = [
         {
             "key": "new_assets",
             "label": "New assets",
             "count": len(new_targets) + len(new_ai),
-            "href": "/exposure?posture=new",
+            "href": href("/exposure", posture="new", window=window_days),
             "examples": new_asset_examples[:examples],
         },
         {
-            "key": "new_risk",
-            "label": "New critical/high findings",
-            "count": len(new_findings),
-            "severity_counts": {
-                "critical": sum(1 for r in new_findings if r["severity"] == "critical"),
-                "high": sum(1 for r in new_findings if r["severity"] == "high"),
-            },
-            "href": "/findings?status=active&sort_by=first_seen&sort_order=desc",
-            "examples": [
-                {
-                    "label": r["title"],
-                    "detail": " · ".join(filter(None, [r["severity"], r["subject"]])),
-                    "when": fmt_when(r["first_seen_at"]),
-                }
-                for r in new_findings[:examples]
-            ],
+            "key": "new_critical",
+            "label": "New critical findings",
+            "count": len(new_critical),
+            "href": href(
+                "/findings", status="active", severity="critical",
+                first_seen_within=window_days, sort_by="first_seen", sort_order="desc",
+            ),
+            "examples": finding_examples(new_critical, "first_seen_at"),
+        },
+        {
+            "key": "new_high",
+            "label": "New high findings",
+            "count": len(new_high),
+            "href": href(
+                "/findings", status="active", severity="high",
+                first_seen_within=window_days, sort_by="first_seen", sort_order="desc",
+            ),
+            "examples": finding_examples(new_high, "first_seen_at"),
         },
         {
             "key": "resolved",
             "label": "Findings resolved",
             "count": len(resolved_findings),
-            "href": "/findings?status=resolved",
-            "examples": [
-                {
-                    "label": r["title"],
-                    "detail": " · ".join(filter(None, [r["severity"], r["subject"]])),
-                    "when": fmt_when(r["resolved_at"]),
-                }
-                for r in resolved_findings[:examples]
-            ],
+            "href": href("/findings", status="resolved", resolved_within=window_days, sort_by="last_seen", sort_order="desc"),
+            "examples": finding_examples(resolved_findings, "resolved_at"),
         },
         {
             "key": "failed_scans",
             "label": "Failed scans",
             "count": len(failed_scans),
-            "href": "/exposure?posture=failed",
+            "href": href("/scans", status="failed"),
             "examples": [
                 {"label": r["label"], "detail": r["scan_type"], "when": fmt_when(r["created_at"])}
                 for r in failed_scans[:examples]
@@ -6337,7 +6364,7 @@ async def exposure_changes(
             "key": "went_stale",
             "label": "Went stale",
             "count": len(went_stale),
-            "href": "/exposure?posture=stale",
+            "href": href("/exposure", posture="stale", sort="stale"),
             "examples": [
                 {
                     "label": r["label"],
@@ -7345,6 +7372,8 @@ async def list_findings(
     verified_only: bool = False,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
+    first_seen_within_days: Optional[int] = Query(None, ge=1),
+    resolved_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, regex="^(severity|first_seen|last_seen|cvss)$"),
     sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
     limit: int = Query(100, le=500),
@@ -7362,7 +7391,8 @@ async def list_findings(
     allowed_params = {
         "severity", "status", "source_type", "target_id", "ai_target_id",
         "scan_id", "root_domain", "verification_verdict", "verification_mode",
-        "verified_only", "search", "seen_within_days", "sort_by", "sort_order",
+        "verified_only", "search", "seen_within_days", "first_seen_within_days",
+        "resolved_within_days", "sort_by", "sort_order",
         "limit", "offset",
     }
     unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
@@ -7466,6 +7496,16 @@ async def list_findings(
         if seen_within_days:
             query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
             params.append(seen_within_days)
+            param_idx += 1
+
+        if first_seen_within_days:
+            query += f" AND f.first_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
+            params.append(first_seen_within_days)
+            param_idx += 1
+
+        if resolved_within_days:
+            query += f" AND f.resolved_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
+            params.append(resolved_within_days)
             param_idx += 1
 
         # Build ORDER BY clause based on sort_by parameter
@@ -8132,6 +8172,9 @@ async def update_finding(
             result = await conn.fetchrow("""
                 UPDATE findings
                 SET status = $1,
+                    resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                       WHEN $1 = 'active' THEN NULL
+                                       ELSE resolved_at END,
                     notes = COALESCE($2, notes),
                     analyst_verdict = COALESCE($3, analyst_verdict),
                     analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
@@ -8151,6 +8194,9 @@ async def update_finding(
                 result = await conn.fetchrow("""
                     UPDATE findings
                     SET status = $1,
+                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                           WHEN $1 = 'active' THEN NULL
+                                           ELSE resolved_at END,
                         notes = COALESCE($2, notes),
                         analyst_verdict = COALESCE($3, analyst_verdict),
                         analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
@@ -8163,6 +8209,9 @@ async def update_finding(
                 result = await conn.fetchrow("""
                     UPDATE findings
                     SET status = $1,
+                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                           WHEN $1 = 'active' THEN NULL
+                                           ELSE resolved_at END,
                         notes = COALESCE($2, notes),
                         analyst_verdict = COALESCE($3, analyst_verdict),
                         analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
@@ -8184,6 +8233,9 @@ async def update_finding(
                 result = await conn.fetchrow("""
                     UPDATE findings
                     SET status = $1,
+                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                           WHEN $1 = 'active' THEN NULL
+                                           ELSE resolved_at END,
                         notes = COALESCE($2, notes),
                         analyst_verdict = COALESCE($3, analyst_verdict),
                         analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
@@ -8196,6 +8248,9 @@ async def update_finding(
                 result = await conn.fetchrow("""
                     UPDATE findings
                     SET status = $1,
+                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                           WHEN $1 = 'active' THEN NULL
+                                           ELSE resolved_at END,
                         notes = COALESCE($2, notes),
                         analyst_verdict = COALESCE($3, analyst_verdict),
                         analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
@@ -8322,7 +8377,12 @@ async def bulk_update_findings(finding_ids: list[str], status: str, notes: Optio
         ids = [uuid.UUID(fid) for fid in finding_ids]
         result = await conn.execute("""
             UPDATE findings
-            SET status = $1, notes = COALESCE($2, notes), updated_at = NOW()
+            SET status = $1,
+                resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                   WHEN $1 = 'active' THEN NULL
+                                   ELSE resolved_at END,
+                notes = COALESCE($2, notes),
+                updated_at = NOW()
             WHERE id = ANY($3)
         """, status, notes, ids)
 

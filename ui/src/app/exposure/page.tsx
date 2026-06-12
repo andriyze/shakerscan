@@ -503,7 +503,7 @@ const POSTURE_VALUES = new Set<string>(POSTURE_FILTERS.map((f) => f.value))
 // Named operational views: each is just a triage filter combination, so the
 // URL stays the single source of truth and every view is shareable.
 const PRESET_VIEWS: Array<{ label: string; kind: 'all' | ExposureAssetKind; posture: PostureFilter; sort: TriageSort }> = [
-  { label: 'Public critical', kind: 'all', posture: 'public', sort: 'critical' },
+  { label: 'Public critical', kind: 'all', posture: 'public_critical', sort: 'critical' },
   { label: 'Failed scans', kind: 'all', posture: 'failed', sort: 'priority' },
   { label: 'Prod AI', kind: 'ai', posture: 'prod', sort: 'priority' },
   { label: 'New this week', kind: 'all', posture: 'new', sort: 'priority' },
@@ -558,6 +558,11 @@ function ExposureView() {
   const triagePosture: PostureFilter =
     typeof filters.posture === 'string' && POSTURE_VALUES.has(filters.posture) ? (filters.posture as PostureFilter) : 'all'
   const triageSort: TriageSort = filters.sort === 'critical' || filters.sort === 'stale' ? filters.sort : 'priority'
+  // Optional day window for the "new" posture (?posture=new&window=30) so the
+  // change strip's links select the same slice they counted; defaults to the
+  // server's 7-day is_new flag when absent.
+  const windowValue = Number(filters.window)
+  const triageNewWindow = Number.isInteger(windowValue) && windowValue > 0 ? windowValue : undefined
 
   const setLens = (next: Lens) => setFilter('lens', next === 'triage' ? undefined : next)
   const setDomain = (value: string) => setFilter('domain', value || undefined)
@@ -963,6 +968,7 @@ function ExposureView() {
             onPostureChange={(p) => applyTriage({ posture: p })}
             onSortChange={(s) => applyTriage({ sort: s })}
             onBulkScan={handleBulkScan}
+            newWindowDays={triageNewWindow}
           />
         </div>
       )}

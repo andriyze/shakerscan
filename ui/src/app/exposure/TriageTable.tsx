@@ -46,6 +46,7 @@ export const POSTURE_FILTERS = [
   { value: 'p2', label: 'P2' },
   { value: 'p3', label: 'P3' },
   { value: 'public', label: 'Public' },
+  { value: 'public_critical', label: 'Public critical' },
   { value: 'internal', label: 'Internal' },
   { value: 'unscanned', label: 'Unscanned' },
   { value: 'failed', label: 'Failed' },
@@ -104,10 +105,11 @@ function relativeTime(value?: string | null): string {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
-function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
+function postureMatches(asset: ExposureAsset, filter: PostureFilter, newWindowDays?: number): boolean {
   if (filter === 'all') return true
   if (filter === 'p1' || filter === 'p2' || filter === 'p3') return asset.action_priority === filter.toUpperCase()
   if (filter === 'public' || filter === 'internal') return asset.exposure_class === filter
+  if (filter === 'public_critical') return asset.exposure_class === 'public' && asset.active_critical > 0
   if (filter === 'unscanned') return (asset.action_reasons || []).includes('never_scanned')
   if (filter === 'failed') return (asset.action_reasons || []).includes('failed_scan')
   if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
@@ -117,8 +119,16 @@ function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
   // High-impact slice of the (otherwise ~all-assets) needs-verification set:
   // unreviewed findings on an asset that also carries critical/high risk.
   if (filter === 'unverified_high') return (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0
-  if (filter === 'prod') return Boolean(asset.production_mode)
-  if (filter === 'new') return Boolean(asset.is_new)
+  if (filter === 'prod') return Boolean(asset.production_mode) || asset.environment === 'production'
+  if (filter === 'new') {
+    // The change strip links here with its own window (?window=30); fall back
+    // to the server's 7-day is_new flag when no explicit window is given.
+    if (newWindowDays && asset.first_seen_at) {
+      const ageMs = Date.now() - new Date(asset.first_seen_at).getTime()
+      return ageMs <= newWindowDays * 86400000
+    }
+    return Boolean(asset.is_new)
+  }
   if (filter === 'unowned') return !asset.owner
   return true
 }
@@ -836,6 +846,7 @@ export function TriageTable({
   onPostureChange,
   onSortChange,
   onBulkScan,
+  newWindowDays,
 }: {
   assets: ExposureAsset[]
   metrics?: ExposureAssetMetrics | null
@@ -856,6 +867,7 @@ export function TriageTable({
   onPostureChange: (posture: PostureFilter) => void
   onSortChange: (sort: TriageSort) => void
   onBulkScan: (assets: ExposureAsset[]) => void
+  newWindowDays?: number
 }) {
   const sortBy = sort
   const [renderLimit, setRenderLimit] = useState(60)
@@ -872,12 +884,12 @@ export function TriageTable({
   }, [kind, posture])
 
   const filtered = useMemo(() => {
-    const rows = assets.filter((a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture))
+    const rows = assets.filter((a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture, newWindowDays))
     const sorted = [...rows]
     if (sortBy === 'critical') sorted.sort((a, b) => b.active_critical - a.active_critical || b.active_high - a.active_high)
     else if (sortBy === 'stale') sorted.sort((a, b) => (b.scan_age_days ?? -1) - (a.scan_age_days ?? -1))
     return sorted
-  }, [assets, kind, posture, sortBy])
+  }, [assets, kind, posture, sortBy, newWindowDays])
 
   const visible = filtered.slice(0, renderLimit)
   const datasetTotal = total ?? assets.length
@@ -994,7 +1006,7 @@ export function TriageTable({
           <span className="text-xs font-medium text-teal-200">{selectedAssets.length} selected</span>
           <button
             type="button"
-            onClick={() => onBulkScan(selectedWeb)}
+            onClick={() => { onBulkScan(selectedWeb); setSelectedIds(new Set()) }}
             disabled={selectedWeb.length === 0}
             title={selectedWeb.length === 0 ? 'Only web targets support quick scans' : undefined}
             className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"

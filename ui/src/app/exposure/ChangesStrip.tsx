@@ -34,7 +34,8 @@ function useLastVisitAnchor(): string | null {
 
 const TILE_TONES: Record<string, string> = {
   new_assets: 'text-teal-300',
-  new_risk: 'text-red-300',
+  new_critical: 'text-red-300',
+  new_high: 'text-orange-300',
   resolved: 'text-emerald-300',
   failed_scans: 'text-red-200',
   went_stale: 'text-yellow-300',
