@@ -15,7 +15,9 @@ import {
   RadioTower,
   ScanLine,
   ShieldAlert,
+  ShieldOff,
   Target,
+  X,
 } from 'lucide-react'
 import {
   getFindings,
@@ -35,13 +37,6 @@ const KIND_META: Record<ExposureAssetKind, { label: string; badge: string; icon:
   ai: { label: 'AI', badge: 'bg-purple-500/15 text-purple-300', icon: Bot },
   model: { label: 'Model', badge: 'bg-slate-400/15 text-slate-300', icon: Boxes },
 }
-
-const KIND_FILTERS: Array<{ value: 'all' | ExposureAssetKind; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'web', label: 'Web' },
-  { value: 'ai', label: 'AI' },
-  { value: 'model', label: 'Model' },
-]
 
 export const POSTURE_FILTERS = [
   { value: 'p1', label: 'P1' },
@@ -74,7 +69,7 @@ const ACTION_LABELS: Record<string, string> = {
   model_not_approved: 'Model not approved',
 }
 
-function riskDot(asset: ExposureAsset): string {
+export function riskDot(asset: ExposureAsset): string {
   if (asset.active_critical > 0) return 'bg-red-500'
   if (asset.active_high > 0) return 'bg-orange-500'
   if (asset.active_total > 0) return 'bg-yellow-500'
@@ -128,11 +123,44 @@ function ExposureBadge({ asset }: { asset: ExposureAsset }) {
   )
 }
 
-function PriorityBadge({ priority }: { priority?: string | null }) {
+export function PriorityBadge({ priority }: { priority?: string | null }) {
   if (!priority) return null
   return (
     <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${PRIORITY_STYLES[priority] || 'bg-gray-700 text-gray-300'}`}>
       {priority}
+    </span>
+  )
+}
+
+const BLAST_STYLES: Record<string, string> = {
+  critical: 'border-red-500/40 bg-red-500/10 text-red-300',
+  high: 'border-purple-400/40 bg-purple-400/10 text-purple-200',
+  medium: 'border-amber-400/30 bg-amber-400/10 text-amber-200',
+  low: 'border-slate-500/30 bg-slate-500/10 text-slate-300',
+}
+
+// Blast radius is the defining AI-surface risk (the largest asset class here)
+// and was previously only visible after expanding a row. Surface the tier and a
+// missing-runtime-controls count inline so AI rows are triageable at a glance.
+function BlastBadge({ asset }: { asset: ExposureAsset }) {
+  const tier = asset.blast_radius_tier
+  if (asset.kind !== 'ai' || !tier) return null
+  const missing = (asset.missing_runtime_controls || []).length
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] uppercase ${BLAST_STYLES[tier] || 'border-gray-700 bg-gray-800 text-gray-400'}`}>
+        <RadioTower className="h-2.5 w-2.5" aria-hidden="true" />
+        {tier} blast
+      </span>
+      {missing > 0 && (
+        <span
+          className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/5 px-1.5 py-0.5 text-[10px] text-amber-200/90"
+          title={(asset.missing_runtime_controls || []).join(', ')}
+        >
+          <ShieldOff className="h-2.5 w-2.5" aria-hidden="true" />
+          {missing} missing
+        </span>
+      )}
     </span>
   )
 }
@@ -145,6 +173,7 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
     <div className="mt-1 flex flex-wrap items-center gap-1.5">
       <PriorityBadge priority={asset.action_priority} />
       <ExposureBadge asset={asset} />
+      <BlastBadge asset={asset} />
       {issueCount > 0 && (
         <span className="inline-flex items-center gap-1 text-[10px] text-gray-500">
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
@@ -157,7 +186,12 @@ function RowPosture({ asset }: { asset: ExposureAsset }) {
 
 function PostureDetail({ asset }: { asset: ExposureAsset }) {
   const reasons = asset.action_reasons || []
-  if (reasons.length === 0 && !asset.blast_radius_tier && !asset.latest_scan_href) return null
+  // Blast tier is shown in the collapsed row now; the expanded detail adds the
+  // *which* — the specific missing runtime controls and data sensitivity.
+  const missingControls = asset.kind === 'ai' ? asset.missing_runtime_controls || [] : []
+  const hasDetail =
+    reasons.length > 0 || missingControls.length > 0 || asset.data_classification || asset.coverage_status || asset.latest_scan_href
+  if (!hasDetail) return null
   return (
     <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-800/40 px-4 py-2">
       {reasons.map((reason) => (
@@ -165,13 +199,22 @@ function PostureDetail({ asset }: { asset: ExposureAsset }) {
           {actionLabel(reason)}
         </span>
       ))}
+      {asset.data_classification && (
+        <span className="rounded border border-fuchsia-400/25 bg-fuchsia-400/5 px-1.5 py-0.5 text-[10px] uppercase text-fuchsia-200/90">
+          {asset.data_classification.replace(/_/g, ' ')}
+        </span>
+      )}
+      {missingControls.map((control) => (
+        <span
+          key={control}
+          className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/5 px-1.5 py-0.5 text-[10px] text-amber-200/90"
+        >
+          <ShieldOff className="h-2.5 w-2.5" aria-hidden="true" />
+          {control.replace(/_/g, ' ')}
+        </span>
+      ))}
       {asset.coverage_status && (
         <span className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-500">coverage: {asset.coverage_status}</span>
-      )}
-      {asset.blast_radius_tier && (
-        <span className="rounded border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[10px] uppercase text-purple-200">
-          {asset.blast_radius_tier} blast
-        </span>
       )}
       {asset.latest_scan_href && (
         <Link
@@ -505,22 +548,30 @@ export function TriageTable({
   onKindChange: (kind: 'all' | ExposureAssetKind) => void
   onPostureChange: (posture: PostureFilter) => void
 }) {
-  const [newOnly, setNewOnly] = useState(false)
   const [sortBy, setSortBy] = useState<'priority' | 'critical' | 'stale'>('priority')
   const [renderLimit, setRenderLimit] = useState(60)
 
   const filtered = useMemo(() => {
-    const rows = assets.filter(
-      (a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture) && (!newOnly || a.is_new)
-    )
+    const rows = assets.filter((a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture))
     const sorted = [...rows]
     if (sortBy === 'critical') sorted.sort((a, b) => b.active_critical - a.active_critical || b.active_high - a.active_high)
     else if (sortBy === 'stale') sorted.sort((a, b) => (b.scan_age_days ?? -1) - (a.scan_age_days ?? -1))
     return sorted
-  }, [assets, kind, posture, newOnly, sortBy])
+  }, [assets, kind, posture, sortBy])
 
   const visible = filtered.slice(0, renderLimit)
   const datasetTotal = total ?? assets.length
+
+  // Mirror the page-level filter bar's active selections as removable chips so
+  // the applied scope is visible (and clearable) from the list itself.
+  const activeFilters: Array<{ key: string; label: string; clear: () => void }> = []
+  if (kind !== 'all') {
+    activeFilters.push({ key: 'kind', label: KIND_META[kind].label, clear: () => onKindChange('all') })
+  }
+  if (posture !== 'all') {
+    const label = POSTURE_FILTERS.find((f) => f.value === posture)?.label ?? posture
+    activeFilters.push({ key: 'posture', label, clear: () => onPostureChange('all') })
+  }
 
   if (error) return <ErrorState message={error} onRetry={onRetry} />
 
@@ -528,56 +579,26 @@ export function TriageTable({
     <div className="space-y-3">
       <ActionQueue assets={assets} onScan={onScan} onExplore={onExplore} scanningIds={scanningIds} />
 
+      {/* Kind + posture filtering lives in the page-level Filter inventory bar
+          (single source of truth). Here we mirror the active filters as
+          removable chips and keep only sort, which is list-local. */}
       <div className="flex flex-wrap items-center gap-3">
-        <div className={`inline-flex p-0.5 ${styles.input}`} role="group" aria-label="Filter by asset kind">
-          {KIND_FILTERS.map((f) => (
+        {activeFilters.length > 0 ? (
+          activeFilters.map((f) => (
             <button
-              key={f.value}
+              key={f.key}
               type="button"
-              aria-pressed={kind === f.value}
-              onClick={() => onKindChange(f.value)}
-              className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                kind === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
-              }`}
+              onClick={f.clear}
+              aria-label={`Remove ${f.label} filter`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-teal-400/30 bg-teal-500/10 px-2.5 py-1 text-xs text-teal-200 hover:bg-teal-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {f.label}
+              <X className="h-3 w-3" aria-hidden="true" />
             </button>
-          ))}
-        </div>
-        <div className={`inline-flex p-0.5 ${styles.input}`} role="group" aria-label="Filter by exposure posture">
-          <button
-            type="button"
-            aria-pressed={posture === 'all'}
-            onClick={() => onPostureChange('all')}
-            className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-              posture === 'all' ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            All
-          </button>
-          {POSTURE_FILTERS.map((f) => (
-            <button
-              key={f.value}
-              type="button"
-              aria-pressed={posture === f.value}
-              onClick={() => onPostureChange(f.value)}
-              className={`rounded-md px-3 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                posture === f.value ? 'bg-teal-500/20 text-teal-200' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-        <label className={`flex items-center gap-2 px-3 py-1.5 text-xs text-gray-300 ${styles.input}`}>
-          <input
-            type="checkbox"
-            checked={newOnly}
-            onChange={(e) => setNewOnly(e.target.checked)}
-            className="rounded border-gray-700 bg-gray-800"
-          />
-          New only
-        </label>
+          ))
+        ) : (
+          <span className="text-xs text-gray-600">All assets · filter from the bar above</span>
+        )}
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as 'priority' | 'critical' | 'stale')}

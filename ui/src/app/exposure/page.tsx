@@ -45,7 +45,7 @@ import {
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
-import { TriageTable, POSTURE_FILTERS, type PostureFilter } from './TriageTable'
+import { TriageTable, PriorityBadge, riskDot, type PostureFilter } from './TriageTable'
 import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
 
@@ -68,6 +68,8 @@ const monoFont = Spline_Sans_Mono({
   subsets: ['latin'],
   variable: '--font-mono',
 })
+
+const KIND_ABBR: Record<ExposureAssetKind, string> = { web: 'Web', ai: 'AI', model: 'Model' }
 
 const NODE_LABELS: Record<string, string> = {
   domain: 'Domains',
@@ -278,7 +280,9 @@ function PostureSummary({
   onKind: (kind: 'all' | ExposureAssetKind) => void
   onPosture: (posture: PostureFilter) => void
 }) {
-  // Curated, clickable filters — lead with priority, hide always-zero counts.
+  // The single, canonical filter bar for the asset inventory — priority, kind,
+  // and scan-hygiene posture in one place (TriageTable no longer repeats these).
+  // Lead with priority; hide always-zero counts so the bar self-trims by dataset.
   const priorityItems: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
     { label: 'P1', value: metrics?.p1_count ?? 0, tone: 'text-red-300', posture: 'p1' },
     { label: 'P2', value: metrics?.p2_count ?? 0, tone: 'text-orange-300', posture: 'p2' },
@@ -289,13 +293,17 @@ function PostureSummary({
     { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-purple-300', kind: 'ai' },
     { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-teal-300', kind: 'model' },
   ]
+  // Scan-hygiene + internal exposure: each isolates an actionable, *narrow*
+  // slice. "Public" is deliberately omitted — it selects ~two thirds of assets,
+  // so it triages nothing; "Internal" is the rarer, more useful exposure cut.
   const postureItemsAll: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
-    { label: 'Public', value: metrics?.public_assets ?? 0, tone: 'text-cyan-300', posture: 'public' },
+    { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300', posture: 'internal' },
     { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300', posture: 'unscanned' },
     { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300', posture: 'stale' },
     { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300', posture: 'incomplete' },
   ]
   const postureItems = postureItemsAll.filter((item) => item.value > 0)
+  const filtered = kind !== 'all' || posture !== 'all'
 
   const tile = (key: string, label: string, value: number, tone: string, active: boolean, onClick: () => void) => (
     <button
@@ -304,7 +312,7 @@ function PostureSummary({
       aria-pressed={active}
       onClick={onClick}
       className={`min-w-0 rounded px-2 py-1 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-        active ? 'bg-teal-500/15' : 'hover:bg-gray-800/60'
+        active ? 'bg-teal-500/15 ring-1 ring-teal-400/40' : 'hover:bg-gray-800/60'
       }`}
     >
       <div className={`text-sm font-semibold ${tone}`}>{value}</div>
@@ -316,14 +324,23 @@ function PostureSummary({
     <Panel className="p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="mr-1 shrink-0">
-          <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Exposure posture</div>
-          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} assets need action · click to filter</div>
+          <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Filter inventory</div>
+          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} of {metrics?.asset_count ?? 0} need action · click to filter</div>
         </div>
         {priorityItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
         <span className="h-8 w-px bg-gray-800" aria-hidden="true" />
         {kindItems.map((item) => tile(item.label, item.label, item.value, item.tone, kind === item.kind, () => onKind(kind === item.kind ? 'all' : item.kind)))}
         {postureItems.length > 0 && <span className="h-8 w-px bg-gray-800" aria-hidden="true" />}
-        {postureItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture !== 'all' && posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
+        {postureItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
+        {filtered && (
+          <button
+            type="button"
+            onClick={() => { onKind('all'); onPosture('all') }}
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <X className="h-3 w-3" aria-hidden="true" /> Clear
+          </button>
+        )}
       </div>
     </Panel>
   )
@@ -664,7 +681,15 @@ export default function ExposurePage() {
   const byId = useMemo(() => new Map((graph?.nodes || []).map((node) => [node.id, node])), [graph])
   const summary = graph?.summary
   const nodeTypeCounts = summary?.node_type_counts || {}
-  const hotspots = summary?.hotspots || []
+
+  // The Map's priority panel reuses the triage action ranking so the two lenses
+  // agree on what's urgent. `assets` arrives pre-sorted by action_score desc, so
+  // we take the top action-needing assets (graph hotspots ranked by raw finding
+  // count instead — domains/chains — which disagreed with triage's P1/P2 view).
+  const priorityAssets = useMemo(
+    () => assets.filter((a) => a.needs_action).slice(0, 8),
+    [assets]
+  )
 
   const neighbors = useMemo(() => {
     if (!focusId || !graph) return []
@@ -957,24 +982,35 @@ export default function ExposurePage() {
               <Panel className={`${styles.rise} ${styles.d5}`}>
                 <div className={`p-4 ${styles.moduleHeader}`}>
                   <h2 className={`${styles.displayTitle} text-sm text-white`}>Priority targets</h2>
-                  <p className="mt-1 text-xs text-gray-500">Riskiest assets — click to explore</p>
+                  <p className="mt-1 text-xs text-gray-500">Same action ranking as triage — click to explore</p>
                 </div>
                 <div className="divide-y divide-gray-800/60">
-                  {hotspots.length === 0 ? (
-                    <div className="p-4 text-sm text-gray-500">No active high-risk nodes.</div>
+                  {priorityAssets.length === 0 ? (
+                    <div className="p-4 text-sm text-gray-500">No assets need action right now.</div>
                   ) : (
-                    hotspots.map((node, index) => (
-                      <div key={node.id} className="flex gap-3 p-4">
-                        <span className={`${styles.rank} pt-2.5`}>{String(index + 1).padStart(2, '0')}</span>
+                    priorityAssets.map((asset, index) => (
+                      <button
+                        key={asset.node_id}
+                        type="button"
+                        onClick={() => focusById(asset.node_id)}
+                        className="flex w-full gap-3 p-4 text-left hover:bg-gray-800/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      >
+                        <span className={`${styles.rank} pt-1`}>{String(index + 1).padStart(2, '0')}</span>
                         <div className="min-w-0 flex-1">
-                          <NodePill node={node} onFocus={handleFocus} />
-                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
-                            {node.meta?.active_findings_count ? <span>{String(node.meta.active_findings_count)} active findings</span> : null}
-                            {node.meta?.last_grade ? <span>Grade {String(node.meta.last_grade)}</span> : null}
-                            {node.meta?.blast_radius_tier ? <span>{String(node.meta.blast_radius_tier)} blast</span> : null}
+                          <div className="flex items-center gap-2">
+                            <span className={`h-2 w-2 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
+                            <span className="truncate text-sm text-gray-100">{asset.label}</span>
+                            <PriorityBadge priority={asset.action_priority} />
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-500">
+                            <span className="uppercase tracking-wide text-gray-600">{KIND_ABBR[asset.kind]}</span>
+                            {asset.active_critical > 0 && <span className="text-red-400">{asset.active_critical}C</span>}
+                            {asset.active_high > 0 && <span className="text-orange-400">{asset.active_high}H</span>}
+                            {asset.grade && <span>Grade {asset.grade}</span>}
+                            {asset.kind === 'ai' && asset.blast_radius_tier && <span className="text-purple-300">{asset.blast_radius_tier} blast</span>}
                           </div>
                         </div>
-                      </div>
+                      </button>
                     ))
                   )}
                 </div>

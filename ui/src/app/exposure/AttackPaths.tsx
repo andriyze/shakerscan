@@ -1,16 +1,23 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
-import { ChevronRight, ExternalLink, GitBranch, Radar, Target } from 'lucide-react'
+import { ChevronRight, ExternalLink, GitBranch, Radar, Target, X } from 'lucide-react'
 import type { ExposureAttackPath } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { Button, EmptyState, ErrorState } from '@/components/ui'
+import { EmptyState, ErrorState } from '@/components/ui'
 import styles from './exposure.module.css'
+
+const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 }
 
 function severityClass(severity?: string | null) {
   if (!severity) return 'bg-gray-700 text-gray-300'
   return SEVERITY_BADGE_STYLES[severity as SeverityLevel] ?? SEVERITY_BADGE_STYLES.info
+}
+
+function titleize(value?: string | null): string {
+  if (!value) return 'Other'
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
 function compactEvidence(value: unknown): string | null {
@@ -177,6 +184,34 @@ export function AttackPaths({
   onRetry: () => void
   onExploreAsset: (nodeId: string) => void
 }) {
+  const [typeFilter, setTypeFilter] = useState<string | null>(null)
+
+  // Break the flat list into chain-type groups. Most datasets repeat a handful
+  // of templates across many assets (e.g. SQLi→PrivEsc 3×), so a per-type
+  // breakdown with worst-severity + complete count makes the list scannable and
+  // gives a real filter, rather than scrolling near-identical cards.
+  const groups = useMemo(() => {
+    const byType = new Map<string, ExposureAttackPath[]>()
+    for (const p of paths) {
+      const key = p.chain_type || 'other'
+      const list = byType.get(key)
+      if (list) list.push(p)
+      else byType.set(key, [p])
+    }
+    return Array.from(byType.entries())
+      .map(([type, items]) => ({
+        type,
+        label: items[0]?.name || titleize(type),
+        count: items.length,
+        complete: items.filter((p) => p.status === 'complete').length,
+        worst: items.reduce<string | null>(
+          (acc, p) => ((SEVERITY_RANK[p.severity || ''] ?? -1) > (SEVERITY_RANK[acc || ''] ?? -1) ? p.severity ?? acc : acc),
+          null
+        ),
+      }))
+      .sort((a, b) => (SEVERITY_RANK[b.worst || ''] ?? -1) - (SEVERITY_RANK[a.worst || ''] ?? -1) || b.count - a.count)
+  }, [paths])
+
   if (error) return <ErrorState message={error} onRetry={onRetry} />
   if (loading) {
     return (
@@ -198,17 +233,55 @@ export function AttackPaths({
   }
 
   const complete = paths.filter((p) => p.status === 'complete').length
+  const visible = typeFilter ? paths.filter((p) => (p.chain_type || 'other') === typeFilter) : paths
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 text-sm text-gray-400">
+      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-400">
         <GitBranch className="h-4 w-4 text-teal-300/60" aria-hidden="true" />
         <span>
           <span className="font-semibold text-white">{paths.length}</span> exploit paths ·{' '}
-          <span className="text-red-300">{complete} complete</span>
+          <span className="text-red-300">{complete} complete</span> · {groups.length}{' '}
+          {groups.length === 1 ? 'chain type' : 'chain types'}
         </span>
+        {typeFilter && (
+          <button
+            type="button"
+            onClick={() => setTypeFilter(null)}
+            className="ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <X className="h-3 w-3" aria-hidden="true" /> Clear filter
+          </button>
+        )}
       </div>
+
+      {groups.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {groups.map((g) => {
+            const active = typeFilter === g.type
+            return (
+              <button
+                key={g.type}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setTypeFilter(active ? null : g.type)}
+                className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  active ? 'border-teal-400/50 bg-teal-500/15 text-teal-100' : 'border-gray-800 bg-gray-950 text-gray-300 hover:border-gray-700'
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${g.worst === 'critical' ? 'bg-red-500' : g.worst === 'high' ? 'bg-orange-500' : 'bg-yellow-500'}`} aria-hidden="true" />
+                <span className="max-w-[16rem] truncate">{g.label}</span>
+                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
+                  {g.count}
+                </span>
+                {g.complete > 0 && <span className="text-[10px] text-red-300">{g.complete} complete</span>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       <div className="space-y-3">
-        {paths.map((path) => (
+        {visible.map((path) => (
           <PathCard key={path.id} path={path} onExploreAsset={onExploreAsset} />
         ))}
       </div>
