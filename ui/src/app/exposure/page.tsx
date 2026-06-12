@@ -32,6 +32,8 @@ import {
   getExposureAttackPaths,
   getExposureGraph,
   getExposureNodes,
+  rescanModelIntakeTarget,
+  scanAITarget,
   scanTarget,
   type ExposureAsset,
   type ExposureAssetKind,
@@ -711,14 +713,52 @@ function ExposureView() {
     setShowEndpoints(false)
   }
 
+  // Every scan action actually queues a scan for its asset kind — web quick
+  // scan, AI Gate smoke probe, or model intake re-check — rather than dropping
+  // the user on a settings page.
+  async function triggerScan(asset: ExposureAsset): Promise<string | undefined> {
+    if (asset.kind === 'web') {
+      const res = await scanTarget(asset.id, { scan_type: 'quick' })
+      return res?.scan_id || res?.id
+    }
+    if (asset.kind === 'ai') {
+      const res = await scanAITarget(asset.id, {
+        probe_pack: 'shaker-ai-smoke',
+        scan_profile: 'smoke',
+        environment: asset.production_mode ? 'production' : 'preview',
+        confirm_production: asset.production_mode,
+      })
+      return res.scan_id
+    }
+    const res = await rescanModelIntakeTarget(asset.id)
+    return res.scan_id
+  }
+
+  const SCAN_QUEUED_LABEL: Record<ExposureAssetKind, string> = {
+    web: 'Quick scan started',
+    ai: 'AI Gate smoke scan queued',
+    model: 'Model intake re-check queued',
+  }
+
+  // The API hard-requires confirm_production for production AI surfaces; ask
+  // the user before sending it instead of silently auto-confirming.
+  function confirmProductionScan(toScan: ExposureAsset[]): boolean {
+    const prodAI = toScan.filter((asset) => asset.kind === 'ai' && asset.production_mode)
+    if (prodAI.length === 0) return true
+    const names = prodAI.map((asset) => asset.label).join(', ')
+    return window.confirm(
+      `This runs AI Gate probes against ${prodAI.length === 1 ? 'a production AI surface' : `${prodAI.length} production AI surfaces`} (${names}). Continue?`
+    )
+  }
+
   async function handleScan(asset: ExposureAsset) {
+    if (!confirmProductionScan([asset])) return
     setScanningIds((prev) => new Set(prev).add(asset.id))
     try {
-      const res = await scanTarget(asset.id, { scan_type: 'quick' })
-      const scanId = res?.scan_id || res?.id
-      toast.success('Quick scan started', scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined)
-    } catch {
-      toast.error(`Failed to start scan for ${asset.label}`)
+      const scanId = await triggerScan(asset)
+      toast.success(SCAN_QUEUED_LABEL[asset.kind], scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : `Failed to start scan for ${asset.label}`)
     } finally {
       setScanningIds((prev) => {
         const next = new Set(prev)
@@ -728,27 +768,28 @@ function ExposureView() {
     }
   }
 
-  // Bulk variant of handleScan: fire all quick scans concurrently and report
-  // one summary toast instead of one per asset.
+  // Bulk variant of handleScan: fire kind-appropriate scans concurrently and
+  // report one summary toast instead of one per asset.
   async function handleBulkScan(toScan: ExposureAsset[]) {
-    const webAssets = toScan.filter((asset) => asset.kind === 'web')
-    if (webAssets.length === 0) return
-    setScanningIds((prev) => new Set([...prev, ...webAssets.map((asset) => asset.id)]))
+    if (toScan.length === 0) return
+    if (!confirmProductionScan(toScan)) return
+    setScanningIds((prev) => new Set([...prev, ...toScan.map((asset) => asset.id)]))
     try {
-      const results = await Promise.allSettled(webAssets.map((asset) => scanTarget(asset.id, { scan_type: 'quick' })))
+      const results = await Promise.allSettled(toScan.map((asset) => triggerScan(asset)))
       const ok = results.filter((result) => result.status === 'fulfilled').length
       const failed = results.length - ok
       if (ok > 0) {
-        toast.success(`Started ${ok} quick scan${ok === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`, {
+        toast.success(`Queued ${ok} scan${ok === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`, {
           link: { href: '/scans', label: 'View scans' },
         })
       } else {
-        toast.error('Failed to start the selected scans')
+        const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+        toast.error(firstError?.reason instanceof Error ? firstError.reason.message : 'Failed to queue the selected scans')
       }
     } finally {
       setScanningIds((prev) => {
         const next = new Set(prev)
-        webAssets.forEach((asset) => next.delete(asset.id))
+        toScan.forEach((asset) => next.delete(asset.id))
         return next
       })
     }

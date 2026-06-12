@@ -367,15 +367,12 @@ function AssetDetailDrawer({
   const verified = asset.active_verified || 0
   const needsVerification = asset.active_needs_verification || 0
 
-  // Map a recommendation to the action it performs, so it renders as a real CTA.
+  // Map a recommendation to the action it performs, so it renders as a real
+  // CTA. "scan" queues the kind-appropriate scan directly for every kind.
   function recTarget(rkind: string): { href?: string; onClick?: () => void } {
     if (rkind === 'findings') return { href: asset!.findings_href }
     if (rkind === 'latest_scan' && asset!.latest_scan_href) return { href: asset!.latest_scan_href }
-    if (rkind === 'scan') {
-      if (asset!.kind === 'web') return { onClick: () => onScan(asset!) }
-      if (asset!.kind === 'ai') return { href: '/settings/ai-gate' }
-      if (asset!.kind === 'model') return { href: '/settings/model-intake' }
-    }
+    if (rkind === 'scan') return { onClick: () => onScan(asset!) }
     return {}
   }
 
@@ -593,17 +590,15 @@ function AssetDetailDrawer({
         </div>
 
         <div className="flex flex-wrap gap-2 border-t border-gray-800 p-4">
-          {asset.kind === 'web' && (
-            <button
-              type="button"
-              onClick={() => onScan(asset)}
-              disabled={scanning}
-              className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-3 py-1.5 text-xs text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
-              Quick scan
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => onScan(asset)}
+            disabled={scanning}
+            className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-3 py-1.5 text-xs text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
+            {asset.kind === 'web' ? 'Quick scan' : asset.kind === 'ai' ? 'Run smoke test' : 'Re-check model'}
+          </button>
           <button
             type="button"
             onClick={() => { onExplore(asset.node_id); onClose() }}
@@ -666,17 +661,15 @@ function ActionQueue({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              {asset.kind === 'web' && (
-                <button
-                  type="button"
-                  onClick={() => onScan(asset)}
-                  disabled={scanningIds.has(asset.id)}
-                  aria-label={`Start quick scan for ${asset.label}`}
-                  className="rounded border border-teal-400/30 bg-teal-400/10 p-1.5 text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                >
-                  {scanningIds.has(asset.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => onScan(asset)}
+                disabled={scanningIds.has(asset.id)}
+                aria-label={`Start scan for ${asset.label}`}
+                className="rounded border border-teal-400/30 bg-teal-400/10 p-1.5 text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                {scanningIds.has(asset.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
+              </button>
               <button
                 type="button"
                 onClick={() => onExplore(asset.node_id)}
@@ -719,28 +712,20 @@ function AssetRow({
 }) {
   const KindIcon = KIND_META[asset.kind].icon
 
-  const primaryAction =
-    asset.kind === 'web'
-      ? (
-          <button
-            type="button"
-            onClick={() => onScan(asset)}
-            disabled={scanning}
-            className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-2 py-1 text-[11px] text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            {scanning ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <ScanLine className="h-3 w-3" aria-hidden="true" />}
-            Scan
-          </button>
-        )
-      : (
-          <Link
-            href={asset.kind === 'ai' ? '/settings/ai-gate' : '/settings/model-intake'}
-            className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <ScanLine className="h-3 w-3" aria-hidden="true" />
-            {asset.kind === 'ai' ? 'Test' : 'Re-check'}
-          </Link>
-        )
+  // One-click scan for every kind: web quick scan, AI Gate smoke probe, or
+  // model intake re-check — the handler queues the right scan type.
+  const scanLabel = asset.kind === 'web' ? 'Scan' : asset.kind === 'ai' ? 'Test' : 'Re-check'
+  const primaryAction = (
+    <button
+      type="button"
+      onClick={() => onScan(asset)}
+      disabled={scanning}
+      className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-2 py-1 text-[11px] text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+    >
+      {scanning ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <ScanLine className="h-3 w-3" aria-hidden="true" />}
+      {scanLabel}
+    </button>
+  )
 
   return (
     <div className={`flex items-center gap-3 border-b border-gray-800/50 px-3 py-2.5 last:border-b-0 hover:bg-gray-900/40 ${selected ? 'bg-teal-500/5' : ''}`}>
@@ -895,7 +880,6 @@ export function TriageTable({
   const datasetTotal = total ?? assets.length
 
   const selectedAssets = useMemo(() => filtered.filter((a) => selectedIds.has(a.node_id)), [filtered, selectedIds])
-  const selectedWeb = selectedAssets.filter((a) => a.kind === 'web')
   // Owner lives in targets.metadata_json, so AI surfaces (separate table,
   // managed in AI Gate settings) are excluded from bulk assignment.
   const selectedOwnable = selectedAssets.filter((a) => a.kind !== 'ai')
@@ -1006,13 +990,11 @@ export function TriageTable({
           <span className="text-xs font-medium text-teal-200">{selectedAssets.length} selected</span>
           <button
             type="button"
-            onClick={() => { onBulkScan(selectedWeb); setSelectedIds(new Set()) }}
-            disabled={selectedWeb.length === 0}
-            title={selectedWeb.length === 0 ? 'Only web targets support quick scans' : undefined}
+            onClick={() => { onBulkScan(selectedAssets); setSelectedIds(new Set()) }}
             className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <ScanLine className="h-3 w-3" aria-hidden="true" />
-            Scan selected ({selectedWeb.length} web)
+            Scan selected ({selectedAssets.length})
           </button>
           {!bulkOwnerOpen ? (
             <button

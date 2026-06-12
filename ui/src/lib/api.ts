@@ -806,6 +806,19 @@ export interface ExposureChangesResponse {
   categories: ExposureChangeCategory[]
 }
 
+// Re-run the most recent model intake scan for a model target (same policy
+// profile, metadata, and requirement options it was last evaluated with).
+export async function rescanModelIntakeTarget(targetId: string): Promise<{
+  scan_id: string
+  job_id: string
+  status: string
+  ui_url?: string
+}> {
+  const res = await fetch(`${API_URL}/model-intake/targets/${targetId}/rescan`, { method: 'POST' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to queue model intake re-check'))
+  return res.json()
+}
+
 // Ownership/accountability fields stored in targets.metadata_json. The API
 // merges keys into the existing metadata; send "" to clear a key.
 export async function updateTargetMetadata(

@@ -4733,6 +4733,80 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     }
 
 
+@app.post("/model-intake/targets/{target_id}/rescan")
+async def rescan_model_intake_target(target_id: str):
+    """Re-queue a model intake scan for an existing model target.
+
+    Reuses the options of the target's most recent intake scan (policy profile,
+    metadata, signature/hash requirements), so one-click re-checks from the
+    exposure inventory run the same evaluation the artifact was admitted with.
+    """
+    try:
+        target_uuid = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT id, url FROM targets WHERE id = $1 AND is_active = true",
+            target_uuid,
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        last_scan = await conn.fetchrow(
+            """
+            SELECT options FROM scans
+            WHERE target_id = $1 AND run_kind = 'model_intake'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            target_uuid,
+        )
+        if not last_scan:
+            raise HTTPException(
+                status_code=409,
+                detail="No previous model intake scan to re-run. Submit one from Model Intake settings first.",
+            )
+        options = _decode_json_value(last_scan["options"]) or {}
+        options["run_kind"] = "model_intake"
+        artifact_ref = target["url"]
+
+        r = get_redis()
+        job_id = str(uuid.uuid4())
+        scan_id = str(uuid.uuid4())
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, target_url, job_id, status, options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, $2, $3, $4, 'pending', $5, 'model_intake', 'model_intake', $6)
+        """,
+            uuid.UUID(scan_id),
+            target_uuid,
+            artifact_ref,
+            job_id,
+            json.dumps(options),
+            f"model_artifact:{hashlib.sha256(artifact_ref.encode()).hexdigest()[:16]}",
+        )
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target": artifact_ref,
+        "options": options,
+        "submitted_at": utc_now_iso(),
+    }
+    r.rpush(QUEUE_NAME, json.dumps(job_data))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
+
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "target": artifact_ref,
+        "scan_type": "model_intake",
+        "run_kind": "model_intake",
+        "ui_url": f"/scans/{scan_id}",
+    }
+
+
 # ============================================================
 # AI GATE TARGETS
 # ============================================================
