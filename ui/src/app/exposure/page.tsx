@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Chakra_Petch, Spline_Sans_Mono } from 'next/font/google'
 import {
@@ -43,9 +43,11 @@ import {
   type ExposureSearchNode,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
+import { useUrlFilters } from '@/lib/useUrlFilters'
 import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
-import { TriageTable, PriorityBadge, riskDot, type PostureFilter } from './TriageTable'
+import { TriageTable, PriorityBadge, riskDot, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
+import { ChangesStrip } from './ChangesStrip'
 import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
 
@@ -300,6 +302,10 @@ function PostureSummary({
     // Validation leads with the rare, actionable signal (assets with *proven*
     // risk) rather than the ~98%-noisy "needs verification" inverse.
     { label: 'Proven risk', value: metrics?.verified_assets ?? 0, tone: 'text-red-300', posture: 'verified' },
+    // The high-impact slice of "needs verification" (unreviewed findings on an
+    // asset that also has critical/high risk) — the raw inverse is ~all assets.
+    { label: 'Unverified high', value: metrics?.unverified_high_assets ?? 0, tone: 'text-orange-300', posture: 'unverified_high' },
+    { label: 'Unowned', value: metrics?.unowned_assets ?? 0, tone: 'text-amber-200', posture: 'unowned' },
     { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300', posture: 'internal' },
     { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300', posture: 'unscanned' },
     { label: 'Failed', value: metrics?.failed_scans ?? 0, tone: 'text-red-200', posture: 'failed' },
@@ -492,12 +498,33 @@ function Legend() {
   )
 }
 
+const POSTURE_VALUES = new Set<string>(POSTURE_FILTERS.map((f) => f.value))
+
+// Named operational views: each is just a triage filter combination, so the
+// URL stays the single source of truth and every view is shareable.
+const PRESET_VIEWS: Array<{ label: string; kind: 'all' | ExposureAssetKind; posture: PostureFilter; sort: TriageSort }> = [
+  { label: 'Public critical', kind: 'all', posture: 'public', sort: 'critical' },
+  { label: 'Failed scans', kind: 'all', posture: 'failed', sort: 'priority' },
+  { label: 'Prod AI', kind: 'ai', posture: 'prod', sort: 'priority' },
+  { label: 'New this week', kind: 'all', posture: 'new', sort: 'priority' },
+  { label: 'Unverified high-impact', kind: 'all', posture: 'unverified_high', sort: 'priority' },
+  { label: 'Unowned assets', kind: 'all', posture: 'unowned', sort: 'priority' },
+]
+
 export default function ExposurePage() {
+  // useUrlFilters reads useSearchParams, which the App Router requires to sit
+  // under a Suspense boundary.
+  return (
+    <Suspense fallback={null}>
+      <ExposureView />
+    </Suspense>
+  )
+}
+
+function ExposureView() {
   const [graph, setGraph] = useState<ExposureGraph | null>(null)
   const [domains, setDomains] = useState<string[]>([])
-  const [domain, setDomain] = useState('')
   const [includeResolved, setIncludeResolved] = useState(false)
-  const [lens, setLens] = useState<Lens>('triage')
   const [focusId, setFocusId] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<ExposureNode | null>(null)
   const [depth, setDepth] = useState(1)
@@ -519,9 +546,33 @@ export default function ExposurePage() {
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [newCount, setNewCount] = useState(0)
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set())
-  const [triageKind, setTriageKind] = useState<'all' | ExposureAssetKind>('all')
-  const [triagePosture, setTriagePosture] = useState<PostureFilter>('all')
   const [selectedAsset, setSelectedAsset] = useState<ExposureAsset | null>(null)
+
+  // Lens + triage filters live in the URL so views are shareable, survive
+  // reloads, and back/forward steps through filter changes.
+  const { filters, setFilter, setFilters } = useUrlFilters()
+  const domain = typeof filters.domain === 'string' ? filters.domain : ''
+  const lens: Lens = filters.lens === 'map' || filters.lens === 'paths' ? filters.lens : 'triage'
+  const triageKind: 'all' | ExposureAssetKind =
+    filters.kind === 'web' || filters.kind === 'ai' || filters.kind === 'model' ? filters.kind : 'all'
+  const triagePosture: PostureFilter =
+    typeof filters.posture === 'string' && POSTURE_VALUES.has(filters.posture) ? (filters.posture as PostureFilter) : 'all'
+  const triageSort: TriageSort = filters.sort === 'critical' || filters.sort === 'stale' ? filters.sort : 'priority'
+
+  const setLens = (next: Lens) => setFilter('lens', next === 'triage' ? undefined : next)
+  const setDomain = (value: string) => setFilter('domain', value || undefined)
+
+  // Triage filter updates go through one setFilters call: sequential setFilter
+  // calls in a handler would clobber each other (each reads the same URL
+  // snapshot). Defaults are stored as absent params to keep URLs clean. Any
+  // update also returns to the triage lens, where these filters apply.
+  function applyTriage(updates: { kind?: 'all' | ExposureAssetKind; posture?: PostureFilter; sort?: TriageSort }) {
+    const next: Record<string, string | undefined> = { lens: undefined }
+    if (updates.kind !== undefined) next.kind = updates.kind === 'all' ? undefined : updates.kind
+    if (updates.posture !== undefined) next.posture = updates.posture === 'all' ? undefined : updates.posture
+    if (updates.sort !== undefined) next.sort = updates.sort === 'priority' ? undefined : updates.sort
+    setFilters(next)
+  }
   const graphKeyRef = useRef<string | null>(null)
   const pathsKeyRef = useRef<string | null>(null)
 
@@ -667,6 +718,32 @@ export default function ExposurePage() {
       setScanningIds((prev) => {
         const next = new Set(prev)
         next.delete(asset.id)
+        return next
+      })
+    }
+  }
+
+  // Bulk variant of handleScan: fire all quick scans concurrently and report
+  // one summary toast instead of one per asset.
+  async function handleBulkScan(toScan: ExposureAsset[]) {
+    const webAssets = toScan.filter((asset) => asset.kind === 'web')
+    if (webAssets.length === 0) return
+    setScanningIds((prev) => new Set([...prev, ...webAssets.map((asset) => asset.id)]))
+    try {
+      const results = await Promise.allSettled(webAssets.map((asset) => scanTarget(asset.id, { scan_type: 'quick' })))
+      const ok = results.filter((result) => result.status === 'fulfilled').length
+      const failed = results.length - ok
+      if (ok > 0) {
+        toast.success(`Started ${ok} quick scan${ok === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`, {
+          link: { href: '/scans', label: 'View scans' },
+        })
+      } else {
+        toast.error('Failed to start the selected scans')
+      }
+    } finally {
+      setScanningIds((prev) => {
+        const next = new Set(prev)
+        webAssets.forEach((asset) => next.delete(asset.id))
         return next
       })
     }
@@ -833,13 +910,39 @@ export default function ExposurePage() {
           metrics={assetMetrics}
           kind={triageKind}
           posture={triagePosture}
-          onKind={(k) => { setTriageKind(k); setLens('triage') }}
-          onPosture={(p) => { setTriagePosture(p); setLens('triage') }}
+          onKind={(k) => applyTriage({ kind: k })}
+          onPosture={(p) => applyTriage({ posture: p })}
         />
       </div>
 
       {lens === 'triage' && (
-        <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3}`}>
+        <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3} space-y-3`}>
+          <ChangesStrip rootDomain={domain || undefined} />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wide text-gray-600">Views</span>
+            {PRESET_VIEWS.map((preset) => {
+              const active = triageKind === preset.kind && triagePosture === preset.posture && triageSort === preset.sort
+              return (
+                <button
+                  key={preset.label}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() =>
+                    active
+                      ? applyTriage({ kind: 'all', posture: 'all', sort: 'priority' })
+                      : applyTriage({ kind: preset.kind, posture: preset.posture, sort: preset.sort })
+                  }
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                    active
+                      ? 'border-teal-400/40 bg-teal-500/15 text-teal-200'
+                      : 'border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              )
+            })}
+          </div>
           <TriageTable
             assets={assets}
             metrics={assetMetrics}
@@ -855,8 +958,11 @@ export default function ExposurePage() {
             onCloseDetails={() => setSelectedAsset(null)}
             kind={triageKind}
             posture={triagePosture}
-            onKindChange={setTriageKind}
-            onPostureChange={setTriagePosture}
+            sort={triageSort}
+            onKindChange={(k) => applyTriage({ kind: k })}
+            onPostureChange={(p) => applyTriage({ posture: p })}
+            onSortChange={(s) => applyTriage({ sort: s })}
+            onBulkScan={handleBulkScan}
           />
         </div>
       )}

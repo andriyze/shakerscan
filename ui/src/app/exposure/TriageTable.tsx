@@ -7,27 +7,31 @@ import {
   Bot,
   Boxes,
   ChevronRight,
+  Download,
   ExternalLink,
   History,
   Loader2,
   Radar,
   RadioTower,
+  Pencil,
   ScanLine,
   ShieldAlert,
   ShieldOff,
   Target,
+  UserPlus,
   X,
 } from 'lucide-react'
 import {
   getFindings,
   extractFindingTriage,
+  updateTargetMetadata,
   type ExposureAsset,
   type ExposureAssetKind,
   type ExposureAssetMetrics,
   type Finding,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { gradeTextColor } from '@/components/ui'
+import { gradeTextColor, useToast } from '@/components/ui'
 import { ErrorState } from '@/components/ui'
 import styles from './exposure.module.css'
 
@@ -49,9 +53,15 @@ export const POSTURE_FILTERS = [
   { value: 'incomplete', label: 'Incomplete' },
   { value: 'verified', label: 'Proven risk' },
   { value: 'needs_verification', label: 'Needs verification' },
+  { value: 'unverified_high', label: 'Unverified high-impact' },
+  { value: 'prod', label: 'Production' },
+  { value: 'new', label: 'New (7d)' },
+  { value: 'unowned', label: 'Unowned' },
 ] as const
 
 export type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
+
+export type TriageSort = 'priority' | 'critical' | 'stale'
 
 export const PRIORITY_STYLES: Record<string, string> = {
   P1: 'bg-red-500/20 text-red-300 border border-red-500/40',
@@ -104,11 +114,49 @@ function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
   if (filter === 'incomplete') return Boolean(asset.scan_limited)
   if (filter === 'verified') return (asset.active_verified || 0) > 0
   if (filter === 'needs_verification') return (asset.active_needs_verification || 0) > 0
+  // High-impact slice of the (otherwise ~all-assets) needs-verification set:
+  // unreviewed findings on an asset that also carries critical/high risk.
+  if (filter === 'unverified_high') return (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0
+  if (filter === 'prod') return Boolean(asset.production_mode)
+  if (filter === 'new') return Boolean(asset.is_new)
+  if (filter === 'unowned') return !asset.owner
   return true
 }
 
 function actionLabel(reason: string): string {
   return ACTION_LABELS[reason] || reason.replace(/_/g, ' ')
+}
+
+function csvCell(value: unknown): string {
+  const s = value === null || value === undefined ? '' : String(value)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+// Client-side inventory export: /exposure/assets already returns the full
+// enriched asset list, so no dedicated backend export endpoint is needed.
+function exportAssetsCsv(rows: ExposureAsset[]) {
+  const header = [
+    'label', 'kind', 'url', 'root_domain', 'owner', 'environment', 'exposure', 'priority', 'reasons',
+    'coverage', 'critical', 'high', 'total_findings', 'grade', 'last_scanned_at',
+  ]
+  const lines = [header.join(',')]
+  for (const a of rows) {
+    lines.push(
+      [
+        a.label, a.kind, a.url || '', a.root_domain || a.origin || '', a.owner || '', a.environment || '',
+        a.exposure_class || '',
+        a.action_priority || '', (a.action_reasons || []).join('; '), a.coverage_posture || '',
+        a.active_critical, a.active_high, a.active_total, a.grade || '', a.last_scanned_at || '',
+      ].map(csvCell).join(',')
+    )
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `exposure-assets-${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 function coverageLabel(asset: ExposureAsset): string {
@@ -119,6 +167,14 @@ function coverageLabel(asset: ExposureAsset): string {
   if (posture === 'stale') return 'Stale coverage'
   if (posture === 'unscanned') return 'Never scanned'
   return 'Coverage unknown'
+}
+
+// Compact posture word for the table column; the drawer keeps the full label.
+function coverageShortLabel(asset: ExposureAsset): string {
+  const posture = asset.coverage_posture || 'unknown'
+  if (posture === 'unscanned') return 'never'
+  if (posture === 'unknown') return '—'
+  return posture
 }
 
 function coverageClass(asset: ExposureAsset): string {
@@ -189,21 +245,24 @@ function BlastBadge({ asset }: { asset: ExposureAsset }) {
   )
 }
 
-// Compact posture for the collapsed row: priority + exposure + an issue count.
-// Detail (reasons, coverage, blast, scan link) lives in the expanded row.
+// Compact posture for the collapsed row: priority + exposure + the top reasons
+// driving that priority, so P1/P2 rows self-explain without opening the drawer.
 function RowPosture({ asset }: { asset: ExposureAsset }) {
-  const issueCount = (asset.action_reasons || []).length
+  const reasons = asset.action_reasons || []
+  const shown = reasons.slice(0, 2)
+  const hidden = reasons.length - shown.length
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+    <div className="mt-1 flex flex-wrap items-center gap-1.5" title={reasons.length > 0 ? reasons.map(actionLabel).join(' · ') : undefined}>
       <PriorityBadge priority={asset.action_priority} />
       <ExposureBadge asset={asset} />
       <BlastBadge asset={asset} />
-      {issueCount > 0 && (
-        <span className="inline-flex items-center gap-1 text-[10px] text-gray-500">
+      {shown.map((reason) => (
+        <span key={reason} className="inline-flex items-center gap-1 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
           <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
-          {issueCount} {issueCount === 1 ? 'issue' : 'issues'}
+          {actionLabel(reason)}
         </span>
-      )}
+      ))}
+      {hidden > 0 && <span className="text-[10px] text-gray-500">+{hidden} more</span>}
     </div>
   )
 }
@@ -214,21 +273,35 @@ function AssetDetailDrawer({
   onExplore,
   onScan,
   scanning,
+  onUpdated,
 }: {
   asset: ExposureAsset | null
   onClose: () => void
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
   scanning: boolean
+  onUpdated: () => void
 }) {
   const [findings, setFindings] = useState<Finding[] | null>(null)
   const [error, setError] = useState(false)
   const closeRef = useRef<HTMLButtonElement>(null)
+  const toast = useToast()
+  // Ownership is editable for web/model targets (AI surfaces manage it in AI
+  // Gate settings). Local copy keeps the drawer current after a save without
+  // waiting for the asset list to refetch.
+  const [ownership, setOwnership] = useState<{ owner: string; environment: string }>({ owner: '', environment: '' })
+  const [editingOwnership, setEditingOwnership] = useState(false)
+  const [ownerInput, setOwnerInput] = useState('')
+  const [envInput, setEnvInput] = useState('')
+  const [savingOwnership, setSavingOwnership] = useState(false)
 
   useEffect(() => {
     if (!asset) return
     setFindings(null)
     setError(false)
+    setOwnership({ owner: asset.owner || '', environment: asset.environment || '' })
+    setEditingOwnership(false)
+    setSavingOwnership(false)
     let active = true
     const params =
       asset.kind === 'ai'
@@ -259,6 +332,26 @@ function AssetDetailDrawer({
 
   if (!asset) return null
   const KindIcon = KIND_META[asset.kind].icon
+  const ownershipEditable = asset.kind !== 'ai'
+
+  async function saveOwnership() {
+    if (!asset) return
+    setSavingOwnership(true)
+    try {
+      const owner = ownerInput.trim()
+      const environment = envInput.trim()
+      await updateTargetMetadata(asset.id, { owner, environment })
+      setOwnership({ owner, environment })
+      setEditingOwnership(false)
+      toast.success('Ownership updated')
+      onUpdated()
+    } catch {
+      toast.error('Failed to update ownership')
+    } finally {
+      setSavingOwnership(false)
+    }
+  }
+
   const recommended = asset.recommended_actions || []
   const missingControls = asset.kind === 'ai' ? asset.missing_runtime_controls || [] : []
   const verified = asset.active_verified || 0
@@ -388,8 +481,63 @@ function AssetDetailDrawer({
               <div>
                 <div className="text-[10px] uppercase tracking-wide text-gray-500">Asset facts</div>
               </div>
+              {ownershipEditable ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOwnerInput(ownership.owner)
+                    setEnvInput(ownership.environment)
+                    setEditingOwnership((v) => !v)
+                  }}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  <Pencil className="h-3 w-3" aria-hidden="true" />
+                  {editingOwnership ? 'Cancel' : 'Edit ownership'}
+                </button>
+              ) : (
+                <span className="text-[10px] text-gray-600">Ownership via AI Gate settings</span>
+              )}
             </div>
+            {editingOwnership && (
+              <div className="flex flex-wrap items-end gap-2 border-b border-gray-800/60 p-3">
+                <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-gray-500">
+                  Owner
+                  <input
+                    type="text"
+                    value={ownerInput}
+                    onChange={(e) => setOwnerInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void saveOwnership() }}
+                    placeholder="team or person"
+                    className="w-40 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs normal-case text-white placeholder:text-gray-600"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-gray-500">
+                  Environment
+                  <select
+                    value={envInput}
+                    onChange={(e) => setEnvInput(e.target.value)}
+                    className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs normal-case text-white"
+                  >
+                    <option value="">unset</option>
+                    <option value="production">production</option>
+                    <option value="staging">staging</option>
+                    <option value="development">development</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void saveOwnership()}
+                  disabled={savingOwnership}
+                  className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-2.5 py-1 text-xs text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  {savingOwnership ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : null}
+                  Save
+                </button>
+              </div>
+            )}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 p-3 text-xs">
+              <div><dt className="text-gray-600">Owner</dt><dd className={`truncate ${ownership.owner ? 'text-gray-200' : 'text-amber-200/80'}`}>{ownership.owner || 'Unassigned'}</dd></div>
+              <div><dt className="text-gray-600">Environment</dt><dd className="truncate text-gray-200">{ownership.environment || 'n/a'}</dd></div>
               <div><dt className="text-gray-600">Domain</dt><dd className="truncate text-gray-200">{asset.root_domain || asset.origin || 'n/a'}</dd></div>
               <div><dt className="text-gray-600">Kind</dt><dd className="text-gray-200">{KIND_META[asset.kind].label}</dd></div>
               <div><dt className="text-gray-600">Scans</dt><dd className="text-gray-200">{asset.total_scans ?? 0}</dd></div>
@@ -548,12 +696,16 @@ function AssetRow({
   onScan,
   onDetails,
   scanning,
+  selected,
+  onToggleSelect,
 }: {
   asset: ExposureAsset
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
   onDetails: (asset: ExposureAsset) => void
   scanning: boolean
+  selected: boolean
+  onToggleSelect: () => void
 }) {
   const KindIcon = KIND_META[asset.kind].icon
 
@@ -581,7 +733,14 @@ function AssetRow({
         )
 
   return (
-    <div className="flex items-center gap-3 border-b border-gray-800/50 px-3 py-2.5 last:border-b-0 hover:bg-gray-900/40">
+    <div className={`flex items-center gap-3 border-b border-gray-800/50 px-3 py-2.5 last:border-b-0 hover:bg-gray-900/40 ${selected ? 'bg-teal-500/5' : ''}`}>
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggleSelect}
+        aria-label={`Select ${asset.label}`}
+        className="h-3.5 w-3.5 shrink-0 rounded border-gray-700 bg-gray-800"
+      />
       <button
         type="button"
         onClick={() => onDetails(asset)}
@@ -624,8 +783,11 @@ function AssetRow({
           )}
         </span>
 
-        <span className="hidden w-24 shrink-0 text-right text-[11px] text-gray-600 lg:block">
-          {relativeTime(asset.last_scanned_at)}
+        <span className="hidden w-24 shrink-0 flex-col items-end gap-0.5 lg:flex">
+          <span className={`inline-flex rounded border px-1.5 py-0.5 text-[10px] uppercase ${coverageClass(asset)}`}>
+            {coverageShortLabel(asset)}
+          </span>
+          <span className="text-[10px] text-gray-600">{relativeTime(asset.last_scanned_at)}</span>
         </span>
 
         <ChevronRight className="h-4 w-4 shrink-0 text-gray-600" aria-hidden="true" />
@@ -669,8 +831,11 @@ export function TriageTable({
   onCloseDetails,
   kind,
   posture,
+  sort,
   onKindChange,
   onPostureChange,
+  onSortChange,
+  onBulkScan,
 }: {
   assets: ExposureAsset[]
   metrics?: ExposureAssetMetrics | null
@@ -686,11 +851,25 @@ export function TriageTable({
   onCloseDetails: () => void
   kind: 'all' | ExposureAssetKind
   posture: PostureFilter
+  sort: TriageSort
   onKindChange: (kind: 'all' | ExposureAssetKind) => void
   onPostureChange: (posture: PostureFilter) => void
+  onSortChange: (sort: TriageSort) => void
+  onBulkScan: (assets: ExposureAsset[]) => void
 }) {
-  const [sortBy, setSortBy] = useState<'priority' | 'critical' | 'stale'>('priority')
+  const sortBy = sort
   const [renderLimit, setRenderLimit] = useState(60)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkOwnerOpen, setBulkOwnerOpen] = useState(false)
+  const [bulkOwner, setBulkOwner] = useState('')
+  const [assigningOwner, setAssigningOwner] = useState(false)
+  const toast = useToast()
+
+  // A selection made under one filter is invisible under another — clear it so
+  // bulk actions only ever apply to rows the user can currently see.
+  useEffect(() => {
+    setSelectedIds(new Set())
+  }, [kind, posture])
 
   const filtered = useMemo(() => {
     const rows = assets.filter((a) => (kind === 'all' || a.kind === kind) && postureMatches(a, posture))
@@ -702,6 +881,51 @@ export function TriageTable({
 
   const visible = filtered.slice(0, renderLimit)
   const datasetTotal = total ?? assets.length
+
+  const selectedAssets = useMemo(() => filtered.filter((a) => selectedIds.has(a.node_id)), [filtered, selectedIds])
+  const selectedWeb = selectedAssets.filter((a) => a.kind === 'web')
+  // Owner lives in targets.metadata_json, so AI surfaces (separate table,
+  // managed in AI Gate settings) are excluded from bulk assignment.
+  const selectedOwnable = selectedAssets.filter((a) => a.kind !== 'ai')
+  const allVisibleSelected = visible.length > 0 && visible.every((a) => selectedIds.has(a.node_id))
+
+  async function applyBulkOwner() {
+    const owner = bulkOwner.trim()
+    if (!owner || selectedOwnable.length === 0) return
+    setAssigningOwner(true)
+    try {
+      const results = await Promise.allSettled(selectedOwnable.map((a) => updateTargetMetadata(a.id, { owner })))
+      const ok = results.filter((result) => result.status === 'fulfilled').length
+      const failed = results.length - ok
+      if (ok > 0) toast.success(`Owner set on ${ok} asset${ok === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`)
+      else toast.error('Failed to assign owner')
+    } finally {
+      setAssigningOwner(false)
+      setBulkOwnerOpen(false)
+      setBulkOwner('')
+      onRetry()
+    }
+  }
+
+  function toggleSelect(nodeId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
+    })
+  }
+
+  function toggleSelectAllVisible() {
+    setSelectedIds((prev) => {
+      if (allVisibleSelected) {
+        const next = new Set(prev)
+        visible.forEach((a) => next.delete(a.node_id))
+        return next
+      }
+      return new Set([...prev, ...visible.map((a) => a.node_id)])
+    })
+  }
 
   // Mirror the page-level filter bar's active selections as removable chips so
   // the applied scope is visible (and clearable) from the list itself.
@@ -742,7 +966,7 @@ export function TriageTable({
         )}
         <select
           value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as 'priority' | 'critical' | 'stale')}
+          onChange={(e) => onSortChange(e.target.value as TriageSort)}
           aria-label="Sort assets"
           className={`px-2 py-1.5 text-xs text-gray-300 ${styles.input}`}
         >
@@ -750,20 +974,109 @@ export function TriageTable({
           <option value="critical">Sort: most critical</option>
           <option value="stale">Sort: oldest scan</option>
         </select>
+        <button
+          type="button"
+          onClick={() => exportAssetsCsv(selectedAssets.length > 0 ? selectedAssets : filtered)}
+          disabled={filtered.length === 0}
+          className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <Download className="h-3 w-3" aria-hidden="true" />
+          Export CSV{selectedAssets.length > 0 ? ` (${selectedAssets.length})` : ''}
+        </button>
         <span className="ml-auto text-xs text-gray-500">
           Showing {Math.min(visible.length, filtered.length)} of {filtered.length}
           {filtered.length !== datasetTotal && ` · ${datasetTotal} total`}
         </span>
       </div>
 
+      {selectedAssets.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-teal-400/30 bg-teal-500/10 px-3 py-2">
+          <span className="text-xs font-medium text-teal-200">{selectedAssets.length} selected</span>
+          <button
+            type="button"
+            onClick={() => onBulkScan(selectedWeb)}
+            disabled={selectedWeb.length === 0}
+            title={selectedWeb.length === 0 ? 'Only web targets support quick scans' : undefined}
+            className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <ScanLine className="h-3 w-3" aria-hidden="true" />
+            Scan selected ({selectedWeb.length} web)
+          </button>
+          {!bulkOwnerOpen ? (
+            <button
+              type="button"
+              onClick={() => setBulkOwnerOpen(true)}
+              disabled={selectedOwnable.length === 0}
+              title={selectedOwnable.length === 0 ? 'AI surfaces manage ownership in AI Gate settings' : undefined}
+              className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              <UserPlus className="h-3 w-3" aria-hidden="true" />
+              Assign owner ({selectedOwnable.length})
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <input
+                type="text"
+                value={bulkOwner}
+                onChange={(e) => setBulkOwner(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void applyBulkOwner() }}
+                placeholder="team or person"
+                autoFocus
+                aria-label="Owner for selected assets"
+                className="w-36 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-white placeholder:text-gray-600"
+              />
+              <button
+                type="button"
+                onClick={() => void applyBulkOwner()}
+                disabled={!bulkOwner.trim() || assigningOwner}
+                className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                {assigningOwner ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : null}
+                Set owner
+              </button>
+              <button
+                type="button"
+                onClick={() => { setBulkOwnerOpen(false); setBulkOwner('') }}
+                className="rounded px-1.5 py-1 text-xs text-teal-200/80 hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                Cancel
+              </button>
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => exportAssetsCsv(selectedAssets)}
+            className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-gray-900 px-2 py-1 text-xs text-teal-100 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <Download className="h-3 w-3" aria-hidden="true" />
+            Export selection
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedIds(new Set())}
+            className="ml-auto inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-teal-200/80 hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <X className="h-3 w-3" aria-hidden="true" />
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <div className={`${styles.module} ${styles.corners} overflow-hidden`}>
         <div className={`hidden items-center gap-3 px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 sm:flex ${styles.moduleHeader}`}>
-          <span className="w-5 shrink-0" />
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            onChange={toggleSelectAllVisible}
+            disabled={visible.length === 0}
+            aria-label="Select all visible assets"
+            className="h-3.5 w-3.5 shrink-0 rounded border-gray-700 bg-gray-800"
+          />
           <span className="w-2.5 shrink-0" />
           <span className="flex-1">Asset</span>
           <span className="w-28 shrink-0">Crit / High</span>
           <span className="hidden w-10 shrink-0 text-center md:block">Grade</span>
-          <span className="hidden w-24 shrink-0 text-right lg:block">Scanned</span>
+          <span className="hidden w-24 shrink-0 text-right lg:block">Coverage</span>
           <span className="shrink-0">Actions</span>
         </div>
         {loading ? (
@@ -784,6 +1097,8 @@ export function TriageTable({
                 onScan={onScan}
                 onDetails={onDetails}
                 scanning={scanningIds.has(asset.id)}
+                selected={selectedIds.has(asset.node_id)}
+                onToggleSelect={() => toggleSelect(asset.node_id)}
               />
             ))}
             {filtered.length > visible.length && (
@@ -804,6 +1119,7 @@ export function TriageTable({
         onExplore={onExplore}
         onScan={onScan}
         scanning={Boolean(selectedAsset && scanningIds.has(selectedAsset.id))}
+        onUpdated={onRetry}
       />
     </div>
   )

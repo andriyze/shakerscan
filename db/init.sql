@@ -21,6 +21,11 @@ CREATE TABLE targets (
     is_active BOOLEAN DEFAULT true,
     scan_options JSONB DEFAULT '{}',
 
+    -- Ownership/accountability metadata for the exposure inventory
+    -- (owner, environment, risk_tier, data_classification), mirroring
+    -- ai_targets.metadata_json
+    metadata_json JSONB NOT NULL DEFAULT '{}',
+
     -- Statistics (updated after each scan)
     last_scan_id UUID,
     last_scanned_at TIMESTAMPTZ,

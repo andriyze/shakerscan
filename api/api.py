@@ -1757,6 +1757,9 @@ class TargetUpdate(BaseModel):
     name: Optional[str] = None
     is_active: Optional[bool] = None
     scan_options: Optional[dict] = None
+    # Merged into the existing metadata (JSONB ||), so partial ownership
+    # updates don't clobber unrelated keys. Set a key to "" to clear it.
+    metadata_json: Optional[dict] = None
 
 
 class FindingUpdate(BaseModel):
@@ -5834,7 +5837,7 @@ async def exposure_assets(
     async with db_pool.acquire() as conn:
         target_rows = await conn.fetch(
             """
-            SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source,
+            SELECT t.id, t.url, t.name, t.root_domain, t.discovery_source, t.metadata_json,
                    t.last_grade, t.last_score, t.last_scanned_at, t.created_at, t.total_scans,
                    ls.id AS latest_scan_id, ls.status AS latest_scan_status,
                    ls.scan_type AS latest_scan_type, ls.completion_status, ls.top_coverage_status,
@@ -5963,6 +5966,7 @@ async def exposure_assets(
             scan_limited=bool(completion["scan_limited"]),
             latest_scan_status=latest_scan_status,
         )
+        meta = _parse_graph_json(row.get("metadata_json"))
         assets.append({
             "id": str(row["id"]),
             "node_id": f"target:{row['id']}",
@@ -5972,6 +5976,10 @@ async def exposure_assets(
             "root_domain": None if is_model else row.get("root_domain"),
             "origin": row.get("root_domain") if is_model else None,
             "exposure_class": exposure_class,
+            "owner": str(meta.get("owner") or meta.get("asset_owner") or "").strip() or None,
+            "environment": str(meta.get("environment") or "").strip() or None,
+            "risk_tier": str(meta.get("risk_tier") or "").strip() or None,
+            "data_classification": str(meta.get("data_classification") or "").strip() or None,
             "grade": row.get("last_grade"),
             "score": row.get("last_score"),
             "active_total": total,
@@ -6024,6 +6032,12 @@ async def exposure_assets(
         latest_scan_status = row.get("latest_scan_status")
         blast_radius = build_agent_blast_radius(row, [{"status": "active"} for _ in range(total)])
         blast_radius_tier = str(blast_radius.get("tier") or "")
+        ai_meta = _parse_graph_json(row.get("metadata_json"))
+        ai_owner = str(ai_meta.get("asset_owner") or ai_meta.get("owner") or "").strip() or None
+        ai_environment = (
+            str(ai_meta.get("environment") or "").strip()
+            or ("production" if row.get("production_mode") else "")
+        ) or None
         action_reasons = _exposure_action_reasons(
             kind="ai",
             exposure_class=exposure_class,
@@ -6055,6 +6069,8 @@ async def exposure_assets(
             "target_type": row.get("target_type"),
             "production_mode": bool(row.get("production_mode")),
             "exposure_class": exposure_class,
+            "owner": ai_owner,
+            "environment": ai_environment,
             "blast_radius_score": blast_radius.get("score"),
             "blast_radius_tier": blast_radius.get("tier"),
             "blast_radius_factors": blast_radius.get("factors") or [],
@@ -6117,6 +6133,12 @@ async def exposure_assets(
         "failed_scans": sum(1 for a in assets if "failed_scan" in a.get("action_reasons", [])),
         "fresh_scans": sum(1 for a in assets if a.get("coverage_posture") == "fresh"),
         "verified_assets": sum(1 for a in assets if (a.get("active_verified") or 0) > 0),
+        "unverified_high_assets": sum(
+            1 for a in assets
+            if (a.get("active_needs_verification") or 0) > 0
+            and (a.get("active_critical", 0) + a.get("active_high", 0)) > 0
+        ),
+        "unowned_assets": sum(1 for a in assets if not a.get("owner")),
         "needs_action": sum(1 for a in assets if a.get("needs_action")),
         "p1_count": sum(1 for a in assets if a.get("action_priority") == "P1"),
         "p2_count": sum(1 for a in assets if a.get("action_priority") == "P2"),
@@ -6138,6 +6160,198 @@ async def exposure_assets(
         "offset": offset,
         "new_count": new_count,
         "metrics": metrics,
+    }
+
+
+@app.get("/exposure/changes")
+async def exposure_changes(
+    since: Optional[str] = None,
+    root_domain: Optional[str] = None,
+    days: int = Query(7, ge=1, le=90),
+    examples: int = Query(5, ge=0, le=10),
+):
+    """Awareness deltas for the exposure page: what changed since an anchor.
+
+    ``since`` (ISO timestamp, e.g. the user's last visit) wins over ``days``.
+    Categories cover new assets, new active critical/high findings, resolved
+    findings, failed scans, and assets whose coverage crossed the 30-day stale
+    threshold inside the window. Each category carries an ``href`` to the
+    exposure/findings view that shows that slice.
+    """
+    anchor = _exposure_datetime(since) if since else None
+    if since and anchor is None:
+        raise HTTPException(status_code=400, detail="Invalid 'since' timestamp")
+    if anchor is None:
+        anchor = datetime.now(timezone.utc) - timedelta(days=days)
+
+    async with db_pool.acquire() as conn:
+        new_targets = await conn.fetch(
+            """
+            SELECT COALESCE(name, url) AS label, url, discovery_source, created_at
+            FROM targets
+            WHERE is_active = true AND created_at > $1
+              AND ($2::text IS NULL OR root_domain = $2::text)
+            ORDER BY created_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+        new_ai = await conn.fetch(
+            """
+            SELECT name AS label, endpoint_url AS url, created_at
+            FROM ai_targets
+            WHERE is_active = true AND created_at > $1
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY created_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+        new_findings = await conn.fetch(
+            """
+            SELECT f.title, f.severity, f.first_seen_at,
+                   COALESCE(t.root_domain, ait.name, f.url) AS subject
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            WHERE f.status = 'active' AND f.severity IN ('critical', 'high')
+              AND f.first_seen_at > $1
+              AND ($2::text IS NULL OR t.root_domain = $2::text
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY f.first_seen_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+        resolved_findings = await conn.fetch(
+            """
+            SELECT f.title, f.severity, f.resolved_at,
+                   COALESCE(t.root_domain, ait.name, f.url) AS subject
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            WHERE f.status = 'resolved' AND f.resolved_at > $1
+              AND ($2::text IS NULL OR t.root_domain = $2::text
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY f.resolved_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+        failed_scans = await conn.fetch(
+            """
+            SELECT s.id, s.target_url AS label, s.scan_type, s.created_at
+            FROM scans s
+            LEFT JOIN targets t ON s.target_id = t.id
+            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
+            WHERE s.status = 'failed' AND s.created_at > $1
+              AND ($2::text IS NULL OR t.root_domain = $2::text
+                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY s.created_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+        went_stale = await conn.fetch(
+            """
+            SELECT COALESCE(name, url) AS label, last_scanned_at
+            FROM targets
+            WHERE is_active = true AND total_scans > 0 AND last_scanned_at IS NOT NULL
+              AND last_scanned_at <= NOW() - INTERVAL '30 days'
+              AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
+              AND ($2::text IS NULL OR root_domain = $2::text)
+            ORDER BY last_scanned_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+
+    def fmt_when(value: Any) -> str | None:
+        when = _exposure_datetime(value)
+        return when.isoformat() if when else None
+
+    new_asset_examples = [
+        {
+            "label": r["label"],
+            "detail": "model" if r["discovery_source"] == "model-intake" else "web",
+            "when": fmt_when(r["created_at"]),
+        }
+        for r in new_targets
+    ] + [
+        {"label": r["label"] or r["url"], "detail": "ai", "when": fmt_when(r["created_at"])}
+        for r in new_ai
+    ]
+    new_asset_examples.sort(key=lambda e: e["when"] or "", reverse=True)
+
+    categories = [
+        {
+            "key": "new_assets",
+            "label": "New assets",
+            "count": len(new_targets) + len(new_ai),
+            "href": "/exposure?posture=new",
+            "examples": new_asset_examples[:examples],
+        },
+        {
+            "key": "new_risk",
+            "label": "New critical/high findings",
+            "count": len(new_findings),
+            "severity_counts": {
+                "critical": sum(1 for r in new_findings if r["severity"] == "critical"),
+                "high": sum(1 for r in new_findings if r["severity"] == "high"),
+            },
+            "href": "/findings?status=active&sort_by=first_seen&sort_order=desc",
+            "examples": [
+                {
+                    "label": r["title"],
+                    "detail": " · ".join(filter(None, [r["severity"], r["subject"]])),
+                    "when": fmt_when(r["first_seen_at"]),
+                }
+                for r in new_findings[:examples]
+            ],
+        },
+        {
+            "key": "resolved",
+            "label": "Findings resolved",
+            "count": len(resolved_findings),
+            "href": "/findings?status=resolved",
+            "examples": [
+                {
+                    "label": r["title"],
+                    "detail": " · ".join(filter(None, [r["severity"], r["subject"]])),
+                    "when": fmt_when(r["resolved_at"]),
+                }
+                for r in resolved_findings[:examples]
+            ],
+        },
+        {
+            "key": "failed_scans",
+            "label": "Failed scans",
+            "count": len(failed_scans),
+            "href": "/exposure?posture=failed",
+            "examples": [
+                {"label": r["label"], "detail": r["scan_type"], "when": fmt_when(r["created_at"])}
+                for r in failed_scans[:examples]
+            ],
+        },
+        {
+            "key": "went_stale",
+            "label": "Went stale",
+            "count": len(went_stale),
+            "href": "/exposure?posture=stale",
+            "examples": [
+                {
+                    "label": r["label"],
+                    "detail": f"{_exposure_days_since(r['last_scanned_at'])}d since scan",
+                    "when": fmt_when(r["last_scanned_at"]),
+                }
+                for r in went_stale[:examples]
+            ],
+        },
+    ]
+    return {
+        "since": anchor.isoformat(),
+        "total_changes": sum(c["count"] for c in categories),
+        "categories": categories,
     }
 
 
@@ -6951,6 +7165,11 @@ async def update_target(target_id: str, request: TargetUpdate):
         if request.scan_options is not None:
             updates.append(f"scan_options = ${param_idx}")
             params.append(json.dumps(request.scan_options))
+            param_idx += 1
+
+        if request.metadata_json is not None:
+            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
+            params.append(json.dumps(request.metadata_json))
             param_idx += 1
 
         if not updates:

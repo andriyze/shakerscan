@@ -579,6 +579,8 @@ export interface ExposureAsset {
   root_domain?: string | null
   origin?: string | null
   exposure_class?: 'public' | 'internal' | 'supply_chain' | 'unknown' | string | null
+  owner?: string | null
+  environment?: string | null
   target_type?: string | null
   production_mode?: boolean
   blast_radius_score?: number | null
@@ -635,6 +637,8 @@ export interface ExposureAssetMetrics {
   failed_scans?: number
   fresh_scans?: number
   verified_assets?: number
+  unverified_high_assets?: number
+  unowned_assets?: number
   needs_action?: number
   p1_count?: number
   p2_count?: number
@@ -779,6 +783,57 @@ export async function getExposureAssets(params?: {
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
+  return res.json()
+}
+
+export interface ExposureChangeExample {
+  label: string
+  detail?: string | null
+  when?: string | null
+}
+
+export interface ExposureChangeCategory {
+  key: string
+  label: string
+  count: number
+  href?: string | null
+  severity_counts?: { critical?: number; high?: number }
+  examples: ExposureChangeExample[]
+}
+
+export interface ExposureChangesResponse {
+  since: string
+  total_changes: number
+  categories: ExposureChangeCategory[]
+}
+
+// Ownership/accountability fields stored in targets.metadata_json. The API
+// merges keys into the existing metadata; send "" to clear a key.
+export async function updateTargetMetadata(
+  targetId: string,
+  metadata: Record<string, string>
+): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/targets/${targetId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ metadata_json: metadata }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update target metadata'))
+  return res.json()
+}
+
+export async function getExposureChanges(params?: {
+  root_domain?: string
+  since?: string
+  days?: number
+}): Promise<ExposureChangesResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.since) searchParams.set('since', params.since)
+  if (params?.days) searchParams.set('days', String(params.days))
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure changes'))
   return res.json()
 }
 

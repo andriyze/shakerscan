@@ -445,6 +445,13 @@ async def run_schema_migrations(pool) -> None:
                 WHERE verification_count IS NULL
             """)
 
+            # Ownership/accountability metadata for the exposure inventory,
+            # mirroring ai_targets.metadata_json (owner, environment, ...).
+            await conn.execute("""
+                ALTER TABLE targets
+                ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            """)
+
             # AI Gate targets.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_targets (
