@@ -48,7 +48,7 @@ MAX_PLAN_STEPS = 8
 MAX_RESPONSE_SNIPPET = 4000
 
 # Finding types we support for AI verification
-AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect", "cors", "2fa_bypass", "command_injection", "ssti", "xxe", "jwt", "idor", "bola"}
+AI_VERIFIABLE_TYPES = {"xss", "sqli", "ssrf", "path_traversal", "open_redirect", "cors", "2fa_bypass", "command_injection", "ssti", "xxe", "jwt", "idor", "bola", "exposed_file", "generic_http"}
 
 # Enforce safe, same-origin HTTP replay behavior for AI-generated steps.
 ALLOWED_HTTP_METHODS = {"GET", "POST", "HEAD", "OPTIONS"}

@@ -134,6 +134,7 @@ def dispatch_ladder_step(
     prove_xxe=None,
     prove_jwt=None,
     prove_bola=None,
+    prove_exposed_file=None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Map a ladder step name + finding type to a prover coroutine.
 
@@ -224,6 +225,12 @@ def dispatch_ladder_step(
         step_meta["strategy"] = step_name
         if prove_bola:
             return prove_bola(url, param, ""), step_meta
+        return None, step_meta
+
+    if finding_type == "exposed_file":
+        step_meta["strategy"] = step_name
+        if prove_exposed_file:
+            return prove_exposed_file(url, evidence=evidence), step_meta
         return None, step_meta
 
     return None, step_meta

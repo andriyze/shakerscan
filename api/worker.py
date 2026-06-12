@@ -23,6 +23,7 @@ import asyncpg
 import redis
 
 from retest_contract import (
+    AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
     VerificationPolicy,
@@ -1871,7 +1872,16 @@ def _current_retest_capabilities() -> dict[str, bool]:
         "path_traversal": "prove_path_traversal",
         "open_redirect": "prove_open_redirect",
         "cors": "prove_cors",
+        "command_injection": "prove_command_injection",
+        "ssti": "prove_ssti",
+        "xxe": "prove_xxe",
+        "jwt": "prove_jwt",
+        "idor": "prove_bola",
+        "bola": "prove_bola",
+        "exposed_file": "prove_exposed_file",
     }
+    # AI-only types (2fa_bypass, generic_http) keep False: there is no
+    # deterministic prover, the AI verification tier handles them.
     for finding_type, func_name in func_map.items():
         capabilities[finding_type] = callable(getattr(poe, func_name, None))
     return capabilities
@@ -1887,6 +1897,7 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_bola,
             prove_command_injection,
             prove_cors,
+            prove_exposed_file,
             prove_jwt,
             prove_open_redirect,
             prove_path_traversal,
@@ -1976,16 +1987,17 @@ async def run_finding_retest(verification: dict) -> dict:
             "retryable": False,
         }
 
-    # 2FA bypass currently relies on AI reasoning (Tier 2) rather than a deterministic prover.
-    # Return a deterministic "inconclusive" base result that explicitly allows AI escalation.
-    if finding_type == "2fa_bypass":
+    # AI-only types (2fa_bypass, generic_http) rely on AI reasoning (Tier 2)
+    # rather than a deterministic prover. Return a deterministic "inconclusive"
+    # base result that explicitly allows AI escalation.
+    if finding_type in AI_ONLY_RETEST_TYPES:
         completed_at = utc_now()
         has_ai_step = "ai_reasoning" in attempt_ladder
         return {
             "status": "completed",
             "result_status": "inconclusive",
             "verdict": "inconclusive",
-            "verdict_reason": "No deterministic prover available for 2FA bypass; escalating to AI reasoning.",
+            "verdict_reason": f"No deterministic prover available for {finding_type}; escalating to AI reasoning.",
             "error_message": None,
             "confidence": None,
             "proof": None,
@@ -2002,7 +2014,7 @@ async def run_finding_retest(verification: dict) -> dict:
                 "succeeded_step": None,
                 "deterministic_skipped_reason": "ai_only_type",
             },
-            "message": "Deterministic 2FA bypass prover unavailable; AI verification required.",
+            "message": f"Deterministic prover unavailable for {finding_type}; AI verification required.",
             "attempt_ladder": attempt_ladder,
             "attempts_exhausted": False,
             "deterministic_exhausted": True,
@@ -2044,6 +2056,7 @@ async def run_finding_retest(verification: dict) -> dict:
         "prove_xxe": prove_xxe,
         "prove_jwt": prove_jwt,
         "prove_bola": prove_bola,
+        "prove_exposed_file": prove_exposed_file,
     }
 
     def _call_prover(step_name: str):

@@ -65,6 +65,7 @@ except ModuleNotFoundError as exc:
     from api.scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
 
 from retest_contract import (
+    AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
     SUPPORTED_RETEST_TYPES,
     SUPPORTED_RETEST_VERDICTS,
@@ -73,6 +74,7 @@ from retest_contract import (
     build_retest_job_payload,
     extract_auth_context,
     infer_retest_inputs,
+    infer_type_from_title_tool,
     normalize_retest_type,
     parse_json_field,
     run_schema_migrations,
@@ -724,26 +726,9 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
     if evidence_type:
         return evidence_type
 
-    title = str(finding.get("title", "")).lower()
-    tool = str(finding.get("tool", "")).lower()
-
-    if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss", "custom_xss"}:
-        return "xss"
-    if (("sql" in title and "inject" in title) or "sqli" in title or
-            tool in {"sqlmap", "smart_sqli", "custom_sqli", "oob_sqli"}):
-        return "sqli"
-    if "ssrf" in title or "server-side request forgery" in title:
-        return "ssrf"
-    if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
-        return "path_traversal"
-    if "open redirect" in title or "url redirect" in title:
-        return "open_redirect"
-    if "cors" in title:
-        return "cors"
-    if "2fa bypass" in title or "mfa bypass" in title or tool in {"2fa_bypass", "mfa_bypass"}:
-        return "2fa_bypass"
-
-    return None
+    # Shared title/tool inference from retest_contract so API, worker, and
+    # auto-retest policy always agree on whether a finding is retestable.
+    return infer_type_from_title_tool(finding.get("title"), finding.get("tool"))
 
 
 def extract_retest_inputs(
@@ -7655,7 +7640,48 @@ async def get_finding(finding_id: str):
         if not finding:
             raise HTTPException(status_code=404, detail="Finding not found")
 
-    return dict(finding)
+    result = dict(finding)
+
+    # Retest capability hints so the UI can gate the retest button instead of
+    # surfacing a 400 after the click.
+    if result.get("source") == "ai_gate" or result.get("ai_target_id"):
+        result["retest_supported"] = True
+        result["retest_type"] = None
+        result["retest_modes"] = ["same_probe", "same_family", "strict_replay"]
+    else:
+        evidence = parse_json_field(result.get("evidence"))
+        retest_type = infer_retest_type(result, evidence)
+        tool = str(result.get("tool") or "").lower()
+        if retest_type:
+            result["retest_supported"] = True
+            result["retest_type"] = retest_type
+            result["retest_modes"] = (
+                ["tiered", "ai"] if retest_type in AI_ONLY_RETEST_TYPES
+                else ["tiered", "deterministic", "ai"]
+            )
+        elif tool == "model_intake":
+            result["retest_supported"] = False
+            result["retest_type"] = None
+            result["retest_modes"] = []
+            result["retest_unsupported_reason"] = "model_intake"
+        else:
+            ai_settings = _load_effective_ai_settings()
+            ai_ready = bool(
+                ai_settings.get("ai_verify_enabled")
+                and (ai_settings.get("ai_verify_url") or ai_settings.get("ai_url"))
+                and (ai_settings.get("ai_verify_api_key") or ai_settings.get("ai_api_key"))
+            )
+            if ai_ready:
+                result["retest_supported"] = True
+                result["retest_type"] = "generic_http"
+                result["retest_modes"] = ["ai"]
+            else:
+                result["retest_supported"] = False
+                result["retest_type"] = None
+                result["retest_modes"] = []
+                result["retest_unsupported_reason"] = "no_deterministic_prover_and_ai_verification_disabled"
+
+    return result
 
 
 @app.post("/findings/{finding_id:path}/retest")
@@ -7698,14 +7724,49 @@ async def retest_finding(
         )
 
         if not retest_inputs.get("finding_type"):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "unsupported_finding_type",
-                    "message": "Could not infer retest type from finding.",
-                    "supported_types": list(SUPPORTED_RETEST_TYPES),
-                },
+            tool = str(finding_data.get("tool") or "").lower()
+            if tool == "model_intake":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "unsupported_finding_type",
+                        "message": "Model Intake findings cannot be retested via HTTP replay; re-run the Model Intake scan for this artifact instead.",
+                    },
+                )
+
+            # No deterministic prover for this finding. Fall back to the AI
+            # verification tier (generic_http) when an AI verifier is configured.
+            ai_settings = _load_effective_ai_settings()
+            ai_ready = bool(
+                ai_settings.get("ai_verify_enabled")
+                and (ai_settings.get("ai_verify_url") or ai_settings.get("ai_url"))
+                and (ai_settings.get("ai_verify_api_key") or ai_settings.get("ai_api_key"))
             )
+            if not ai_ready:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "unsupported_finding_type",
+                        "message": (
+                            "Could not infer a deterministic retest type from this finding, "
+                            "and AI verification is not configured. Enable AI verification in "
+                            "AI settings to retest this finding type."
+                        ),
+                        "supported_types": list(SUPPORTED_RETEST_TYPES),
+                    },
+                )
+            if mode == "deterministic":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "no_deterministic_prover",
+                        "message": "This finding has no deterministic prover; retest it in tiered or AI mode.",
+                    },
+                )
+            retest_inputs["finding_type"] = "generic_http"
+            # Force the AI tier so an explicit user retest is not silently
+            # skipped by the severity-based AI escalation gate.
+            mode = "ai"
 
         if not retest_inputs.get("target_url"):
             raise HTTPException(

@@ -133,7 +133,13 @@ SUPPORTED_RETEST_TYPES: tuple[str, ...] = (
     "jwt",
     "idor",
     "bola",
+    "exposed_file",
+    "generic_http",
 )
+
+# Types whose attempt ladder has no deterministic prover steps; the worker
+# returns an "escalate to AI" base result instead of walking provers.
+AI_ONLY_RETEST_TYPES: frozenset[str] = frozenset({"2fa_bypass", "generic_http"})
 
 SUPPORTED_RETEST_VERDICTS: tuple[str, ...] = (
     "exploited",
@@ -196,6 +202,34 @@ RETEST_TYPE_ALIASES: dict[str, str] = {
     "bola": "bola",
     "broken_object_level_authorization": "bola",
     "broken-object-level-authorization": "bola",
+    "exposed_file": "exposed_file",
+    "exposed-file": "exposed_file",
+    "exposed_files": "exposed_file",
+    "sensitive_file_exposure": "exposed_file",
+    "forced_browsing": "exposed_file",
+    "forced-browsing": "exposed_file",
+    "generic_http": "generic_http",
+}
+
+# Scanner tool name -> retest type. Tool names are stable identifiers, so they
+# are a far more reliable inference signal than title keyword matching.
+RETEST_TOOL_TYPE_MAP: dict[str, str] = {
+    "dalfox": "xss",
+    "dom_xss": "xss",
+    "smart_xss": "xss",
+    "custom_xss": "xss",
+    "sqlmap": "sqli",
+    "smart_sqli": "sqli",
+    "custom_sqli": "sqli",
+    "oob_sqli": "sqli",
+    "2fa_bypass": "2fa_bypass",
+    "mfa_bypass": "2fa_bypass",
+    "commix": "command_injection",
+    "smart_bola": "bola",
+    "bola": "bola",
+    "idor_bola": "bola",
+    "exposed_files": "exposed_file",
+    "forced_browsing": "exposed_file",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
@@ -212,6 +246,8 @@ DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
     "jwt": '{"alg":"none"}',
     "idor": "",
     "bola": "",
+    "exposed_file": "",
+    "generic_http": "",
 }
 
 # Ladder names intentionally use stable identifiers so UI/reporting can
@@ -230,6 +266,8 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "jwt": ["none_algorithm", "weak_secret_bruteforce", "signature_strip", "ai_reasoning"],
     "idor": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "bola": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
+    "exposed_file": ["content_marker_replay", "ai_reasoning"],
+    "generic_http": ["ai_reasoning"],
 }
 
 RETRY_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -247,6 +285,58 @@ def normalize_retest_type(value: str | None) -> str | None:
     if not value:
         return None
     return RETEST_TYPE_ALIASES.get(str(value).strip().lower())
+
+
+def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | None:
+    """Infer a retest type from a finding's title/tool.
+
+    Single source of truth for both the API retest endpoint and the worker
+    (auto-retest + retest execution) so the two never disagree on whether a
+    finding is retestable.
+    """
+    title = str(title or "").lower()
+    tool = str(tool or "").lower()
+
+    mapped = RETEST_TOOL_TYPE_MAP.get(tool)
+    if mapped:
+        return mapped
+
+    # NoSQL injection must never be routed to the SQLi prover: the prover
+    # cannot reproduce NoSQL operator injection and would report a false
+    # "likely_fixed". Without a dedicated prover these findings fall through
+    # to the AI verification path instead.
+    if "nosql" in title or tool == "nosql_injection":
+        return None
+
+    if "xss" in title or "cross-site scripting" in title:
+        return "xss"
+    if ("sql" in title and "inject" in title) or "sqli" in title:
+        return "sqli"
+    if "ssrf" in title or "server-side request forgery" in title:
+        return "ssrf"
+    if any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
+        return "path_traversal"
+    if "open redirect" in title or "url redirect" in title:
+        return "open_redirect"
+    if "cors" in title:
+        return "cors"
+    if "2fa bypass" in title or "mfa bypass" in title:
+        return "2fa_bypass"
+    if "command injection" in title or "rce" in title or "remote code execution" in title:
+        return "command_injection"
+    if "ssti" in title or "template injection" in title:
+        return "ssti"
+    if "xxe" in title or "xml external entity" in title:
+        return "xxe"
+    if "jwt" in title:
+        return "jwt"
+    if "bola" in title or "broken object level" in title:
+        return "bola"
+    if "idor" in title or "insecure direct object" in title:
+        return "idor"
+    if "exposed file" in title or (title.startswith("accessible ") and ":" in title):
+        return "exposed_file"
+    return None
 
 
 def get_attempt_ladder(finding_type: str | None) -> list[str]:
@@ -285,39 +375,12 @@ def parse_json_field(value: Any) -> dict[str, Any]:
 def infer_retest_inputs(verification: dict[str, Any]) -> dict[str, Any]:
     """Build effective retest inputs using verification row and finding evidence."""
     evidence = parse_json_field(verification.get("evidence"))
-    title = str(verification.get("title", "")).lower()
-    tool = str(verification.get("tool", "")).lower()
 
     finding_type = normalize_retest_type(verification.get("finding_type"))
     if not finding_type:
         finding_type = normalize_retest_type(evidence.get("type"))
     if not finding_type:
-        if "xss" in title or "cross-site scripting" in title or tool in {"dalfox", "dom_xss", "smart_xss", "custom_xss"}:
-            finding_type = "xss"
-        elif ("sql" in title and "inject" in title) or "sqli" in title or tool in {"sqlmap", "smart_sqli", "custom_sqli", "oob_sqli"}:
-            finding_type = "sqli"
-        elif "ssrf" in title or "server-side request forgery" in title:
-            finding_type = "ssrf"
-        elif any(k in title for k in ("path traversal", "local file inclusion", "directory traversal", "lfi", "../")):
-            finding_type = "path_traversal"
-        elif "open redirect" in title or "url redirect" in title:
-            finding_type = "open_redirect"
-        elif "cors" in title:
-            finding_type = "cors"
-        elif "2fa bypass" in title or "mfa bypass" in title or tool in {"2fa_bypass", "mfa_bypass"}:
-            finding_type = "2fa_bypass"
-        elif "command injection" in title or "rce" in title or "remote code execution" in title or tool in {"commix"}:
-            finding_type = "command_injection"
-        elif "ssti" in title or "template injection" in title:
-            finding_type = "ssti"
-        elif "xxe" in title or "xml external entity" in title:
-            finding_type = "xxe"
-        elif "jwt" in title:
-            finding_type = "jwt"
-        elif "bola" in title or "broken object level" in title or tool in {"smart_bola", "bola"}:
-            finding_type = "bola"
-        elif "idor" in title or "insecure direct object" in title:
-            finding_type = "idor"
+        finding_type = infer_type_from_title_tool(verification.get("title"), verification.get("tool"))
 
     target_url = verification.get("target_url") or verification.get("target") or verification.get("finding_url") or evidence.get("target") or ""
     original_url = verification.get("original_url") or verification.get("finding_url") or evidence.get("url") or target_url
@@ -355,6 +418,11 @@ def build_replay_commands(inputs: dict[str, Any]) -> list[str]:
     quoted_url = urllib.parse.quote(target_url, safe=":/?&=%#.-_~")
 
     commands.append(f"curl -i -k '{quoted_url}'")
+
+    if finding_type in ("exposed_file", "generic_http"):
+        # Exposure replays are a plain GET; injection-style payload commands
+        # would be misleading here.
+        return commands
 
     if param:
         if method == "POST":

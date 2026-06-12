@@ -320,19 +320,20 @@ function FindingDetailContent() {
       setRetestLoading(true)
       setRetestMessage(null)
       const aiFinding = getFindingSourceType(finding) === 'AI'
+      const effectiveMode = selectedRetestMode
       const queued = aiFinding
         ? await retestAiFinding(finding.id, {
             requested_by: 'ui',
-            mode: ['same_probe', 'same_family', 'strict_replay'].includes(retestMode)
-              ? retestMode as 'same_probe' | 'same_family' | 'strict_replay'
+            mode: ['same_probe', 'same_family', 'strict_replay'].includes(effectiveMode)
+              ? effectiveMode as 'same_probe' | 'same_family' | 'strict_replay'
               : 'same_probe'
           })
         : await retestFinding(
             finding.id,
             { requested_by: 'ui' },
-            retestMode === 'tiered' || ['same_probe', 'same_family', 'strict_replay'].includes(retestMode)
+            effectiveMode === 'tiered' || ['same_probe', 'same_family', 'strict_replay'].includes(effectiveMode)
               ? undefined
-              : retestMode as 'ai' | 'deterministic'
+              : effectiveMode as 'ai' | 'deterministic'
           )
       setRetestMessage(`${aiFinding ? 'AI Gate replay' : 'Retest'} queued (${queued.retest_id.slice(0, 8)}...)`)
       toast.success(`${aiFinding ? 'AI Gate replay' : 'Retest'} queued`)
@@ -364,20 +365,30 @@ function FindingDetailContent() {
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
   const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const retestSupported = finding?.retest_supported !== false
+  const retestModes = finding?.retest_modes
+  const dastRetestOptions = [
+    { value: 'tiered', label: 'Tiered' },
+    { value: 'deterministic', label: 'Deterministic only' },
+    { value: 'ai', label: 'AI only' },
+  ].filter((option) => !retestModes || retestModes.includes(option.value))
   const retestOptions = isAiFinding
     ? [
         { value: 'same_probe', label: 'Same probe' },
         { value: 'same_family', label: 'Same family' },
         { value: 'strict_replay', label: 'Strict replay' },
       ]
-    : [
-        { value: 'tiered', label: 'Tiered' },
-        { value: 'deterministic', label: 'Deterministic only' },
-        { value: 'ai', label: 'AI only' },
-      ]
+    : dastRetestOptions.length > 0
+    ? dastRetestOptions
+    : [{ value: 'tiered', label: 'Tiered' }]
   const selectedRetestMode = retestOptions.some((option) => option.value === retestMode)
     ? retestMode
     : retestOptions[0].value
+  const retestUnsupportedMessage =
+    finding?.retest_unsupported_reason === 'model_intake'
+      ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
+      : 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
+  const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
   const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
   const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
   const aiProbeId = evidenceString(rawEvidenceObject, 'probe_id')
@@ -429,8 +440,9 @@ function FindingDetailContent() {
           </select>
           <button
             onClick={handleRetest}
-            disabled={retestLoading}
-            className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50"
+            disabled={retestLoading || !retestSupported}
+            title={!retestSupported ? retestUnsupportedMessage : undefined}
+            className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {retestLoading ? 'Queueing...' : 'Retest Finding'}
           </button>
@@ -599,6 +611,24 @@ function FindingDetailContent() {
 
       <SectionCard title="Retest Verification">
         <div className="space-y-3">
+          {!retestSupported && (
+            <div className="text-xs rounded px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
+              Automated retest unavailable: {retestUnsupportedMessage}
+            </div>
+          )}
+          {manualVerifyCommands.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Manual verification commands (from evidence)</p>
+              <div className="space-y-1">
+                {manualVerifyCommands.map((command, idx) => (
+                  <div key={idx} className="flex items-start gap-1">
+                    <code className="text-[11px] text-blue-300 break-all flex-1">{command}</code>
+                    <CopyButton text={command} label="Copy verification command" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {hasPendingRetest && (
             <div className="inline-flex items-center gap-2 rounded bg-blue-900/30 border border-blue-900/60 px-2 py-1 text-xs text-blue-300">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />

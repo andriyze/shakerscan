@@ -1,6 +1,6 @@
 'use client'
 
-import { useSearchParams, useRouter, usePathname } from 'next/navigation'
+import { useSearchParams, usePathname } from 'next/navigation'
 import { useCallback, useMemo, useEffect } from 'react'
 
 export type FilterValue = string | number | undefined
@@ -13,9 +13,19 @@ export interface UseUrlFiltersOptions<T extends FilterState> {
   defaults?: Partial<T>
 }
 
+// Filter changes are shallow client-side updates: native history.pushState /
+// replaceState (which useSearchParams syncs with) instead of router.push.
+// router.push re-renders through the App Router cache, and on a statically
+// prerendered page that was hard-loaded WITH query params it reconciles the
+// push against the prerendered entry and silently reverts it — breaking every
+// filter interaction after opening a deep link.
+function shallowNavigate(url: string, mode: 'push' | 'replace') {
+  if (mode === 'push') window.history.pushState(null, '', url)
+  else window.history.replaceState(null, '', url)
+}
+
 export function useUrlFilters<T extends FilterState = FilterState>(options: UseUrlFiltersOptions<T> = {}) {
   const searchParams = useSearchParams()
-  const router = useRouter()
   const pathname = usePathname()
   const { defaults = {} as Partial<T> } = options
   // Memoize defaults to prevent infinite re-renders
@@ -47,10 +57,10 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
         const params = new URLSearchParams(searchParams.toString())
         params.delete('page')
         const queryString = params.toString()
-        router.replace(queryString ? `${pathname}?${queryString}` : pathname, { scroll: false })
+        shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'replace')
       }
     }
-  }, [searchParams, pathname, router, defaultsRecord])
+  }, [searchParams, pathname, defaultsRecord])
 
   // Update a single filter
   const setFilter = useCallback((key: string, value: string | number | undefined) => {
@@ -68,8 +78,8 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
     }
 
     const queryString = params.toString()
-    router.push(queryString ? `${pathname}?${queryString}` : pathname, { scroll: false })
-  }, [searchParams, pathname, router, defaultsRecord])
+    shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'push')
+  }, [searchParams, pathname, defaultsRecord])
 
   // Update multiple filters at once
   const setFilters = useCallback((updates: FilterState) => {
@@ -89,8 +99,8 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
     }
 
     const queryString = params.toString()
-    router.push(queryString ? `${pathname}?${queryString}` : pathname, { scroll: false })
-  }, [searchParams, pathname, router, defaultsRecord])
+    shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'push')
+  }, [searchParams, pathname, defaultsRecord])
 
   // Build a URL with given filters, preserving current context
   const buildUrl = useCallback((path: string, overrides: FilterState = {}) => {

@@ -314,6 +314,11 @@ export interface Finding {
   verification_count?: number
   created_at?: string
   updated_at?: string
+  // Retest capability hints (populated by GET /findings/{id})
+  retest_supported?: boolean
+  retest_type?: string | null
+  retest_modes?: string[]
+  retest_unsupported_reason?: string
 }
 
 export interface RetestRecord {
