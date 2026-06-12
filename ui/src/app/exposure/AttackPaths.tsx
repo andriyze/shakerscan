@@ -125,6 +125,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
                       {step.finding_id && (
                         <Link
                           href={`/findings/${step.finding_id}`}
+                          title={step.finding_title || undefined}
                           className="inline-flex items-center gap-1 rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Finding <ExternalLink className="h-2.5 w-2.5" aria-hidden="true" />
@@ -158,6 +159,14 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
             >
               View scan <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </Link>
+            {path.findings_href && (
+              <Link
+                href={path.findings_href}
+                className="inline-flex items-center gap-1 rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                Scan findings <ExternalLink className="h-3 w-3" aria-hidden="true" />
+              </Link>
+            )}
             {path.asset_node_id && (
               <button
                 type="button"

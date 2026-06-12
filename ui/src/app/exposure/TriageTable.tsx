@@ -112,7 +112,7 @@ function relativeTime(value?: string | null): string {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
-function postureMatches(asset: ExposureAsset, filter: PostureFilter, newWindowDays?: number): boolean {
+export function postureMatches(asset: ExposureAsset, filter: PostureFilter, newWindowDays?: number): boolean {
   if (filter === 'all') return true
   if (filter === 'p1' || filter === 'p2' || filter === 'p3') return asset.action_priority === filter.toUpperCase()
   if (filter === 'public' || filter === 'internal') return asset.exposure_class === filter

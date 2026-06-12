@@ -111,25 +111,27 @@ export function ExposureGraph({
   // instead of exploding and resettling on every focus change.
   const nodeCacheRef = useRef<Map<string, GraphNode>>(new Map())
   const firstFitRef = useRef(true)
-  const [width, setWidth] = useState(800)
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 800, height })
   const [hoverId, setHoverId] = useState<string | null>(null)
   // Per-frame label collision registry: the canvas repaints every node each
   // frame, so the rect list resets when the paint counter wraps. Persistent
   // labels that would overlap an already-drawn label are skipped — dense
   // clusters show one readable label instead of a text pileup.
-  const labelRectsRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number }>>([])
+  const labelRectsRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; text: string; cx: number; cy: number }>>([])
   const paintCounterRef = useRef(0)
   const nodeTotalRef = useRef(0)
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const update = () => setWidth(el.clientWidth)
+    // Track both dimensions so a responsive container (shorter canvas on
+    // phones) resizes the graph instead of overflowing it.
+    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight || height })
     update()
     const observer = new ResizeObserver(update)
     observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [height])
 
   const graphData = useMemo(() => {
     const cache = nodeCacheRef.current
@@ -302,12 +304,17 @@ export function ExposureGraph({
 
         // Collision check (graph coords, consistent within a frame): focused
         // and hovered labels always draw; persistent/zoom labels skip if they
-        // would overlap one already placed this frame.
+        // would overlap one already placed this frame, or repeat the same text
+        // nearby (domain + same-named target nodes sit adjacent — one label
+        // identifies both, hover still names each node).
         const halfW = ctx.measureText(text).width / 2 + 2 / globalScale
-        const rect = { x1: x - halfW, y1: labelY - 1 / globalScale, x2: x + halfW, y2: labelY + fontSize + 1 / globalScale }
+        const rect = { x1: x - halfW, y1: labelY - 1 / globalScale, x2: x + halfW, y2: labelY + fontSize + 1 / globalScale, text, cx: x, cy: y }
         const mustDraw = isFocus || isHover
+        const dupRadius = 56 / globalScale
         const collides = labelRectsRef.current.some(
-          (other) => rect.x1 < other.x2 && rect.x2 > other.x1 && rect.y1 < other.y2 && rect.y2 > other.y1
+          (other) =>
+            (rect.x1 < other.x2 && rect.x2 > other.x1 && rect.y1 < other.y2 && rect.y2 > other.y1) ||
+            (other.text === text && (other.cx - x) ** 2 + (other.cy - y) ** 2 < dupRadius * dupRadius)
         )
         if (mustDraw || !collides) {
           labelRectsRef.current.push(rect)
@@ -361,8 +368,8 @@ export function ExposureGraph({
       <ForceGraph2D
         ref={fgRef}
         graphData={graphData}
-        width={width}
-        height={height}
+        width={size.width}
+        height={size.height}
         backgroundColor="rgba(0,0,0,0)"
         nodeRelSize={1}
         nodeCanvasObject={paintNode}

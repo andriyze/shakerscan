@@ -6515,7 +6515,13 @@ async def exposure_attack_paths(
                 missing_required = [missing_required]
             elif not isinstance(missing_required, list):
                 missing_required = []
+            chain_evidence = chain.get("evidence") if isinstance(chain.get("evidence"), dict) else {}
+            supporting = [
+                sf for sf in (chain_evidence.get("supporting_findings") or [])
+                if isinstance(sf, dict) and sf.get("id")
+            ]
             paths.append({
+                "_supporting": supporting,
                 "id": f"{row['id']}:{chain_type}:{idx}",
                 "name": chain.get("name") or chain_type,
                 "chain_type": chain.get("chain_type"),
@@ -6533,6 +6539,68 @@ async def exposure_attack_paths(
                 "scan_id": str(row["id"]),
                 "scan_href": f"/scans/{row['id']}",
             })
+
+    # Resolve chain-step findings to DB finding ids so each step can deep-link
+    # to its exact finding. Chains carry scanner fingerprints ("tool:hash") in
+    # their supporting_findings evidence, which map onto findings.fingerprint
+    # (with a suffix-only fallback for pre-rename findings).
+    fingerprints: set[str] = set()
+    for p in paths:
+        for sf in p["_supporting"]:
+            fid = str(sf.get("id") or "")
+            if fid:
+                fingerprints.add(fid)
+                if ":" in fid:
+                    fingerprints.add(fid.split(":")[-1])
+    fp_map: dict[str, str] = {}
+    if fingerprints:
+        async with db_pool.acquire() as conn:
+            finding_rows = await conn.fetch(
+                "SELECT id, fingerprint FROM findings WHERE fingerprint = ANY($1::text[])",
+                list(fingerprints),
+            )
+        for fr in finding_rows:
+            fp = str(fr["fingerprint"])
+            fp_map[fp] = str(fr["id"])
+            if ":" in fp:
+                fp_map.setdefault(fp.split(":")[-1], str(fr["id"]))
+
+    def _types_align(step_type: str, matched: str) -> bool:
+        # Chain steps use template vocabulary ("sqli"); supporting findings use
+        # the correlator's ("sqli_confirmed", "admin_panel_found") — treat a
+        # shared underscore-prefix family as the same type.
+        if not step_type or not matched:
+            return False
+        return matched == step_type or matched.startswith(f"{step_type}_") or step_type.startswith(f"{matched}_")
+
+    def _resolve_step_finding(step: dict[str, Any], supporting: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+        raw = str(step.get("finding_id") or "")
+        if raw:
+            if raw in fp_map:
+                return fp_map[raw], None
+            try:
+                uuid.UUID(raw)
+                return raw, None
+            except ValueError:
+                pass
+        step_type = str(step.get("finding_type") or "")
+        for sf in supporting:
+            if _types_align(step_type, str(sf.get("matched_type") or "")):
+                sf_id = str(sf.get("id") or "")
+                resolved = fp_map.get(sf_id) or (fp_map.get(sf_id.split(":")[-1]) if ":" in sf_id else None)
+                if resolved:
+                    return resolved, sf.get("title")
+        return None, None
+
+    for p in paths:
+        supporting = p.pop("_supporting")
+        for step in p["steps"]:
+            resolved_id, resolved_title = _resolve_step_finding(step, supporting)
+            step["finding_id"] = resolved_id
+            if resolved_title:
+                step["finding_title"] = resolved_title
+        # Card-level fallback drill-down when steps can't be resolved 1:1.
+        p["findings_href"] = f"/findings?scan_id={p['scan_id']}"
 
     severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
     paths.sort(

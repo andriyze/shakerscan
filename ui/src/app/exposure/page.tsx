@@ -49,7 +49,7 @@ import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
-import { TriageTable, PriorityBadge, riskDot, isProductionAIAsset, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
+import { TriageTable, PriorityBadge, riskDot, isProductionAIAsset, postureMatches, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
 import { ChangesStrip } from './ChangesStrip'
 import { AttackPaths } from './AttackPaths'
 import styles from './exposure.module.css'
@@ -820,6 +820,19 @@ function ExposureView() {
     else loadGraph()
   }
 
+  // Preset chips show how many assets each view selects, so users never click
+  // into an empty view blind; zero-count presets are dimmed and disabled.
+  const presetCounts = useMemo(
+    () =>
+      PRESET_VIEWS.map(
+        (preset) =>
+          assets.filter(
+            (asset) => (preset.kind === 'all' || asset.kind === preset.kind) && postureMatches(asset, preset.posture)
+          ).length
+      ),
+    [assets]
+  )
+
   const searchMatches = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return []
@@ -1003,25 +1016,34 @@ function ExposureView() {
           <ChangesStrip rootDomain={domain || undefined} />
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[10px] uppercase tracking-wide text-gray-600">Views</span>
-            {PRESET_VIEWS.map((preset) => {
+            {PRESET_VIEWS.map((preset, index) => {
               const active = triageKind === preset.kind && triagePosture === preset.posture && triageSort === preset.sort
+              const count = presetCounts[index] ?? 0
+              const empty = count === 0 && !active
               return (
                 <button
                   key={preset.label}
                   type="button"
                   aria-pressed={active}
+                  disabled={empty}
+                  title={empty ? 'No matching assets right now' : undefined}
                   onClick={() =>
                     active
                       ? applyTriage({ kind: 'all', posture: 'all', sort: 'priority' })
                       : applyTriage({ kind: preset.kind, posture: preset.posture, sort: preset.sort })
                   }
-                  className={`rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
                       ? 'border-teal-400/40 bg-teal-500/15 text-teal-200'
-                      : 'border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                      : empty
+                        ? 'border-gray-800/60 text-gray-600'
+                        : 'border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
                   }`}
                 >
                   {preset.label}
+                  <span className={`rounded-full px-1.5 text-[10px] ${active ? 'bg-teal-400/20 text-teal-100' : 'bg-gray-800 text-gray-500'}`}>
+                    {count}
+                  </span>
                 </button>
               )
             })}
@@ -1139,7 +1161,7 @@ function ExposureView() {
             </div>
           ) : (
             <div>
-              <div className={`relative h-[560px] w-full ${styles.graphBackdrop}`}>
+              <div className={`relative h-[420px] w-full sm:h-[560px] ${styles.graphBackdrop}`}>
                 <div className={styles.radarRings} aria-hidden="true" />
                 <div className={styles.sweep} aria-hidden="true" />
                 <ExposureGraphCanvas

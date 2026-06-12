@@ -667,6 +667,7 @@ export interface ExposureAttackStep {
   impact?: string | null
   finding_type?: string | null
   finding_id?: string | null
+  finding_title?: string | null
   evidence?: unknown
 }
 
@@ -687,6 +688,7 @@ export interface ExposureAttackPath {
   asset_node_id?: string | null
   scan_id: string
   scan_href: string
+  findings_href?: string | null
 }
 
 export interface ExposureAttackPathsResponse {
