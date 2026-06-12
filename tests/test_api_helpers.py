@@ -43,9 +43,14 @@ if "fastapi" not in sys.modules:
     def _fake_query(default=None, **kwargs):
         return default
 
+    class _FakeRequest:
+        def __init__(self, query_params=None):
+            self.query_params = query_params or {}
+
     fastapi_mod.FastAPI = _FakeFastAPI
     fastapi_mod.HTTPException = _FakeHTTPException
     fastapi_mod.Query = _fake_query
+    fastapi_mod.Request = _FakeRequest
     sys.modules["fastapi"] = fastapi_mod
 
     middleware_mod = types.ModuleType("fastapi.middleware")

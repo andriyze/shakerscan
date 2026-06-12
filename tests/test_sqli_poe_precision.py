@@ -1,11 +1,12 @@
 import asyncio
+import urllib.parse
 
 from scanner.scanner_tools.proof_of_exploit import (
     _is_valid_sqli_extraction,
     _split_curl_response,
 )
 from scanner.scanner_tools import active_checks
-from scanner.scanner_tools.active_checks import _check_sqli_response
+from scanner.scanner_tools.active_checks import _check_sqli_response, custom_sqli_test
 
 
 HONEY_POSTGRES_ERROR = """ERROR: syntax error at or near "' OR 1=1--"
@@ -255,6 +256,71 @@ def test_sqli_data_extraction_accepts_sensitive_rowset(monkeypatch):
     assert result["dbms_confirmed"] == "postgresql"
     assert "password_hash" in result["extracted_data"]["sensitive_markers"]
     assert any("sensitive rowset" in item for item in result["evidence"])
+
+
+def test_check_sqli_response_payload_guard_ignores_reflected_schema_keyword():
+    """A reflected schema keyword (echoed payload) must not count as exfiltration."""
+    payload = "')) UNION SELECT sql,name FROM sqlite_master--"
+    out = f"<!DOCTYPE html><body>results for: {payload}</body>"
+    baseline = "<!DOCTYPE html><body>results for: normal</body>"
+
+    # Without payload context, the reflected `sqlite_master` token scores as a leak.
+    vuln_no_guard, ev_no_guard = _check_sqli_response(
+        out=out, baseline_len=len(baseline), elapsed=0.1, technique="schema_dump",
+        dbms_detected=None, baseline_body=baseline,
+    )
+    # With the payload supplied, the same token is recognised as reflection.
+    vuln_guard, ev_guard = _check_sqli_response(
+        out=out, baseline_len=len(baseline), elapsed=0.1, technique="schema_dump",
+        dbms_detected=None, baseline_body=baseline, payload=payload,
+    )
+
+    assert vuln_no_guard is True
+    assert any("sqlite_master" in item for item in ev_no_guard)
+    assert vuln_guard is False
+    assert not any("sqlite_master" in item for item in ev_guard)
+
+
+def test_custom_sqli_test_ignores_reflecting_app(monkeypatch):
+    """Reproduces the tidyhelpers false positive: an app that echoes the query
+    (so the SQL payload appears in the page) but raises no DB error and returns
+    no real banner must produce zero SQLi findings."""
+
+    async def reflecting_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        decoded = urllib.parse.unquote_plus(url)  # echo the payload like a search box
+        body = f"<!DOCTYPE html><html><body>Search results for: {decoded}</body></html>"
+        return f"{body}\n200", "", 0
+
+    monkeypatch.setattr(active_checks, "run", reflecting_run)
+
+    result = asyncio.run(custom_sqli_test("https://tidyhelpers.com/search?query=test"))
+
+    assert result["scan_completed"] is True
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
+
+
+def test_custom_sqli_test_detects_real_postgres_error(monkeypatch):
+    """A genuine database error in the response is still reported (high severity)."""
+
+    async def erroring_run(cmd, *args, **kwargs):
+        url = cmd[-1]
+        if "%27" in url:  # any payload that injected a quote breaks the query
+            return f"{HONEY_POSTGRES_ERROR}\n500", "", 0
+        return '{"id":1,"username":"admin","role":"admin"}\n200', "", 0
+
+    monkeypatch.setattr(active_checks, "run", erroring_run)
+
+    result = asyncio.run(custom_sqli_test("https://example.test/user?id=1"))
+
+    assert result["vulnerable"] is True
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert finding["severity"] == "high"
+    assert finding["type"] == "SQL Injection"
+    assert any("SQL error detected" in item for item in finding["evidence"])
+    assert any("postgresql" in item.lower() for item in finding["evidence"])
 
 
 def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):

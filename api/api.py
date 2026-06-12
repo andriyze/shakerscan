@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 import redis
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -7113,6 +7113,7 @@ async def mark_retest_enqueue_failed(
 
 @app.get("/findings")
 async def list_findings(
+    request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
     source_type: Optional[str] = Query(None, regex="^(dast|ai|model_intake)$"),
@@ -7136,6 +7137,28 @@ async def list_findings(
     paginated row, so we only execute the (expensive, ILIKE-heavy) query
     once instead of twice.
     """
+    # Reject unknown query parameters instead of silently ignoring them. A typo'd
+    # filter (e.g. ?domain= instead of ?root_domain=) would otherwise return the
+    # full, unfiltered result set with no indication the filter did nothing.
+    allowed_params = {
+        "severity", "status", "source_type", "target_id", "ai_target_id",
+        "scan_id", "root_domain", "verification_verdict", "verification_mode",
+        "verified_only", "search", "seen_within_days", "sort_by", "sort_order",
+        "limit", "offset",
+    }
+    unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
+    if unknown_params:
+        hint = ""
+        if any(p in ("domain", "last_seen") for p in unknown_params):
+            hint = " (did you mean 'root_domain' / 'seen_within_days'?)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown query parameter(s): {', '.join(unknown_params)}{hint}. "
+                f"Allowed: {', '.join(sorted(allowed_params))}"
+            ),
+        )
+
     async with db_pool.acquire() as conn:
         query = """
             SELECT f.*,

