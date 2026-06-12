@@ -299,6 +299,7 @@ function PostureSummary({
   const postureItemsAll: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
     { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300', posture: 'internal' },
     { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300', posture: 'unscanned' },
+    { label: 'Failed', value: metrics?.failed_scans ?? 0, tone: 'text-red-200', posture: 'failed' },
     { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300', posture: 'stale' },
     { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300', posture: 'incomplete' },
   ]
@@ -341,6 +342,88 @@ function PostureSummary({
             <X className="h-3 w-3" aria-hidden="true" /> Clear
           </button>
         )}
+      </div>
+    </Panel>
+  )
+}
+
+function AwarenessStrip({
+  assets,
+  metrics,
+  onPosture,
+}: {
+  assets: ExposureAsset[]
+  metrics: ExposureAssetMetrics | null
+  onPosture: (posture: PostureFilter) => void
+}) {
+  const newAssets = assets.filter((a) => a.is_new).length
+  const failed = metrics?.failed_scans ?? assets.filter((a) => a.coverage_posture === 'failed').length
+  const needsVerification = metrics?.active_needs_verification ?? assets.reduce((sum, a) => sum + (a.active_needs_verification || 0), 0)
+  const verified = metrics?.active_verified ?? assets.reduce((sum, a) => sum + (a.active_verified || 0), 0)
+  const items = [
+    {
+      key: 'p1',
+      label: 'Immediate priority',
+      value: metrics?.p1_count ?? 0,
+      detail: 'P1 assets',
+      tone: 'text-red-300',
+      action: () => onPosture('p1'),
+    },
+    {
+      key: 'failed',
+      label: 'Failed coverage',
+      value: failed,
+      detail: 'latest scans failed',
+      tone: 'text-red-200',
+      action: () => onPosture('failed'),
+    },
+    {
+      key: 'incomplete',
+      label: 'Incomplete coverage',
+      value: metrics?.incomplete_scans ?? 0,
+      detail: 'limited scans',
+      tone: 'text-amber-200',
+      action: () => onPosture('incomplete'),
+    },
+    {
+      key: 'verify',
+      label: 'Needs validation',
+      value: needsVerification,
+      detail: `${verified} verified`,
+      tone: 'text-blue-200',
+      action: () => onPosture('needs_verification'),
+    },
+    {
+      key: 'new',
+      label: 'New assets',
+      value: newAssets,
+      detail: 'last 7 days',
+      tone: 'text-teal-200',
+      action: () => onPosture('new'),
+    },
+  ].filter((item) => Number(item.value) > 0)
+
+  if (items.length === 0) return null
+
+  return (
+    <Panel className="p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="mr-2 shrink-0">
+          <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Needs attention</div>
+          <div className="text-[11px] text-gray-600">Fresh signals from inventory, coverage, and validation</div>
+        </div>
+        {items.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={item.action}
+            className="rounded border border-gray-800 bg-black/20 px-3 py-2 text-left hover:border-gray-700 hover:bg-gray-900/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <div className={`text-sm font-semibold ${item.tone}`}>{item.value}</div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500">{item.label}</div>
+            <div className="text-[10px] text-gray-700">{item.detail}</div>
+          </button>
+        ))}
       </div>
     </Panel>
   )
@@ -517,6 +600,7 @@ export default function ExposurePage() {
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set())
   const [triageKind, setTriageKind] = useState<'all' | ExposureAssetKind>('all')
   const [triagePosture, setTriagePosture] = useState<PostureFilter>('all')
+  const [selectedAsset, setSelectedAsset] = useState<ExposureAsset | null>(null)
   const graphKeyRef = useRef<string | null>(null)
   const pathsKeyRef = useRef<string | null>(null)
 
@@ -622,6 +706,7 @@ export default function ExposurePage() {
   function changeScope(next: () => void) {
     setFocusId(null)
     setSelectedNode(null)
+    setSelectedAsset(null)
     setHighlightType(null)
     next()
   }
@@ -823,6 +908,14 @@ export default function ExposurePage() {
       </div>
 
       <div className={`${styles.rise} ${styles.d2}`}>
+        <AwarenessStrip
+          assets={assets}
+          metrics={assetMetrics}
+          onPosture={(p) => { setTriagePosture(p); setLens('triage') }}
+        />
+      </div>
+
+      <div className={`${styles.rise} ${styles.d2}`}>
         <PostureSummary
           metrics={assetMetrics}
           kind={triageKind}
@@ -843,7 +936,10 @@ export default function ExposurePage() {
             onRetry={loadAssets}
             onExplore={focusById}
             onScan={handleScan}
+            onDetails={setSelectedAsset}
             scanningIds={scanningIds}
+            selectedAsset={selectedAsset}
+            onCloseDetails={() => setSelectedAsset(null)}
             kind={triageKind}
             posture={triagePosture}
             onKindChange={setTriageKind}

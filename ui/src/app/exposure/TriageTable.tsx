@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import {
   getFindings,
+  extractFindingTriage,
   updateFinding,
   type ExposureAsset,
   type ExposureAssetKind,
@@ -45,8 +46,11 @@ export const POSTURE_FILTERS = [
   { value: 'public', label: 'Public' },
   { value: 'internal', label: 'Internal' },
   { value: 'unscanned', label: 'Unscanned' },
+  { value: 'failed', label: 'Failed' },
   { value: 'stale', label: 'Stale' },
   { value: 'incomplete', label: 'Incomplete' },
+  { value: 'needs_verification', label: 'Needs verification' },
+  { value: 'new', label: 'New' },
 ] as const
 
 export type PostureFilter = (typeof POSTURE_FILTERS)[number]['value'] | 'all'
@@ -67,6 +71,7 @@ const ACTION_LABELS: Record<string, string> = {
   production_ai_risk: 'Production AI risk',
   high_blast_radius: 'High blast radius',
   model_not_approved: 'Model not approved',
+  failed_scan: 'Failed scan',
 }
 
 export function riskDot(asset: ExposureAsset): string {
@@ -96,13 +101,34 @@ function postureMatches(asset: ExposureAsset, filter: PostureFilter): boolean {
   if (filter === 'p1' || filter === 'p2' || filter === 'p3') return asset.action_priority === filter.toUpperCase()
   if (filter === 'public' || filter === 'internal') return asset.exposure_class === filter
   if (filter === 'unscanned') return (asset.action_reasons || []).includes('never_scanned')
+  if (filter === 'failed') return (asset.action_reasons || []).includes('failed_scan')
   if (filter === 'stale') return (asset.action_reasons || []).includes('stale_scan')
   if (filter === 'incomplete') return Boolean(asset.scan_limited)
+  if (filter === 'needs_verification') return (asset.active_needs_verification || 0) > 0
+  if (filter === 'new') return Boolean(asset.is_new)
   return true
 }
 
 function actionLabel(reason: string): string {
   return ACTION_LABELS[reason] || reason.replace(/_/g, ' ')
+}
+
+function coverageLabel(asset: ExposureAsset): string {
+  const posture = asset.coverage_posture || 'unknown'
+  if (posture === 'fresh') return 'Fresh coverage'
+  if (posture === 'limited') return 'Limited coverage'
+  if (posture === 'failed') return 'Latest scan failed'
+  if (posture === 'stale') return 'Stale coverage'
+  if (posture === 'unscanned') return 'Never scanned'
+  return 'Coverage unknown'
+}
+
+function coverageClass(asset: ExposureAsset): string {
+  const posture = asset.coverage_posture
+  if (posture === 'fresh') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+  if (posture === 'limited' || posture === 'stale') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+  if (posture === 'failed' || posture === 'unscanned') return 'border-red-400/30 bg-red-400/10 text-red-200'
+  return 'border-gray-700 bg-gray-800 text-gray-400'
 }
 
 function ExposureBadge({ asset }: { asset: ExposureAsset }) {
@@ -225,6 +251,198 @@ function PostureDetail({ asset }: { asset: ExposureAsset }) {
           {asset.latest_scan_type || 'scan'}
         </Link>
       )}
+    </div>
+  )
+}
+
+function AssetDetailDrawer({
+  asset,
+  onClose,
+  onExplore,
+  onScan,
+  scanning,
+}: {
+  asset: ExposureAsset | null
+  onClose: () => void
+  onExplore: (nodeId: string) => void
+  onScan: (asset: ExposureAsset) => void
+  scanning: boolean
+}) {
+  const [findings, setFindings] = useState<Finding[] | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (!asset) return
+    setFindings(null)
+    setError(false)
+    let active = true
+    const params =
+      asset.kind === 'ai'
+        ? { ai_target_id: asset.id, status: 'active', limit: 10, sort_by: 'severity' as const }
+        : { target_id: asset.id, status: 'active', limit: 10, sort_by: 'severity' as const }
+    getFindings(params)
+      .then((res) => {
+        if (active) setFindings(res.findings || [])
+      })
+      .catch(() => {
+        if (active) setError(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [asset])
+
+  if (!asset) return null
+  const KindIcon = KIND_META[asset.kind].icon
+  const recommended = asset.recommended_actions || []
+  const verificationTotal = (asset.active_verified || 0) + (asset.active_needs_verification || 0)
+  const verifiedPct = verificationTotal > 0 ? Math.round(((asset.active_verified || 0) / verificationTotal) * 100) : null
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
+      <button type="button" className="absolute inset-0 cursor-default" aria-label="Close asset details backdrop" onClick={onClose} />
+      <aside className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-gray-800 bg-gray-950 shadow-2xl">
+        <div className={`flex items-start justify-between gap-3 p-4 ${styles.moduleHeader}`}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <KindIcon className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+              <h2 className={`${styles.displayTitle} truncate text-base text-white`}>{asset.label}</h2>
+              <PriorityBadge priority={asset.action_priority} />
+            </div>
+            <div className="mt-1 break-all text-xs text-gray-500">{asset.url || asset.root_domain || asset.origin}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close asset details"
+            className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded border border-gray-800 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-gray-600">Risk</div>
+              <div className="mt-1 flex items-baseline gap-2">
+                {asset.active_critical > 0 && <span className="text-lg font-semibold text-red-300">{asset.active_critical}C</span>}
+                {asset.active_high > 0 && <span className="text-lg font-semibold text-orange-300">{asset.active_high}H</span>}
+                {asset.active_total === 0 && <span className="text-lg font-semibold text-emerald-300">Clean</span>}
+                {asset.grade && <span className={`ml-auto ${styles.displayTitle} text-lg ${gradeTextColor(asset.grade)}`}>{asset.grade}</span>}
+              </div>
+            </div>
+            <div className="rounded border border-gray-800 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-gray-600">Validation</div>
+              <div className="mt-1 text-sm text-gray-200">
+                {(asset.active_verified || 0)} verified · {(asset.active_needs_verification || 0)} need review
+              </div>
+              {verifiedPct !== null && <div className="mt-1 text-[11px] text-gray-500">{verifiedPct}% verified signal</div>}
+            </div>
+            <div className="rounded border border-gray-800 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-gray-600">Coverage</div>
+              <div className={`mt-1 inline-flex rounded border px-2 py-0.5 text-xs ${coverageClass(asset)}`}>{coverageLabel(asset)}</div>
+              <div className="mt-1 text-[11px] text-gray-500">
+                {asset.latest_scan_type || 'No scan'} · {relativeTime(asset.last_scanned_at)}
+              </div>
+            </div>
+            <div className="rounded border border-gray-800 bg-black/20 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-gray-600">Exposure</div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                <ExposureBadge asset={asset} />
+                <BlastBadge asset={asset} />
+              </div>
+            </div>
+          </div>
+
+          {recommended.length > 0 && (
+            <section className="rounded border border-teal-400/20 bg-teal-400/5 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-teal-300">Recommended next actions</div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {recommended.map((action) => (
+                  <span key={action} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-200">{action}</span>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="rounded border border-gray-800 bg-black/20">
+            <div className={`flex items-center justify-between gap-2 px-3 py-2 ${styles.moduleHeader}`}>
+              <div>
+                <div className="text-[10px] uppercase tracking-wide text-gray-500">Asset facts</div>
+              </div>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 p-3 text-xs">
+              <div><dt className="text-gray-600">Domain</dt><dd className="truncate text-gray-200">{asset.root_domain || asset.origin || 'n/a'}</dd></div>
+              <div><dt className="text-gray-600">Kind</dt><dd className="text-gray-200">{KIND_META[asset.kind].label}</dd></div>
+              <div><dt className="text-gray-600">Scans</dt><dd className="text-gray-200">{asset.total_scans ?? 0}</dd></div>
+              <div><dt className="text-gray-600">First seen</dt><dd className="text-gray-200">{relativeTime(asset.first_seen_at)}</dd></div>
+              <div><dt className="text-gray-600">Skipped modules</dt><dd className="text-gray-200">{asset.skipped_modules_count ?? 0}</dd></div>
+              <div><dt className="text-gray-600">Capped lists</dt><dd className="text-gray-200">{asset.capped_lists_count ?? 0}</dd></div>
+              {asset.data_classification && <div><dt className="text-gray-600">Data</dt><dd className="truncate text-gray-200">{asset.data_classification}</dd></div>}
+              {asset.risk_tier && <div><dt className="text-gray-600">Risk tier</dt><dd className="text-gray-200">{asset.risk_tier}</dd></div>}
+            </dl>
+          </section>
+
+          <section className="rounded border border-gray-800 bg-black/20">
+            <div className={`flex items-center justify-between gap-2 px-3 py-2 ${styles.moduleHeader}`}>
+              <div className="text-[10px] uppercase tracking-wide text-gray-500">Active findings</div>
+              <Link href={asset.findings_href} className="text-[11px] text-blue-300 hover:text-blue-200">Open all</Link>
+            </div>
+            {error ? (
+              <p className="p-3 text-xs text-gray-500">Could not load findings.</p>
+            ) : !findings ? (
+              <div className="space-y-2 p-3">
+                {Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-8 animate-pulse rounded bg-gray-800/60" />)}
+              </div>
+            ) : findings.length === 0 ? (
+              <p className="p-3 text-xs text-gray-500">No active findings on this asset.</p>
+            ) : (
+              <div className="divide-y divide-gray-800/50">
+                {findings.map((finding) => {
+                  const triage = extractFindingTriage(finding)
+                  const verdict = finding.last_verification_verdict || (triage?.verified ? 'verified' : triage?.needs_verification ? 'needs review' : null)
+                  return (
+                    <Link key={finding.id} href={`/findings/${finding.id}`} className="block px-3 py-2 hover:bg-gray-800/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>{finding.severity}</span>
+                        <span className="min-w-0 flex-1 truncate text-xs text-gray-200">{finding.title}</span>
+                      </div>
+                      {verdict && <div className="mt-1 text-[10px] uppercase tracking-wide text-gray-600">{verdict.replace(/_/g, ' ')}</div>}
+                    </Link>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="flex flex-wrap gap-2 border-t border-gray-800 p-4">
+          {asset.kind === 'web' && (
+            <button
+              type="button"
+              onClick={() => onScan(asset)}
+              disabled={scanning}
+              className="inline-flex items-center gap-1 rounded border border-teal-400/30 bg-teal-400/10 px-3 py-1.5 text-xs text-teal-200 hover:bg-teal-400/20 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanLine className="h-3.5 w-3.5" />}
+              Quick scan
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { onExplore(asset.node_id); onClose() }}
+            className="inline-flex items-center gap-1 rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <Radar className="h-3.5 w-3.5" /> Explore map
+          </button>
+          {asset.latest_scan_href && (
+            <Link href={asset.latest_scan_href} className="inline-flex items-center gap-1 rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+              <History className="h-3.5 w-3.5" /> Latest scan
+            </Link>
+          )}
+        </div>
+      </aside>
     </div>
   )
 }
@@ -398,11 +616,13 @@ function AssetRow({
   asset,
   onExplore,
   onScan,
+  onDetails,
   scanning,
 }: {
   asset: ExposureAsset
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
+  onDetails: (asset: ExposureAsset) => void
   scanning: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -490,6 +710,14 @@ function AssetRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onDetails(asset)}
+            aria-label={`Open details for ${asset.label}`}
+            className="inline-flex items-center gap-1 rounded border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-200 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            Details
+          </button>
           {primaryAction}
           <Link
             href={asset.findings_href}
@@ -528,7 +756,10 @@ export function TriageTable({
   onRetry,
   onExplore,
   onScan,
+  onDetails,
   scanningIds,
+  selectedAsset,
+  onCloseDetails,
   kind,
   posture,
   onKindChange,
@@ -542,7 +773,10 @@ export function TriageTable({
   onRetry: () => void
   onExplore: (nodeId: string) => void
   onScan: (asset: ExposureAsset) => void
+  onDetails: (asset: ExposureAsset) => void
   scanningIds: Set<string>
+  selectedAsset: ExposureAsset | null
+  onCloseDetails: () => void
   kind: 'all' | ExposureAssetKind
   posture: PostureFilter
   onKindChange: (kind: 'all' | ExposureAssetKind) => void
@@ -641,6 +875,7 @@ export function TriageTable({
                 asset={asset}
                 onExplore={onExplore}
                 onScan={onScan}
+                onDetails={onDetails}
                 scanning={scanningIds.has(asset.id)}
               />
             ))}
@@ -656,6 +891,13 @@ export function TriageTable({
           </>
         )}
       </div>
+      <AssetDetailDrawer
+        asset={selectedAsset}
+        onClose={onCloseDetails}
+        onExplore={onExplore}
+        onScan={onScan}
+        scanning={Boolean(selectedAsset && scanningIds.has(selectedAsset.id))}
+      />
     </div>
   )
 }

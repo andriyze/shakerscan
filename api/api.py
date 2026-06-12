@@ -5738,6 +5738,7 @@ def _exposure_action_reasons(
     production_mode: bool = False,
     blast_radius_tier: str | None = None,
     deployment_approved: bool | None = None,
+    latest_scan_status: str | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     days = _exposure_days_since(last_scanned_at)
@@ -5745,6 +5746,8 @@ def _exposure_action_reasons(
         reasons.append("never_scanned")
     elif days is not None and days >= 30:
         reasons.append("stale_scan")
+    if latest_scan_status == "failed":
+        reasons.append("failed_scan")
     if scan_limited:
         reasons.append("incomplete_scan")
     if active_critical > 0:
@@ -5760,6 +5763,50 @@ def _exposure_action_reasons(
     if kind == "model" and deployment_approved is False:
         reasons.append("model_not_approved")
     return reasons
+
+
+def _exposure_coverage_posture(*, total_scans: int, last_scanned_at: Any, scan_limited: bool, latest_scan_status: str | None) -> str:
+    days = _exposure_days_since(last_scanned_at)
+    if total_scans <= 0 or not last_scanned_at:
+        return "unscanned"
+    if latest_scan_status == "failed":
+        return "failed"
+    if scan_limited:
+        return "limited"
+    if days is not None and days >= 30:
+        return "stale"
+    return "fresh"
+
+
+def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verified: int, active_needs_verification: int) -> list[str]:
+    actions: list[str] = []
+    rs = set(reasons)
+    if "never_scanned" in rs:
+        actions.append("Run first scan")
+    if "failed_scan" in rs:
+        actions.append("Open latest failed scan")
+    if "incomplete_scan" in rs:
+        actions.append("Review skipped scan coverage")
+    if "stale_scan" in rs:
+        actions.append("Refresh scan")
+    if "critical_findings" in rs:
+        actions.append("Triage critical findings")
+    elif "high_findings" in rs:
+        actions.append("Triage high findings")
+    if "public_high_risk" in rs:
+        actions.append("Prioritize public exposure")
+    if kind == "ai" and "high_blast_radius" in rs:
+        actions.append("Review AI runtime controls")
+    if kind == "ai" and "production_ai_risk" in rs:
+        actions.append("Retest production AI surface")
+    if kind == "model" and "model_not_approved" in rs:
+        actions.append("Complete model approval")
+    if active_verified > 0:
+        actions.append("Fix verified findings")
+    if active_needs_verification > 0:
+        actions.append("Verify suspected findings")
+    # Stable de-dupe, preserving priority order.
+    return list(dict.fromkeys(actions))[:5]
 
 
 @app.get("/exposure/assets")
@@ -5786,7 +5833,9 @@ async def exposure_assets(
                    ls.completed_at AS latest_scan_completed_at,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
-                   COALESCE(fc.active_high, 0) AS active_high
+                   COALESCE(fc.active_high, 0) AS active_high,
+                   COALESCE(fc.active_verified, 0) AS active_verified,
+                   COALESCE(fc.active_needs_verification, 0) AS active_needs_verification
             FROM targets t
             LEFT JOIN LATERAL (
                 SELECT id, status, scan_type, completed_at,
@@ -5801,7 +5850,16 @@ async def exposure_assets(
                 SELECT target_id,
                     COUNT(*) FILTER (WHERE status = 'active') AS active_total,
                     COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high,
+                    COUNT(*) FILTER (WHERE status = 'active' AND last_verification_verdict = 'exploited') AS active_verified,
+                    COUNT(*) FILTER (
+                        WHERE status = 'active'
+                          AND (
+                            last_verification_verdict IS NULL
+                            OR last_verification_verdict IN ('inconclusive', 'error', 'likely_vulnerable')
+                            OR analyst_verdict IN ('needs_review', 'retest_needed')
+                          )
+                    ) AS active_needs_verification
                 FROM findings WHERE target_id IS NOT NULL GROUP BY target_id
             ) fc ON fc.target_id = t.id
             WHERE t.is_active = true
@@ -5820,7 +5878,9 @@ async def exposure_assets(
                    COALESCE(sc.scan_count, 0) AS scan_count,
                    COALESCE(fc.active_total, 0) AS active_total,
                    COALESCE(fc.active_critical, 0) AS active_critical,
-                   COALESCE(fc.active_high, 0) AS active_high
+                   COALESCE(fc.active_high, 0) AS active_high,
+                   COALESCE(fc.active_verified, 0) AS active_verified,
+                   COALESCE(fc.active_needs_verification, 0) AS active_needs_verification
             FROM ai_targets a
             LEFT JOIN LATERAL (
                 SELECT id, status, scan_type, completed_at,
@@ -5839,7 +5899,16 @@ async def exposure_assets(
                 SELECT ai_target_id,
                     COUNT(*) FILTER (WHERE status = 'active') AS active_total,
                     COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS active_critical,
-                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high
+                    COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS active_high,
+                    COUNT(*) FILTER (WHERE status = 'active' AND last_verification_verdict = 'exploited') AS active_verified,
+                    COUNT(*) FILTER (
+                        WHERE status = 'active'
+                          AND (
+                            last_verification_verdict IS NULL
+                            OR last_verification_verdict IN ('inconclusive', 'error', 'likely_vulnerable')
+                            OR analyst_verdict IN ('needs_review', 'retest_needed')
+                          )
+                    ) AS active_needs_verification
                 FROM findings WHERE ai_target_id IS NOT NULL GROUP BY ai_target_id
             ) fc ON fc.ai_target_id = a.id
             WHERE a.is_active = true
@@ -5859,10 +5928,13 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
+        verified = int(row.get("active_verified") or 0)
+        needs_verification = int(row.get("active_needs_verification") or 0)
         completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("url"), kind=asset_kind)
         total_scans = int(row.get("total_scans") or 0)
         last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
+        latest_scan_status = row.get("latest_scan_status")
         action_reasons = _exposure_action_reasons(
             kind=asset_kind,
             exposure_class=exposure_class,
@@ -5872,9 +5944,16 @@ async def exposure_assets(
             last_scanned_at=last_scanned_at,
             scan_limited=bool(completion["scan_limited"]),
             deployment_approved=None,
+            latest_scan_status=latest_scan_status,
         )
         action_priority, action_score = _exposure_action_priority(
             action_reasons, exposure_class=exposure_class, active_critical=crit, active_high=high
+        )
+        coverage_posture = _exposure_coverage_posture(
+            total_scans=total_scans,
+            last_scanned_at=last_scanned_at,
+            scan_limited=bool(completion["scan_limited"]),
+            latest_scan_status=latest_scan_status,
         )
         assets.append({
             "id": str(row["id"]),
@@ -5890,15 +5969,18 @@ async def exposure_assets(
             "active_total": total,
             "active_critical": crit,
             "active_high": high,
+            "active_verified": verified,
+            "active_needs_verification": needs_verification,
             "total_scans": total_scans,
             "last_scanned_at": last_scanned_at,
             "latest_scan_id": str(row["latest_scan_id"]) if row.get("latest_scan_id") else None,
-            "latest_scan_status": row.get("latest_scan_status"),
+            "latest_scan_status": latest_scan_status,
             "latest_scan_type": row.get("latest_scan_type"),
             "latest_scan_href": f"/scans/{row['latest_scan_id']}" if row.get("latest_scan_id") else None,
             "scan_complete": completion["scan_complete"],
             "scan_limited": completion["scan_limited"],
             "coverage_status": completion["coverage_status"],
+            "coverage_posture": coverage_posture,
             "skipped_modules_count": completion["skipped_modules_count"],
             "capped_lists_count": completion["capped_lists_count"],
             "scan_age_days": _exposure_days_since(last_scanned_at),
@@ -5906,6 +5988,12 @@ async def exposure_assets(
             "needs_action": bool(action_reasons),
             "action_priority": action_priority,
             "action_score": action_score,
+            "recommended_actions": _exposure_recommended_actions(
+                kind=asset_kind,
+                reasons=action_reasons,
+                active_verified=verified,
+                active_needs_verification=needs_verification,
+            ),
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5919,10 +6007,13 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
+        verified = int(row.get("active_verified") or 0)
+        needs_verification = int(row.get("active_needs_verification") or 0)
         completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("endpoint_url"), kind="ai")
         total_scans = int(row.get("scan_count") or 0)
         last_scanned_at = row.get("latest_scan_completed_at") or row.get("last_scanned_at")
+        latest_scan_status = row.get("latest_scan_status")
         blast_radius = build_agent_blast_radius(row, [{"status": "active"} for _ in range(total)])
         blast_radius_tier = str(blast_radius.get("tier") or "")
         action_reasons = _exposure_action_reasons(
@@ -5935,9 +6026,16 @@ async def exposure_assets(
             scan_limited=bool(completion["scan_limited"]),
             production_mode=bool(row.get("production_mode")),
             blast_radius_tier=blast_radius_tier,
+            latest_scan_status=latest_scan_status,
         )
         action_priority, action_score = _exposure_action_priority(
             action_reasons, exposure_class=exposure_class, active_critical=crit, active_high=high
+        )
+        coverage_posture = _exposure_coverage_posture(
+            total_scans=total_scans,
+            last_scanned_at=last_scanned_at,
+            scan_limited=bool(completion["scan_limited"]),
+            latest_scan_status=latest_scan_status,
         )
         assets.append({
             "id": str(row["id"]),
@@ -5960,15 +6058,18 @@ async def exposure_assets(
             "active_total": total,
             "active_critical": crit,
             "active_high": high,
+            "active_verified": verified,
+            "active_needs_verification": needs_verification,
             "total_scans": total_scans,
             "last_scanned_at": last_scanned_at,
             "latest_scan_id": str(row["latest_scan_id"]) if row.get("latest_scan_id") else None,
-            "latest_scan_status": row.get("latest_scan_status"),
+            "latest_scan_status": latest_scan_status,
             "latest_scan_type": row.get("latest_scan_type"),
             "latest_scan_href": f"/scans/{row['latest_scan_id']}" if row.get("latest_scan_id") else None,
             "scan_complete": completion["scan_complete"],
             "scan_limited": completion["scan_limited"],
             "coverage_status": completion["coverage_status"],
+            "coverage_posture": coverage_posture,
             "skipped_modules_count": completion["skipped_modules_count"],
             "capped_lists_count": completion["capped_lists_count"],
             "scan_age_days": _exposure_days_since(last_scanned_at),
@@ -5976,6 +6077,12 @@ async def exposure_assets(
             "needs_action": bool(action_reasons),
             "action_priority": action_priority,
             "action_score": action_score,
+            "recommended_actions": _exposure_recommended_actions(
+                kind="ai",
+                reasons=action_reasons,
+                active_verified=verified,
+                active_needs_verification=needs_verification,
+            ),
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
@@ -5989,6 +6096,8 @@ async def exposure_assets(
         "asset_count": len(assets),
         "active_critical": sum(a["active_critical"] for a in assets),
         "active_high": sum(a["active_high"] for a in assets),
+        "active_verified": sum(a.get("active_verified", 0) for a in assets),
+        "active_needs_verification": sum(a.get("active_needs_verification", 0) for a in assets),
         "ai_surfaces": sum(1 for a in assets if a["kind"] == "ai"),
         "web_targets": sum(1 for a in assets if a["kind"] == "web"),
         "model_artifacts": sum(1 for a in assets if a["kind"] == "model"),
@@ -5997,6 +6106,8 @@ async def exposure_assets(
         "unscanned_assets": sum(1 for a in assets if "never_scanned" in a.get("action_reasons", [])),
         "stale_assets": sum(1 for a in assets if "stale_scan" in a.get("action_reasons", [])),
         "incomplete_scans": sum(1 for a in assets if "incomplete_scan" in a.get("action_reasons", [])),
+        "failed_scans": sum(1 for a in assets if "failed_scan" in a.get("action_reasons", [])),
+        "fresh_scans": sum(1 for a in assets if a.get("coverage_posture") == "fresh"),
         "needs_action": sum(1 for a in assets if a.get("needs_action")),
         "p1_count": sum(1 for a in assets if a.get("action_priority") == "P1"),
         "p2_count": sum(1 for a in assets if a.get("action_priority") == "P2"),

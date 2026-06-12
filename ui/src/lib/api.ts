@@ -592,6 +592,8 @@ export interface ExposureAsset {
   active_total: number
   active_critical: number
   active_high: number
+  active_verified?: number
+  active_needs_verification?: number
   total_scans?: number
   last_scanned_at?: string | null
   latest_scan_id?: string | null
@@ -601,6 +603,7 @@ export interface ExposureAsset {
   scan_complete?: boolean | null
   scan_limited?: boolean
   coverage_status?: string | null
+  coverage_posture?: 'fresh' | 'limited' | 'failed' | 'stale' | 'unscanned' | string | null
   skipped_modules_count?: number
   capped_lists_count?: number
   scan_age_days?: number | null
@@ -608,6 +611,7 @@ export interface ExposureAsset {
   needs_action?: boolean
   action_priority?: 'P1' | 'P2' | 'P3' | null
   action_score?: number
+  recommended_actions?: string[]
   first_seen_at?: string | null
   is_new: boolean
   risk_score: number
@@ -618,6 +622,8 @@ export interface ExposureAssetMetrics {
   asset_count: number
   active_critical: number
   active_high: number
+  active_verified?: number
+  active_needs_verification?: number
   ai_surfaces: number
   web_targets?: number
   model_artifacts?: number
@@ -626,6 +632,8 @@ export interface ExposureAssetMetrics {
   unscanned_assets?: number
   stale_assets?: number
   incomplete_scans?: number
+  failed_scans?: number
+  fresh_scans?: number
   needs_action?: number
   p1_count?: number
   p2_count?: number
