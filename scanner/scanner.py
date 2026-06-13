@@ -5234,7 +5234,7 @@ async def build_report(target: str,
         )
 
     discovery["summary"] = discovery_summary
-    emit_progress("discovery_complete", 40, "discovery summary ready")
+    emit_progress("report_assembly", 90, "discovery summary ready")
 
     # Base report
     report = {
@@ -8946,7 +8946,7 @@ async def build_report(target: str,
                             replay_flags: list[bool] = []  # Track which candidates use replay
                             emit_progress(
                                 "active_sqlmap",
-                                90,
+                                94,
                                 f"starting SQLMap verification on {len(sqlmap_candidates)} candidates",
                             )
 
@@ -9008,7 +9008,7 @@ async def build_report(target: str,
                                     replay_flags.append(False)
 
                             sqlmap_results = await asyncio.gather(*tasks, return_exceptions=True)
-                            emit_progress("active_sqlmap", 91, "SQLMap verification complete")
+                            emit_progress("active_sqlmap", 94, "SQLMap verification complete")
 
                             for candidate, srep, used_replay in zip(sqlmap_candidates, sqlmap_results, replay_flags):
                                 if isinstance(srep, Exception):
@@ -9102,7 +9102,7 @@ async def build_report(target: str,
                             nosql_limit = 3 if quick_mode else 8
                             emit_progress(
                                 "active_nosql",
-                                91,
+                                94,
                                 f"starting NoSQL JSON body checks on {min(len(nosql_candidates), nosql_limit)} candidates",
                             )
                             for ep in nosql_candidates[:nosql_limit]:
@@ -9131,7 +9131,7 @@ async def build_report(target: str,
                                             },
                                             "CWE-943"
                                         ))
-                            emit_progress("active_nosql", 91, "NoSQL JSON body checks complete")
+                            emit_progress("active_nosql", 94, "NoSQL JSON body checks complete")
                     except Exception as e:
                         active_block.setdefault("nosql_errors", []).append({"error": str(e)})
                 elif run_sqli and not nosql_decision.run:
@@ -9185,7 +9185,7 @@ async def build_report(target: str,
                     print(f"[scanner] Smart mode: Running DOM XSS analysis on {min(len(js_urls_for_dom_xss), dom_xss_max_files)} JS files (max: {dom_xss_max_files})", file=sys.stderr)
                 else:
                     print(f"[scanner] Smart mode: Running DOM XSS analysis (self-discovering JS files, max: {dom_xss_max_files})", file=sys.stderr)
-                emit_progress("active_dom_analysis", 91, "starting DOM XSS static analysis")
+                emit_progress("active_dom_analysis", 94, "starting DOM XSS static analysis")
 
                 dom_xss_results = await dom_xss_analysis(
                     url=base_url,
@@ -9195,7 +9195,7 @@ async def build_report(target: str,
                 )
 
                 active_block["dom_xss"] = dom_xss_results
-                emit_progress("active_dom_analysis", 91, "DOM XSS static analysis complete")
+                emit_progress("active_dom_analysis", 94, "DOM XSS static analysis complete")
 
                 # Add normalized findings for DOM XSS vulnerabilities
                 if dom_xss_results.get("findings"):
@@ -9311,7 +9311,7 @@ async def build_report(target: str,
                         print("[scanner] Multi-user BOLA: user2_session provided - cross-user comparison enabled", file=sys.stderr)
                     else:
                         print("[scanner] Single-user BOLA: no user2_session - unauthenticated access testing only", file=sys.stderr)
-                    emit_progress("active_bola", 91, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
+                    emit_progress("active_bola", 94, f"starting BOLA/IDOR testing on {len(bola_urls)} URLs")
 
                     # Budget for BOLA testing. On a rich app the discovered-URL
                     # set can be large enough that testing every template takes
@@ -9356,7 +9356,7 @@ async def build_report(target: str,
                         )
 
                     active_block["smart_bola"] = bola_results
-                    emit_progress("active_bola", 91, "BOLA/IDOR testing complete")
+                    emit_progress("active_bola", 94, "BOLA/IDOR testing complete")
 
                     # Add findings to report (shared builder preserves the
                     # cross-user evidence and triage classification).
@@ -9691,7 +9691,7 @@ async def build_report(target: str,
         import traceback
         traceback.print_exc()
 
-    emit_progress("validation", 92, "finding validation complete")
+    emit_progress("validation", 95, "finding validation complete")
 
     # Save checkpoint with all findings collected
     save_checkpoint(report, "findings_complete")
@@ -9849,7 +9849,7 @@ async def build_report(target: str,
             report["attack_chains"] = _empty_attack_chains("attack_chains module unavailable")
 
     if report.get("attack_chains"):
-        emit_progress("attack_chains", 95, "attack chain analysis complete")
+        emit_progress("attack_chains", 96, "attack chain analysis complete")
 
     # Calculate grade
     emit_progress("finalizing", 97, "grading report")

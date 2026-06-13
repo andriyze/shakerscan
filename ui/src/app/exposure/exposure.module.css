@@ -8,6 +8,8 @@
   --hud-text: #99f6e4;
   --panel-top: rgba(13, 18, 28, 0.92);
   --panel-bottom: rgba(8, 11, 19, 0.97);
+  --font-display: 'Avenir Next Condensed', 'Segoe UI Semibold', system-ui, sans-serif;
+  --font-mono: 'SFMono-Regular', 'Roboto Mono', 'Cascadia Code', ui-monospace, monospace;
   font-family: var(--font-mono), ui-monospace, 'SFMono-Regular', monospace;
   position: relative;
 }

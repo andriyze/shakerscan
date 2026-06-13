@@ -2,7 +2,6 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { Chakra_Petch, Spline_Sans_Mono } from 'next/font/google'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -61,18 +60,6 @@ const LENSES: Array<{ value: Lens; label: string; icon: typeof ListTree }> = [
   { value: 'map', label: 'Map', icon: Radar },
   { value: 'paths', label: 'Attack paths', icon: GitBranch },
 ]
-
-const displayFont = Chakra_Petch({
-  weight: ['500', '600', '700'],
-  subsets: ['latin'],
-  variable: '--font-display',
-})
-
-const monoFont = Spline_Sans_Mono({
-  weight: ['400', '500', '600'],
-  subsets: ['latin'],
-  variable: '--font-mono',
-})
 
 const KIND_ABBR: Record<ExposureAssetKind, string> = { web: 'Web', ai: 'AI', model: 'Model' }
 
@@ -886,7 +873,7 @@ function ExposureView() {
   const lensBusy = lens === 'triage' ? assetsLoading : lens === 'paths' ? pathsLoading : loading || refetching
 
   return (
-    <div className={`${displayFont.variable} ${monoFont.variable} ${styles.page}`}>
+    <div className={styles.page}>
       <div className={styles.pageGlow} aria-hidden="true" />
       <div className={`${styles.content} space-y-6`}>
       <div className={`flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between ${styles.rise} ${styles.d1}`}>

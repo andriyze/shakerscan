@@ -5670,9 +5670,9 @@ async def smart_sqli_test(
             return
         elapsed = now - progress_started
         if max_seconds and max_seconds > 0:
-            pct = 60 + int(24 * min(1.0, elapsed / max_seconds))
+            pct = 91 + int(1 * min(1.0, elapsed / max_seconds))
         else:
-            pct = min(84, 60 + int(elapsed // 120))
+            pct = min(92, 91 + int(elapsed // 300))
         _emit_scan_progress(
             "active_sqli",
             pct,
@@ -6614,9 +6614,9 @@ async def smart_xss_test(
             return
         elapsed = now - progress_started
         if max_seconds and max_seconds > 0:
-            pct = 86 + int(2 * min(1.0, elapsed / max_seconds))
+            pct = 92 + int(1 * min(1.0, elapsed / max_seconds))
         else:
-            pct = min(88, 86 + int(elapsed // 180))
+            pct = min(93, 92 + int(elapsed // 300))
         _emit_scan_progress(
             "active_xss",
             pct,
@@ -7452,7 +7452,7 @@ async def run_smart_active_tests(
         )
 
     print(f"[active] Running smart active tests on {len(endpoints)} endpoints", file=sys.stderr)
-    _emit_scan_progress("active", 58, f"starting smart active tests on {len(endpoints)} endpoints")
+    _emit_scan_progress("active", 91, f"starting smart active tests on {len(endpoints)} endpoints")
     if signals:
         active_signals = [k for k, v in signals.items() if v]
         if active_signals:
@@ -7498,7 +7498,7 @@ async def run_smart_active_tests(
         )
 
     if run_sqli:
-        _emit_scan_progress("active_sqli", 60, "starting SQLi probes")
+        _emit_scan_progress("active_sqli", 91, "starting SQLi probes")
         sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
         sqli_results = await smart_sqli_test(
             url, prioritized_endpoints, dbms, auth_session,
@@ -7523,7 +7523,7 @@ async def run_smart_active_tests(
         remaining = _remaining_active_seconds()
         if remaining <= 1.0:
             print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
-            _emit_scan_progress("active_xss", 86, "skipping XSS probes; active time budget exhausted")
+            _emit_scan_progress("active_xss", 92, "skipping XSS probes; active time budget exhausted")
             xss_results = {
                 "findings": [],
                 "reflections_found": 0,
@@ -7535,7 +7535,7 @@ async def run_smart_active_tests(
                 "budget_exhausted_reason": "time_budget",
             }
         else:
-            _emit_scan_progress("active_xss", 86, "starting XSS probes")
+            _emit_scan_progress("active_xss", 92, "starting XSS probes")
             xss_results = await smart_xss_test(
                 url, endpoints, auth_session=auth_session,
                 max_endpoints=xss_max_endpoints,
@@ -7556,7 +7556,7 @@ async def run_smart_active_tests(
     # Hash-route DOM XSS is part of XSS coverage. Keep it in default smart
     # scans, but honor focused SQLi-only scans.
     if run_xss:
-        _emit_scan_progress("active_dom_xss", 88, "starting DOM XSS probes")
+        _emit_scan_progress("active_dom_xss", 93, "starting DOM XSS probes")
         hash_route_results = await hash_route_dom_xss_test(
             endpoints,
             max_endpoints=xss_max_endpoints,
@@ -7579,7 +7579,7 @@ async def run_smart_active_tests(
     all_findings = sqli_findings + xss_findings + hash_route_findings
     active_elapsed_seconds = time.monotonic() - active_started
     active_remaining_seconds = _remaining_active_seconds()
-    _emit_scan_progress("active", 89, "smart active tests complete")
+    _emit_scan_progress("active", 94, "smart active tests complete")
 
     return {
         "findings": all_findings,
