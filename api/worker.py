@@ -1651,6 +1651,21 @@ def _result_status_for_verdict(verdict: str | None) -> str:
 
 # A false_positive verdict must be backed by high-confidence objective evidence.
 FALSE_POSITIVE_MIN_CONFIDENCE = 0.7
+PARTIAL_EVIDENCE_MIN_CONFIDENCE = 0.3
+
+NON_VULNERABILITY_EVIDENCE_TYPES: frozenset[str] = frozenset({
+    "",
+    "no_url",
+    "unsupported_vulnerability_type",
+    "catch_all_server",
+    "shape_match_over_catch_all",
+    "ambiguous_200_response",
+    "access_denied",
+    "not_found",
+    "sensitive_markers_absent",
+    "soft_404_page",
+    "content_replaced_with_html",
+})
 
 
 def _enforce_verdict_invariants(result: dict[str, Any]) -> dict[str, Any]:
@@ -1676,6 +1691,50 @@ def _enforce_verdict_invariants(result: dict[str, Any]) -> dict[str, Any]:
                 "treating as inconclusive (insufficient confidence for false positive)."
             )
     return result
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_partial_vulnerability_signal(candidate: dict[str, Any] | None) -> bool:
+    """Return true only for actual partial exploit evidence.
+
+    Attempting a prover is not evidence. The candidate must carry a meaningful
+    non-benign evidence type or technique with non-trivial confidence.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if candidate.get("proven"):
+        return True
+    confidence = _as_float(candidate.get("confidence"), 0.0)
+    if confidence < PARTIAL_EVIDENCE_MIN_CONFIDENCE:
+        return False
+    evidence_type = str(candidate.get("evidence_type") or "").strip().lower()
+    if evidence_type and evidence_type not in NON_VULNERABILITY_EVIDENCE_TYPES:
+        return True
+    technique = str(candidate.get("technique") or "").strip()
+    return bool(technique and evidence_type not in NON_VULNERABILITY_EVIDENCE_TYPES)
+
+
+def _has_partial_deterministic_evidence(result: dict[str, Any]) -> bool:
+    """Whether an inconclusive deterministic replay found partial vuln evidence."""
+    proof = result.get("proof")
+    if _is_partial_vulnerability_signal(proof if isinstance(proof, dict) else None):
+        return True
+    artifacts = result.get("artifacts")
+    step_attempts = (
+        artifacts.get("step_attempts")
+        if isinstance(artifacts, dict) and isinstance(artifacts.get("step_attempts"), list)
+        else []
+    )
+    return any(
+        _is_partial_vulnerability_signal(attempt if isinstance(attempt, dict) else None)
+        for attempt in step_attempts
+    )
 
 
 def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[str, Any]) -> dict[str, Any]:
@@ -2155,6 +2214,7 @@ async def run_finding_retest(verification: dict) -> dict:
                     "proven": bool(getattr(proof, "proven", False)) if proof else False,
                     "confidence": getattr(proof, "confidence", None) if proof else None,
                     "technique": getattr(proof, "technique", None) if proof else None,
+                    "evidence_type": getattr(proof, "evidence_type", None) if proof else None,
                 })
 
                 if proof and getattr(proof, "proven", False):
@@ -2451,6 +2511,9 @@ async def process_finding_retest_job(job_data: dict):
                 }
             elif not force_ai:
                 result = await run_finding_retest(dict(verification))
+                if requested_mode == "deterministic" and result.get("verdict") != "exploited":
+                    result["has_ai_step"] = False
+                    result["attempts_exhausted"] = bool(result.get("deterministic_exhausted"))
             else:
                 result = {
                     "status": "completed",
@@ -2475,6 +2538,7 @@ async def process_finding_retest_job(job_data: dict):
             still_vulnerable_deterministic = result.get("verdict") == "exploited"
             should_try_ai = (
                 not still_vulnerable_deterministic
+                and requested_mode != "deterministic"
                 and (result.get("has_ai_step") or force_ai)
                 and ai_config_ready
             )
@@ -2588,16 +2652,7 @@ async def process_finding_retest_job(job_data: dict):
             # found partial evidence, promote from inconclusive → likely_vulnerable.
             _current_verdict = str(result.get("verdict") or "").lower()
             if _current_verdict == "inconclusive" and result.get("deterministic_exhausted"):
-                _proof = result.get("proof")
-                _step_attempts = []
-                _artifacts = result.get("artifacts")
-                if isinstance(_artifacts, dict) and isinstance(_artifacts.get("step_attempts"), list):
-                    _step_attempts = _artifacts.get("step_attempts") or []
-                _has_partial_evidence = (
-                    (isinstance(_proof, dict) and not _proof.get("proven") and _proof.get("evidence_type"))
-                    or len(_step_attempts) > 0
-                )
-                if _has_partial_evidence:
+                if _has_partial_deterministic_evidence(result):
                     result["verdict"] = "likely_vulnerable"
                     result["verdict_reason"] = (
                         (result.get("verdict_reason") or "")

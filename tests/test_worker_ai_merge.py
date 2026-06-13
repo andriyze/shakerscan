@@ -14,6 +14,7 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 
 from worker import (  # noqa: E402
     _enforce_verdict_invariants,
+    _has_partial_deterministic_evidence,
     _merge_ai_result_into_retest_result,
     _is_ai_circuit_open,
     _is_retryable_ai_error,
@@ -223,6 +224,55 @@ def test_enforce_verdict_invariants_downgrades_weak_false_positive():
         {"verdict": "false_positive", "confidence": 0.9, "result_status": "inconclusive"}
     )
     assert kept["verdict"] == "false_positive"
+
+
+def test_failed_retest_steps_with_zero_confidence_are_not_partial_evidence():
+    result = {
+        "proof": {
+            "proven": False,
+            "confidence": 0.0,
+            "evidence_type": "",
+            "technique": "",
+            "request": None,
+        },
+        "artifacts": {
+            "step_attempts": [
+                {"step": "dbms_extraction", "proven": False, "confidence": 0.0, "technique": "", "evidence_type": ""},
+                {"step": "boolean_diff", "proven": False, "confidence": 0.0, "technique": "", "evidence_type": ""},
+                {"step": "timing_fallback", "proven": False, "confidence": 0.0, "technique": "", "evidence_type": ""},
+            ]
+        },
+    }
+
+    assert _has_partial_deterministic_evidence(result) is False
+
+
+def test_meaningful_nonproven_signal_is_partial_evidence():
+    result = {
+        "proof": {
+            "proven": False,
+            "confidence": 0.6,
+            "evidence_type": "cross_user_access_suspected",
+            "technique": "idor_replay",
+        },
+        "artifacts": {"step_attempts": []},
+    }
+
+    assert _has_partial_deterministic_evidence(result) is True
+
+
+def test_benign_evidence_types_are_not_partial_vulnerability_evidence():
+    for evidence_type in ("access_denied", "not_found", "catch_all_server", "soft_404_page"):
+        result = {
+            "proof": {
+                "proven": False,
+                "confidence": 0.9,
+                "evidence_type": evidence_type,
+                "technique": "replay",
+            },
+            "artifacts": {"step_attempts": []},
+        }
+        assert _has_partial_deterministic_evidence(result) is False
 
 
 def test_slot_wait_state_defaults_to_now_and_first_cycle():
