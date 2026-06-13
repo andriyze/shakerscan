@@ -381,7 +381,7 @@ curl -X PUT http://localhost:8080/settings/ai \
     "ai_url": "https://api.openai.com/v1/chat/completions",
     "ai_api_key": "sk-...",
     "ai_model": "gpt-4o-mini",
-    "ai_model_fallback": "moonshotai/kimi-k2.5,anthropic/claude-3-5-sonnet",
+    "ai_model_fallback": "deepseek/deepseek-chat,anthropic/claude-3-5-sonnet",
     "ai_verify_enabled": true,
     "ai_verify_url": "https://api.openai.com/v1/chat/completions",
     "ai_verify_api_key": "sk-...",
@@ -415,7 +415,7 @@ curl -X POST http://localhost:8080/settings/ai/test \
   -d '{
     "scope":"verify",
     "ai_model":"gpt-4o-mini",
-    "ai_fallback_model":"moonshotai/kimi-k2.5"
+    "ai_fallback_model":"deepseek/deepseek-chat"
   }'
 ```
 

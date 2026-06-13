@@ -4,7 +4,9 @@ import urllib.parse
 from scanner.scanner_tools.proof_of_exploit import (
     _is_valid_sqli_extraction,
     _split_curl_response,
+    prove_sqli_reflection_fp,
 )
+from scanner.scanner_tools import proof_of_exploit
 from scanner.scanner_tools import active_checks
 from scanner.scanner_tools.active_checks import _check_sqli_response, custom_sqli_test
 
@@ -367,3 +369,84 @@ def test_sqli_data_extraction_rejects_version_already_in_baseline(monkeypatch):
 
     assert result["extraction_successful"] is False
     assert "version" not in result["extracted_data"]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic reflection false-positive prover (retest path)
+# ---------------------------------------------------------------------------
+
+def _fake_capture(by_substring):
+    """Return a fake fetch_with_capture that picks a body by matching the URL."""
+    async def fake_fetch_with_capture(url, **kwargs):
+        body = ""
+        for needle, value in by_substring:
+            if needle in url:
+                body = value
+                break
+        return {"status_code": 200, "headers": {}, "body": body, "final_url": url, "elapsed_ms": 1.0, "error": None}
+    return fake_fetch_with_capture
+
+
+def test_reflection_fp_prover_flags_echoing_param(monkeypatch):
+    # The app echoes whatever is in `service_id` (canary + the UNION expression)
+    # but never evaluates SQL: the arithmetic product never appears.
+    def body_for(url):
+        decoded = urllib.parse.unquote_plus(url)
+        return f"<html><body>results for: {decoded}</body></html>"
+
+    async def fake(url, **kwargs):
+        return {"status_code": 200, "headers": {}, "body": body_for(url), "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://x.test/market/svc?service_id=1", "service_id"))
+    assert proof is not None
+    assert proof.is_false_positive is True
+    assert proof.confidence >= 0.85
+    assert proof.evidence_type == "reflection_false_positive"
+
+
+def test_reflection_fp_prover_skips_when_db_evaluates(monkeypatch):
+    # The DB actually computes 7857*7919 -> product appears: NOT a reflection FP.
+    product = str(7857 * 7919)
+
+    async def fake(url, **kwargs):
+        decoded = urllib.parse.unquote_plus(url)
+        body = f"<html><body>row: {product}</body></html>" if "UNION" in decoded else f"echo {decoded}"
+        return {"status_code": 200, "headers": {}, "body": body, "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://x.test/s?service_id=1", "service_id"))
+    assert proof is None
+
+
+def test_reflection_fp_prover_skips_when_not_reflected(monkeypatch):
+    async def fake(url, **kwargs):
+        return {"status_code": 200, "headers": {}, "body": "<html>static page, no echo</html>", "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://x.test/s?service_id=1", "service_id"))
+    assert proof is None
+
+
+def test_reflection_fp_prover_skips_on_sql_error(monkeypatch):
+    async def fake(url, **kwargs):
+        decoded = urllib.parse.unquote_plus(url)
+        if "UNION" in decoded:
+            return {"status_code": 200, "headers": {}, "body": "You have an error in your SQL syntax near", "final_url": url, "elapsed_ms": 1.0, "error": None}
+        return {"status_code": 200, "headers": {}, "body": f"echo {decoded}", "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://x.test/s?service_id=1", "service_id"))
+    assert proof is None
+
+
+def test_reflection_fp_prover_injects_param_absent_from_url(monkeypatch):
+    # Finding URL has no query string (the param lives only in evidence). The
+    # prover must still inject it and detect the reflection FP.
+    async def fake(url, **kwargs):
+        decoded = urllib.parse.unquote_plus(url)
+        return {"status_code": 200, "headers": {}, "body": f"<html>results for: {decoded}</html>", "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://gap.test/market/bronx/mulching", "service_id"))
+    assert proof is not None and proof.is_false_positive is True

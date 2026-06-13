@@ -358,6 +358,17 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
         if key in overrides:
             settings[key] = overrides.get(key) or ""
 
+    # The UI presents a single "Shared Provider" whose model is authoritative for
+    # retest verification ("Retest AI uses the shared provider settings"). The
+    # verify-specific fields are seeded from env (AI_MODEL / AI_FALLBACK_MODEL),
+    # so without this a stale env model silently overrides the saved one for
+    # retests even though the UI/Redis shows the new model. Mirror the
+    # Redis-configured shared model onto the verify fields so what you save wins.
+    if "ai_model" in overrides:
+        settings["ai_verify_model"] = settings["ai_model"]
+    if "ai_model_fallback" in overrides:
+        settings["ai_verify_model_fallback"] = settings["ai_model_fallback"]
+
     if "ai_verify_enabled" in overrides:
         settings["ai_verify_enabled"] = _is_truthy(overrides.get("ai_verify_enabled"), default=AI_VERIFY_ENABLED)
     if "auto_retest_on_scan_complete" in overrides:
@@ -2033,6 +2044,7 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_open_redirect,
             prove_path_traversal,
             prove_sqli,
+            prove_sqli_reflection_fp,
             prove_ssrf,
             prove_ssrf_oob,
             prove_ssti,
@@ -2161,6 +2173,50 @@ async def run_finding_retest(verification: dict) -> dict:
     # Build auth headers from verification's auth_context
     auth_ctx = parse_json_field(verification.get("auth_context"))
     auth_headers = auth_context_to_headers(auth_ctx) if auth_ctx else None
+
+    # Deterministic reflection check (SQLi): a finding whose parameter merely
+    # echoes input — with no real SQL execution — is an objective false positive.
+    # Settle it here without spending an AI call, so reflection FPs are cleared
+    # reliably even when the AI provider is unavailable.
+    if finding_type == "sqli":
+        try:
+            fp_proof = await prove_sqli_reflection_fp(
+                test_url, inputs.get("param", ""), headers=auth_headers,
+            )
+        except Exception as _refl_err:
+            fp_proof = None
+        if fp_proof is not None and getattr(fp_proof, "is_false_positive", False):
+            fp_data = fp_proof.to_dict()
+            completed_at = utc_now()
+            return {
+                "status": "completed",
+                "result_status": "inconclusive",
+                "verdict": "false_positive",
+                "verdict_reason": fp_proof.extracted_data or "Parameter reflects input; no SQL execution.",
+                "error_message": None,
+                "confidence": fp_proof.confidence,
+                "proof": fp_data,
+                "replay_commands": replay_commands,
+                "artifacts": {
+                    "started_at": started_at.isoformat(),
+                    "completed_at": completed_at.isoformat(),
+                    "finding_type": finding_type,
+                    "target_url": test_url,
+                    "tool_capabilities": capabilities,
+                    "technique": fp_proof.technique,
+                    "evidence_type": fp_proof.evidence_type,
+                    "deterministic_fp": True,
+                },
+                "message": "Deterministic reflection check proved the finding is a false positive.",
+                "attempt_ladder": attempt_ladder,
+                "attempts_exhausted": True,
+                "deterministic_exhausted": True,
+                # Objective evidence — do not escalate to AI.
+                "has_ai_step": False,
+                "retry_class": "none",
+                "retryable": False,
+                "verification_mode": "deterministic",
+            }
 
     # -- Attempt ladder execution --
     # Iterate through escalating proof strategies, stop on first proven result.

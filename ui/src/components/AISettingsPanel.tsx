@@ -564,7 +564,7 @@ export default function AISettingsPanel() {
               value={aiModelFallbackInput}
               onChange={(e) => setAIModelFallbackInput(e.target.value)}
               className={INPUT_CLASS}
-              placeholder="moonshotai/kimi-k2.5,openai/gpt-4o-mini"
+              placeholder="deepseek/deepseek-chat,openai/gpt-4o-mini"
             />
           </Field>
           <Field
