@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import {
   AlertTriangle,
@@ -31,7 +32,7 @@ import {
   type Finding,
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { ConfirmDialog, gradeTextColor, useToast } from '@/components/ui'
+import { ConfirmDialog, gradeTextColor, useModalA11y, useToast } from '@/components/ui'
 import { ErrorState } from '@/components/ui'
 import styles from './exposure.module.css'
 
@@ -350,44 +351,12 @@ function AssetDetailDrawer({
     }
   }, [asset])
 
-  // Modal behaviour: focus the panel on open, trap Tab inside it, close on
-  // Escape, and return focus to the originating control on close.
-  useEffect(() => {
-    if (!asset) return
-    const previouslyFocused = document.activeElement as HTMLElement | null
-    closeRef.current?.focus()
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose()
-        return
-      }
-      if (e.key !== 'Tab' || !panelRef.current) return
-      const focusables = panelRef.current.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-      if (focusables.length === 0) return
-      const first = focusables[0]
-      const last = focusables[focusables.length - 1]
-      const active = document.activeElement as HTMLElement | null
-      const inside = panelRef.current.contains(active)
-      if (e.shiftKey) {
-        if (!inside || active === first) {
-          e.preventDefault()
-          last.focus()
-        }
-      } else if (!inside || active === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      previouslyFocused?.focus?.()
-    }
-  }, [asset, onClose])
+  // Modal behaviour (focus trap, Escape close, focus restore, inert page
+  // background) via the shared hook; the drawer is portaled to <body> so the
+  // inert background can't disable the drawer itself.
+  useModalA11y(Boolean(asset), panelRef, onClose, closeRef)
 
-  if (!asset) return null
+  if (!asset || typeof document === 'undefined') return null
   const KindIcon = KIND_META[asset.kind].icon
   const ownershipEditable = asset.kind !== 'ai'
 
@@ -423,7 +392,7 @@ function AssetDetailDrawer({
     return {}
   }
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-40 bg-black/60" role="dialog" aria-modal="true" aria-label={`Asset details for ${asset.label}`}>
       <button type="button" className="absolute inset-0 cursor-default" aria-label="Close asset details backdrop" onClick={onClose} />
       <aside ref={panelRef} className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-gray-800 bg-gray-950 shadow-2xl">
@@ -660,7 +629,8 @@ function AssetDetailDrawer({
           )}
         </div>
       </aside>
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -972,11 +942,13 @@ export function TriageTable({
   const [bulkScanning, setBulkScanning] = useState(false)
   const toast = useToast()
 
-  // A selection made under one filter is invisible under another — clear it so
-  // bulk actions only ever apply to rows the user can currently see.
+  // A selection made under one scope is invisible under another — clear it on
+  // any filter change (kind/posture/query/window) AND whenever the dataset
+  // itself reloads (domain change, refresh, post-action refetch), so stale
+  // selections can't silently reappear and feed a bulk action.
   useEffect(() => {
     setSelectedIds(new Set())
-  }, [kind, posture])
+  }, [kind, posture, query, newWindowDays, assets])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

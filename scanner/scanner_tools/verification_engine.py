@@ -44,6 +44,8 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "jwt": ["none_algorithm", "weak_secret_bruteforce", "signature_strip", "ai_reasoning"],
     "idor": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "bola": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
+    "exposed_file": ["content_marker_replay", "ai_reasoning"],
+    "generic_http": ["ai_reasoning"],
 }
 
 # Type alias mapping (subset of retest_contract.RETEST_TYPE_ALIASES)
@@ -63,6 +65,10 @@ TYPE_ALIASES: dict[str, str] = {
     "idor": "idor", "bola": "bola",
     "insecure_direct_object_reference": "idor",
     "broken_object_level_authorization": "bola",
+    "exposed_file": "exposed_file", "exposed-file": "exposed_file",
+    "exposed_files": "exposed_file", "sensitive_file_exposure": "exposed_file",
+    "forced_browsing": "exposed_file", "forced-browsing": "exposed_file",
+    "generic_http": "generic_http",
 }
 
 

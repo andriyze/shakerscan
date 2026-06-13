@@ -6099,6 +6099,12 @@ async def exposure_assets(
             str(ai_meta.get("environment") or "").strip()
             or ("production" if row.get("production_mode") else "")
         ) or None
+        # Production semantics shared with the UI's isProductionAIAsset(): the
+        # explicit flag OR declared environment metadata. Keeps action reasons,
+        # P1 promotion, and metrics consistent with the UI's scan confirmation.
+        ai_is_production = bool(row.get("production_mode")) or (
+            str(ai_meta.get("environment") or "").strip().lower() == "production"
+        )
         action_reasons = _exposure_action_reasons(
             kind="ai",
             exposure_class=exposure_class,
@@ -6107,7 +6113,7 @@ async def exposure_assets(
             total_scans=total_scans,
             last_scanned_at=last_scanned_at,
             scan_limited=bool(completion["scan_limited"]),
-            production_mode=bool(row.get("production_mode")),
+            production_mode=ai_is_production,
             blast_radius_tier=blast_radius_tier,
             latest_scan_status=latest_scan_status,
         )
@@ -6204,7 +6210,10 @@ async def exposure_assets(
         "p1_count": sum(1 for a in assets if a.get("action_priority") == "P1"),
         "p2_count": sum(1 for a in assets if a.get("action_priority") == "P2"),
         "p3_count": sum(1 for a in assets if a.get("action_priority") == "P3"),
-        "prod_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("production_mode")),
+        "prod_ai_surfaces": sum(
+            1 for a in assets
+            if a["kind"] == "ai" and (a.get("production_mode") or a.get("environment") == "production")
+        ),
         "high_blast_ai_surfaces": sum(1 for a in assets if a["kind"] == "ai" and a.get("blast_radius_tier") in {"high", "critical"}),
     }
     new_count = sum(1 for a in assets if a["is_new"])
@@ -6313,7 +6322,7 @@ async def exposure_changes(
             anchor,
             root_domain,
         )
-        went_stale = await conn.fetch(
+        went_stale_web = await conn.fetch(
             """
             SELECT COALESCE(name, url) AS label, last_scanned_at
             FROM targets
@@ -6326,6 +6335,26 @@ async def exposure_changes(
             anchor,
             root_domain,
         )
+        # AI surfaces go stale too — the destination view's stale-window filter
+        # spans every asset kind, so the tile must count the same population.
+        went_stale_ai = await conn.fetch(
+            """
+            SELECT name AS label, last_scanned_at
+            FROM ai_targets
+            WHERE is_active = true AND last_scanned_at IS NOT NULL
+              AND last_scanned_at <= NOW() - INTERVAL '30 days'
+              AND last_scanned_at > $1::timestamptz - INTERVAL '30 days'
+              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
+            ORDER BY last_scanned_at DESC
+            """,
+            anchor,
+            root_domain,
+        )
+    went_stale = sorted(
+        [*went_stale_web, *went_stale_ai],
+        key=lambda r: _exposure_datetime(r["last_scanned_at"]) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     def fmt_when(value: Any) -> str | None:
         when = _exposure_datetime(value)
