@@ -173,6 +173,13 @@ async def main():
     check("Safe mode skips RFI + prototype pollution",
           not ({"rfi", "prototype_pollution"} & safe_found),
           f"unexpected={({'rfi', 'prototype_pollution'} & safe_found)}")
+    skipped = {item.get("check"): item.get("reason") for item in safe.get("skipped_checks", [])}
+    check("Safe mode reports skipped active checks",
+          skipped == {
+              "rfi": "safe_mode_server_side_fetch",
+              "prototype_pollution": "safe_mode_state_changing_post_put",
+          },
+          f"skipped={skipped}")
     check("Safe mode did not mutate target state", _state["json_spaces"] == 0,
           f"json_spaces={_state['json_spaces']}")
 

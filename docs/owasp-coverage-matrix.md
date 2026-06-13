@@ -91,7 +91,7 @@ validated against the available test target (OWASP Juice Shop):
 ## Validation
 
 Phase 1 checks are validated two ways:
-1. **True-positive** — a stdlib mock server (`tests/test_injection_extra.py`) that
+1. **True-positive** — a stdlib mock server (`scanner/tests/test_injection_extra.py`) that
    simulates each vulnerability; every check must detect it.
 2. **False-positive safety / integration** — run against OWASP Juice Shop
    (`http://localhost:3001`, `host.docker.internal:3001` from the worker) to

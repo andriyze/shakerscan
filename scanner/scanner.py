@@ -4636,7 +4636,7 @@ async def build_report(target: str,
     if injection_extra_testing and not public_only:
         injection_extra_task = asyncio.create_task(run_injection_extra_checks(base_url, discovered_urls=crawl_urls, auth_session=auth_session, safe_mode=injection_extra_safe_mode))
     else:
-        async def dummy_injection_extra(): return {"findings": [], "tested": {}, "checks_run": []}
+        async def dummy_injection_extra(): return {"findings": [], "tested": {}, "checks_run": [], "skipped_checks": []}
         injection_extra_task = asyncio.create_task(dummy_injection_extra())
 
     if api_security_testing and not public_only:
@@ -4895,7 +4895,7 @@ async def build_report(target: str,
     open_redirect_results = await await_with_timeout(open_redirect_task, _phase4_timeout(60, "open_redirect"), {"vulnerable": False, "redirect_params_found": [], "confirmed_redirects": []}, "open_redirect")
     host_header_results = await await_with_timeout(host_header_task, _phase4_timeout(60, "host_header"), {"vulnerable": False, "header_reflection": [], "password_reset_endpoints": []}, "host_header")
     business_logic_results = await await_with_timeout(business_logic_task, _phase4_timeout(90, "business_logic"), {"potential_issues": [], "price_fields": [], "quantity_fields": []}, "business_logic")
-    injection_extra_results = await await_with_timeout(injection_extra_task, _phase4_timeout(120, "injection_extra"), {"findings": [], "tested": {}, "checks_run": []}, "injection_extra")
+    injection_extra_results = await await_with_timeout(injection_extra_task, _phase4_timeout(120, "injection_extra"), {"findings": [], "tested": {}, "checks_run": [], "skipped_checks": []}, "injection_extra")
     api_security_p4_results = await await_with_timeout(api_security_p4_task, _phase4_timeout(90, "api_security_p4"), {"vulnerable": False, "mass_assignment_risks": [], "bfla_endpoints": []}, "api_security_p4")
     forced_browsing_results = await await_with_timeout(forced_browsing_task, _phase4_timeout(180, "forced_browsing"), {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}, "forced_browsing")
     mass_assignment_results = await await_with_timeout(mass_assignment_task, _phase4_timeout(60, "mass_assignment"), {"vulnerable": False, "findings": [], "endpoints_tested": 0, "parameters_tested": 0}, "mass_assignment")

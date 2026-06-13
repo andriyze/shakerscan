@@ -440,6 +440,23 @@ def test_reflection_fp_prover_skips_on_sql_error(monkeypatch):
     assert proof is None
 
 
+def test_reflection_fp_prover_skips_when_sql_payload_is_filtered(monkeypatch):
+    # Simple input reflection is not enough to prove a SQLi false positive. If the
+    # UNION payload is filtered/dropped, the prover must bow out instead of
+    # clearing the finding as an objective FP.
+    async def fake(url, **kwargs):
+        decoded = urllib.parse.unquote_plus(url)
+        if "UNION" in decoded:
+            body = "<html>results normalized by input filter</html>"
+        else:
+            body = f"<html>echo {decoded}</html>"
+        return {"status_code": 200, "headers": {}, "body": body, "final_url": url, "elapsed_ms": 1.0, "error": None}
+
+    monkeypatch.setattr(proof_of_exploit, "fetch_with_capture", fake)
+    proof = asyncio.run(prove_sqli_reflection_fp("https://x.test/s?service_id=1", "service_id"))
+    assert proof is None
+
+
 def test_reflection_fp_prover_injects_param_absent_from_url(monkeypatch):
     # Finding URL has no query string (the param lives only in evidence). The
     # prover must still inject it and detect the reflection FP.

@@ -429,6 +429,7 @@ async def run_injection_extra_checks(
 
     findings: list[dict[str, Any]] = []
     checks_run: list[str] = []
+    skipped_checks: list[dict[str, str]] = []
 
     if targets:
         # SSI/ESI/CSV are GET-only reflection probes (same risk profile as the
@@ -443,6 +444,11 @@ async def run_injection_extra_checks(
         if not safe_mode:
             checks_run.append("rfi")
             coros.append(test_rfi(url, targets, auth_args, max_endpoints))
+        else:
+            skipped_checks.append({
+                "check": "rfi",
+                "reason": "safe_mode_server_side_fetch",
+            })
         for result in await asyncio.gather(*coros):
             findings += result
 
@@ -453,10 +459,16 @@ async def run_injection_extra_checks(
         findings += await test_prototype_pollution(
             url, json_endpoints, auth_args, max_endpoints
         )
+    else:
+        skipped_checks.append({
+            "check": "prototype_pollution",
+            "reason": "safe_mode_state_changing_post_put",
+        })
 
     return {
         "findings": findings,
         "tested": {"param_targets": len(targets), "json_endpoints": len(json_endpoints)},
         "checks_run": checks_run,
+        "skipped_checks": skipped_checks,
         "safe_mode": safe_mode,
     }
