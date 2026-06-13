@@ -33,14 +33,18 @@ export function ConfirmDialog({
 
   // Focus trap + Escape + focus restore + inert background (shared behaviour).
   // Portaled to <body> so the inert background can't disable the dialog.
-  useModalA11y(open, panelRef, onCancel, confirmRef)
+  // While busy, every dismissal path (Escape, backdrop, cancel button) is
+  // suppressed — the in-flight operation keeps its progress/error surface.
+  useModalA11y(open, panelRef, () => {
+    if (!busy) onCancel()
+  }, confirmRef)
 
   if (!open || typeof document === 'undefined') return null
 
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={onCancel}
+      onClick={busy ? undefined : onCancel}
     >
       <div
         ref={panelRef}

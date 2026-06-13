@@ -88,7 +88,9 @@ const ACTION_LABELS: Record<string, string> = {
 // "prod" posture, scan environment, and confirmation logic always agree: the
 // explicit flag OR declared environment metadata.
 export function isProductionAIAsset(asset: ExposureAsset): boolean {
-  return asset.kind === 'ai' && (Boolean(asset.production_mode) || asset.environment === 'production')
+  // The API emits environment normalized (trimmed/lowercased); compare
+  // case-insensitively anyway so this can never drift from the API again.
+  return asset.kind === 'ai' && (Boolean(asset.production_mode) || (asset.environment || '').toLowerCase() === 'production')
 }
 
 export function riskDot(asset: ExposureAsset): string {
@@ -135,7 +137,7 @@ export function postureMatches(asset: ExposureAsset, filter: PostureFilter, newW
   // High-impact slice of the (otherwise ~all-assets) needs-verification set:
   // unreviewed findings on an asset that also carries critical/high risk.
   if (filter === 'unverified_high') return (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0
-  if (filter === 'prod') return Boolean(asset.production_mode) || asset.environment === 'production'
+  if (filter === 'prod') return Boolean(asset.production_mode) || (asset.environment || '').toLowerCase() === 'production'
   if (filter === 'new') {
     // The change strip links here with its own window (?window=30); fall back
     // to the server's 7-day is_new flag when no explicit window is given.

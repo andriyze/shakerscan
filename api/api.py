@@ -6038,7 +6038,7 @@ async def exposure_assets(
             "origin": row.get("root_domain") if is_model else None,
             "exposure_class": exposure_class,
             "owner": str(meta.get("owner") or meta.get("asset_owner") or "").strip() or None,
-            "environment": str(meta.get("environment") or "").strip() or None,
+            "environment": str(meta.get("environment") or "").strip().lower() or None,
             "risk_tier": str(meta.get("risk_tier") or "").strip() or None,
             "data_classification": str(meta.get("data_classification") or "").strip() or None,
             "grade": row.get("last_grade"),
@@ -6095,8 +6095,11 @@ async def exposure_assets(
         blast_radius_tier = str(blast_radius.get("tier") or "")
         ai_meta = _parse_graph_json(row.get("metadata_json"))
         ai_owner = str(ai_meta.get("asset_owner") or ai_meta.get("owner") or "").strip() or None
+        # Normalized once at emission (trimmed, lowercased) so every consumer —
+        # UI prod filter/confirmation, API metrics, action reasons — compares
+        # the same canonical value regardless of how metadata was written.
         ai_environment = (
-            str(ai_meta.get("environment") or "").strip()
+            str(ai_meta.get("environment") or "").strip().lower()
             or ("production" if row.get("production_mode") else "")
         ) or None
         # Production semantics shared with the UI's isProductionAIAsset(): the
