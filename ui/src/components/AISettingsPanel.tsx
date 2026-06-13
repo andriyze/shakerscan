@@ -81,6 +81,8 @@ export default function AISettingsPanel() {
   const [verificationMinSeverityInput, setVerificationMinSeverityInput] = useState<Severity>('medium')
   const [aiEscalationMinSeverityInput, setAIEscalationMinSeverityInput] = useState<Severity>('high')
   const [proofRequiredForSmartInput, setProofRequiredForSmartInput] = useState(false)
+  const [autoFpOnRetestInput, setAutoFpOnRetestInput] = useState(false)
+  const [autoFpMinConfidenceInput, setAutoFpMinConfidenceInput] = useState('0.9')
   const [demoModeEnabledInput, setDemoModeEnabledInput] = useState(false)
   const [demoHoneyModeInput, setDemoHoneyModeInput] = useState<DemoHoneyMode>('custom')
   const [demoHoneyPublicURLInput, setDemoHoneyPublicURLInput] = useState('')
@@ -106,6 +108,8 @@ export default function AISettingsPanel() {
     setVerificationMinSeverityInput(settings.verification_min_severity || settings.auto_retest_min_severity || 'medium')
     setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
+    setAutoFpOnRetestInput(Boolean(settings.auto_fp_on_retest))
+    setAutoFpMinConfidenceInput(String(settings.auto_fp_min_confidence ?? 0.9))
     setDemoModeEnabledInput(Boolean(settings.demo_mode_enabled))
     const publicURL = settings.demo_honey_public_url || ''
     const scannerURL = settings.demo_honey_scanner_url || ''
@@ -157,6 +161,8 @@ export default function AISettingsPanel() {
         verification_min_severity: verificationMinSeverityInput,
         ai_escalation_min_severity: aiEscalationMinSeverityInput,
         proof_required_for_smart: proofRequiredForSmartInput,
+        auto_fp_on_retest: autoFpOnRetestInput,
+        auto_fp_min_confidence: Math.min(1, Math.max(0, Number.parseFloat(autoFpMinConfidenceInput || '0.9') || 0.9)),
         demo_mode_enabled: demoModeEnabledInput,
         demo_honey_public_url: demoModeEnabledInput ? demoHoneyPublicURLInput : '',
         demo_honey_scanner_url: demoModeEnabledInput ? demoHoneyScannerURLInput : '',
@@ -698,6 +704,29 @@ export default function AISettingsPanel() {
             checked={proofRequiredForSmartInput}
             onChange={setProofRequiredForSmartInput}
           />
+          <ToggleRow
+            label="Auto-close high-confidence false positives"
+            description="When on, a retest that concludes a high-confidence false positive flips the finding from active to false positive automatically (audited and reversible)."
+            hint="Off by default: a wrong auto-FP hides a real vulnerability. Leave off to keep a human in the loop via the one-click 'mark false positive' control."
+            checked={autoFpOnRetestInput}
+            onChange={setAutoFpOnRetestInput}
+          />
+          {autoFpOnRetestInput && (
+            <Field
+              label="Auto-FP minimum confidence"
+              hint="Retest confidence required before auto-closing (0–1). Higher than the 0.7 false-positive verdict bar because auto-closing is riskier than labeling."
+            >
+              <input
+                type="number"
+                min={0.7}
+                max={1}
+                step={0.05}
+                value={autoFpMinConfidenceInput}
+                onChange={(e) => setAutoFpMinConfidenceInput(e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          )}
           <Field
             label="Verification Min Severity (scan-time + retest)"
             hint="Baseline minimum severity for verification workflows across scan-time checks and retests."

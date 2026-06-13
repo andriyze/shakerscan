@@ -225,6 +225,7 @@ function FindingDetailContent() {
   const [retestMessage, setRetestMessage] = useState<string | null>(null)
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
+  const [historyExpanded, setHistoryExpanded] = useState(false)
 
   // Build back URL with preserved filters
   const backUrl = useMemo(() => {
@@ -724,7 +725,7 @@ function FindingDetailContent() {
 
           {retestHistory.length > 0 ? (
             <div className="space-y-2">
-              {retestHistory.map((entry) => (
+              {(historyExpanded || hasPendingRetest ? retestHistory : retestHistory.slice(0, 1)).map((entry) => (
                 <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 text-gray-300">
@@ -790,6 +791,17 @@ function FindingDetailContent() {
                   {entry.error_message && <div className="text-red-300 mt-1">{entry.error_message}</div>}
                 </div>
               ))}
+              {retestHistory.length > 1 && !hasPendingRetest && (
+                <button
+                  type="button"
+                  onClick={() => setHistoryExpanded((v) => !v)}
+                  className="text-xs text-blue-300 hover:text-blue-200 transition-colors"
+                >
+                  {historyExpanded
+                    ? 'Show less'
+                    : `Show ${retestHistory.length - 1} older retest${retestHistory.length - 1 === 1 ? '' : 's'}`}
+                </button>
+              )}
             </div>
           ) : (
             <p className="text-xs text-gray-500">No retests recorded yet.</p>

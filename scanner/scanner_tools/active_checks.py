@@ -1420,6 +1420,7 @@ async def custom_sqli_test(url: str) -> dict:
     async def _evaluate(
         param_name: str, original_value: str, payload: str, payload_type: str,
         baseline_body: str, baseline_len: int, baseline_status: int, baseline_time: float,
+        reflected: bool = False,
     ) -> tuple[str, str, bool, list[str]]:
         """Inject one payload and run it through the shared SQLi response engine."""
         nonlocal tested
@@ -1435,20 +1436,32 @@ async def custom_sqli_test(url: str) -> dict:
             test_body, baseline_len, test_time, payload_type,
             dbms_detected=None, status_code=test_status,
             baseline_status=baseline_status, baseline_elapsed=baseline_time,
-            baseline_body=baseline_body, payload=payload,
+            baseline_body=baseline_body, payload=payload, reflected=reflected,
         )
         return test_url, test_body, is_vuln, evidence
+
+    async def _param_reflects(param_name: str, original_value: str) -> bool:
+        """Probe whether the parameter echoes arbitrary input into the response."""
+        canary = "zqSqli12345cx"
+        probe_params = {k: list(v) for k, v in query_params.items()}
+        probe_params[param_name] = [original_value + canary]
+        probe_query = urllib.parse.urlencode(probe_params, doseq=True)
+        probe_url = urllib.parse.urlunparse(parsed._replace(query=probe_query))
+        probe_body, _, _ = await get_response(probe_url)
+        return bool(probe_body and canary in probe_body)
 
     for param_name in query_params:
         original_value = query_params[param_name][0] if query_params[param_name] else "test"
 
         baseline_body, baseline_status, baseline_time = await get_response(url)
         baseline_len = len(baseline_body)
+        param_reflected = await _param_reflects(param_name, original_value)
 
         for payload, payload_type in sqli_payloads:
             test_url, test_body, is_vuln, evidence = await _evaluate(
                 param_name, original_value, payload, payload_type,
                 baseline_body, baseline_len, baseline_status, baseline_time,
+                reflected=param_reflected,
             )
             if not is_vuln:
                 continue
@@ -5753,7 +5766,10 @@ async def smart_sqli_test(
             for name, value in param_defaults.items():
                 if name not in baseline_params:
                     baseline_params[name] = _stringify_body_value(value)
-            baseline_params[param] = f"test{random.randint(1000, 9999)}"
+            # Distinctive canary so we can detect whether this parameter is
+            # reflected into the response (echoed input mimics data extraction).
+            reflection_canary = f"zqSqli{random.randint(100000, 999999)}cx"
+            baseline_params[param] = reflection_canary
             baseline_query = urllib.parse.urlencode(baseline_params)
             baseline_url = urllib.parse.urlunparse(parsed._replace(query=baseline_query))
 
@@ -5771,6 +5787,9 @@ async def smart_sqli_test(
 
             baseline_body, baseline_status = _parse_curl_body_status(baseline_out)
             baseline_len = len(baseline_body) if baseline_body else 0
+            # If the canary echoes back, this parameter reflects input — any
+            # in-response "extraction" token must be treated as reflection.
+            param_reflected = bool(baseline_body and reflection_canary in baseline_body)
 
             if baseline_status in (405, 415):
                 continue
@@ -5803,6 +5822,7 @@ async def smart_sqli_test(
                     baseline_elapsed=baseline_elapsed,
                     baseline_body=baseline_body,
                     payload=payload,
+                    reflected=param_reflected,
                 )
 
                 if is_vulnerable:
@@ -5876,6 +5896,9 @@ async def smart_sqli_test(
                 break
             results["params_tested"] += 1
             _emit_sqli_progress(f"testing {method} param {param}")
+            # Distinctive canary embedded in the baseline so we can detect
+            # whether this body parameter is reflected into the response.
+            reflection_canary = f"zqSqli{random.randint(100000, 999999)}cx"
             # Build baseline for THIS param
             if is_array_body:
                 baseline_body = copy.deepcopy(base_body)
@@ -5885,18 +5908,18 @@ async def smart_sqli_test(
                     if param not in baseline_body[0]:
                         baseline_body[0][param] = _fallback_value_for_param(param)
                     if isinstance(baseline_body[0][param], str):
-                        baseline_body[0][param] = f"{baseline_body[0][param]}{random.randint(1000, 9999)}"
+                        baseline_body[0][param] = f"{baseline_body[0][param]}{reflection_canary}"
                 else:
                     base_val = baseline_body[0] if baseline_body else _fallback_value_for_param(param)
                     if not isinstance(base_val, str):
                         base_val = str(base_val)
-                    baseline_body[0] = f"{base_val}{random.randint(1000, 9999)}"
+                    baseline_body[0] = f"{base_val}{reflection_canary}"
             else:
                 baseline_body = dict(base_body) if base_body else {}
                 if param not in baseline_body:
                     baseline_body[param] = _fallback_value_for_param(param)
                 if isinstance(baseline_body[param], str):
-                    baseline_body[param] = f"{baseline_body[param]}{random.randint(1000, 9999)}"
+                    baseline_body[param] = f"{baseline_body[param]}{reflection_canary}"
 
             baseline_body_args, baseline_header_args = _build_curl_body_args(baseline_body, content_type)
             baseline_start = time.time()
@@ -5913,6 +5936,7 @@ async def smart_sqli_test(
 
             baseline_body_out, baseline_status = _parse_curl_body_status(baseline_out)
             baseline_len = len(baseline_body_out) if baseline_body_out else 0
+            param_reflected = bool(baseline_body_out and reflection_canary in baseline_body_out)
 
             if baseline_status in (405, 415):
                 continue
@@ -5963,6 +5987,7 @@ async def smart_sqli_test(
                     baseline_body=baseline_body_out,
                     true_condition_len=true_condition_len,
                     payload=payload,
+                    reflected=param_reflected,
                 )
 
                 if is_vulnerable:
@@ -6393,6 +6418,7 @@ def _check_sqli_response(
     baseline_body: str | None = None,
     true_condition_len: int | None = None,
     payload: str | None = None,
+    reflected: bool = False,
 ) -> tuple[bool, list[str]]:
     """Check response for SQLi indicators with enhanced blind SQLi heuristics.
 
@@ -6400,6 +6426,14 @@ def _check_sqli_response(
     appear in the injected payload are ignored: an echoed ``information_schema``
     (or any other reflected SQL keyword) is reflection, not exfiltrated data, and
     must not be counted as proof.
+
+    When ``reflected`` is True the parameter has been confirmed to echo arbitrary
+    input back into the response (via a canary pre-check). In that case the
+    data-extraction-indicator heuristic is suppressed entirely: a token like
+    ``@@version`` or ``sqlite_master`` appearing in the body cannot be
+    distinguished from the reflected payload, so it is not proof. Only
+    behavioral signals (time-based delay, boolean diff, DB error fingerprints
+    not present in the baseline) remain trustworthy.
 
     Returns:
         Tuple of (is_vulnerable, evidence_list)
@@ -6497,7 +6531,9 @@ def _check_sqli_response(
 
     # 7. Data extraction indicators. Reflected payload tokens like @@version
     # are not proof; only DB/banner/schema output counts here.
-    if "schema" in technique or "version" in technique or "user" in technique or "database" in technique:
+    # If the parameter is confirmed to reflect input, this heuristic is wholly
+    # unreliable (the token may just be the echoed payload) — skip it.
+    if not reflected and ("schema" in technique or "version" in technique or "user" in technique or "database" in technique):
         extraction_patterns: list[str] = []
         if "version" in technique:
             extraction_patterns.extend([

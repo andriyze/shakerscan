@@ -89,8 +89,11 @@ RETEST_REQUEUE_DELAY_SECONDS = int(os.environ.get("RETEST_REQUEUE_DELAY_SECONDS"
 RETEST_QUEUE_MAX_RETRIES = max(1, int(os.environ.get("RETEST_QUEUE_MAX_RETRIES", "5")))
 # Maximum wall-clock time to wait for a retest slot before marking verification failed.
 RETEST_SLOT_WAIT_MAX_SECONDS = max(30, int(os.environ.get("RETEST_SLOT_WAIT_MAX_SECONDS", "900")))
-# Maximum time budget for one AI verifier attempt per retest job.
-RETEST_AI_BUDGET_SECONDS = max(15, int(os.environ.get("RETEST_AI_BUDGET_SECONDS", "120")))
+# Maximum time budget for one AI verifier attempt per retest job. The AI
+# verifier runs an agentic plan->execute->classify loop (60s per LLM call plus
+# HTTP steps), so 120s was frequently too tight and the whole verification was
+# discarded as a timeout instead of reaching a verdict. 240s gives it room.
+RETEST_AI_BUDGET_SECONDS = max(15, int(os.environ.get("RETEST_AI_BUDGET_SECONDS", "240")))
 # AI verification circuit breaker controls for transient upstream/provider failures.
 RETEST_AI_CIRCUIT_KEY = os.environ.get("RETEST_AI_CIRCUIT_KEY", "retest:ai:circuit")
 RETEST_AI_CIRCUIT_WINDOW_SECONDS = max(30, int(os.environ.get("RETEST_AI_CIRCUIT_WINDOW_SECONDS", "300")))
@@ -328,6 +331,11 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
             os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
             default=False,
         ),
+        "auto_fp_on_retest": _is_truthy(
+            os.environ.get("AUTO_FP_ON_RETEST", "false"),
+            default=False,
+        ),
+        "auto_fp_min_confidence": os.environ.get("AUTO_FP_MIN_CONFIDENCE", "0.9"),
     }
     try:
         r = get_redis()
@@ -367,6 +375,13 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
             overrides.get("proof_required_for_smart"),
             default=False,
         )
+    if "auto_fp_on_retest" in overrides:
+        settings["auto_fp_on_retest"] = _is_truthy(
+            overrides.get("auto_fp_on_retest"),
+            default=False,
+        )
+    if "auto_fp_min_confidence" in overrides:
+        settings["auto_fp_min_confidence"] = overrides.get("auto_fp_min_confidence")
     if "auto_retest_max_per_scan" in overrides:
         try:
             settings["auto_retest_max_per_scan"] = max(0, int(str(overrides.get("auto_retest_max_per_scan") or "0")))
@@ -378,6 +393,8 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     settings["auto_retest_on_scan_complete"] = policy.auto_retest_enabled
     settings["auto_retest_max_per_scan"] = policy.auto_retest_max_per_scan
     settings["proof_required_for_smart"] = policy.proof_required_for_smart
+    settings["auto_fp_on_retest"] = policy.auto_fp_on_retest
+    settings["auto_fp_min_confidence"] = policy.auto_fp_min_confidence
     settings["verification_min_severity"] = policy.verification_min_severity
     settings["auto_retest_min_severity"] = policy.verification_min_severity
     settings["ai_escalation_min_severity"] = policy.ai_escalation_min_severity
@@ -2772,6 +2789,45 @@ async def process_finding_retest_job(job_data: dict):
                 completed_at,
                 verification["finding_id"],
             )
+
+            # Optional policy: auto-close a finding when a retest concludes a
+            # high-confidence false positive. OFF by default and intentionally
+            # conservative — a wrong auto-FP hides a real vulnerability. Only an
+            # active finding is touched, the action is audited via analyst_verdict
+            # fields, and it remains fully reversible by an analyst.
+            auto_fp_applied = False
+            try:
+                final_verdict = str(result.get("verdict") or "").lower()
+                final_conf = float(result.get("confidence")) if result.get("confidence") is not None else 0.0
+            except (TypeError, ValueError):
+                final_verdict, final_conf = "", 0.0
+            if (
+                _retest_policy.auto_fp_on_retest
+                and final_verdict == "false_positive"
+                and final_conf >= _retest_policy.auto_fp_min_confidence
+            ):
+                audit_note = (
+                    f"Auto-set false positive by retest {verification_id} "
+                    f"(mode={verification_mode}, confidence={final_conf:.2f}). Reversible by an analyst."
+                )
+                updated_status = await conn.fetchval("""
+                    UPDATE findings
+                    SET status = 'false_positive',
+                        analyst_verdict = 'false_positive',
+                        analyst_verdict_at = NOW(),
+                        analyst_verdict_notes = $2,
+                        resolved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = $1 AND status = 'active'
+                    RETURNING id
+                """, verification["finding_id"], audit_note)
+                auto_fp_applied = updated_status is not None
+                if auto_fp_applied:
+                    print(
+                        f"[retest:{job_id[:8]}] Auto-closed finding {verification['finding_id']} "
+                        f"as false_positive (confidence={final_conf:.2f})",
+                        flush=True,
+                    )
 
         r.hset(retest_key, mapping={
             "status": "completed" if result.get("verdict") == "exploited" or result["status"] == "completed" else "failed",

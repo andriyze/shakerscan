@@ -11,12 +11,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 from retest_contract import (  # noqa: E402
     AI_ONLY_RETEST_TYPES,
     SUPPORTED_RETEST_TYPES,
+    VerificationPolicy,
     build_replay_commands,
     get_attempt_ladder,
     infer_retest_inputs,
     infer_type_from_title_tool,
     normalize_retest_type,
 )
+
+
+def test_auto_fp_policy_is_off_by_default():
+    p = VerificationPolicy.from_env(overrides={})
+    assert p.auto_fp_on_retest is False
+    assert p.auto_fp_min_confidence == 0.9
+
+
+def test_auto_fp_policy_reads_overrides_and_clamps_confidence():
+    p = VerificationPolicy.from_env(
+        overrides={"auto_fp_on_retest": "true", "auto_fp_min_confidence": "1.4"}
+    )
+    assert p.auto_fp_on_retest is True
+    assert p.auto_fp_min_confidence == 1.0
 
 
 def test_2fa_bypass_is_supported_retest_type():

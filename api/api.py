@@ -213,6 +213,14 @@ def _normalize_non_negative_int(value: Any, default: int) -> int:
         return default
 
 
+def _normalize_confidence(value: Any, default: float) -> float:
+    """Clamp a confidence value into [0, 1], falling back to default on error."""
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _decode_json_value(value: Any) -> Any:
     """Decode JSON strings returned from JSON/JSONB columns when needed."""
     if isinstance(value, str):
@@ -351,6 +359,13 @@ def _default_ai_settings() -> dict[str, Any]:
             os.environ.get("PROOF_REQUIRED_FOR_SMART", "false"),
             default=False,
         ),
+        "auto_fp_on_retest": _is_truthy(
+            os.environ.get("AUTO_FP_ON_RETEST", "false"),
+            default=False,
+        ),
+        "auto_fp_min_confidence": _normalize_confidence(
+            os.environ.get("AUTO_FP_MIN_CONFIDENCE", "0.9"), default=0.9
+        ),
         "demo_mode_enabled": _is_truthy(
             os.environ.get("AI_DEMO_MODE_ENABLED", "false"),
             default=False,
@@ -435,6 +450,14 @@ def _load_effective_ai_settings() -> dict[str, Any]:
         settings["proof_required_for_smart"] = _is_truthy(
             overrides.get("proof_required_for_smart"), default=settings["proof_required_for_smart"]
         )
+    if "auto_fp_on_retest" in overrides:
+        settings["auto_fp_on_retest"] = _is_truthy(
+            overrides.get("auto_fp_on_retest"), default=settings["auto_fp_on_retest"]
+        )
+    if "auto_fp_min_confidence" in overrides:
+        settings["auto_fp_min_confidence"] = _normalize_confidence(
+            overrides.get("auto_fp_min_confidence"), default=settings["auto_fp_min_confidence"]
+        )
     if "demo_mode_enabled" in overrides:
         settings["demo_mode_enabled"] = _is_truthy(
             overrides.get("demo_mode_enabled"), default=settings["demo_mode_enabled"]
@@ -475,6 +498,8 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "verification_min_severity": settings.get("verification_min_severity") or settings.get("auto_retest_min_severity") or "medium",
         "ai_escalation_min_severity": settings.get("ai_escalation_min_severity") or settings.get("ai_verify_min_severity") or "high",
         "proof_required_for_smart": bool(settings.get("proof_required_for_smart", False)),
+        "auto_fp_on_retest": bool(settings.get("auto_fp_on_retest", False)),
+        "auto_fp_min_confidence": _normalize_confidence(settings.get("auto_fp_min_confidence"), default=0.9),
         "demo_mode_enabled": bool(settings.get("demo_mode_enabled", False)),
         "demo_honey_public_url": settings.get("demo_honey_public_url") or "",
         "demo_honey_scanner_url": settings.get("demo_honey_scanner_url") or "",
@@ -1865,6 +1890,8 @@ class AISettingsUpdate(BaseModel):
     verification_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     ai_escalation_min_severity: Optional[str] = Field(default=None, pattern="^(critical|high|medium|low|info)$")
     proof_required_for_smart: Optional[bool] = None
+    auto_fp_on_retest: Optional[bool] = None
+    auto_fp_min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     demo_mode_enabled: Optional[bool] = None
     demo_honey_public_url: Optional[str] = None
     demo_honey_scanner_url: Optional[str] = None
@@ -4099,6 +4126,10 @@ async def update_ai_settings(request: AISettingsUpdate):
         updates["ai_verify_min_severity"] = updates["ai_escalation_min_severity"]
     if request.proof_required_for_smart is not None:
         updates["proof_required_for_smart"] = "true" if request.proof_required_for_smart else "false"
+    if request.auto_fp_on_retest is not None:
+        updates["auto_fp_on_retest"] = "true" if request.auto_fp_on_retest else "false"
+    if request.auto_fp_min_confidence is not None:
+        updates["auto_fp_min_confidence"] = str(_normalize_confidence(request.auto_fp_min_confidence, default=0.9))
     if request.demo_mode_enabled is not None:
         updates["demo_mode_enabled"] = "true" if request.demo_mode_enabled else "false"
     if request.demo_honey_public_url is not None:
@@ -4146,6 +4177,8 @@ async def update_ai_settings(request: AISettingsUpdate):
             "VERIFICATION_MIN_SEVERITY": effective.get("verification_min_severity") or "medium",
             "AI_ESCALATION_MIN_SEVERITY": effective.get("ai_escalation_min_severity") or "high",
             "PROOF_REQUIRED_FOR_SMART": "true" if effective.get("proof_required_for_smart", False) else "false",
+            "AUTO_FP_ON_RETEST": "true" if effective.get("auto_fp_on_retest", False) else "false",
+            "AUTO_FP_MIN_CONFIDENCE": str(_normalize_confidence(effective.get("auto_fp_min_confidence"), default=0.9)),
             "AI_DEMO_MODE_ENABLED": "true" if effective.get("demo_mode_enabled", False) else "false",
             "AI_DEMO_HONEY_PUBLIC_URL": None if clear_demo_honey_public_url else effective.get("demo_honey_public_url") or None,
             "AI_DEMO_HONEY_SCANNER_URL": None if clear_demo_honey_scanner_url else effective.get("demo_honey_scanner_url") or None,

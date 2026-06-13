@@ -281,6 +281,30 @@ def test_check_sqli_response_payload_guard_ignores_reflected_schema_keyword():
     assert not any("sqlite_master" in item for item in ev_guard)
 
 
+def test_check_sqli_response_suppresses_extraction_for_reflected_param():
+    """Defense-in-depth: when a parameter is confirmed to reflect input, any
+    extraction token in the response is unreliable and must be suppressed — even
+    a resolved version string the per-payload guard would otherwise miss."""
+    # The resolved version is NOT in the payload, so the per-payload guard does
+    # not catch it; only the reflection flag should.
+    payload = "' UNION SELECT NULL,NULL,NULL-- -"
+    out = "<body>results for your search: MySQL 8.0.32-log</body>"
+    baseline = "<body>results for your search: normal</body>"
+
+    vuln_unreflected, _ev = _check_sqli_response(
+        out=out, baseline_len=len(baseline), elapsed=0.1, technique="version",
+        dbms_detected=None, baseline_body=baseline, payload=payload, reflected=False,
+    )
+    vuln_reflected, ev_reflected = _check_sqli_response(
+        out=out, baseline_len=len(baseline), elapsed=0.1, technique="version",
+        dbms_detected=None, baseline_body=baseline, payload=payload, reflected=True,
+    )
+
+    assert vuln_unreflected is True
+    assert vuln_reflected is False
+    assert not any("Data extraction indicator" in item for item in ev_reflected)
+
+
 def test_custom_sqli_test_ignores_reflecting_app(monkeypatch):
     """Reproduces the tidyhelpers false positive: an app that echoes the query
     (so the SQL payload appears in the page) but raises no DB error and returns

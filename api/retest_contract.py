@@ -55,6 +55,17 @@ class VerificationPolicy:
     proof_required_for_smart: bool = False
     """When True, smart scans default to verified-findings-only output."""
 
+    auto_fp_on_retest: bool = False
+    """When True, a retest that concludes a high-confidence false_positive may
+    flip the finding's lifecycle status active -> false_positive. OFF by default:
+    a wrong auto-FP hides a real vulnerability, so a human stays in the loop
+    unless a team explicitly opts in."""
+
+    auto_fp_min_confidence: float = 0.9
+    """Minimum retest confidence required before auto_fp_on_retest acts. Higher
+    than the false_positive verdict bar (0.7) because auto-closing a finding is
+    riskier than merely labeling the verdict."""
+
     @classmethod
     def from_env(cls, overrides: dict[str, Any] | None = None) -> "VerificationPolicy":
         """Build policy from env vars with optional Redis/runtime overrides."""
@@ -101,12 +112,32 @@ class VerificationPolicy:
             default=False,
         )
 
+        auto_fp = _truthy(
+            ov.get("auto_fp_on_retest")
+            if "auto_fp_on_retest" in (ov or {})
+            else os.environ.get("AUTO_FP_ON_RETEST", "false"),
+            default=False,
+        )
+
+        auto_fp_conf = 0.9
+        raw_fp_conf = (
+            ov.get("auto_fp_min_confidence")
+            if ov.get("auto_fp_min_confidence") is not None
+            else os.environ.get("AUTO_FP_MIN_CONFIDENCE", "0.9")
+        )
+        try:
+            auto_fp_conf = min(1.0, max(0.0, float(raw_fp_conf)))
+        except (TypeError, ValueError):
+            pass
+
         return cls(
             verification_min_severity=verification_min,
             ai_escalation_min_severity=ai_min,
             auto_retest_enabled=auto_enabled,
             auto_retest_max_per_scan=max_per,
             proof_required_for_smart=proof_req,
+            auto_fp_on_retest=auto_fp,
+            auto_fp_min_confidence=auto_fp_conf,
         )
 
     def severity_allows_verification(self, severity: str) -> bool:

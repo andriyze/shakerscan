@@ -392,6 +392,8 @@ export interface AISettings {
   verification_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_escalation_min_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   proof_required_for_smart: boolean
+  auto_fp_on_retest: boolean
+  auto_fp_min_confidence: number
   demo_mode_enabled: boolean
   demo_honey_public_url: string
   demo_honey_scanner_url: string
@@ -413,6 +415,8 @@ export interface AISettingsUpdate {
   verification_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   ai_escalation_min_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   proof_required_for_smart?: boolean
+  auto_fp_on_retest?: boolean
+  auto_fp_min_confidence?: number
   demo_mode_enabled?: boolean
   demo_honey_public_url?: string
   demo_honey_scanner_url?: string
