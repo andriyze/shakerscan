@@ -156,6 +156,29 @@ export const FINDING_STATUS_BADGE_STYLES: Record<FindingStatus, string> = {
   accepted_risk: 'bg-purple-500/20 text-purple-400',
 }
 
+// Retest / verification verdicts (see api/retest_contract.py SUPPORTED_RETEST_VERDICTS).
+export const RETEST_VERDICT_BADGE_STYLES: Record<string, string> = {
+  exploited: 'bg-red-500/20 text-red-400',
+  likely_vulnerable: 'bg-orange-500/20 text-orange-400',
+  blocked_by_security: 'bg-amber-500/20 text-amber-300',
+  out_of_scope_internal: 'bg-gray-500/20 text-gray-400',
+  inconclusive: 'bg-amber-500/20 text-amber-300',
+  false_positive: 'bg-gray-500/20 text-gray-400',
+  likely_fixed: 'bg-green-500/20 text-green-400',
+  error: 'bg-gray-500/20 text-gray-400',
+}
+
+export const RETEST_VERDICT_LABELS: Record<string, string> = {
+  exploited: 'Still vulnerable',
+  likely_vulnerable: 'Likely vulnerable',
+  blocked_by_security: 'Blocked by security',
+  out_of_scope_internal: 'Out of scope (internal)',
+  inconclusive: 'Inconclusive',
+  false_positive: 'False positive',
+  likely_fixed: 'Likely fixed',
+  error: 'Retest error',
+}
+
 export type FindingSourceType = 'AI' | 'DAST' | 'Model Intake'
 
 export const SOURCE_TYPE_BADGE_STYLES: Record<FindingSourceType, string> = {

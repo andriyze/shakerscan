@@ -3,6 +3,7 @@ export { Card, SectionCard } from './Card'
 export {
   Badge,
   FindingStatusBadge,
+  RetestVerdictBadge,
   ScanStatusBadge,
   SeverityBadge,
   SourceTypeBadge,

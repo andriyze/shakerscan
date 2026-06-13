@@ -297,16 +297,17 @@ def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | Non
     title = str(title or "").lower()
     tool = str(tool or "").lower()
 
+    # NoSQL injection must never be routed to the SQLi prover: the prover
+    # cannot reproduce NoSQL operator injection and would report a false
+    # "likely_fixed". This guard runs BEFORE the tool map so a NoSQL finding
+    # mistagged with a sqli-family tool still can't misroute. Without a
+    # dedicated prover these findings fall through to the AI verification path.
+    if "nosql" in title or tool == "nosql_injection":
+        return None
+
     mapped = RETEST_TOOL_TYPE_MAP.get(tool)
     if mapped:
         return mapped
-
-    # NoSQL injection must never be routed to the SQLi prover: the prover
-    # cannot reproduce NoSQL operator injection and would report a false
-    # "likely_fixed". Without a dedicated prover these findings fall through
-    # to the AI verification path instead.
-    if "nosql" in title or tool == "nosql_injection":
-        return None
 
     if "xss" in title or "cross-site scripting" in title:
         return "xss"

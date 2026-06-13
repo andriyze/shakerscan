@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, useCallback, Suspense } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
@@ -16,13 +16,14 @@ import {
   type Finding,
   type RetestRecord
 } from '@/lib/api'
-import { FINDING_STATUSES } from '@/lib/constants'
+import { FINDING_STATUSES, RETEST_VERDICT_LABELS } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 import {
   Card,
   ConfirmDialog,
   ErrorState,
   FindingStatusBadge,
+  RetestVerdictBadge,
   SectionCard,
   SeverityBadge,
   SourceTypeBadge,
@@ -269,6 +270,26 @@ function FindingDetailContent() {
     return () => clearInterval(interval)
   }, [hasPendingRetest, fetchFinding])
 
+  // Announce the result when a retest transitions from pending -> finished, so
+  // the user gets a clear "it ran" signal instead of a banner stuck at "queued".
+  const prevPendingRetest = useRef(false)
+  useEffect(() => {
+    if (prevPendingRetest.current && !hasPendingRetest) {
+      const latest = retestHistory[0]
+      const verdict = latest?.verdict || latest?.result_status || ''
+      const label = RETEST_VERDICT_LABELS[verdict] || verdict.replace(/_/g, ' ') || 'complete'
+      setRetestMessage(`Retest complete — ${label}`)
+      if (verdict === 'exploited' || verdict === 'likely_vulnerable') {
+        toast.error(`Retest: ${label}`)
+      } else if (verdict === 'likely_fixed') {
+        toast.success(`Retest: ${label}`)
+      } else {
+        toast.info(`Retest complete — ${label}`)
+      }
+    }
+    prevPendingRetest.current = hasPendingRetest
+  }, [hasPendingRetest, retestHistory, toast])
+
   async function handleStatusChange(newStatus: string) {
     if (!finding || statusUpdating) return
     try {
@@ -427,6 +448,10 @@ function FindingDetailContent() {
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
         <div className="flex items-center gap-2">
+          <RetestVerdictBadge
+            verdict={finding.last_verification_verdict}
+            pending={hasPendingRetest}
+          />
           <select
             value={selectedRetestMode}
             onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
@@ -649,7 +674,9 @@ function FindingDetailContent() {
               <span className="capitalize">{finding.last_verification_status || 'not tested'}</span>
             </InfoItem>
             <InfoItem label="Last verdict">
-              <span className="capitalize">{(finding.last_verification_verdict || 'n/a').replaceAll('_', ' ')}</span>
+              {finding.last_verification_verdict
+                ? <RetestVerdictBadge verdict={finding.last_verification_verdict} />
+                : <span className="text-gray-400">n/a</span>}
             </InfoItem>
             <InfoItem label="Last confidence">
               {typeof finding.last_verification_confidence === 'number'
@@ -670,10 +697,17 @@ function FindingDetailContent() {
                 <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 text-gray-300">
-                      {(entry.status === 'queued' || entry.status === 'running') && (
-                        <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden="true" />
+                      {(entry.status === 'queued' || entry.status === 'running') ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden="true" />
+                          <span>{entry.finding_type} • {entry.status}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-gray-400">{entry.finding_type}</span>
+                          <RetestVerdictBadge verdict={entry.verdict || entry.result_status} />
+                        </>
                       )}
-                      {entry.finding_type} • {(entry.verdict || entry.result_status || entry.status).replaceAll('_', ' ')}
                     </div>
                     <div className="text-gray-500">
                       {entry.completed_at

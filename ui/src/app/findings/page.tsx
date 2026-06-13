@@ -11,6 +11,7 @@ import {
   EmptyState,
   ErrorState,
   FindingStatusBadge,
+  RetestVerdictBadge,
   SeverityBadge,
   SourceTypeBadge,
   TableSkeleton,
@@ -698,7 +699,12 @@ function FindingsContent() {
                         <p className="text-xs text-gray-600 truncate mt-1">{finding.url}</p>
                       )}
                     </div>
-                    <FindingStatusBadge status={finding.status} />
+                    <div className="flex items-center gap-2 shrink-0">
+                      {finding.last_verification_verdict && (
+                        <RetestVerdictBadge verdict={finding.last_verification_verdict} />
+                      )}
+                      <FindingStatusBadge status={finding.status} />
+                    </div>
                   </div>
                 </Link>
               )

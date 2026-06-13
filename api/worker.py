@@ -1610,6 +1610,13 @@ def classify_retest_outcome(
             "Finding lacks replayable exploit context for this verifier.",
         )
 
+    if evidence_type in {"catch_all_server", "shape_match_over_catch_all", "ambiguous_200_response"}:
+        return (
+            "inconclusive",
+            "inconclusive",
+            "Retest could not distinguish the original exposure from a catch-all or ambiguous HTTP 200 response.",
+        )
+
     if confidence is not None and confidence <= 0.2:
         return (
             "inconclusive",

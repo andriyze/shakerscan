@@ -96,13 +96,28 @@ def match_critical_validator(path: str):
 
 
 def looks_like_soft_404(content: str) -> bool:
-    """Heuristic: short generic error page masquerading as a 200 response."""
+    """Heuristic: short generic error page masquerading as a 200 response.
+
+    Deliberately conservative, mirroring the scan-time check: only a SHORT body
+    that is dominated by an error phrase counts. A longer file that merely
+    mentions an error word (e.g. a log file containing "error occurred", or a
+    config with "access denied" strings) is NOT treated as a soft 404 — that
+    would falsely mark a still-exposed file as remediated on retest. Longer soft
+    404 / catch-all pages are caught elsewhere (catch-all probe, HTML/shape
+    checks) rather than here.
+    """
     body = (content or "").strip().lower()
     if not body:
         return True
-    if len(body) >= 4096:
-        return False
     # Config/secret-looking content (key=value / key: value) is never a soft 404.
     if re.search(r"(?m)^[A-Za-z0-9_][A-Za-z0-9_.\-]*\s*[=:]", content or ""):
         return False
-    return any(pattern in body for pattern in SOFT_404_PATTERNS)
+    # Only short, error-dominated bodies qualify. Bodies large enough to be a
+    # real exposed artifact are left to the shape/catch-all logic.
+    if len(body) >= 256:
+        return False
+    for pattern in SOFT_404_PATTERNS:
+        if pattern in body:
+            if len(body) < 64 or len(pattern) >= len(body) * 0.25:
+                return True
+    return False

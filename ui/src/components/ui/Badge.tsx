@@ -1,5 +1,7 @@
 import {
   FINDING_STATUS_BADGE_STYLES,
+  RETEST_VERDICT_BADGE_STYLES,
+  RETEST_VERDICT_LABELS,
   SCAN_STATUS_BADGE_STYLES,
   SEVERITY_BADGE_STYLES,
   SOURCE_TYPE_BADGE_STYLES,
@@ -49,6 +51,29 @@ export function FindingStatusBadge({ status }: { status: string }) {
 
 export function SourceTypeBadge({ type }: { type: FindingSourceType }) {
   return <Badge className={SOURCE_TYPE_BADGE_STYLES[type]}>{type}</Badge>
+}
+
+export function RetestVerdictBadge({
+  verdict,
+  pending = false,
+  className = '',
+}: {
+  verdict?: string | null
+  pending?: boolean
+  className?: string
+}) {
+  if (pending) {
+    return (
+      <Badge className={`bg-blue-500/20 text-blue-300 ${className}`}>
+        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" aria-hidden="true" />
+        Verifying
+      </Badge>
+    )
+  }
+  if (!verdict) return null
+  const style = RETEST_VERDICT_BADGE_STYLES[verdict] ?? RETEST_VERDICT_BADGE_STYLES.inconclusive
+  const label = RETEST_VERDICT_LABELS[verdict] ?? verdict.replace(/_/g, ' ')
+  return <Badge className={`${style} ${className}`}>{label}</Badge>
 }
 
 export function gradeTextColor(grade?: string | null): string {

@@ -66,6 +66,13 @@ def test_nosql_injection_never_routes_to_sqli_prover():
     assert infer_type_from_title_tool("SQL Injection in id parameter", "") == "sqli"
 
 
+def test_nosql_guard_runs_before_tool_map():
+    # Even if a NoSQL finding were mistagged with a sqli-family tool, the guard
+    # (which runs before the tool map) must prevent misrouting to the SQLi prover.
+    assert infer_type_from_title_tool("NoSQL Injection in username", "smart_sqli") is None
+    assert infer_type_from_title_tool("Some title", "nosql_injection") is None
+
+
 def test_tool_map_covers_types_previously_missing_from_api_inference():
     assert infer_type_from_title_tool("Broken object level authorization", "smart_bola") == "bola"
     assert infer_type_from_title_tool("Command Injection in cmd parameter", "") == "command_injection"

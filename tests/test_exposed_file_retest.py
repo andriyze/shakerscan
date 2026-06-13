@@ -37,6 +37,30 @@ def _fake_fetch(response: dict):
     return fake_fetch_with_capture
 
 
+def _routed_fetch(main: dict, probe: dict | None = None):
+    """Fake that distinguishes the real path from the catch-all probe sibling.
+
+    The probe defaults to a clean 404 (server correctly rejects nonexistent
+    paths) so shape-match can prove. Pass `probe` to simulate a catch-all.
+    """
+    probe_response = probe if probe is not None else {"status_code": 404, "body": "not found"}
+
+    async def fake_fetch_with_capture(url, **kwargs):
+        is_probe = "_shakerscan_" in url or ".nonexistent" in url
+        chosen = probe_response if is_probe else main
+        return {
+            "status_code": 0,
+            "headers": {},
+            "body": "",
+            "final_url": url,
+            "elapsed_ms": 1.0,
+            "error": None,
+            **chosen,
+        }
+
+    return fake_fetch_with_capture
+
+
 # ---------------------------------------------------------------------------
 # exposure_markers
 # ---------------------------------------------------------------------------
@@ -58,10 +82,20 @@ def test_match_critical_validator_for_key_files():
 def test_looks_like_soft_404():
     assert looks_like_soft_404("<html><body>404 Page Not Found</body></html>") is True
     assert looks_like_soft_404("") is True
+    assert looks_like_soft_404("Service Unavailable") is True
     # Config-style content with error-like words is not a soft 404
     assert looks_like_soft_404("error_reporting=E_ALL\npassword=secret\n") is False
     # Long content is not treated as a soft 404
     assert looks_like_soft_404("x" * 5000) is False
+
+
+def test_looks_like_soft_404_does_not_flag_log_files():
+    # A real, still-exposed log file mentions error words but is NOT a soft 404.
+    # The stricter heuristic must not mark it remediated on retest.
+    log_body = ("[2024-01-01 12:00:00] GET /admin handled in 12ms\n" * 20) + \
+        "[2024-01-01 12:05:00] ERROR: database connection refused, server error\n"
+    assert len(log_body) >= 256
+    assert looks_like_soft_404(log_body) is False
 
 
 # ---------------------------------------------------------------------------
@@ -116,16 +150,43 @@ def test_prove_exposed_file_markers_gone_means_remediated(monkeypatch):
 
 
 def test_prove_exposed_file_forced_browsing_shape_match(monkeypatch):
-    # forced_browsing evidence has no markers/hash; corroborate on response shape.
+    # forced_browsing evidence has no markers/hash; corroborate on response shape
+    # when the server correctly rejects random sibling paths (not a catch-all).
     body = '{"aws_access_key_id": "AKIA..."}' + " " * 370
-    monkeypatch.setattr(poe, "fetch_with_capture", _fake_fetch({
-        "status_code": 200,
-        "body": body,
-        "headers": {"content-type": "application/json"},
-    }))
+    main = {"status_code": 200, "body": body, "headers": {"content-type": "application/json"}}
+    monkeypatch.setattr(poe, "fetch_with_capture", _routed_fetch(main))
     proof = asyncio.run(poe.prove_exposed_file(
         "https://example.com/credentials.json",
         evidence={"path": "/credentials.json", "content_type": "application/json", "content_length": 402},
+    ))
+    assert proof.proven is True
+    assert proof.evidence_type == "content_shape_match"
+
+
+def test_prove_exposed_file_catch_all_server_is_inconclusive(monkeypatch):
+    # Server answers EVERY path (including a random nonexistent sibling) with the
+    # same JSON 200 shape. Shape-match must not falsely claim "still exposed".
+    body = '{"message": "ok"}' + " " * 385
+    same = {"status_code": 200, "body": body, "headers": {"content-type": "application/json"}}
+    monkeypatch.setattr(poe, "fetch_with_capture", _routed_fetch(same, probe=same))
+    proof = asyncio.run(poe.prove_exposed_file(
+        "https://example.com/credentials.json",
+        evidence={"path": "/credentials.json", "content_type": "application/json", "content_length": 402},
+    ))
+    assert proof.proven is False
+    assert proof.evidence_type == "catch_all_server"
+
+
+def test_prove_exposed_file_log_file_with_error_words_still_proven(monkeypatch):
+    # A still-exposed log file mentions error words but is genuinely served
+    # (random siblings 404). It must prove via shape, not be marked soft_404.
+    log_body = ("[2024-01-01 12:00:00] GET /admin handled in 12ms\n" * 20) + \
+        "[2024-01-01 12:05:00] ERROR: database connection refused, server error\n"
+    main = {"status_code": 200, "body": log_body, "headers": {"content-type": "text/plain"}}
+    monkeypatch.setattr(poe, "fetch_with_capture", _routed_fetch(main))
+    proof = asyncio.run(poe.prove_exposed_file(
+        "https://example.com/error_log",
+        evidence={"path": "/error_log", "content_type": "text/plain", "content_length": len(log_body)},
     ))
     assert proof.proven is True
     assert proof.evidence_type == "content_shape_match"
