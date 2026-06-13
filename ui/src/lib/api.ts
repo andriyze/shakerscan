@@ -345,6 +345,8 @@ export interface RetestRecord {
   ai_plan?: Record<string, unknown> | null
   ai_reasoning?: string | null
   confidence?: number | null
+  retry_class?: string | null
+  retryable?: boolean
   message?: string
   error_message?: string
   created_at?: string

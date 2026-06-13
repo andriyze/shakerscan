@@ -1604,10 +1604,12 @@ def classify_retest_outcome(
         )
 
     if evidence_type in {"no_url", "unsupported_vulnerability_type"}:
+        # Missing replay context is "we could not verify", NOT proof the finding
+        # was invalid. false_positive must be reserved for objective FP evidence.
         return (
             "inconclusive",
-            "false_positive",
-            "Finding lacks replayable exploit context for this verifier.",
+            "inconclusive",
+            "Finding lacks replayable exploit context for this verifier; could not verify.",
         )
 
     if evidence_type in {"catch_all_server", "shape_match_over_catch_all", "ambiguous_200_response"}:
@@ -1618,10 +1620,14 @@ def classify_retest_outcome(
         )
 
     if confidence is not None and confidence <= 0.2:
+        # No exploit evidence reproduced, but a non-reproduction at low confidence
+        # is inconclusive — it is not objective proof the original finding was a
+        # false positive. Returning false_positive here mislabels timeouts and
+        # weak replays as terminal FPs.
         return (
             "inconclusive",
-            "false_positive",
-            "Low-confidence retest with no exploit evidence after replay.",
+            "inconclusive",
+            "Retest reproduced no exploit evidence (low confidence); inconclusive.",
         )
 
     return (
@@ -1641,6 +1647,35 @@ def _result_status_for_verdict(verdict: str | None) -> str:
     if v in {"likely_vulnerable", "false_positive", "inconclusive", "blocked_by_security", "out_of_scope_internal"}:
         return "inconclusive"
     return "error"
+
+
+# A false_positive verdict must be backed by high-confidence objective evidence.
+FALSE_POSITIVE_MIN_CONFIDENCE = 0.7
+
+
+def _enforce_verdict_invariants(result: dict[str, Any]) -> dict[str, Any]:
+    """Guarantee the persisted verdict is internally consistent.
+
+    A ``false_positive`` verdict asserts the original finding was invalid, so it
+    must carry high-confidence evidence. A low/no-confidence "false_positive"
+    (a deterministic non-reproduction, or an AI error/timeout) is downgraded to
+    ``inconclusive`` so the UI never shows a terminal "False positive" at 0%
+    confidence. This is the single enforcement point regardless of code path.
+    """
+    verdict = str(result.get("verdict") or "").lower()
+    if verdict == "false_positive":
+        try:
+            conf_val = float(result.get("confidence")) if result.get("confidence") is not None else 0.0
+        except (TypeError, ValueError):
+            conf_val = 0.0
+        if conf_val < FALSE_POSITIVE_MIN_CONFIDENCE:
+            result["verdict"] = "inconclusive"
+            result["result_status"] = "inconclusive"
+            result["verdict_reason"] = (
+                "Retest could not confirm the original finding is invalid; "
+                "treating as inconclusive (insufficient confidence for false positive)."
+            )
+    return result
 
 
 def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[str, Any]) -> dict[str, Any]:
@@ -1669,7 +1704,20 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
         result["verification_mode"] = "ai_driven"
         return result
 
+    ai_confidence = ai_result.get("confidence")
+    ai_high_conf = isinstance(ai_confidence, (int, float)) and float(ai_confidence) >= FALSE_POSITIVE_MIN_CONFIDENCE
+
+    # An AI "false_positive" only stands when it is high-confidence. A timeout,
+    # error, or low-confidence AI guess (which surfaces as false_positive or
+    # inconclusive) must not stamp the finding as a terminal false positive —
+    # downgrade it to inconclusive so it stays active and retryable.
+    if ai_verdict == "false_positive" and not ai_high_conf:
+        ai_verdict = "inconclusive"
+        ai_result = {**ai_result, "verdict": "inconclusive"}
+
     # Only replace deterministic outcomes when they were inconclusive or failed.
+    # A strong deterministic conclusion (exploited / likely_fixed / likely_vulnerable
+    # / objective false_positive) survives even an AI error or timeout.
     if current_verdict not in {"", "error", "inconclusive"}:
         return result
 
@@ -1677,9 +1725,9 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
     result["verification_mode"] = "ai_driven"
     result["verdict"] = ai_verdict
     result["verdict_reason"] = ai_result.get("reasoning", "")
-    result["confidence"] = ai_result.get("confidence")
+    result["confidence"] = ai_confidence
     result["result_status"] = _result_status_for_verdict(ai_verdict)
-    return result
+    return _enforce_verdict_invariants(result)
 
 
 def _severity_allows_auto_retest(severity: str, min_severity: str) -> bool:
@@ -2557,6 +2605,10 @@ async def process_finding_retest_job(job_data: dict):
                     ).strip()
                     result["result_status"] = _result_status_for_verdict(result["verdict"])
                     print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
+
+            # Final consistency guard before persistence: never write a
+            # low-confidence "false_positive" (single enforcement point).
+            result = _enforce_verdict_invariants(result)
 
             completed_at = utc_now()
             verification_mode = result.get("verification_mode", "deterministic")

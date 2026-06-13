@@ -386,6 +386,14 @@ function FindingDetailContent() {
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
   const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const latestRetest = retestHistory[0]
+  // An inconclusive retest that is retryable means "we couldn't decide, try
+  // again" — distinct from a terminal verdict. Surfaced so users understand the
+  // finding stays active because verification didn't conclude.
+  const lastVerdictInconclusive = finding?.last_verification_verdict === 'inconclusive'
+  const lastRetestRetryable = Boolean(
+    lastVerdictInconclusive && latestRetest && latestRetest.status !== 'queued' && latestRetest.status !== 'running' && latestRetest.retryable
+  )
   const retestSupported = finding?.retest_supported !== false
   const retestModes = finding?.retest_modes
   const dastRetestOptions = [
@@ -669,14 +677,37 @@ function FindingDetailContent() {
               {retestMessage}
             </div>
           )}
+          {finding.status === 'active' && lastVerdictInconclusive && (
+            <div className="text-xs rounded px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
+              This finding remains <span className="text-yellow-400">active</span> because the latest retest was{' '}
+              <span className="text-amber-300">inconclusive</span> — verification did not conclude
+              {lastRetestRetryable ? ' and is retryable' : ''}. Retest verdicts inform triage; the
+              finding status is set by analysts using the status controls below.
+            </div>
+          )}
+          {finding.status === 'active' && finding.last_verification_verdict === 'false_positive' && (
+            <div className="text-xs rounded px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
+              The latest retest judged this a <span className="text-gray-300">false positive</span> with high
+              confidence. The finding is still <span className="text-yellow-400">active</span> — retests never
+              change finding status automatically. Review and set the status to{' '}
+              <span className="text-gray-300">false positive</span> below if you agree.
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
             <InfoItem label="Last status">
               <span className="capitalize">{finding.last_verification_status || 'not tested'}</span>
             </InfoItem>
             <InfoItem label="Last verdict">
-              {finding.last_verification_verdict
-                ? <RetestVerdictBadge verdict={finding.last_verification_verdict} />
-                : <span className="text-gray-400">n/a</span>}
+              {finding.last_verification_verdict ? (
+                <div className="flex flex-col items-start gap-1">
+                  <RetestVerdictBadge verdict={finding.last_verification_verdict} />
+                  {lastRetestRetryable && (
+                    <span className="text-[11px] text-amber-300/80">retryable — re-run to retry</span>
+                  )}
+                </div>
+              ) : (
+                <span className="text-gray-400">n/a</span>
+              )}
             </InfoItem>
             <InfoItem label="Last confidence">
               {typeof finding.last_verification_confidence === 'number'
@@ -706,6 +737,12 @@ function FindingDetailContent() {
                         <>
                           <span className="text-gray-400">{entry.finding_type}</span>
                           <RetestVerdictBadge verdict={entry.verdict || entry.result_status} />
+                          {entry.result_status && entry.result_status !== entry.verdict && (
+                            <span className="text-gray-500">({entry.result_status.replaceAll('_', ' ')})</span>
+                          )}
+                          {entry.retryable && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300/90 text-[10px]">retryable</span>
+                          )}
                         </>
                       )}
                     </div>

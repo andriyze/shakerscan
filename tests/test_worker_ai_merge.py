@@ -13,6 +13,7 @@ sys.modules.setdefault("asyncpg", types.SimpleNamespace())
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 
 from worker import (  # noqa: E402
+    _enforce_verdict_invariants,
     _merge_ai_result_into_retest_result,
     _is_ai_circuit_open,
     _is_retryable_ai_error,
@@ -22,6 +23,7 @@ from worker import (  # noqa: E402
     _slot_wait_backoff_seconds,
     _slot_wait_state,
     _stale_retest_should_requeue,
+    classify_retest_outcome,
     RETEST_AI_CIRCUIT_ERROR_THRESHOLD,
     RETEST_STALE_REQUEUE_LIMIT,
 )
@@ -127,6 +129,100 @@ def test_ai_false_positive_does_not_override_existing_non_error_verdict():
     assert merged["verification_mode"] == "deterministic"
     assert merged["verdict"] == "likely_fixed"
     assert merged["result_status"] == "likely_fixed"
+
+
+# ---------------------------------------------------------------------------
+# Verdict semantics: false_positive must mean "objectively invalid", never
+# "we failed to replay" or "AI timed out".
+# ---------------------------------------------------------------------------
+
+def test_classify_low_confidence_no_proof_is_inconclusive_not_false_positive():
+    result_status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": ""},
+        proven=False,
+        confidence=0.0,
+        inputs={"target_url": "https://example.com/x"},
+    )
+    assert (result_status, verdict) == ("inconclusive", "inconclusive")
+
+
+def test_classify_missing_replay_context_is_inconclusive_not_false_positive():
+    _result_status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "no_url"},
+        proven=False,
+        confidence=None,
+        inputs={"target_url": "https://example.com/x"},
+    )
+    assert verdict == "inconclusive"
+
+
+def test_classify_catch_all_is_inconclusive():
+    _result_status, verdict, _reason = classify_retest_outcome(
+        proof={"evidence_type": "catch_all_server"},
+        proven=False,
+        confidence=None,
+        inputs={"target_url": "https://example.com/x"},
+    )
+    assert verdict == "inconclusive"
+
+
+def test_ai_timeout_over_low_conf_no_proof_stays_inconclusive():
+    # Deterministic produced an inconclusive (post-fix) verdict; AI then times
+    # out. The final verdict must be inconclusive, never false_positive.
+    result = {
+        "status": "completed",
+        "result_status": "inconclusive",
+        "verdict": "inconclusive",
+        "confidence": 0.0,
+        "verification_mode": "deterministic",
+    }
+    ai_result = {
+        "verdict": "inconclusive",
+        "confidence": None,
+        "reasoning": "AI verification timeout: exceeded 120s budget",
+        "error": "AI verification timeout: exceeded 120s budget",
+    }
+    merged = _merge_ai_result_into_retest_result(result, ai_result)
+    assert merged["verdict"] == "inconclusive"
+    assert merged["result_status"] == "inconclusive"
+
+
+def test_high_confidence_ai_false_positive_classifies_as_false_positive():
+    result = {
+        "status": "completed",
+        "result_status": "inconclusive",
+        "verdict": "inconclusive",
+        "verification_mode": "deterministic",
+    }
+    ai_result = {"verdict": "false_positive", "confidence": 0.88, "reasoning": "Vendor static asset"}
+    merged = _merge_ai_result_into_retest_result(result, ai_result)
+    assert merged["verdict"] == "false_positive"
+    assert merged["confidence"] == 0.88
+
+
+def test_low_confidence_ai_false_positive_downgraded_to_inconclusive():
+    result = {
+        "status": "completed",
+        "result_status": "inconclusive",
+        "verdict": "inconclusive",
+        "verification_mode": "deterministic",
+    }
+    ai_result = {"verdict": "false_positive", "confidence": 0.3, "reasoning": "Probably not real"}
+    merged = _merge_ai_result_into_retest_result(result, ai_result)
+    assert merged["verdict"] == "inconclusive"
+
+
+def test_enforce_verdict_invariants_downgrades_weak_false_positive():
+    downgraded = _enforce_verdict_invariants(
+        {"verdict": "false_positive", "confidence": 0.0, "result_status": "inconclusive"}
+    )
+    assert downgraded["verdict"] == "inconclusive"
+    assert downgraded["result_status"] == "inconclusive"
+
+    kept = _enforce_verdict_invariants(
+        {"verdict": "false_positive", "confidence": 0.9, "result_status": "inconclusive"}
+    )
+    assert kept["verdict"] == "false_positive"
 
 
 def test_slot_wait_state_defaults_to_now_and_first_cycle():
