@@ -172,8 +172,8 @@ jobs:
       packages: write
     outputs:
       version: ${{ needs.meta.outputs.version }}
-      scanner_image: ${{ env.SCANNER_IMAGE }}:${{ needs.meta.outputs.version }}
-      ui_image: ${{ env.UI_IMAGE }}:${{ needs.meta.outputs.version }}
+      scanner_image: shakerscan/shakerscan-scanner:${{ needs.meta.outputs.version }}
+      ui_image: shakerscan/shakerscan-ui:${{ needs.meta.outputs.version }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -234,19 +234,31 @@ jobs:
       - name: Create release notes
         shell: bash
         run: |
+          version="${{ needs.meta.outputs.version }}"
           cat > release-notes.md <<EOF
-          Docker images:
-          - \`${{ needs.merge.outputs.scanner_image }}\`
-          - \`${{ needs.merge.outputs.ui_image }}\`
+          ## Shaker Scan v${{ needs.meta.outputs.version }}
 
-          Multi-architecture platforms:
+          This release focuses on DAST precision, retest trust, and attack-surface visibility.
+
+          ### Highlights
+          - Improved DAST calibration and false-positive handling for SQL injection, CORS, auth/rate-limit checks, GraphQL introspection, HTTP methods, and exposed-file findings.
+          - Added clearer scan completion metadata so reports show when budgets capped active coverage or modules were skipped.
+          - Hardened retest verdict handling so false-positive or inconclusive verification does not leave findings presented as confidently active.
+          - Expanded the Exposure page into a risk-ranked attack-surface view with triage, graph, and attack-path lenses.
+          - Stabilized long smart-scan progress reporting so active scans no longer jump backward between phases.
+
+          ### Docker images
+          - \`${SCANNER_IMAGE}:${version}\`
+          - \`${UI_IMAGE}:${version}\`
+
+          ### Multi-architecture platforms
           - \`linux/amd64\`
           - \`linux/arm64\`
 
-          Run prebuilt images:
+          ### Run prebuilt images
 
           \`\`\`bash
-          ./scanner.sh start --prebuilt --image-tag ${{ needs.merge.outputs.version }}
+          ./scanner.sh start --prebuilt --image-tag ${version}
           \`\`\`
           EOF
 
