@@ -64,7 +64,27 @@ PARALLEL_OPTION_KEYS = (
 # only meaningful for these; for passive types it degrades to a single shard.
 ACTIVE_SCAN_TYPES = frozenset({"full", "aggressive", "smart"})
 
-VALID_STRATEGIES = frozenset({"auto", "scope", "family"})
+VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage"})
+
+# exploit-depth: drive confirmed findings to proof rather than capping early.
+EXPLOIT_DEPTH_BUDGET = {
+    "sqli_extract_max": 8,
+    "oob_max_findings": 8,
+    "max_findings_per_family": None,  # None -> unlimited (worker maps to -1)
+}
+
+# coverage strategy: active endpoints tested per shard. Kept <= the exhaustive
+# active_max_endpoints ceiling (300) so the resolved budget honors it; shard
+# count auto-scales to cover the whole discovered worklist.
+COVERAGE_PER_SHARD_CAP = 150
+
+# Auth fields that establish the primary (user1) authenticated identity.
+_PRIMARY_AUTH_KEYS = (
+    "auth_header", "auth_cookies", "auth_headers_json",
+    "login_username", "login_password", "login_url", "login_extra_fields",
+    "auto_auth", "auth_scenario_json",
+)
+_SECONDARY_AUTH_KEYS = ("user2_header", "user2_cookies")
 
 # Hard ceiling on shards regardless of request, so a stray ``shards: 999`` can't
 # flood the queue. The worker fleet cap (POST /workers, 1-20) bounds throughput
@@ -169,6 +189,200 @@ def _normalize_endpoint_list(endpoints: Any) -> list[str]:
         seen.add(value)
         normalized.append(value)
     return normalized
+
+
+def _apply_exploit_depth(options: dict[str, Any]) -> None:
+    """Raise exploitation caps + disable early stop so confirmed findings get
+    driven to proof instead of being capped at a few per family."""
+    options["no_early_stop"] = True
+    _merge_custom_budget_defaults(options, dict(EXPLOIT_DEPTH_BUDGET))
+
+
+def available_auth_states(options: dict[str, Any]) -> list[str]:
+    """Auth identities the parent options can exercise: always anonymous, plus
+    user1 (primary creds) and user2 (secondary creds) when present."""
+    states = ["anonymous"]
+    if any(options.get(k) for k in _PRIMARY_AUTH_KEYS):
+        states.append("user1")
+    if any(options.get(k) for k in _SECONDARY_AUTH_KEYS):
+        states.append("user2")
+    return states
+
+
+def _apply_auth_state(options: dict[str, Any], state: str) -> dict[str, Any]:
+    """Return a copy of options scoped to a single auth identity."""
+    o = dict(options)
+    if state == "anonymous":
+        for k in (*_PRIMARY_AUTH_KEYS, *_SECONDARY_AUTH_KEYS):
+            o.pop(k, None)
+    elif state == "user1":
+        for k in _SECONDARY_AUTH_KEYS:
+            o.pop(k, None)
+    elif state == "user2":
+        o["auth_header"] = options.get("user2_header") or options.get("auth_header")
+        o["auth_cookies"] = options.get("user2_cookies") or options.get("auth_cookies")
+        for k in (*_SECONDARY_AUTH_KEYS, "login_username", "login_password"):
+            o.pop(k, None)
+    o["auth_state"] = state
+    return o
+
+
+def _expand_auth_states(
+    shards: list[ShardSpec],
+    parent_options: dict[str, Any],
+    notes: list[str],
+) -> list[ShardSpec]:
+    """If auth-state sharding is requested and >1 identity is available, fan each
+    base shard out per identity (anonymous/user1/user2), bounded by MAX_SHARDS."""
+    if not parent_options.get("auth_state_shards"):
+        return shards
+    states = available_auth_states(parent_options)
+    if len(states) < 2:
+        notes.append("auth_state_shards requested but no credentials supplied; staying anonymous")
+        return shards
+    expanded: list[ShardSpec] = []
+    for shard in shards:
+        for state in states:
+            if len(expanded) >= MAX_SHARDS:
+                notes.append(f"auth-state expansion capped at {MAX_SHARDS} shards")
+                break
+            opts = _apply_auth_state(shard.options, state)
+            expanded.append(ShardSpec(index=len(expanded), label=f"{shard.label}:{state}", options=opts))
+    for i, shard in enumerate(expanded):
+        shard.index = i
+    return expanded
+
+
+def _finalize_shards(
+    shards: list[ShardSpec],
+    parent_options: dict[str, Any],
+    notes: list[str],
+) -> list[ShardSpec]:
+    """Apply cross-strategy shard transforms (exploit-depth, auth-state)."""
+    if parent_options.get("exploit_depth"):
+        for shard in shards:
+            _apply_exploit_depth(shard.options)
+    shards = _expand_auth_states(shards, parent_options, notes)
+    return shards
+
+
+def harvest_endpoints(recon_result: Any, *, max_endpoints: int = 2000) -> list[str]:
+    """Extract a testable endpoint worklist ("METHOD /path?query" strings) from a
+    discover-once recon scan result. Endpoints that carry query params (the ones
+    worth active injection testing) are ordered first. Defensive against the many
+    discovery shapes the scanner emits."""
+    from urllib.parse import urlparse
+
+    # `discovery` is a TOP-LEVEL report section (report['result'] is only the
+    # grade block). Fall back to the nested location defensively.
+    rep = recon_result or {}
+    disc = rep.get("discovery")
+    if not isinstance(disc, dict):
+        disc = ((rep.get("result") or {}).get("discovery")) or {}
+    with_params: list[str] = []
+    without_params: list[str] = []
+    seen: set[str] = set()
+
+    def add(method: Any, url: Any) -> None:
+        if not url or not isinstance(url, str):
+            return
+        raw = url.strip()
+        if not raw:
+            return
+        try:
+            if "://" in raw:
+                pu = urlparse(raw)
+            else:
+                pu = urlparse("http://x" + (raw if raw.startswith("/") else "/" + raw))
+        except Exception:
+            return
+        path = pu.path or "/"
+        key = f"{(method or 'GET').upper()} {path}?{pu.query}" if pu.query else f"{(method or 'GET').upper()} {path}"
+        if key in seen:
+            return
+        seen.add(key)
+        (with_params if pu.query else without_params).append(key)
+
+    def add_list(items: Any, default_method: str = "GET") -> None:
+        for e in items or []:
+            if isinstance(e, str):
+                add(default_method, e)
+            elif isinstance(e, dict):
+                add(e.get("method") or default_method, e.get("url") or e.get("path"))
+
+    add_list(disc.get("browser_api_endpoints"))
+    har = disc.get("har_discovery") or {}
+    if isinstance(har, dict):
+        add_list(har.get("endpoints"))
+    jb = disc.get("js_bundle_analysis") or {}
+    if isinstance(jb, dict):
+        add_list(jb.get("api_endpoints"))
+        add_list(jb.get("routes"))
+        add_list(jb.get("internal_urls"))
+    add_list(disc.get("katana_sample"))
+    sm = disc.get("smart_discovery") or {}
+    if isinstance(sm, dict):
+        for k in ("api_endpoints_sample", "probed_endpoints_sample",
+                  "all_urls_sample", "recursive_paths_sample"):
+            add_list(sm.get(k))
+
+    return (with_params + without_params)[:max_endpoints]
+
+
+def plan_coverage_shards(
+    parent_options: dict[str, Any],
+    endpoints: Any,
+    *,
+    per_shard_cap: int = COVERAGE_PER_SHARD_CAP,
+    max_shards: int = MAX_SHARDS,
+    notes: list[str] | None = None,
+) -> "ParallelPlan":
+    """Partition a discovered endpoint worklist across N=ceil(len/cap) shards so
+    the union approaches full endpoint coverage. Unlike ``scope`` (lean,
+    known-API speed path), each coverage shard runs the FULL active suite over
+    its slice. The plan handler harvests ``endpoints`` from a discover-once recon
+    pass, so discovery is not repeated per shard.
+    """
+    notes = notes if notes is not None else []
+    eps = _normalize_endpoint_list(endpoints)
+    if len(eps) < 2:
+        notes.append(f"coverage: only {len(eps)} endpoints to partition; single shard")
+        opts = _base_child_options(parent_options)
+        shards = _finalize_shards([ShardSpec(0, "coverage[0]", opts)], parent_options, notes)
+        return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
+
+    import math
+    n = max(1, min(max_shards, math.ceil(len(eps) / max(1, per_shard_cap))))
+    buckets = _partition_round_robin(eps, n)
+    if len(eps) > len(buckets) * per_shard_cap:
+        notes.append(
+            f"coverage: {len(eps)} endpoints exceed {len(buckets)} shards x {per_shard_cap} cap; "
+            "coverage will be partial (raise shards or per-shard cap)"
+        )
+    shards: list[ShardSpec] = []
+    for i, slice_eps in enumerate(buckets):
+        opts = _base_child_options(parent_options)
+        opts["custom_endpoints"] = slice_eps
+        opts["no_early_stop"] = True
+        cnt = max(1, len(slice_eps))
+        # Endpoints are injected, so keep discovery lean but run the full active
+        # suite (all families) deeply over every endpoint in the slice.
+        _merge_custom_budget_defaults(
+            opts,
+            {
+                "max_urls": 300,
+                "browser_max_pages": 8,
+                "browser_max_depth": 2,
+                "nuclei_max_targets": 300,
+                "active_max_endpoints": cnt,
+                "active_max_seconds": min(2400, max(300, 8 * cnt)),
+                "active_params_per_endpoint": 8,
+                "smart_bola_max_endpoints": cnt,
+            },
+        )
+        shards.append(ShardSpec(index=i, label=f"coverage[{i}]", options=opts))
+    shards = _finalize_shards(shards, parent_options, notes)
+    return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 
 def _plan_scope(
@@ -292,6 +506,11 @@ def plan_shards(
     resolved = strategy
     if strategy == "auto":
         resolved = "scope" if len(endpoints) >= 2 else "family"
+    if resolved == "coverage":
+        # coverage needs a harvested worklist that only the plan handler can
+        # produce (discover-once recon). plan_shards is pure, so degrade safely.
+        notes.append("coverage strategy requires the plan stage's recon pass; falling back to family")
+        resolved = "family"
 
     requested = _coerce_shard_request(requested_shards, worker_count)
 
@@ -300,10 +519,12 @@ def plan_shards(
             notes.append("no endpoint list to partition; switching to family strategy")
             resolved = "family"
         else:
-            shards = _plan_scope(parent_options, endpoints, requested, notes)
+            shards = _finalize_shards(_plan_scope(parent_options, endpoints, requested, notes),
+                                      parent_options, notes)
             return ParallelPlan(strategy="scope", shards=shards, notes=notes)
 
-    shards = _plan_family(parent_options, scan_type, requested, notes)
+    shards = _finalize_shards(_plan_family(parent_options, scan_type, requested, notes),
+                              parent_options, notes)
     return ParallelPlan(strategy="family", shards=shards, notes=notes)
 
 

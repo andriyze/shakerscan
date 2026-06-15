@@ -345,3 +345,54 @@ The biggest single item is extracting `run_recon_stage`/`run_shard_stage` from `
 - The DB's existing `UNIQUE(target_id, fingerprint)` dedup and the retest queue's slot/watchdog give us race-safe parallel writes and a barrier almost for free.
 - **Parallelism is the enabler for "max budget":** once wall-clock scales with workers, default deep scans to exhaustive profiles, bigger wordlists, and file-driven payload sets.
 - Ship **Phase 0 scope-sharding + dictionaries now** (low risk), then invest in the **recon/shard/merge refactor** for true intra-target parallelism.
+
+---
+
+## 15. Coverage-gap analysis & next-gen budget plan (2026-06-15)
+
+### What a real family parallel smart scan of Juice Shop showed
+Scan `34e8d955` (smart, parallel, `family`, 14m41s, grade B, 4 deduped findings):
+
+| Shard | Profile | Endpoints discovered | Endpoints tested | Coverage |
+|---|---|---|---|---|
+| 0 broad | balanced | 520 | 100 | **0.192** |
+| 1 sqli | thorough | 775 | 150 | 0.194 |
+| 2 xss | thorough | 821 | 150 | 0.183 |
+
+- **Only ~19% of discovered endpoints get actively tested**, and the parent report shows just the broad shard's number (`50/680 selected`, coverage 0.19). Juice Shop exposes 500–800+ endpoints; we exploit a sliver.
+- **Discovery is repeated per shard and is inconsistent** (520 vs 775 vs 821 discovered) — wasted work, and the focused shards only test their one family per endpoint.
+- **`family` adds depth, not breadth.** It never partitions the endpoint space, so endpoint coverage does not rise with more shards.
+- **Anonymous auth only** — authenticated surface (the most interesting part of Juice Shop) is untested.
+- **Hard ceiling:** even the `exhaustive` profile caps `active_max_endpoints` at **300** < the 520–821 discovered. **No single scan can cover all endpoints — partitioning across shards is mathematically required.**
+- **Minor bugs:** the merged parent report's `input.port` shows `8080` (the API port) instead of `3001`; the parent "Coverage Budget" card reflects only the broad shard's balanced budget, not the aggregate.
+
+### Implementation status (shipped 2026-06-15)
+All six items below are implemented, tested, and deployed. Verified live on Juice Shop:
+a `coverage` parallel scan ran a discover-once recon that **harvested 390 endpoints and fanned out 3 shards of 130 each (disjoint)**, each running the full active suite + exploit-depth. The merge now aggregates coverage across shards; the `input.port 8080→3001` bug is fixed at source; a pre-fan-out UI state ("Discovering endpoints once, then sharding…") replaces the confusing "0/0 shards". Remaining increment for a *true* 100%: emit the scanner's full internal worklist (today harvest pulls from discovery samples in the report, ~390 of ~489).
+
+### The fix set (in priority order)
+
+1. **Coverage-aware merge (quick, do first).** The merge must **union `smart_coverage` across shards** (tested endpoints/params, `auth_states_tested`, `discovery_sources`) and recompute `coverage = |union tested| / |union discovered|`, instead of inheriting the broad shard's. Also fix `input.port` in the merged report. Without this, none of the breadth work below is even visible. Worker-side only (`process_scan_merge_job`).
+
+2. **`coverage` shard strategy = discover-once + endpoint-worklist partitioning (the headline).** This is the deferred recon carve-out, now the top priority:
+   - Plan/recon stage runs discovery **once**, persists the full deduped endpoint worklist (the ~520 unique endpoints) + shared context (tech, DBMS, auth recipe) to Redis.
+   - Fan out: partition the worklist round-robin across N shards; each shard runs the **full active suite (all families)** over its slice with **discovery disabled** (inject the worklist).
+   - `N = ceil(discovered_endpoints / per_shard_active_cap)` so the union approaches **100% coverage**.
+   - Merge (with fix #1) then reports true aggregate coverage.
+   - Eliminates the 3× redundant crawl and the 300-endpoint single-scan ceiling.
+
+3. **`saturate` budget profile / auto-sizing.** A profile whose goal is `coverage → 1.0`: it sizes shard count and per-shard caps to the *discovered* endpoint count rather than a fixed number. Pairs with `shards: "auto"` and the worker fleet.
+
+4. **Authenticated & multi-auth-state sharding.** Accept creds/token; shard by auth state (`anonymous`, `user1`, `user2`) so authenticated endpoints and BOLA/IDOR get covered. `auth_states_tested` becomes a first-class coverage axis.
+
+5. **Exploit-depth mode ("exploit all").** Raise per-finding exploitation caps (`sqli_extract_max`, `oob_max_findings`, `max_findings_per_family`) and run attack-chain correlation on the full union, so confirmed issues are driven to proof, not capped at 3.
+
+6. **Hybrid `coverage × family` (the "scan + exploit everything" mode).** Two-level fan-out: partition endpoints across a first axis, and within each partition run deep per-family passes. Highest coverage *and* depth; scales to the fleet/budget directive.
+
+### Going bigger on budget today (no refactor)
+Until #2 lands, the largest achievable in one parallel scan: `budget_profile: exhaustive` + `custom_budget` raising `active_max_endpoints` toward the ceiling, plus `scope` strategy with the endpoint list partitioned across shards (each shard ≤300 active endpoints, N shards = ceil(total/300)). That already beats `family` for breadth — it's `coverage` strategy done manually with a known endpoint list.
+
+### Effort
+- #1 coverage-merge + port fix: **S** (worker merge only).
+- #2 `coverage` strategy (recon carve-out): **L** (the `run_recon_stage` extraction).
+- #3 saturate profile: **S–M**. #4 auth sharding: **M**. #5 exploit depth: **S**. #6 hybrid: **M** (composes #2+#4/#5).

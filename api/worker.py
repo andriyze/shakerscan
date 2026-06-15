@@ -3736,13 +3736,43 @@ async def process_scan_plan_job(job_data: dict):
     target_id = str(row['target_id']) if row and row['target_id'] else None
     target_url = (row['target_url'] if row else None) or target
 
-    plan = parallel_scan.plan_shards(
-        options,
-        scan_type=scan_type,
-        requested_shards=options.get('shards', 'auto'),
-        strategy=options.get('shard_strategy') or 'auto',
-        worker_count=job_data.get('parallel_worker_count') or 0,
-    )
+    requested_strategy = (options.get('shard_strategy') or 'auto').strip().lower()
+    if requested_strategy == 'coverage':
+        # Discover-once: run a discovery-focused recon pass (active disabled),
+        # harvest the endpoint worklist, then partition it across shards so the
+        # union approaches full endpoint coverage. Discovery is NOT repeated.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET status = 'running', started_at = $1, current_phase = 'recon', progress = 3 WHERE id = $2",
+                now, uuid.UUID(parent_id),
+            )
+        recon_opts = parallel_scan._base_child_options(options)
+        recon_opts['scan_type'] = 'smart'
+        recon_opts.pop('custom_endpoints', None)
+        parallel_scan._merge_custom_budget(recon_opts, {
+            'active_max_endpoints': 0, 'active_max_seconds': 1,
+            'nuclei_max_targets': 1, 'max_urls': 3000, 'max_duration_minutes': 30,
+        })
+        print(f"[{parent_id[:8]}] coverage: running discover-once recon", flush=True)
+        try:
+            recon_result = await run_scan(target, recon_opts, scan_id=parent_id, job_id=parent_job_id)
+        except Exception as e:
+            recon_result = {}
+            print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
+        harvested = parallel_scan.harvest_endpoints(recon_result)
+        harvested = parallel_scan._normalize_endpoint_list(
+            list(options.get('custom_endpoints') or []) + harvested
+        )
+        print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon", flush=True)
+        plan = parallel_scan.plan_coverage_shards(options, harvested)
+    else:
+        plan = parallel_scan.plan_shards(
+            options,
+            scan_type=scan_type,
+            requested_shards=options.get('shards', 'auto'),
+            strategy=requested_strategy,
+            worker_count=job_data.get('parallel_worker_count') or 0,
+        )
     for note in plan.notes:
         print(f"[{parent_id[:8]}] plan note: {note}", flush=True)
 
@@ -4019,6 +4049,7 @@ async def process_scan_merge_job(job_data: dict):
     base_result = None
     base_section_count = -1
     shard_summaries = []
+    shard_covs: list[dict] = []
     min_score = None
     min_score_grade = None
     for ch in children:
@@ -4037,6 +4068,9 @@ async def process_scan_merge_job(job_data: dict):
                 min_score_grade = ch['grade']
         if not cres:
             continue
+        sc = cres.get('smart_coverage')
+        if isinstance(sc, dict):
+            shard_covs.append(sc)
         if status == 'completed':
             section_count = len(cres.get('result', {}) or {})
             if section_count > base_section_count:
@@ -4066,23 +4100,72 @@ async def process_scan_merge_job(job_data: dict):
         merged['result']['grade'] = agg_grade
 
     # Recompute attack chains over the full union (they need every finding).
+    # attack_chains is a TOP-LEVEL report section, not part of the grade block.
     parent_options = _as_report_dict(parent['options']) or {}
     try:
         from scanner_tools.attack_chains import analyze_attack_chains
         include_partial = bool(parent_options.get('include_partial_attack_chains'))
-        merged['result']['attack_chains'] = analyze_attack_chains(union_findings, include_partial)
+        merged['attack_chains'] = analyze_attack_chains(union_findings, include_partial)
     except Exception as e:
         print(f"[merge {parent_id[:8]}] attack-chain recompute skipped: {e}", flush=True)
 
     completed_n = sum(1 for c in children if c['status'] == 'completed')
     failed_n = sum(1 for c in children if c['status'] == 'failed')
+    strategy = parent_options.get('parallel_strategy')
     merged['parallel'] = {
-        'strategy': parent_options.get('parallel_strategy'),
+        'strategy': strategy,
         'shards': shard_summaries,
         'shards_total': len(children),
         'shards_completed': completed_n,
         'shards_failed': failed_n,
     }
+
+    # Coverage-aware merge: the parent must reflect the WHOLE fan-out, not just
+    # the base shard. We only have per-shard counts (not the tested-endpoint
+    # sets), so aggregate honestly per strategy:
+    #   - scope/coverage shards test DISJOINT endpoint slices -> sum tested.
+    #   - family/auto shards OVERLAP (each picks top-N) -> take the best shard.
+    # auth states and discovery sources union cleanly in all cases.
+    if shard_covs:
+        def _ep(c, k):
+            try:
+                return int(((c.get('endpoints') or {}).get(k)) or 0)
+            except (TypeError, ValueError):
+                return 0
+        discovered = max((_ep(c, 'discovered') for c in shard_covs), default=0)
+        disjoint = strategy in ('scope', 'coverage')
+        if disjoint:
+            tested = min(discovered or 10**9, sum(_ep(c, 'tested') for c in shard_covs))
+        else:
+            tested = max((_ep(c, 'tested') for c in shard_covs), default=0)
+        coverage = round(tested / discovered, 3) if discovered else 0.0
+        auth_states = sorted({s for c in shard_covs for s in (c.get('auth_states_tested') or [])})
+        sources = sorted({s for c in shard_covs for s in (c.get('discovery_sources') or [])})
+        agg_cov = dict(merged.get('smart_coverage') or {})
+        agg_cov['endpoints'] = {**(agg_cov.get('endpoints') or {}),
+                                'discovered': discovered, 'tested': tested, 'coverage': coverage}
+        if auth_states:
+            agg_cov['auth_states_tested'] = auth_states
+        if sources:
+            agg_cov['discovery_sources'] = sources
+        agg_cov['aggregated_from_shards'] = len(shard_covs)
+        merged['smart_coverage'] = agg_cov  # top-level report section
+
+    # Correct the report's target identity to the actual scanned target (guards
+    # against any stale per-shard input drift). `input` is a top-level section.
+    try:
+        from urllib.parse import urlparse as _urlparse
+        _pu = _urlparse(target_url)
+        if isinstance(merged.get('input'), dict):
+            merged['input'].update({
+                'target': target_url,
+                'normalized_host': _pu.hostname,
+                'port': _pu.port or (443 if _pu.scheme == 'https' else 80),
+                'scheme': _pu.scheme,
+            })
+    except Exception:
+        pass
+
     merged['job_id'] = parent_job_id
     merged['scan_id'] = parent_id
 

@@ -2391,6 +2391,11 @@ async def build_report(target: str,
         print("Warning: --active flag ignored when --public is set (public mode disables active scans)", file=sys.stderr)
 
     host, port, scheme = normalize_host(target)
+    # Stable copies of the TARGET identity. `port` (and rarely host/scheme) get
+    # reassigned later by port-scan/result loops (e.g. `port = entry.get("port")`),
+    # which previously leaked a scanned port into the report's input block. Use
+    # these for anything that must reflect the scanned target, not a loop var.
+    target_host, target_port, target_scheme = host, port, scheme
     base_url = f"{scheme}://{host}"
     if port and port not in [80, 443]:
         base_url = f"{scheme}://{host}:{port}"
@@ -2635,7 +2640,7 @@ async def build_report(target: str,
             report: dict[str, Any] = {
                 "schema_version": REPORT_SCHEMA_VERSION,
                 "scanner_version": SCANNER_VERSION,
-                "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
+                "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
                 "scan_mode": scan_mode_label,
                 "scan_config": {
                     "active_enforced": active_enforced,
@@ -5250,7 +5255,7 @@ async def build_report(target: str,
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "scanner_version": SCANNER_VERSION,
-        "input": {"target": target, "normalized_host": host, "port": port, "scheme": scheme},
+        "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
         "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
         "scan_config": {
             "active_enforced": active_enforced,

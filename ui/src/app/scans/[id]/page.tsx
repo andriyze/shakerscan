@@ -90,7 +90,39 @@ function ScanVerdictCard({ scan }: { scan: any }) {
 }
 
 function ParallelShardRollup({ scan }: { scan: any }) {
-  if (scan?.scan_role !== 'parent' || !Array.isArray(scan?.shards)) {
+  if (scan?.scan_role !== 'parent') {
+    return null
+  }
+
+  const shards = Array.isArray(scan?.shards) ? scan.shards : []
+  const strategy = scan.options?.parallel_strategy
+  const strategyBadge = strategy ? (
+    <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
+      {String(strategy)} strategy
+    </span>
+  ) : null
+
+  // Pre-fan-out window: a parent has no shards yet while the plan stage runs
+  // (notably the `coverage` strategy's discover-once recon pass). Show a clear
+  // planning state instead of a confusing "0/0 terminal".
+  if (shards.length === 0) {
+    if (['running', 'pending', 'queued'].includes(scan.status)) {
+      return (
+        <Card className="p-4 mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300">Parallel Shards</h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {strategy === 'coverage'
+                  ? 'Discovering endpoints once, then sharding the worklist across the fleet…'
+                  : 'Planning shards…'}
+              </p>
+            </div>
+            {strategyBadge}
+          </div>
+        </Card>
+      )
+    }
     return null
   }
 

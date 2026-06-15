@@ -1867,9 +1867,11 @@ class ScanOptions(BaseModel):
     shards: Optional[Any] = None                    # int or "auto" (scale to workers)
     shard_strategy: Optional[str] = Field(
         default=None,
-        pattern="^(auto|scope|family)$",
-        description="auto (default), scope (partition custom_endpoints), or family (broad + deep sqli/xss).",
+        pattern="^(auto|scope|family|coverage)$",
+        description="auto (default), scope (partition custom_endpoints), family (broad + deep sqli/xss), or coverage (discover-once, partition all endpoints).",
     )
+    exploit_depth: bool = False                      # Raise exploitation caps + no early stop on shards
+    auth_state_shards: bool = False                  # Fan shards out per auth identity (anon/user1/user2)
 
 
 class ScanRequest(BaseModel):
