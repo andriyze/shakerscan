@@ -114,6 +114,106 @@ def test_sanitize_scan_options_decodes_json_string():
     assert sanitized["auth_header"] == "***"
 
 
+def _auto_shard_settings(enabled=True, **overrides):
+    settings = {
+        "auto_sharding_enabled": enabled,
+        "auto_sharding_strategy": "auto",
+        "auto_sharding_max_shards": 4,
+        "auto_sharding_min_workers": 2,
+    }
+    settings.update(overrides)
+    return settings
+
+
+def _resolve_auto_shard_policy(options):
+    scan_type = api_module.normalize_dast_scan_options(options)
+    payload = api_module._build_scan_options_payload(options, scan_type)
+    enabled, worker_count = api_module._apply_auto_sharding_policy(options, payload, scan_type)
+    return scan_type, payload, enabled, worker_count
+
+
+def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+
+    assert enabled is False
+    assert worker_count is None
+    assert payload["parallel"] is False
+    assert "auto_sharded" not in payload
+
+
+def test_auto_sharding_uses_family_for_active_scan_when_enabled(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+
+    assert enabled is True
+    assert worker_count == 6
+    assert payload["parallel"] is True
+    assert payload["auto_sharded"] is True
+    assert payload["shard_strategy"] == "auto"
+    assert payload["shards"] == 3
+    assert "broad/SQLi/XSS" in payload["auto_sharding_reason"]
+
+
+def test_auto_sharding_uses_scope_for_explicit_endpoint_list(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+
+    _, payload, enabled, _ = _resolve_auto_shard_policy(api_module.ScanOptions(
+        scan_type="standard",
+        custom_endpoints=["GET /api/users", "POST /api/login", "GET /api/basket"],
+    ))
+
+    assert enabled is True
+    assert payload["parallel"] is True
+    assert payload["shards"] == 4
+    assert "explicit endpoints" in payload["auto_sharding_reason"]
+
+
+def test_explicit_parallel_false_overrides_global_auto_sharding(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart", parallel=False))
+
+    assert enabled is False
+    assert worker_count is None
+    assert payload["parallel"] is False
+    assert "auto_sharded" not in payload
+
+
+def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart", parallel=True))
+
+    assert enabled is True
+    assert worker_count == 1
+    assert payload["parallel"] is True
+    assert payload["shards"] == "auto"
+
+
+def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "_load_effective_scan_execution_settings",
+        lambda: _auto_shard_settings(True, auto_sharding_min_workers=2),
+    )
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+
+    assert enabled is False
+    assert worker_count == 1
+    assert payload["parallel"] is False
+    assert "minimum is 2" in payload["auto_sharding_reason"]
+
+
 def test_normalize_dast_scan_options_keeps_explicit_standard():
     options = api_module.ScanOptions(scan_type="STANDARD", quick=False)
 

@@ -22,9 +22,9 @@ from typing import Any
 
 from scanner_tools.common import is_in_scope_url, run
 try:
-    from constants import resolve_phase4_max_seconds, resolve_scan_budget
+    from constants import resolve_bola_deadline_seconds, resolve_phase4_max_seconds, resolve_scan_budget
 except ImportError:
-    from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
+    from scanner.constants import resolve_bola_deadline_seconds, resolve_phase4_max_seconds, resolve_scan_budget
 from scanner_tools.active_enrichment_policy import (
     record_active_enrichment_skip,
     should_run_active_enrichment,
@@ -9321,11 +9321,7 @@ async def build_report(target: str,
                     # for the pathological case where a request hangs past its
                     # own timeout. The internal graceful stop preserves partial
                     # findings that a hard cancel would discard.
-                    try:
-                        _bola_active_budget = scan_budget.get("active_max_seconds") if isinstance(scan_budget, dict) else None
-                    except Exception:
-                        _bola_active_budget = None
-                    bola_overall_deadline = max(300, min(900, int(_bola_active_budget or 600)))
+                    bola_overall_deadline = resolve_bola_deadline_seconds(scan_budget, custom_budget)
                     try:
                         bola_results = await asyncio.wait_for(
                             smart_bola_test(

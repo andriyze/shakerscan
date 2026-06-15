@@ -106,8 +106,37 @@ def test_scope_trims_discovery_budget():
     plan = plan_shards({"scan_type": "smart", "custom_endpoints": eps},
                        scan_type="smart", strategy="scope", requested_shards=2)
     for s in plan.shards:
+        assert s.options["custom_budget"]["max_duration_minutes"] == 8
         assert s.options["custom_budget"]["max_urls"] == 150
         assert s.options["custom_budget"]["browser_max_pages"] == 5
+        assert s.options["custom_budget"]["nuclei_max_targets"] == 120
+        assert s.options["custom_budget"]["phase4_max_seconds"] == 20
+        assert s.options["custom_budget"]["active_max_seconds"] == 60
+        assert s.options["custom_budget"]["active_max_endpoints"] == 2
+        assert s.options["custom_budget"]["active_params_per_endpoint"] == 2
+        assert s.options["custom_budget"]["smart_bola_max_endpoints"] == 2
+
+
+def test_scope_preserves_explicit_custom_budget_caps():
+    eps = ["GET /a?id=1", "GET /b?id=2"]
+    plan = plan_shards(
+        {
+            "scan_type": "smart",
+            "custom_endpoints": eps,
+            "custom_budget": {
+                "max_urls": 25,
+                "active_max_seconds": 30,
+                "smart_bola_max_endpoints": 1,
+            },
+        },
+        scan_type="smart",
+        strategy="scope",
+        requested_shards=2,
+    )
+    for s in plan.shards:
+        assert s.options["custom_budget"]["max_urls"] == 25
+        assert s.options["custom_budget"]["active_max_seconds"] == 30
+        assert s.options["custom_budget"]["smart_bola_max_endpoints"] == 1
 
 
 def test_scope_more_shards_than_endpoints_reduces():

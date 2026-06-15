@@ -1,4 +1,8 @@
-from scanner.constants import resolve_phase4_max_seconds, resolve_scan_budget
+from scanner.constants import (
+    resolve_bola_deadline_seconds,
+    resolve_phase4_max_seconds,
+    resolve_scan_budget,
+)
 
 
 def test_resolve_scan_budget_applies_profile_defaults():
@@ -73,6 +77,20 @@ def test_phase4_budget_uses_explicit_lower_override():
     )
 
     assert phase4_max == 30
+
+
+def test_bola_deadline_keeps_profile_floor_without_custom_budget():
+    assert resolve_bola_deadline_seconds({"active_max_seconds": 90}, None) == 300
+
+
+def test_bola_deadline_honors_explicit_custom_budget():
+    assert (
+        resolve_bola_deadline_seconds(
+            {"active_max_seconds": 90},
+            {"active_max_seconds": 90},
+        )
+        == 90
+    )
 
 
 def test_custom_budget_cannot_disable_watchdog_timeout():

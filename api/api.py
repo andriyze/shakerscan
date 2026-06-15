@@ -82,6 +82,9 @@ from retest_contract import (
 )
 import parallel_scan
 
+AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
+AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
+
 try:
     from ai_demo_scenarios import get_ai_test_scenarios
 except ModuleNotFoundError as exc:
@@ -156,6 +159,7 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
+SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
 logger = logging.getLogger(__name__)
 
@@ -505,6 +509,205 @@ def _sanitize_ai_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
         "demo_honey_public_url": settings.get("demo_honey_public_url") or "",
         "demo_honey_scanner_url": settings.get("demo_honey_scanner_url") or "",
     }
+
+
+def _normalize_parallel_strategy(value: Any, default: str = "auto") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in parallel_scan.VALID_STRATEGIES:
+        return candidate
+    return default
+
+
+def _normalize_auto_shard_count(value: Any, default: int = 4) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        parsed = default
+    return max(2, min(AUTO_SHARD_MAX_SHARDS, parsed))
+
+
+def _default_scan_execution_settings() -> dict[str, Any]:
+    return {
+        "auto_sharding_enabled": _is_truthy(
+            os.environ.get("AUTO_SHARDING_ENABLED", "false"),
+            default=False,
+        ),
+        "auto_sharding_strategy": _normalize_parallel_strategy(
+            os.environ.get("AUTO_SHARDING_STRATEGY", "auto"),
+            default="auto",
+        ),
+        "auto_sharding_max_shards": _normalize_auto_shard_count(
+            os.environ.get("AUTO_SHARDING_MAX_SHARDS", "4"),
+            default=4,
+        ),
+        "auto_sharding_min_workers": max(
+            1,
+            _normalize_non_negative_int(
+                os.environ.get("AUTO_SHARDING_MIN_WORKERS", "2"),
+                default=2,
+            ),
+        ),
+    }
+
+
+def _load_effective_scan_execution_settings() -> dict[str, Any]:
+    settings = _default_scan_execution_settings()
+    try:
+        r = get_redis()
+        overrides = r.hgetall(SCAN_SETTINGS_KEY) or {}
+    except Exception:
+        overrides = {}
+
+    if "auto_sharding_enabled" in overrides:
+        settings["auto_sharding_enabled"] = _is_truthy(
+            overrides.get("auto_sharding_enabled"),
+            default=settings["auto_sharding_enabled"],
+        )
+    if "auto_sharding_strategy" in overrides:
+        settings["auto_sharding_strategy"] = _normalize_parallel_strategy(
+            overrides.get("auto_sharding_strategy"),
+            default=settings["auto_sharding_strategy"],
+        )
+    if "auto_sharding_max_shards" in overrides:
+        settings["auto_sharding_max_shards"] = _normalize_auto_shard_count(
+            overrides.get("auto_sharding_max_shards"),
+            default=int(settings["auto_sharding_max_shards"]),
+        )
+    if "auto_sharding_min_workers" in overrides:
+        settings["auto_sharding_min_workers"] = max(
+            1,
+            _normalize_non_negative_int(
+                overrides.get("auto_sharding_min_workers"),
+                default=int(settings["auto_sharding_min_workers"]),
+            ),
+        )
+    return settings
+
+
+def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
+    worker_count = _running_scan_worker_count_best_effort()
+    return {
+        "auto_sharding_enabled": bool(settings.get("auto_sharding_enabled")),
+        "auto_sharding_strategy": _normalize_parallel_strategy(
+            settings.get("auto_sharding_strategy"),
+            default="auto",
+        ),
+        "auto_sharding_max_shards": _normalize_auto_shard_count(
+            settings.get("auto_sharding_max_shards"),
+            default=4,
+        ),
+        "auto_sharding_min_workers": max(
+            1,
+            _normalize_non_negative_int(settings.get("auto_sharding_min_workers"), default=2),
+        ),
+        "eligible_scan_types": sorted(AUTO_SHARD_ACTIVE_SCAN_TYPES),
+        "running_workers": worker_count,
+    }
+
+
+def _scan_option_was_explicit(options: Any, field: str) -> bool:
+    return field in getattr(options, "model_fields_set", set())
+
+
+def _custom_endpoint_count(options_payload: dict[str, Any]) -> int:
+    endpoints = options_payload.get("custom_endpoints")
+    if not isinstance(endpoints, list):
+        return 0
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        if not isinstance(endpoint, str):
+            continue
+        value = endpoint.strip()
+        if value:
+            seen.add(value)
+    return len(seen)
+
+
+def _auto_shard_eligibility(scan_type: str, options_payload: dict[str, Any]) -> tuple[bool, str]:
+    endpoint_count = _custom_endpoint_count(options_payload)
+    if endpoint_count >= 2:
+        return True, f"{endpoint_count} explicit endpoints can be split by scope"
+    if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+        return True, f"{scan_type} scan can run broad/SQLi/XSS families in parallel"
+    return False, f"{scan_type} scan has no endpoint list and no active families to shard"
+
+
+def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
+    options_payload = options.model_dump() if hasattr(options, "model_dump") else options.dict()
+    effective_budget_profile = options_payload.get("budget_profile")
+    if options_payload.get("thorough_params") and not effective_budget_profile and not options_payload.get("custom_budget"):
+        effective_budget_profile = "thorough"
+    resolved_budget = resolve_scan_budget(
+        scan_type,
+        effective_budget_profile,
+        options_payload.get("custom_budget"),
+    )
+    options_payload["budget_profile"] = resolved_budget["budget_profile"]
+    options_payload["resolved_budget"] = resolved_budget
+    return options_payload
+
+
+def _apply_auto_sharding_policy(
+    options: Any,
+    options_payload: dict[str, Any],
+    scan_type: str,
+) -> tuple[bool, int | None]:
+    """Resolve whether this scan should become a parallel parent.
+
+    Explicit per-scan intent wins. If `parallel` is omitted, the global
+    scan-execution setting can turn eligible scans into parent scans.
+    """
+    if _scan_option_was_explicit(options, "parallel"):
+        if options.parallel:
+            options_payload["parallel"] = True
+            if not options_payload.get("shards"):
+                options_payload["shards"] = "auto"
+            options_payload["shard_strategy"] = _normalize_parallel_strategy(
+                options_payload.get("shard_strategy"),
+                default="auto",
+            )
+            return True, _running_scan_worker_count_best_effort()
+        options_payload["parallel"] = False
+        return False, None
+
+    settings = _load_effective_scan_execution_settings()
+    if not settings.get("auto_sharding_enabled"):
+        options_payload["parallel"] = False
+        return False, None
+
+    eligible, reason = _auto_shard_eligibility(scan_type, options_payload)
+    if not eligible:
+        options_payload["parallel"] = False
+        return False, None
+
+    worker_count = _running_scan_worker_count_best_effort()
+    min_workers = max(1, int(settings.get("auto_sharding_min_workers") or 2))
+    if worker_count is not None and worker_count < min_workers:
+        options_payload["parallel"] = False
+        options_payload["auto_sharding_reason"] = (
+            f"auto-sharding skipped: {worker_count} running worker(s), "
+            f"minimum is {min_workers}"
+        )
+        return False, worker_count
+
+    strategy = _normalize_parallel_strategy(
+        settings.get("auto_sharding_strategy"),
+        default="auto",
+    )
+    max_shards = _normalize_auto_shard_count(settings.get("auto_sharding_max_shards"), default=4)
+    if _custom_endpoint_count(options_payload) < 2 and scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+        if strategy in {"auto", "family"}:
+            max_shards = min(max_shards, len(parallel_scan.FAMILY_SHARD_LABELS))
+    requested_shards: Any = "auto"
+    if worker_count is not None:
+        requested_shards = max(2, min(max_shards, worker_count))
+
+    options_payload["parallel"] = True
+    options_payload["shards"] = requested_shards
+    options_payload["shard_strategy"] = strategy
+    options_payload["auto_sharded"] = True
+    options_payload["auto_sharding_reason"] = reason
+    return True, worker_count
 
 
 def _normalize_demo_base_url(value: Any, *, default: str = "") -> str:
@@ -1301,12 +1504,38 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 decoded_options = {}
             scan_options = dict(decoded_options)
             scan_options['scan_type'] = scan_type
+            scan_options_model = ScanOptions(**scan_options)
+            scan_type = normalize_dast_scan_options(scan_options_model)
+            if scan_type in ACTIVE_ENFORCED_SCAN_TYPES and scan_options_model.public:
+                print(
+                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
+                    f"public option is incompatible with '{scan_type}' scan type",
+                    flush=True,
+                )
+                next_run = calculate_next_run(
+                    schedule['frequency'],
+                    schedule['day_of_week'],
+                    schedule['time_of_day'] or '02:00',
+                    schedule['timezone'] or 'UTC',
+                    schedule['jitter_minutes'] or 0
+                )
+                await conn.execute("""
+                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
+                """, next_run, schedule_id)
+                continue
+            scan_options = _build_scan_options_payload(scan_options_model, scan_type)
+            parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
+                scan_options_model,
+                scan_options,
+                scan_type,
+            )
+            scan_role = 'parent' if parallel_enabled else 'standalone'
 
             await conn.execute("""
-                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+                INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
             """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                 json.dumps(scan_options), scan_type)
+                 json.dumps(scan_options), scan_type, scan_role)
 
         job_data = {
             'job_id': job_id,
@@ -1317,6 +1546,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
             'scheduled': True,
             'schedule_id': str(schedule_id)
         }
+        if parallel_enabled:
+            job_data['type'] = 'scan_plan'
+            if parallel_worker_count is not None:
+                job_data['parallel_worker_count'] = parallel_worker_count
 
         try:
             r.rpush(QUEUE_NAME, json.dumps(job_data))
@@ -1931,6 +2164,15 @@ class AISettingsUpdate(BaseModel):
     demo_honey_public_url: Optional[str] = None
     demo_honey_scanner_url: Optional[str] = None
     persist_to_env: bool = False
+
+
+class ScanExecutionSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auto_sharding_enabled: Optional[bool] = None
+    auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family)$")
+    auto_sharding_max_shards: Optional[int] = Field(default=None, ge=2, le=AUTO_SHARD_MAX_SHARDS)
+    auto_sharding_min_workers: Optional[int] = Field(default=None, ge=1, le=20)
 
 
 class AISettingsProbeRequest(BaseModel):
@@ -4085,6 +4327,46 @@ async def get_ai_settings():
     """Get effective AI settings (secrets masked)."""
     settings = _load_effective_ai_settings()
     return _sanitize_ai_settings_response(settings)
+
+
+@app.get("/settings/scan-execution")
+async def get_scan_execution_settings():
+    """Get effective scan execution settings."""
+    settings = _load_effective_scan_execution_settings()
+    return _sanitize_scan_execution_settings_response(settings)
+
+
+@app.put("/settings/scan-execution")
+async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
+    """Update runtime scan execution settings."""
+    try:
+        r = get_redis()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
+
+    updates: dict[str, str] = {}
+    if request.auto_sharding_enabled is not None:
+        updates["auto_sharding_enabled"] = "true" if request.auto_sharding_enabled else "false"
+    if request.auto_sharding_strategy is not None:
+        updates["auto_sharding_strategy"] = _normalize_parallel_strategy(
+            request.auto_sharding_strategy,
+            default="auto",
+        )
+    if request.auto_sharding_max_shards is not None:
+        updates["auto_sharding_max_shards"] = str(
+            _normalize_auto_shard_count(request.auto_sharding_max_shards, default=4)
+        )
+    if request.auto_sharding_min_workers is not None:
+        updates["auto_sharding_min_workers"] = str(max(1, int(request.auto_sharding_min_workers)))
+
+    if updates:
+        r.hset(SCAN_SETTINGS_KEY, mapping=updates)
+
+    settings = _load_effective_scan_execution_settings()
+    return {
+        "status": "updated",
+        "settings": _sanitize_scan_execution_settings_response(settings),
+    }
 
 
 @app.put("/settings/ai")
@@ -6799,17 +7081,12 @@ async def submit_scan(request: ScanRequest):
             }
         )
 
-    options_payload = request.options.dict()
-    effective_budget_profile = options_payload.get("budget_profile")
-    if options_payload.get("thorough_params") and not effective_budget_profile and not options_payload.get("custom_budget"):
-        effective_budget_profile = "thorough"
-    resolved_budget = resolve_scan_budget(
+    options_payload = _build_scan_options_payload(request.options, scan_type)
+    parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
+        request.options,
+        options_payload,
         scan_type,
-        effective_budget_profile,
-        options_payload.get("custom_budget"),
     )
-    options_payload["budget_profile"] = resolved_budget["budget_profile"]
-    options_payload["resolved_budget"] = resolved_budget
 
     # Create or find target
     async with db_pool.acquire() as conn:
@@ -6828,7 +7105,7 @@ async def submit_scan(request: ScanRequest):
             """, normalized_target, request.name, extract_root_domain(normalized_target))
 
         # Parallel scans become a parent row; the scan_plan job fans out shards.
-        scan_role = 'parent' if request.options.parallel else 'standalone'
+        scan_role = 'parent' if parallel_enabled else 'standalone'
 
         # Create scan record
         await conn.execute("""
@@ -6848,8 +7125,10 @@ async def submit_scan(request: ScanRequest):
     }
     # Parallel scans are routed to the plan stage, which decomposes the parent
     # into shard jobs. Everything else stays on the standard scan path.
-    if request.options.parallel:
+    if parallel_enabled:
         job_data['type'] = 'scan_plan'
+        if parallel_worker_count is not None:
+            job_data['parallel_worker_count'] = parallel_worker_count
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
 
@@ -6860,8 +7139,11 @@ async def submit_scan(request: ScanRequest):
         'target': normalized_target,
         'scan_type': scan_type
     }
-    if request.options.parallel:
+    if parallel_enabled:
         response['parallel'] = True
+        if options_payload.get("auto_sharded"):
+            response['auto_sharded'] = True
+            response['auto_sharding_reason'] = options_payload.get("auto_sharding_reason")
     # Surface warning if path/query was stripped
     if target_note:
         response['warning'] = target_note
@@ -9162,6 +9444,32 @@ def get_compose_context(containers: list) -> tuple[Optional[str], Optional[str],
 def _is_scan_worker_container_name(name: str) -> bool:
     normalized = str(name or "").lstrip("/").lower()
     return "shakerscan" in normalized and "worker" in normalized and "gungnir" not in normalized
+
+
+def _running_scan_worker_count_best_effort() -> int | None:
+    """Return running scanner worker count, or None when Docker is unavailable.
+
+    Auto-sharding should use real fleet capacity when the standard Docker
+    deployment exposes it, but should not fail API requests in environments
+    without a mounted Docker socket.
+    """
+    try:
+        filters = urllib.parse.quote('{"name":["worker"]}')
+        status_code, containers = docker_socket_request(
+            "GET",
+            f"/containers/json?all=true&filters={filters}",
+        )
+        if status_code != 200 or not isinstance(containers, list):
+            return None
+        count = 0
+        for container in containers:
+            names = container.get("Names", [])
+            name = names[0].lstrip("/") if names else ""
+            if _is_scan_worker_container_name(name) and container.get("State") == "running":
+                count += 1
+        return count
+    except Exception:
+        return None
 
 
 @app.get("/workers")

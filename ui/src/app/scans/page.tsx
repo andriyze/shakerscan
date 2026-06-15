@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, Suspense } from 'react'
 import Link from 'next/link'
 import { getScans, cancelScan, getDomains, getGradeColor, formatDate, formatDuration, submitScan, type Scan } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SCAN_STATUSES, SCAN_TYPES, supportsParallelFamily, type ScanType } from '@/lib/constants'
+import { SCAN_STATUSES, SCAN_TYPES, type ScanType } from '@/lib/constants'
 import { Card, ConfirmDialog, ErrorState, LastUpdated, ScanStatusBadge, TableSkeleton, useToast } from '@/components/ui'
 
 const PAGE_SIZE = 50
@@ -244,18 +244,17 @@ function ScansContent() {
     }
   }
 
-  async function handleScan(targetUrl: string, scanType: ScanType, parallel = false) {
+  async function handleScan(targetUrl: string, scanType: ScanType) {
     const type = SCAN_TYPES.find(t => t.value === scanType)
     if (!type) return
     try {
       const result = await submitScan(targetUrl, {
         ...type.options,
-        scan_type: scanType,
-        ...(parallel ? { parallel: true, shards: 'auto', shard_strategy: 'auto' } : {})
+        scan_type: scanType
       })
       setOpenScanMenu(null)
       toast.success(
-        parallel ? 'Parallel scan started' : 'Scan started',
+        result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
         result?.scan_id
           ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
           : undefined
@@ -546,38 +545,22 @@ function ScansContent() {
                         {openScanMenu === scan.id && (
                           <div role="menu" className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
                             {SCAN_TYPES.map((type) => (
-                              <div key={type.value} className="border-b border-gray-700/50 last:border-b-0">
-                                <button
-                                  role="menuitem"
-                                  onClick={() => handleScan(scan.target_url, type.value)}
-                                  className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-sm text-white font-medium">{type.label}</span>
-                                    {type.requiresPermission && (
-                                      <span className="text-xs text-yellow-500">Active</span>
-                                    )}
-                                  </div>
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    {type.duration ? `${type.duration} - ` : ''}{type.description}
-                                  </p>
-                                </button>
-                                {supportsParallelFamily(type.value) && (
-                                  <button
-                                    role="menuitem"
-                                    onClick={() => handleScan(scan.target_url, type.value, true)}
-                                    className="w-full px-3 py-2 text-left hover:bg-blue-950/40 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
-                                  >
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm text-blue-200 font-medium">{type.label} Parallel</span>
-                                      <span className="text-xs text-blue-400">Auto</span>
-                                    </div>
-                                    <p className="text-xs text-gray-400 mt-0.5">
-                                      Broad + SQLi + XSS shards across workers
-                                    </p>
-                                  </button>
-                                )}
-                              </div>
+                              <button
+                                key={type.value}
+                                role="menuitem"
+                                onClick={() => handleScan(scan.target_url, type.value)}
+                                className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-sm text-white font-medium">{type.label}</span>
+                                  {type.requiresPermission && (
+                                    <span className="text-xs text-yellow-500">Active</span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  {type.duration ? `${type.duration} - ` : ''}{type.description}
+                                </p>
+                              </button>
                             ))}
                           </div>
                         )}

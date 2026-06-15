@@ -435,6 +435,22 @@ export interface AISettingsUpdate {
   persist_to_env?: boolean
 }
 
+export interface ScanExecutionSettings {
+  auto_sharding_enabled: boolean
+  auto_sharding_strategy: 'auto' | 'scope' | 'family'
+  auto_sharding_max_shards: number
+  auto_sharding_min_workers: number
+  eligible_scan_types: string[]
+  running_workers?: number | null
+}
+
+export interface ScanExecutionSettingsUpdate {
+  auto_sharding_enabled?: boolean
+  auto_sharding_strategy?: 'auto' | 'scope' | 'family'
+  auto_sharding_max_shards?: number
+  auto_sharding_min_workers?: number
+}
+
 export interface AIProbeResponse {
   status: 'ok' | 'failed'
   scope: 'scan' | 'verify'
@@ -1239,6 +1255,29 @@ export async function updateAISettings(data: AISettingsUpdate): Promise<{
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to update AI settings'))
+  }
+  return res.json()
+}
+
+export async function getScanExecutionSettings(): Promise<ScanExecutionSettings> {
+  const res = await fetch(`${API_URL}/settings/scan-execution`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch scan execution settings'))
+  }
+  return res.json()
+}
+
+export async function updateScanExecutionSettings(data: ScanExecutionSettingsUpdate): Promise<{
+  status: string
+  settings: ScanExecutionSettings
+}> {
+  const res = await fetch(`${API_URL}/settings/scan-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update scan execution settings'))
   }
   return res.json()
 }

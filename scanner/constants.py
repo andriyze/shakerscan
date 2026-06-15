@@ -163,6 +163,25 @@ def resolve_phase4_max_seconds(
     return phase4_max
 
 
+def resolve_bola_deadline_seconds(scan_budget: dict[str, Any] | None, custom_budget: dict[str, Any] | None) -> int:
+    """Resolve BOLA's graceful stop deadline.
+
+    Profile defaults keep the historical five-minute floor, but explicit custom
+    budgets are respected so known-endpoint parallel shards can stay fast.
+    """
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    raw_budget = budget.get("active_max_seconds")
+    try:
+        active_budget = int(raw_budget or 600)
+    except (TypeError, ValueError):
+        active_budget = 600
+
+    custom = custom_budget if isinstance(custom_budget, dict) else {}
+    if custom.get("active_max_seconds") is not None:
+        return max(30, min(900, active_budget))
+    return max(300, min(900, active_budget))
+
+
 def normalize_budget_profile(value: Any) -> str:
     profile = str(value or DEFAULT_SCAN_BUDGET_PROFILE).strip().lower()
     return profile if profile in SCAN_BUDGET_PROFILES else DEFAULT_SCAN_BUDGET_PROFILE

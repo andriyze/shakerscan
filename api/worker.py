@@ -3734,7 +3734,7 @@ async def process_scan_plan_job(job_data: dict):
         scan_type=scan_type,
         requested_shards=options.get('shards', 'auto'),
         strategy=options.get('shard_strategy') or 'auto',
-        worker_count=0,
+        worker_count=job_data.get('parallel_worker_count') or 0,
     )
     for note in plan.notes:
         print(f"[{parent_id[:8]}] plan note: {note}", flush=True)

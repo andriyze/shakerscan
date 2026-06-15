@@ -52,7 +52,13 @@ TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
 # Option keys that control orchestration itself. They must never be propagated
 # into a child shard's options or a shard would try to fan out recursively.
-PARALLEL_OPTION_KEYS = ("parallel", "shards", "shard_strategy")
+PARALLEL_OPTION_KEYS = (
+    "parallel",
+    "shards",
+    "shard_strategy",
+    "auto_sharded",
+    "auto_sharding_reason",
+)
 
 # Scan types that actually run active injection testing. ``family`` sharding is
 # only meaningful for these; for passive types it degrades to a single shard.
@@ -109,6 +115,15 @@ def _merge_custom_budget(options: dict[str, Any], overrides: dict[str, Any]) -> 
     """Merge ``overrides`` into ``options['custom_budget']`` in place."""
     budget = dict(options.get("custom_budget") or {})
     budget.update(overrides)
+    options["custom_budget"] = budget
+
+
+def _merge_custom_budget_defaults(options: dict[str, Any], defaults: dict[str, Any]) -> None:
+    """Set per-shard budget defaults without overwriting explicit caller caps."""
+    budget = dict(options.get("custom_budget") or {})
+    for key, value in defaults.items():
+        if budget.get(key) is None:
+            budget[key] = value
     options["custom_budget"] = budget
 
 
@@ -176,8 +191,26 @@ def _plan_scope(
         opts = _base_child_options(parent_options)
         opts["custom_endpoints"] = slice_eps
         # Endpoints are explicit, so a deep site crawl per shard is wasted work.
-        # Trim discovery breadth while leaving active-testing budget intact.
-        _merge_custom_budget(opts, {"max_urls": 150, "browser_max_pages": 5})
+        # Trim discovery and active breadth unless the caller provided stricter
+        # custom caps. This is the raw speed path for known API endpoints.
+        endpoint_count = max(1, len(slice_eps))
+        _merge_custom_budget_defaults(
+            opts,
+            {
+                "max_duration_minutes": max(5, min(10, 4 + (2 * endpoint_count))),
+                "max_urls": 150,
+                "browser_max_pages": 5,
+                "browser_max_depth": 1,
+                "param_discovery_url_limit": min(endpoint_count, 3),
+                "param_discovery_max_params": 4,
+                "nuclei_max_targets": 120,
+                "phase4_max_seconds": 20,
+                "active_max_seconds": min(120, max(60, 30 * endpoint_count)),
+                "active_max_endpoints": endpoint_count,
+                "active_params_per_endpoint": 2,
+                "smart_bola_max_endpoints": endpoint_count,
+            },
+        )
         shards.append(ShardSpec(index=i, label=f"scope[{i}]", options=opts))
     return shards
 

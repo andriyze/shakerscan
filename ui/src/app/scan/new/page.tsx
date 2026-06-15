@@ -17,6 +17,7 @@ import { Button, Card, useToast } from '@/components/ui'
 
 const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
 const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
+type ExecutionMode = 'auto' | 'normal' | 'parallel'
 
 function validateTarget(value: string): string | null {
   const trimmed = value.trim()
@@ -57,7 +58,7 @@ export default function NewScanPage() {
   const [scanType, setScanType] = useState<ScanType>('quick')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [loading, setLoading] = useState(false)
-  const [parallelEnabled, setParallelEnabled] = useState(false)
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>('auto')
   const [parallelStrategy, setParallelStrategy] = useState<ParallelStrategy>('auto')
   const [parallelShards, setParallelShards] = useState<'auto' | '2' | '3' | '4' | '6'>('auto')
   const [customEndpointsText, setCustomEndpointsText] = useState('')
@@ -107,7 +108,7 @@ export default function NewScanPage() {
     setTargetError(null)
 
     try {
-      if (parallelEnabled) {
+      if (executionMode === 'parallel') {
         const hasScopeEndpoints = customEndpoints.length >= 2
         if (parallelStrategy === 'scope' && !hasScopeEndpoints) {
           toast.error('Endpoint scope sharding needs at least two custom endpoints.')
@@ -131,8 +132,9 @@ export default function NewScanPage() {
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
         budget_profile: budgetProfile,
-        ...(customEndpoints.length > 0 ? { custom_endpoints: customEndpoints } : {}),
-        ...(parallelEnabled
+        ...(executionMode === 'parallel' && customEndpoints.length > 0 ? { custom_endpoints: customEndpoints } : {}),
+        ...(executionMode === 'normal' ? { parallel: false } : {}),
+        ...(executionMode === 'parallel'
           ? {
               parallel: true,
               shards: parallelShards === 'auto' ? 'auto' : Number.parseInt(parallelShards, 10),
@@ -147,7 +149,7 @@ export default function NewScanPage() {
 
       const result = await submitScan(target.trim(), scanOptions)
       toast.success(
-        'Scan started',
+        result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
         result?.scan_id
           ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
           : undefined
@@ -257,35 +259,38 @@ export default function NewScanPage() {
           <label className="block text-sm font-medium text-gray-400 mb-3">
             Execution
           </label>
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => setParallelEnabled(false)}
-              className={`p-3 rounded-lg border text-left transition-colors ${
-                !parallelEnabled
-                  ? 'border-blue-500 bg-blue-500/10'
-                  : 'border-gray-700 bg-gray-800 hover:border-gray-600'
-              }`}
-            >
-              <div className="font-medium text-white">Normal</div>
-              <div className="text-xs text-gray-500 mt-1">One worker handles this scan.</div>
-            </button>
-            <button
-              type="button"
-              onClick={() => setParallelEnabled(true)}
-              className={`p-3 rounded-lg border text-left transition-colors ${
-                parallelEnabled
-                  ? 'border-blue-500 bg-blue-500/10'
-                  : 'border-gray-700 bg-gray-800 hover:border-gray-600'
-              }`}
-            >
-              <div className="font-medium text-white">Parallel</div>
-              <div className="text-xs text-gray-500 mt-1">Fan out work across available workers.</div>
-            </button>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {([
+              ['auto', 'Auto', 'Use the global auto-sharding setting.'],
+              ['normal', 'Normal', 'Force one worker.'],
+              ['parallel', 'Parallel', 'Force shard fan-out.']
+            ] as const).map(([value, label, description]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setExecutionMode(value)}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  executionMode === value
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+                }`}
+              >
+                <div className="font-medium text-white">{label}</div>
+                <div className="text-xs text-gray-500 mt-1">{description}</div>
+              </button>
+            ))}
           </div>
 
-          {parallelEnabled && (
-            <div className="mt-4 space-y-4 border-t border-gray-800 pt-4">
+          <p className="mt-3 text-xs text-gray-500">
+            Auto keeps this page simple: eligible scans use the Settings policy, while Normal and Parallel are per-scan overrides.
+          </p>
+
+          {executionMode === 'parallel' && (
+            <details className="mt-4 border-t border-gray-800 pt-4">
+              <summary className="cursor-pointer text-sm text-gray-300 hover:text-white">
+                Parallel tuning
+              </summary>
+              <div className="mt-4 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <label className="space-y-1">
                   <span className="block text-xs text-gray-500">Shards</span>
@@ -328,7 +333,8 @@ export default function NewScanPage() {
                 Endpoint scope sharding is the fastest path when you provide known endpoints.
                 Without endpoints, parallel mode is useful for Smart, Full, and Aggressive scans through broad/SQLi/XSS family shards.
               </p>
-            </div>
+              </div>
+            </details>
           )}
         </Card>
 
