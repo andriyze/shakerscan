@@ -367,8 +367,28 @@ Scan `34e8d955` (smart, parallel, `family`, 14m41s, grade B, 4 deduped findings)
 - **Minor bugs:** the merged parent report's `input.port` shows `8080` (the API port) instead of `3001`; the parent "Coverage Budget" card reflects only the broad shard's balanced budget, not the aggregate.
 
 ### Implementation status (shipped 2026-06-15)
-All six items below are implemented, tested, and deployed. Verified live on Juice Shop:
-a `coverage` parallel scan ran a discover-once recon that **harvested 390 endpoints and fanned out 3 shards of 130 each (disjoint)**, each running the full active suite + exploit-depth. The merge now aggregates coverage across shards; the `input.port 8080→3001` bug is fixed at source; a pre-fan-out UI state ("Discovering endpoints once, then sharding…") replaces the confusing "0/0 shards". Remaining increment for a *true* 100%: emit the scanner's full internal worklist (today harvest pulls from discovery samples in the report, ~390 of ~489).
+All items below are implemented, tested, and deployed.
+
+**Full-worklist emit (closes coverage to ~100%, universal):** the scanner now emits its
+complete pre-cap active worklist at `report['active_checks']['active_worklist']` (custom-endpoint
+strings, capped by `custom_budget.active_worklist_max`, default 5000). `coverage` recon harvests
+that instead of lossy discovery samples. Verified live on Juice Shop: recon harvested **1378
+endpoints** (vs 390 from samples) and fanned out **18 disjoint coverage shards of ~77 each**.
+
+**Huge budgets on demand:** `custom_budget` overrides are now capped at the generous
+`SCAN_BUDGET_CEILINGS` (e.g. `active_max_endpoints` 10000, `max_urls` 100000,
+`active_max_seconds` 24h) instead of the per-scan-type `exhaustive` profile — so operators can dial
+in very large budgets without changing default profile behavior.
+
+**Shard count scales:** `coverage` fans out `N = ceil(worklist / coverage_per_shard_cap)` shards
+(default cap 150, tunable per scan), bounded by `COVERAGE_MAX_SHARDS` (32). `auto` scales to the
+worker fleet up to `MAX_SHARDS` (12). `family` is intentionally fixed at 3 (broad/sqli/xss — the
+only capability lanes the scanner exposes). Concurrency is bounded by the worker fleet; excess
+shards queue and run as workers free up.
+
+Also shipped earlier the same day: coverage-aware merge aggregation, `input.port 8080→3001` fix at
+source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
+("Discovering endpoints once, then sharding…").
 
 ### The fix set (in priority order)
 
