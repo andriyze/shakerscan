@@ -138,6 +138,24 @@ def _partition_round_robin(items: list[Any], n: int) -> list[list[Any]]:
     return [b for b in buckets if b]
 
 
+def _normalize_endpoint_list(endpoints: Any) -> list[str]:
+    """Return non-empty, de-duplicated endpoint strings preserving order."""
+    if not isinstance(endpoints, list):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        if not isinstance(endpoint, str):
+            continue
+        value = endpoint.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
 def _plan_scope(
     parent_options: dict[str, Any],
     endpoints: list[str],
@@ -236,9 +254,7 @@ def plan_shards(
         strategy = "auto"
 
     scan_type = (scan_type or "standard").strip().lower()
-    endpoints = parent_options.get("custom_endpoints") or []
-    if not isinstance(endpoints, list):
-        endpoints = []
+    endpoints = _normalize_endpoint_list(parent_options.get("custom_endpoints"))
 
     resolved = strategy
     if strategy == "auto":
@@ -283,6 +299,13 @@ async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_na
     this call enqueued the merge.
     """
     pid = uuid.UUID(parent_id)
+    parent_status = await conn.fetchval("SELECT status FROM scans WHERE id = $1", pid)
+    if parent_status == "cancelled":
+        try:
+            redis_client.set(merge_guard_key(parent_id), "cancelled", nx=True, ex=86400)
+        except Exception:
+            pass
+        return False
     total = await conn.fetchval(
         "SELECT count(*) FROM scans WHERE parent_scan_id = $1", pid
     )

@@ -3405,6 +3405,17 @@ async def process_scan_job(job_data: dict):
     r = get_redis()
     now = utc_now()
 
+    async with db_pool.acquire() as conn:
+        current = await conn.fetchrow("SELECT status FROM scans WHERE id = $1", uuid.UUID(scan_id))
+    if current and current['status'] == 'cancelled':
+        print(f"[{job_id[:8]}] Scan already cancelled; skipping", flush=True)
+        r.hset(
+            f"job:{job_id}",
+            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+        )
+        r.expire(f"job:{job_id}", 86400)
+        return
+
     # Update Redis status
     r.hset(f"job:{job_id}", mapping={
         'status': 'running',
@@ -3418,10 +3429,18 @@ async def process_scan_job(job_data: dict):
     target_id = None
     ai_target_id = None
     async with db_pool.acquire() as conn:
-        await conn.execute("""
+        update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1
-            WHERE id = $2
+            WHERE id = $2 AND status <> 'cancelled'
         """, now, uuid.UUID(scan_id))
+        if update_result.endswith("0"):
+            print(f"[{job_id[:8]}] Scan cancelled before start; skipping", flush=True)
+            r.hset(
+                f"job:{job_id}",
+                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+            )
+            r.expire(f"job:{job_id}", 86400)
+            return
 
         # Get target references
         row = await conn.fetchrow("SELECT target_id, ai_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
@@ -3471,27 +3490,29 @@ async def process_scan_job(job_data: dict):
         completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
 
-        # Update database - but check if scan was already marked failed by stale checker
+        # Update database - but check if scan was already marked terminal by
+        # stale cleanup or user cancellation.
         async with db_pool.acquire() as conn:
-            # Check current status - don't overwrite if already failed (e.g., by stale scan checker)
+            # Check current status - don't overwrite if already terminal.
             current = await conn.fetchrow(
                 "SELECT status FROM scans WHERE id = $1",
                 uuid.UUID(scan_id)
             )
-            if current and current['status'] == 'failed':
-                print(f"[{job_id[:8]}] Scan already marked failed (stale?), not overwriting scan row", flush=True)
+            if current and current['status'] in ('failed', 'cancelled'):
+                terminal_status = current['status']
+                print(f"[{job_id[:8]}] Scan already marked {terminal_status}, not overwriting scan row", flush=True)
                 # Don't save findings - stale checker already saved partial findings from checkpoint.
                 # Saving late-completing findings would cause inconsistency between scan report and /findings.
                 # Update Redis to mark job as done so it doesn't stay "running"
                 # Don't set result_path - the late-completing output doesn't match the official partial results
                 job_key = f"job:{job_id}"
                 r.hset(job_key, mapping={
-                    'status': 'failed',
+                    'status': terminal_status,
                     'score': str(score) if score else 'N/A',
                     'grade': str(grade) if grade else 'N/A',
                     'completed_at': completed_at.isoformat(),
                     'progress': '100',
-                    'current_phase': 'terminated'
+                    'current_phase': 'terminated' if terminal_status == 'failed' else 'cancelled'
                 })
                 r.expire(job_key, 86400)
                 return
@@ -3692,8 +3713,19 @@ async def process_scan_plan_job(job_data: dict):
 
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT target_id, target_url FROM scans WHERE id = $1", uuid.UUID(parent_id)
+            "SELECT target_id, target_url, status FROM scans WHERE id = $1", uuid.UUID(parent_id)
         )
+    if not row:
+        print(f"[{parent_id[:8]}] parent scan not found; plan job skipped", flush=True)
+        return
+    if row['status'] == 'cancelled':
+        print(f"[{parent_id[:8]}] parent scan already cancelled; plan job skipped", flush=True)
+        r.hset(
+            f"job:{parent_job_id}",
+            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+        )
+        r.expire(f"job:{parent_job_id}", 86400)
+        return
     target_id = str(row['target_id']) if row and row['target_id'] else None
     target_url = (row['target_url'] if row else None) or target
 
@@ -3733,12 +3765,21 @@ async def process_scan_plan_job(job_data: dict):
     parent_options = dict(options)
     parent_options['parallel_strategy'] = plan.strategy
     async with db_pool.acquire() as conn:
-        await conn.execute("""
+        update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1,
                 current_phase = $2, progress = 5, shard_count = $3, options = $4
             WHERE id = $5
+              AND status <> 'cancelled'
         """, now, f'sharded:{plan.strategy}', plan.shard_count,
              json.dumps(parent_options), uuid.UUID(parent_id))
+        if update_result.endswith("0"):
+            print(f"[{parent_id[:8]}] parent scan cancelled before fan-out; plan job skipped", flush=True)
+            r.hset(
+                f"job:{parent_job_id}",
+                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+            )
+            r.expire(f"job:{parent_job_id}", 86400)
+            return
 
         for shard in plan.shards:
             child_id = str(uuid.uuid4())
@@ -3786,16 +3827,66 @@ async def process_scan_shard_job(job_data: dict):
     now = utc_now()
     print(f"[{job_id[:8]}] Shard '{label}' ({idx}/{total}) start: {target}", flush=True)
 
+    async with db_pool.acquire() as conn:
+        current = await conn.fetchrow("""
+            SELECT child.status, parent.status AS parent_status
+            FROM scans child
+            LEFT JOIN scans parent ON child.parent_scan_id = parent.id
+            WHERE child.id = $1
+        """, uuid.UUID(scan_id))
+    if current and (current['status'] == 'cancelled' or current['parent_status'] == 'cancelled'):
+        print(f"[{job_id[:8]}] Shard '{label}' already cancelled; skipping", flush=True)
+        if current['status'] != 'cancelled':
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE scans
+                    SET status = 'cancelled',
+                        error_message = 'Cancelled by parent scan',
+                        completed_at = NOW(),
+                        progress = 100,
+                        current_phase = 'cancelled'
+                    WHERE id = $1
+                """, uuid.UUID(scan_id))
+        r.hset(
+            f"job:{job_id}",
+            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+        )
+        r.expire(f"job:{job_id}", 86400)
+        if parent_id:
+            try:
+                async with db_pool.acquire() as conn:
+                    await parallel_scan.reconcile_parallel_parent(conn, parent_id, r, QUEUE_NAME)
+            except Exception as e:
+                print(f"[{job_id[:8]}] merge reconcile error after cancelled shard skip: {e}", flush=True)
+        return
+
     r.hset(f"job:{job_id}", mapping={
         'status': 'running', 'scan_id': scan_id,
         'started_at': now.isoformat(), 'heartbeat': now.isoformat(),
     })
     r.delete(f"scan:{scan_id}:logs")
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE scans SET status = 'running', started_at = $1 WHERE id = $2",
+        update_result = await conn.execute(
+            """
+            UPDATE scans SET status = 'running', started_at = $1
+            WHERE id = $2 AND status <> 'cancelled'
+            """,
             now, uuid.UUID(scan_id),
         )
+    if update_result.endswith("0"):
+        print(f"[{job_id[:8]}] Shard '{label}' cancelled before start; skipping", flush=True)
+        r.hset(
+            f"job:{job_id}",
+            mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+        )
+        r.expire(f"job:{job_id}", 86400)
+        if parent_id:
+            try:
+                async with db_pool.acquire() as conn:
+                    await parallel_scan.reconcile_parallel_parent(conn, parent_id, r, QUEUE_NAME)
+            except Exception as e:
+                print(f"[{job_id[:8]}] merge reconcile error after cancelled shard start: {e}", flush=True)
+        return
     await update_scan_progress(scan_id, f"shard:{label}", 5, job_id=job_id)
 
     stop_heartbeat = threading.Event()
@@ -3825,8 +3916,10 @@ async def process_scan_shard_job(job_data: dict):
 
         async with db_pool.acquire() as conn:
             current = await conn.fetchrow("SELECT status FROM scans WHERE id = $1", uuid.UUID(scan_id))
-            if current and current['status'] == 'failed':
-                pass  # stale checker already finalized this shard
+            if current and current['status'] in ('failed', 'cancelled'):
+                # Stale cleanup or user cancellation already finalized this
+                # shard. Do not overwrite it with late subprocess output.
+                pass
             elif error:
                 await conn.execute("""
                     UPDATE scans SET status = 'failed', error_message = $1, result = $2,
@@ -3844,12 +3937,15 @@ async def process_scan_shard_job(job_data: dict):
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
 
+        final_status = 'failed' if error else 'completed'
+        if current and current['status'] in ('failed', 'cancelled'):
+            final_status = current['status']
         r.hset(f"job:{job_id}", mapping={
-            'status': 'failed' if error else 'completed',
+            'status': final_status,
             'result_path': filepath,
             'completed_at': completed_at.isoformat(),
             'progress': '100',
-            'current_phase': 'failed' if error else 'completed',
+            'current_phase': final_status,
         })
         r.expire(f"job:{job_id}", 86400)
         print(f"[{job_id[:8]}] Shard '{label}' done | findings: {len(findings)} | error: {bool(error)}", flush=True)
@@ -3885,11 +3981,21 @@ async def process_scan_merge_job(job_data: dict):
 
     async with db_pool.acquire() as conn:
         parent = await conn.fetchrow("""
-            SELECT target_id, target_url, options, scan_type, created_at, started_at, job_id
+            SELECT target_id, target_url, options, scan_type, created_at, started_at, job_id, status
             FROM scans WHERE id = $1
         """, uuid.UUID(parent_id))
         if not parent:
             print(f"[merge {parent_id[:8]}] parent not found; aborting", flush=True)
+            return
+        if parent['status'] == 'cancelled':
+            parent_job_id = parent['job_id'] or parent_id
+            r.hset(
+                f"job:{parent_job_id}",
+                mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
+            )
+            r.expire(f"job:{parent_job_id}", 86400)
+            r.delete(parallel_scan.shards_remaining_key(parent_id))
+            print(f"[merge {parent_id[:8]}] parent cancelled; merge skipped", flush=True)
             return
         children = await conn.fetch("""
             SELECT id, status, result, score, grade, findings_count, shard_index, options

@@ -7165,11 +7165,16 @@ async def get_scan_logs(scan_id: str, limit: int = 200):
 async def cancel_scan(scan_id: str):
     """Cancel a running or pending scan."""
     r = get_redis()
+    child_rows = []
+    parent_to_reconcile = None
 
     async with db_pool.acquire() as conn:
         # Check scan exists and is cancellable
         scan = await conn.fetchrow(
-            "SELECT id, status, target_url FROM scans WHERE id = $1",
+            """
+            SELECT id, status, target_url, job_id, scan_role, parent_scan_id
+            FROM scans WHERE id = $1
+            """,
             uuid.UUID(scan_id)
         )
         if not scan:
@@ -7186,25 +7191,73 @@ async def cancel_scan(scan_id: str):
             UPDATE scans
             SET status = 'cancelled',
                 error_message = 'Cancelled by user',
-                completed_at = NOW()
+                completed_at = NOW(),
+                progress = 100,
+                current_phase = 'cancelled'
             WHERE id = $1
         """, uuid.UUID(scan_id))
+
+        if scan['scan_role'] == 'parent':
+            # Fan out cancellation to queued/running child shards. Workers may
+            # still finish their subprocesses, but completion handlers must not
+            # overwrite these terminal rows.
+            child_rows = await conn.fetch("""
+                UPDATE scans
+                SET status = 'cancelled',
+                    error_message = 'Cancelled by parent scan',
+                    completed_at = NOW(),
+                    progress = 100,
+                    current_phase = 'cancelled'
+                WHERE parent_scan_id = $1
+                  AND status IN ('pending', 'queued', 'running')
+                RETURNING id, job_id
+            """, uuid.UUID(scan_id))
+            try:
+                r.set(parallel_scan.merge_guard_key(scan_id), "cancelled", nx=True, ex=86400)
+            except Exception:
+                pass
+        elif scan['scan_role'] == 'shard' and scan['parent_scan_id']:
+            parent_to_reconcile = str(scan['parent_scan_id'])
 
     # Signal worker to stop via Redis (set cancel flag)
     # Workers should check this flag periodically
     r.set(f"scan:{scan_id}:cancel", "1", ex=3600)  # Expires in 1 hour
+    for child in child_rows:
+        r.set(f"scan:{str(child['id'])}:cancel", "1", ex=3600)
 
-    # Also try to find and update the job in Redis
+    # Also update known job hashes in Redis so UI/queue status reflects the
+    # cancellation immediately.
+    job_ids = [scan['job_id']] + [child['job_id'] for child in child_rows]
+    for job_id in job_ids:
+        if job_id:
+            r.hset(
+                f"job:{job_id}",
+                mapping={
+                    'status': 'cancelled',
+                    'progress': '100',
+                    'current_phase': 'cancelled',
+                },
+            )
+            r.expire(f"job:{job_id}", 86400)
+
+    # Backward-compatible fallback for older/odd job hashes.
     for key in r.keys("job:*"):
         job_data = r.hgetall(key)
         if job_data.get('scan_id') == scan_id:
             r.hset(key, 'status', 'cancelled')
             break
 
+    if parent_to_reconcile:
+        async with db_pool.acquire() as conn:
+            await parallel_scan.reconcile_parallel_parent(
+                conn, parent_to_reconcile, r, QUEUE_NAME
+            )
+
     return {
         "status": "cancelled",
         "scan_id": scan_id,
         "target": scan['target_url'],
+        "cancelled_child_shards": len(child_rows),
         "message": "Scan cancelled successfully"
     }
 

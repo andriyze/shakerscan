@@ -15,10 +15,12 @@
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows hidden from `GET /scans` by default (`include_shards=true` to show).
 - **Two strategies:** `scope` (partition `custom_endpoints` across shards — real speed-up) and `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget). `auto` picks scope when ≥2 endpoints are present.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
+- **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. The scanner subprocess still does not poll the cancel flag mid-run.
+- **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
-- **Tests:** `tests/test_parallel_scan.py` (21) + `tests/test_custom_dictionaries.py` (8). Verified live: scope run (2 findings, 94s) and family run (10 raw → 4 deduped findings, 3/3 shards).
+- **Tests:** `tests/test_parallel_scan.py` (23) + `tests/test_custom_dictionaries.py` (8). Verified live: scope run (2 findings, 94s) and family run (10 raw → 4 deduped findings, 3/3 shards).
 
-**Deferred (Phase 2, documented below):** the build_report carve-out for true "discover-once then endpoint-slice" raw speed-up (family currently repeats discovery per shard — depth over speed); a first-class check registry; cooperative cancellation polling in the scanner subprocess; dedicated UI components for parent/shard progress.
+**Deferred (Phase 2, documented below):** the build_report carve-out for true "discover-once then endpoint-slice" raw speed-up (family currently repeats discovery per shard — depth over speed); a first-class check registry; cooperative cancellation polling inside the scanner subprocess; dedicated UI components for parent/shard progress.
 
 ---
 
@@ -159,7 +161,7 @@ Each shard:
 ### 5.4 Failure & lifecycle handling
 - **Stale shards:** reuse the retest watchdog idea — a SETNX-locked reaper requeues or fails shards whose heartbeat expired, then still drives the barrier so merge isn't blocked forever.
 - **Partial success:** merge proceeds with whatever shards completed; parent result records `shards_succeeded/shards_total` and degrades grade confidence rather than failing the whole scan.
-- **Cancellation:** extend the cooperative `scan:{id}:cancel` flag (`api/api.py:7086-7131`) to fan out to all child shard ids; shards must poll it (today the subprocess does not — see Risks).
+- **Cancellation:** parent cancellation fans out to child shard rows and Redis cancel flags. Workers and merge jobs treat cancelled rows as terminal and refuse to overwrite them with late output. Remaining work: make the scanner subprocess poll `scan:{id}:cancel` so cancellation stops active probes earlier instead of only preserving final state.
 - **Idempotency:** shard jobs carry `(parent_id, shard_index, attempt)` like retest jobs so requeues don't double-run.
 
 ---
@@ -248,7 +250,7 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 **Phase 2 — Breadth & polish**
 - Family-based and nuclei-category sharding (§6.2/6.4).
 - Check registry refactor (§8.3).
-- Cancellation fan-out + cooperative cancel polling in the scanner subprocess (see Risks).
+- Cooperative cancel polling in the scanner subprocess (see Risks).
 - UI: parent progress with per-shard breakdown; coverage shows shard contribution.
 
 ---
@@ -256,7 +258,7 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 ## 12. Risks & mitigations
 
 - **Scanner monolith refactor risk.** Mitigate by keeping the single-worker path as `merge([shard(full)])` and golden-diffing reports against current output before/after.
-- **Cancellation isn't enforced today** (cooperative flag is DB-only; the subprocess never polls it — `api/api.py:7086-7131`). Parallel scans amplify wasted work on cancel; add real polling as part of Phase 2.
+- **Cancellation preserves state but does not yet interrupt active subprocess work.** The API now cancels parent/shard rows and prevents late writes from reviving them, but `scanner/scanner.py` still needs to poll `scan:{id}:cancel` to stop active probes early.
 - **Auth session sharing across shards.** Stateful logins may not be cleanly serializable; mitigate by capturing a reusable token/cookie recipe in the recon stage and re-authing per shard on expiry (the scanner already re-auths).
 - **DBMS-fingerprint coupling.** Broadcast the fingerprint from the recon/plan stage so shards don't each re-detect and diverge.
 - **Resource exhaustion.** Each worker uses 2–4 GB / 1–2 cores; fanning one scan to N workers competes with other queued scans. Add a per-parent concurrency cap (Redis slot, like `RETEST_MAX_PARALLEL`) and respect the `POST /workers` ceiling.

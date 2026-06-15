@@ -91,6 +91,16 @@ def test_scope_partitions_endpoints_round_robin():
     assert len(assigned) == len(eps)
 
 
+def test_scope_ignores_duplicate_empty_and_non_string_endpoints():
+    eps = [" GET /a?id=1 ", "", "GET /b?id=2", "GET /a?id=1", None, 7]
+    plan = plan_shards({"scan_type": "smart", "custom_endpoints": eps},
+                       scan_type="smart", strategy="scope", requested_shards=3)
+    assert plan.strategy == "scope"
+    assert plan.shard_count == 2
+    assigned = [e for s in plan.shards for e in s.options["custom_endpoints"]]
+    assert assigned == ["GET /a?id=1", "GET /b?id=2"]
+
+
 def test_scope_trims_discovery_budget():
     eps = [f"GET /api/x{i}?id=1" for i in range(4)]
     plan = plan_shards({"scan_type": "smart", "custom_endpoints": eps},
@@ -175,11 +185,14 @@ def test_max_shards_ceiling():
 class _FakeConn:
     """Minimal asyncpg-conn stand-in for reconcile_parallel_parent."""
 
-    def __init__(self, total, non_terminal):
+    def __init__(self, total, non_terminal, parent_status="running"):
         self._total = total
         self._non_terminal = non_terminal
+        self._parent_status = parent_status
 
     async def fetchval(self, query, *args):
+        if "SELECT status" in query:
+            return self._parent_status
         if "NOT IN" in query:
             return self._non_terminal
         return self._total
@@ -245,3 +258,13 @@ def test_reconcile_noop_when_no_children():
     enqueued = _run(reconcile_parallel_parent(conn, pid, r, "scan_jobs"))
     assert enqueued is False
     assert r.pushed == []
+
+
+def test_reconcile_skips_cancelled_parent():
+    pid = str(uuid.uuid4())
+    conn = _FakeConn(total=3, non_terminal=0, parent_status="cancelled")
+    r = _FakeRedis()
+    enqueued = _run(reconcile_parallel_parent(conn, pid, r, "scan_jobs"))
+    assert enqueued is False
+    assert r.pushed == []
+    assert r.store[parallel_scan.merge_guard_key(pid)] == "cancelled"

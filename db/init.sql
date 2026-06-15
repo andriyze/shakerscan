@@ -386,6 +386,7 @@ CREATE VIEW latest_scans AS
 SELECT DISTINCT ON (target_url) *
 FROM scans
 WHERE status = 'completed'
+  AND (scan_role IS NULL OR scan_role <> 'shard')
 ORDER BY target_url, completed_at DESC;
 
 -- Active findings summary
@@ -407,8 +408,8 @@ GROUP BY target_id;
 CREATE VIEW dashboard_metrics AS
 SELECT
     (SELECT COUNT(*) FROM targets WHERE is_active = true) as total_targets,
-    (SELECT COUNT(*) FROM scans WHERE status = 'completed') as total_scans,
-    (SELECT COUNT(*) FROM scans WHERE status = 'running') as running_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'completed' AND (scan_role IS NULL OR scan_role <> 'shard')) as total_scans,
+    (SELECT COUNT(*) FROM scans WHERE status = 'running' AND (scan_role IS NULL OR scan_role <> 'shard')) as running_scans,
     (SELECT COUNT(*) FROM findings WHERE status = 'active') as active_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'critical') as critical_findings,
     (SELECT COUNT(*) FROM findings WHERE status = 'active' AND severity = 'high') as high_findings,
@@ -422,7 +423,9 @@ SELECT
 CREATE OR REPLACE FUNCTION update_target_stats()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.status = 'completed' AND NEW.target_id IS NOT NULL THEN
+    IF NEW.status = 'completed'
+       AND NEW.target_id IS NOT NULL
+       AND COALESCE(NEW.scan_role, 'standalone') <> 'shard' THEN
         UPDATE targets SET
             last_scan_id = NEW.id,
             last_scanned_at = NEW.completed_at,
