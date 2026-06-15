@@ -80,6 +80,28 @@ def test_harvest_empty_result_is_safe():
     assert p.harvest_endpoints({"result": {"discovery": {}}}) == []
 
 
+def test_harvest_prefers_full_worklist_over_samples():
+    # The scanner emits the FULL worklist at report['active_checks']['active_worklist'];
+    # harvest must use it (not the lossy discovery samples) for true coverage.
+    recon = {
+        "active_checks": {"active_worklist": ["GET /a?x=1", "POST /b form:k=1", "GET /c"]},
+        "discovery": {"katana_sample": ["/should/not/be/used"]},
+    }
+    eps = p.harvest_endpoints(recon)
+    assert eps == ["GET /a?x=1", "POST /b form:k=1", "GET /c"]
+
+
+def test_coverage_per_shard_cap_option_controls_shard_count():
+    eps = [f"GET /e{i}?id=1" for i in range(390)]
+    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # default cap 150
+    many = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 50}, eps)
+    assert few.shard_count == 3
+    assert many.shard_count == 8  # smaller cap -> more shards
+    # still covers every endpoint, disjoint
+    union = [e for s in many.shards for e in s.options["custom_endpoints"]]
+    assert sorted(union) == sorted(eps)
+
+
 # --------------------------- auth-state ---------------------------
 
 def test_available_auth_states():

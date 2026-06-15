@@ -70,6 +70,33 @@ SCAN_BUDGET_FIELDS = {
     "smart_bola_max_endpoints",
     "sqli_extract_max",
     "oob_max_findings",
+    "active_worklist_max",
+}
+
+# Hard ceilings for custom_budget overrides. These are intentionally MUCH higher
+# than the `exhaustive` profile defaults so operators can dial in "huge" budgets
+# on demand (e.g. parallel coverage shards that must test every endpoint of a
+# large estate) without us changing what the exhaustive PROFILE does by default.
+# A key absent here falls back to the exhaustive profile value as the cap.
+SCAN_BUDGET_CEILINGS = {
+    "max_duration_minutes": 2880,      # 48h
+    "discovery_depth": 12,
+    "max_urls": 100000,
+    "browser_max_pages": 2000,
+    "browser_max_depth": 10,
+    "api_probe_limit": 100000,
+    "param_discovery_url_limit": 5000,
+    "param_discovery_max_params": 200,
+    "phase4_max_seconds": 86400,
+    "nuclei_max_targets": 100000,
+    "active_max_seconds": 86400,        # 24h
+    "active_max_endpoints": 10000,
+    "active_params_per_endpoint": 100,
+    "dom_xss_max_files": 2000,
+    "smart_bola_max_endpoints": 10000,
+    "sqli_extract_max": 100,
+    "oob_max_findings": 100,
+    "active_worklist_max": 100000,
 }
 
 
@@ -210,7 +237,12 @@ def resolve_scan_budget(
                 continue
             if key == "max_duration_minutes" and isinstance(value, int) and value <= 0:
                 value = 1
-            ceiling = SCAN_BUDGET_DEFAULTS[normalized_scan_type]["exhaustive"].get(key)
+            # Cap at the generous custom-budget ceiling (allows huge on-demand
+            # budgets), falling back to the exhaustive profile value when a key
+            # has no explicit ceiling.
+            ceiling = SCAN_BUDGET_CEILINGS.get(key)
+            if ceiling is None:
+                ceiling = SCAN_BUDGET_DEFAULTS[normalized_scan_type]["exhaustive"].get(key)
             if (
                 key != "max_findings_per_family"
                 and isinstance(value, int)

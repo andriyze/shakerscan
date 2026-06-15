@@ -91,6 +91,11 @@ _SECONDARY_AUTH_KEYS = ("user2_header", "user2_cookies")
 # anyway; this just bounds the row/queue explosion per scan.
 MAX_SHARDS = 12
 
+# Coverage strategy partitions the FULL endpoint worklist, so big estates need
+# more shards than the generic cap. Bounded higher; excess shards simply queue
+# and run as workers free up (more shards => finer partition => more coverage).
+COVERAGE_MAX_SHARDS = 32
+
 # ``family`` strategy can express at most these distinct, non-overlapping shards
 # with the focused flags the scanner exposes today.
 FAMILY_SHARD_LABELS = ("broad", "sqli", "xss")
@@ -159,9 +164,9 @@ def _coerce_shard_request(requested_shards: Any, worker_count: int) -> int:
         return min(requested_shards, MAX_SHARDS)
     if isinstance(requested_shards, str) and requested_shards.strip().isdigit():
         return min(max(1, int(requested_shards.strip())), MAX_SHARDS)
-    # auto: one shard per available worker, clamped to [2, 4] for a balanced
-    # default that does not monopolise the fleet.
-    auto = max(2, min(4, int(worker_count or 0) or 3))
+    # auto: scale to the available worker fleet so fan-out matches capacity,
+    # bounded by MAX_SHARDS. Falls back to 3 when the fleet size is unknown.
+    auto = max(2, min(MAX_SHARDS, int(worker_count or 0) or 3))
     return auto
 
 
@@ -273,9 +278,19 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = 2000) -> list[s
     discovery shapes the scanner emits."""
     from urllib.parse import urlparse
 
+    rep = recon_result or {}
+
+    # Preferred source: the scanner's FULL emitted worklist (already
+    # custom-endpoint strings, pre-cap). Gives true ~100% coverage. Falls back
+    # to discovery samples for older scanners that don't emit it.
+    worklist = ((rep.get("active_checks") or {}).get("active_worklist"))
+    if isinstance(worklist, list) and worklist:
+        full = _normalize_endpoint_list([w for w in worklist if isinstance(w, str)])
+        if full:
+            return full[:max_endpoints]
+
     # `discovery` is a TOP-LEVEL report section (report['result'] is only the
     # grade block). Fall back to the nested location defensively.
-    rep = recon_result or {}
     disc = rep.get("discovery")
     if not isinstance(disc, dict):
         disc = ((rep.get("result") or {}).get("discovery")) or {}
@@ -333,8 +348,8 @@ def plan_coverage_shards(
     parent_options: dict[str, Any],
     endpoints: Any,
     *,
-    per_shard_cap: int = COVERAGE_PER_SHARD_CAP,
-    max_shards: int = MAX_SHARDS,
+    per_shard_cap: int | None = None,
+    max_shards: int = COVERAGE_MAX_SHARDS,
     notes: list[str] | None = None,
 ) -> "ParallelPlan":
     """Partition a discovered endpoint worklist across N=ceil(len/cap) shards so
@@ -344,6 +359,13 @@ def plan_coverage_shards(
     pass, so discovery is not repeated per shard.
     """
     notes = notes if notes is not None else []
+    # Tunable per-shard endpoint cap: smaller cap -> more (smaller) shards.
+    if per_shard_cap is None:
+        try:
+            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or COVERAGE_PER_SHARD_CAP)
+        except (TypeError, ValueError):
+            per_shard_cap = COVERAGE_PER_SHARD_CAP
+    per_shard_cap = max(1, per_shard_cap)
     eps = _normalize_endpoint_list(endpoints)
     if len(eps) < 2:
         notes.append(f"coverage: only {len(eps)} endpoints to partition; single shard")

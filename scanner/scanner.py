@@ -2251,6 +2251,50 @@ def _append_bola_finding(
 
 # ---------- Scan orchestration ----------
 
+# Upper bound on emitted worklist size (guards report bloat on huge estates).
+# Overridable per scan via custom_budget["active_worklist_max"] for huge runs.
+ACTIVE_WORKLIST_EMIT_LIMIT = 5000
+
+
+def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMIT_LIMIT) -> list[str]:
+    """Convert the full discovered endpoint pool into custom-endpoint strings
+    ("METHOD /path?query") so parallel coverage scans can re-feed and partition
+    EVERY endpoint. Host-relative + deduped; query/body params are synthesized
+    so injection testing triggers when re-fed."""
+    import urllib.parse as _up
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in endpoints or []:
+        if not isinstance(e, dict):
+            continue
+        raw = e.get("url") or e.get("path")
+        if not raw or not isinstance(raw, str):
+            continue
+        method = str(e.get("method") or "GET").upper()
+        try:
+            pu = _up.urlparse(raw if "://" in raw else "http://x" + (raw if raw.startswith("/") else "/" + raw))
+        except Exception:
+            continue
+        path = pu.path or "/"
+        params = [p for p in (e.get("params") or []) if p]
+        body = [b for b in (e.get("body_params") or []) if b]
+        if pu.query:
+            entry = f"{method} {path}?{pu.query}"
+        elif params:
+            entry = f"{method} {path}?" + "&".join(f"{p}=1" for p in params)
+        elif body and method in ("POST", "PUT", "PATCH"):
+            entry = f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
+        else:
+            entry = f"{method} {path}"
+        if entry in seen:
+            continue
+        seen.add(entry)
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def build_report(target: str,
                        dkim_selectors: list[str] | None=None,
                        openapi_url: str | None=None,
@@ -7990,6 +8034,16 @@ async def build_report(target: str,
                 else:
                     active_endpoint_budget = int(_budget_active_max)
                 before_active_endpoints = len(endpoints)
+
+                # Emit the FULL discovered worklist (pre-cap) so parallel
+                # `coverage` scans can partition every endpoint, not just the
+                # budget-capped/sampled subset. Universal for any smart scan.
+                try:
+                    _worklist_limit = int(scan_budget.get("active_worklist_max") or ACTIVE_WORKLIST_EMIT_LIMIT)
+                    active_block["active_worklist"] = _serialize_active_worklist(endpoints, limit=_worklist_limit)
+                    active_block["active_worklist_total"] = before_active_endpoints
+                except Exception as _wl_err:
+                    print(f"[scanner] active_worklist emit skipped: {_wl_err}", file=sys.stderr)
 
                 def _endpoint_distribution(items: list[dict[str, Any]], field: str) -> dict[str, int]:
                     counts: dict[str, int] = {}
