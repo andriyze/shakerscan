@@ -80,6 +80,7 @@ from retest_contract import (
     run_schema_migrations,
     validate_retest_job_payload,
 )
+import parallel_scan
 
 try:
     from ai_demo_scenarios import get_ai_test_scenarios
@@ -1004,11 +1005,16 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     now = utc_now()
 
     async with pool.acquire() as conn:
-        # Get all running scans
+        # Get all running scans. Parent rows of a parallel scan never run a
+        # scanner subprocess (they only wait on shards) so they emit no
+        # heartbeat; they are finalized by the merge job and reconciled below,
+        # so exclude them from heartbeat/duration staleness here.
         running_scans = await conn.fetch("""
-            SELECT id, scan_type, started_at, target_id, current_phase, progress, options
+            SELECT id, scan_type, started_at, target_id, current_phase, progress,
+                   options, scan_role, parent_scan_id
             FROM scans
             WHERE status = 'running' AND started_at IS NOT NULL
+              AND (scan_role IS NULL OR scan_role <> 'parent')
         """)
 
         for scan in running_scans:
@@ -1155,6 +1161,18 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 if partial_findings and target_id:
                     saved = await save_findings_from_partial(conn, scan['id'], target_id, partial_findings)
                     print(f"[cleanup] Saved {saved} findings from partial results for scan {scan_id[:8]}", flush=True)
+
+                # If this was a shard of a parallel scan, its parent may now have
+                # all children terminal — make sure the merge gets enqueued so the
+                # parent doesn't hang forever on a crashed shard.
+                parent_id = scan['parent_scan_id']
+                if parent_id:
+                    try:
+                        await parallel_scan.reconcile_parallel_parent(
+                            conn, str(parent_id), get_redis(), QUEUE_NAME
+                        )
+                    except Exception as e:
+                        print(f"[cleanup] parent reconcile error for {str(parent_id)[:8]}: {e}", flush=True)
 
 
 async def stale_scan_checker(pool: asyncpg.Pool):
@@ -1564,6 +1582,13 @@ class ScanOptions(BaseModel):
     # Format: "METHOD /path params" or just "/path"
     # Examples: "POST /api/login username,password", "/api/users", "GET /api/items?id=1"
     custom_endpoints: Optional[list[str]] = None
+    # Inline content-discovery keywords appended to ffuf directory fuzzing.
+    # e.g. ["admin", "backup", "api/v2", ".git/config"]. Additive; off when omitted.
+    custom_wordlist: Optional[list[str]] = None
+    # Inline injection payloads appended to the active SQLi/XSS payload sets.
+    # Additive; off when omitted. Also loadable via payloads/<cat>/custom.txt.
+    custom_sqli_payloads: Optional[list[str]] = None
+    custom_xss_payloads: Optional[list[str]] = None
     auth_scenario_json: Optional[str] = None  # JSON auth DSL with login flow/success condition/TOTP secret
     focus_rules_json: Optional[str] = None  # JSON array of scope focus rules
     avoid_rules_json: Optional[str] = None  # JSON array of scope avoid rules
@@ -1602,6 +1627,16 @@ class ScanOptions(BaseModel):
     )
     oob_max_payloads: Optional[int] = None         # Deprecated alias for oob_max_findings
     target_scheme_inferred: Optional[bool] = None  # Output-only: set by API when scheme was auto-inferred (do not use as input)
+
+    # Parallel scanning: split one scan of this target across the worker fleet.
+    # See docs/parallel-scan-architecture.md.
+    parallel: bool = False                          # Fan this scan out into shards
+    shards: Optional[Any] = None                    # int or "auto" (scale to workers)
+    shard_strategy: Optional[str] = Field(
+        default=None,
+        pattern="^(auto|scope|family)$",
+        description="auto (default), scope (partition custom_endpoints), or family (broad + deep sqli/xss).",
+    )
 
 
 class ScanRequest(BaseModel):
@@ -6792,12 +6827,16 @@ async def submit_scan(request: ScanRequest):
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target))
 
+        # Parallel scans become a parent row; the scan_plan job fans out shards.
+        scan_role = 'parent' if request.options.parallel else 'standalone'
+
         # Create scan record
         await conn.execute("""
-            INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type)
-            VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+            INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
+            VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
         """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
-             json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)), scan_type)
+             json.dumps(_attach_target_note(options_payload, request.target, target_note, scheme_inferred)),
+             scan_type, scan_role)
 
     # Queue the job
     job_data = {
@@ -6807,6 +6846,10 @@ async def submit_scan(request: ScanRequest):
         'options': _attach_target_note(options_payload, request.target, target_note, scheme_inferred),
         'submitted_at': utc_now_iso()
     }
+    # Parallel scans are routed to the plan stage, which decomposes the parent
+    # into shard jobs. Everything else stays on the standard scan path.
+    if request.options.parallel:
+        job_data['type'] = 'scan_plan'
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
 
@@ -6817,6 +6860,8 @@ async def submit_scan(request: ScanRequest):
         'target': normalized_target,
         'scan_type': scan_type
     }
+    if request.options.parallel:
+        response['parallel'] = True
     # Surface warning if path/query was stripped
     if target_note:
         response['warning'] = target_note
@@ -6846,10 +6891,15 @@ async def list_scans(
     target: Optional[str] = None,
     root_domain: Optional[str] = None,
     created_within_days: Optional[int] = Query(None, ge=1),
+    include_shards: bool = False,
     limit: int = Query(50, le=200),
     offset: int = 0
 ):
-    """List scans with optional filtering."""
+    """List scans with optional filtering.
+
+    Child shard rows of parallel scans are hidden by default so the Scans page
+    shows the parent as a single row (mirrors how retests stay off this list).
+    """
     async with db_pool.acquire() as conn:
         query = """
             SELECT s.*,
@@ -6868,6 +6918,11 @@ async def list_scans(
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE 1=1
         """
+        if not include_shards:
+            shard_filter = " AND (s.scan_role IS NULL OR s.scan_role <> 'shard')"
+            query += shard_filter
+            count_query += shard_filter
+
         params = []
         count_params = []
         param_idx = 1
@@ -6976,6 +7031,29 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     result['findings'] = merged_findings
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
+
+    # Parent of a parallel scan: attach a live rollup of its shards so the UI
+    # can show per-shard progress under the single parent row.
+    if result.get('scan_role') == 'parent':
+        async with db_pool.acquire() as conn:
+            shard_rows = await conn.fetch("""
+                SELECT id, scan_role, shard_index, status, score, grade,
+                       findings_count, current_phase, progress
+                FROM scans
+                WHERE parent_scan_id = $1
+                ORDER BY shard_index
+            """, uuid.UUID(scan_id))
+        shards = [row_to_dict(row) for row in shard_rows]
+        terminal = {'completed', 'failed', 'cancelled'}
+        result['shards'] = shards
+        result['shard_rollup'] = {
+            'total': len(shards),
+            'completed': sum(1 for s in shards if s.get('status') == 'completed'),
+            'failed': sum(1 for s in shards if s.get('status') == 'failed'),
+            'running': sum(1 for s in shards if s.get('status') == 'running'),
+            'pending': sum(1 for s in shards if s.get('status') == 'pending'),
+            'terminal': sum(1 for s in shards if s.get('status') in terminal),
+        }
     return result
 
 

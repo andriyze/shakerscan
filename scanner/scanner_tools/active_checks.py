@@ -5003,6 +5003,41 @@ SQLI_CROSS_DBMS_FALLBACK_PAYLOADS = [
 ]
 
 
+def _load_custom_payloads(category: str) -> list[str]:
+    """Load user-supplied payloads for a category (additive; empty by default).
+
+    Two sources, merged: a drop-in file ``payloads/<category>/custom.txt`` and an
+    inline list via the ``SHAKERSCAN_CUSTOM_<CATEGORY>_PAYLOADS`` env var
+    (newline-joined; set by the worker from the scan's custom_*_payloads option).
+    Both default to nothing, so a scan with neither behaves exactly as before.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(line: str) -> None:
+        s = line.strip()
+        if s and not s.startswith("#") and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for path in (
+        os.path.join(os.path.dirname(__file__), "..", "payloads", category, "custom.txt"),
+        f"/app/payloads/{category}/custom.txt",
+    ):
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        _add(line)
+            except OSError:
+                pass
+    env_raw = os.environ.get(f"SHAKERSCAN_CUSTOM_{category.upper()}_PAYLOADS")
+    if env_raw:
+        for line in env_raw.splitlines():
+            _add(line)
+    return out
+
+
 def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
     selected_key = dbms_key or "generic"
     payloads = list(DBMS_SQLI_PAYLOADS.get(selected_key, DBMS_SQLI_PAYLOADS["generic"]))
@@ -5011,6 +5046,10 @@ def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
         if (payload, technique) not in seen:
             payloads.append((payload, technique, description))
             seen.add((payload, technique))
+    for custom in _load_custom_payloads("sqli"):
+        if (custom, "custom") not in seen:
+            payloads.append((custom, "custom", "User-supplied SQLi payload"))
+            seen.add((custom, "custom"))
     return payloads
 
 # Context-specific XSS payloads with WAF bypass variants
@@ -6566,6 +6605,17 @@ def _check_sqli_response(
     return strong_signal, evidence
 
 
+def _select_xss_payloads(context: str) -> list[tuple[str, str, str]]:
+    """Context payloads plus any user-supplied XSS payloads (additive)."""
+    payloads = list(CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"]))
+    seen = {(p, t) for p, t, _ in payloads}
+    for custom in _load_custom_payloads("xss"):
+        if (custom, "custom") not in seen:
+            payloads.append((custom, "custom", "User-supplied XSS payload"))
+            seen.add((custom, "custom"))
+    return payloads
+
+
 async def smart_xss_test(
     url: str,
     endpoints: list[dict],
@@ -6739,7 +6789,7 @@ async def smart_xss_test(
                 continue
 
             # Get context-specific payloads
-            payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
+            payloads = _select_xss_payloads(context)
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():
@@ -6895,7 +6945,7 @@ async def smart_xss_test(
             if context == "not_reflected":
                 continue
 
-            payloads = CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"])
+            payloads = _select_xss_payloads(context)
 
             for payload, technique, description in payloads:
                 if _budget_exhausted():

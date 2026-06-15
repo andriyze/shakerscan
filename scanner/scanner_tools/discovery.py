@@ -185,6 +185,47 @@ def _read_wordlist(path: str, limit: int | None = None) -> list[str]:
     return entries
 
 
+_CUSTOM_WORDLIST_CACHE: dict[str, str | None] = {}
+
+
+def custom_wordlist_file() -> str | None:
+    """Materialize user-supplied content-discovery words into a temp file.
+
+    Words arrive via the SHAKERSCAN_CUSTOM_WORDLIST env var (newline-joined),
+    set by the worker from the scan's ``custom_wordlist`` option. Returns the
+    temp file path, or None when no custom words were supplied. Cached per
+    process so repeated discovery calls reuse the same file.
+    """
+    raw = os.environ.get("SHAKERSCAN_CUSTOM_WORDLIST")
+    if not raw:
+        return None
+    if raw in _CUSTOM_WORDLIST_CACHE:
+        return _CUSTOM_WORDLIST_CACHE[raw]
+    words = []
+    seen = set()
+    for line in raw.splitlines():
+        word = line.strip().lstrip("/")
+        if not word or word.startswith("#") or word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+    if not words:
+        _CUSTOM_WORDLIST_CACHE[raw] = None
+        return None
+    try:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="shaker_custom_wl_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(words))
+        print(f"[discovery] Loaded {len(words)} custom content-discovery words", file=sys.stderr)
+        _CUSTOM_WORDLIST_CACHE[raw] = path
+        return path
+    except OSError as e:
+        print(f"[discovery] Failed to write custom wordlist: {e}", file=sys.stderr)
+        _CUSTOM_WORDLIST_CACHE[raw] = None
+        return None
+
+
 def _unique_preserve_order(items: list[str]) -> list[str]:
     seen = set()
     ordered: list[str] = []
@@ -1527,9 +1568,11 @@ async def enhanced_url_discovery(
 
             print(f"[discovery] JS parsing found {len(js_endpoints.get('api_endpoints', []))} API endpoints, {hash_routes_added} hash routes", file=sys.stderr)
 
-    # FFUF-based directory fuzzing with appropriate wordlist
+    # FFUF-based directory fuzzing. Build the list of wordlists to fuzz with:
+    # the scan-type default plus any user-supplied custom wordlist. The custom
+    # list runs even for quick/minimal scans so explicit keywords are honored.
+    ffuf_targets: list[tuple[str, str]] = []  # (label, path)
     if ffuf_wordlist and ffuf_wordlist != "minimal":
-        # Map wordlist names to actual wordlists
         wordlist_paths = {
             "common": "/usr/share/wordlists/dirb/common.txt",
             "comprehensive": "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
@@ -1542,25 +1585,32 @@ async def enhanced_url_discovery(
                 wordlist_path = local_common
                 print("[discovery] System wordlist missing, using bundled common wordlist", file=sys.stderr)
         if wordlist_path and os.path.exists(wordlist_path):
-            print(f"[discovery] Running ffuf with {ffuf_wordlist} wordlist", file=sys.stderr)
-            ffuf_cmd = "/opt/tools/ffuf" if os.path.exists("/opt/tools/ffuf") else "ffuf"
-            ffuf_out, _, ffuf_rc = await run([
-                ffuf_cmd, "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist_path,
-                "-mc", "200,201,204,301,302,307,401,403",
-                "-ac",  # Auto-calibrate to filter soft 404s
-                "-t", "20", "-timeout", "5", "-o", "/dev/stdout", "-of", "json",
-                "-s"  # Silent mode
-            ], timeout=180)
-            if ffuf_rc == 0 and ffuf_out:
-                try:
-                    ffuf_data = json.loads(ffuf_out)
-                    for result in ffuf_data.get("results", []):
-                        found_url = result.get("url", "")
-                        if found_url and found_url not in unique_urls:
-                            unique_urls.append(found_url)
-                    print(f"[discovery] ffuf found {len(ffuf_data.get('results', []))} paths", file=sys.stderr)
-                except json.JSONDecodeError:
-                    pass
+            ffuf_targets.append((ffuf_wordlist, wordlist_path))
+
+    custom_wl = custom_wordlist_file()
+    if custom_wl:
+        ffuf_targets.append(("custom", custom_wl))
+
+    for label, wordlist_path in ffuf_targets:
+        print(f"[discovery] Running ffuf with {label} wordlist", file=sys.stderr)
+        ffuf_cmd = "/opt/tools/ffuf" if os.path.exists("/opt/tools/ffuf") else "ffuf"
+        ffuf_out, _, ffuf_rc = await run([
+            ffuf_cmd, "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist_path,
+            "-mc", "200,201,204,301,302,307,401,403",
+            "-ac",  # Auto-calibrate to filter soft 404s
+            "-t", "20", "-timeout", "5", "-o", "/dev/stdout", "-of", "json",
+            "-s"  # Silent mode
+        ], timeout=180)
+        if ffuf_rc == 0 and ffuf_out:
+            try:
+                ffuf_data = json.loads(ffuf_out)
+                for result in ffuf_data.get("results", []):
+                    found_url = result.get("url", "")
+                    if found_url and found_url not in unique_urls:
+                        unique_urls.append(found_url)
+                print(f"[discovery] ffuf ({label}) found {len(ffuf_data.get('results', []))} paths", file=sys.stderr)
+            except json.JSONDecodeError:
+                pass
 
     # Recursive directory fuzzing for deeper discovery
     # Skip if scan_type is "smart" - smart_discovery does its own recursive phase

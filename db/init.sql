@@ -82,7 +82,13 @@ CREATE TABLE scans (
 
     -- Error handling
     error_message TEXT,
-    retry_count INTEGER DEFAULT 0
+    retry_count INTEGER DEFAULT 0,
+
+    -- Parallel scan orchestration (parent/shard/merge fan-out)
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    scan_role TEXT NOT NULL DEFAULT 'standalone',  -- standalone, parent, shard
+    shard_index INTEGER,
+    shard_count INTEGER
 );
 
 -- ============================================================
@@ -330,6 +336,7 @@ CREATE INDEX idx_scans_run_kind ON scans(run_kind);
 CREATE INDEX idx_scans_status ON scans(status);
 CREATE INDEX idx_scans_created ON scans(created_at DESC);
 CREATE INDEX idx_scans_job_id ON scans(job_id);
+CREATE INDEX idx_scans_parent ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
 
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;

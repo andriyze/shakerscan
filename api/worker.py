@@ -5,6 +5,7 @@ Redis-based job worker with PostgreSQL persistence.
 """
 
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import json
@@ -39,6 +40,7 @@ from retest_contract import (
     run_schema_migrations,
     validate_retest_job_payload,
 )
+import parallel_scan
 
 try:
     from constants import resolve_scan_budget
@@ -811,6 +813,30 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
+
+    # User-supplied content-discovery keywords (additive; off when absent).
+    custom_wordlist = options.get("custom_wordlist")
+    if isinstance(custom_wordlist, list) and custom_wordlist:
+        words = []
+        for w in custom_wordlist:
+            if isinstance(w, str) and w.strip() and "\n" not in w and "\r" not in w:
+                words.append(w.strip())
+            if len(words) >= 10000:  # bound env size
+                break
+        if words:
+            scan_env["SHAKERSCAN_CUSTOM_WORDLIST"] = "\n".join(words)
+
+    # User-supplied injection payloads (additive; off when absent).
+    for opt_key, env_key in (
+        ("custom_sqli_payloads", "SHAKERSCAN_CUSTOM_SQLI_PAYLOADS"),
+        ("custom_xss_payloads", "SHAKERSCAN_CUSTOM_XSS_PAYLOADS"),
+    ):
+        vals = options.get(opt_key)
+        if isinstance(vals, list) and vals:
+            clean = [v.strip() for v in vals
+                     if isinstance(v, str) and v.strip() and "\n" not in v and "\r" not in v]
+            if clean:
+                scan_env[env_key] = "\n".join(clean[:2000])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -3631,6 +3657,376 @@ async def process_discovery_job(job_data: dict):
     print(f"[{job_id[:8]}] Discovery completed: {root_domain} | Found: {result.get('total', 0)} subdomains", flush=True)
 
 
+# ===========================================================================
+# Parallel scan orchestration: plan -> shards -> merge (scatter-gather).
+# See docs/parallel-scan-architecture.md and api/parallel_scan.py.
+# ===========================================================================
+
+def _as_report_dict(value) -> dict | None:
+    """Decode a scans.result column (asyncpg may return JSONB as str or dict)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+async def process_scan_plan_job(job_data: dict):
+    """Plan stage: decompose a parent scan into shard jobs (or fall back to a
+    standalone scan when there is nothing to parallelize)."""
+    parent_id = job_data.get('scan_id')
+    parent_job_id = job_data.get('job_id', 'unknown')
+    target = job_data.get('target')
+    options = job_data.get('options', {}) or {}
+    scan_type = (options.get('scan_type') or 'standard').strip().lower() or 'standard'
+
+    r = get_redis()
+    now = utc_now()
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT target_id, target_url FROM scans WHERE id = $1", uuid.UUID(parent_id)
+        )
+    target_id = str(row['target_id']) if row and row['target_id'] else None
+    target_url = (row['target_url'] if row else None) or target
+
+    plan = parallel_scan.plan_shards(
+        options,
+        scan_type=scan_type,
+        requested_shards=options.get('shards', 'auto'),
+        strategy=options.get('shard_strategy') or 'auto',
+        worker_count=0,
+    )
+    for note in plan.notes:
+        print(f"[{parent_id[:8]}] plan note: {note}", flush=True)
+
+    # Not worth parallelizing -> run the parent as a normal standalone scan.
+    if not plan.is_parallel:
+        print(f"[{parent_id[:8]}] plan produced {plan.shard_count} shard; running standalone", flush=True)
+        single_opts = (
+            plan.shards[0].options if plan.shards
+            else parallel_scan._base_child_options(options)
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET scan_role = 'standalone', options = $1 WHERE id = $2",
+                json.dumps(single_opts), uuid.UUID(parent_id),
+            )
+        r.rpush(QUEUE_NAME, json.dumps({
+            'job_id': parent_job_id,
+            'scan_id': parent_id,
+            'target': target,
+            'options': single_opts,
+            'submitted_at': utc_now_iso(),
+        }))
+        return
+
+    # Mark parent running and fan out child shard rows + jobs. Record the
+    # resolved strategy on the parent options so the merge can report it.
+    parent_options = dict(options)
+    parent_options['parallel_strategy'] = plan.strategy
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE scans SET status = 'running', started_at = $1,
+                current_phase = $2, progress = 5, shard_count = $3, options = $4
+            WHERE id = $5
+        """, now, f'sharded:{plan.strategy}', plan.shard_count,
+             json.dumps(parent_options), uuid.UUID(parent_id))
+
+        for shard in plan.shards:
+            child_id = str(uuid.uuid4())
+            child_job_id = str(uuid.uuid4())
+            await conn.execute("""
+                INSERT INTO scans (id, target_id, target_url, job_id, status, options,
+                                   scan_type, parent_scan_id, scan_role, shard_index, shard_count)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'shard', $8, $9)
+            """, uuid.UUID(child_id),
+                 uuid.UUID(target_id) if target_id else None,
+                 target_url, child_job_id, json.dumps(shard.options), scan_type,
+                 uuid.UUID(parent_id), shard.index, plan.shard_count)
+            r.rpush(QUEUE_NAME, json.dumps({
+                'type': parallel_scan.SHARD_JOB_TYPE,
+                'job_id': child_job_id,
+                'scan_id': child_id,
+                'parent_scan_id': parent_id,
+                'target': target,
+                'options': shard.options,
+                'shard_label': shard.label,
+                'shard_index': shard.index,
+                'shard_count': plan.shard_count,
+                'submitted_at': utc_now_iso(),
+            }))
+            r.hset(f"job:{child_job_id}", mapping={'status': 'queued', 'target': target})
+
+    r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
+    print(f"[{parent_id[:8]}] fanned out {plan.shard_count} '{plan.strategy}' shards", flush=True)
+
+
+async def process_scan_shard_job(job_data: dict):
+    """Shard stage: run run_scan() for one child scan. Findings are NOT saved to
+    the findings table here; the merge stage persists the deduped union under the
+    parent so the parent cleanly owns all findings."""
+    job_id = job_data.get('job_id', 'unknown')
+    scan_id = job_data.get('scan_id')            # child scan id
+    parent_id = job_data.get('parent_scan_id')
+    target = job_data.get('target')
+    options = job_data.get('options', {}) or {}
+    label = job_data.get('shard_label', 'shard')
+    idx = job_data.get('shard_index')
+    total = job_data.get('shard_count')
+
+    r = get_redis()
+    now = utc_now()
+    print(f"[{job_id[:8]}] Shard '{label}' ({idx}/{total}) start: {target}", flush=True)
+
+    r.hset(f"job:{job_id}", mapping={
+        'status': 'running', 'scan_id': scan_id,
+        'started_at': now.isoformat(), 'heartbeat': now.isoformat(),
+    })
+    r.delete(f"scan:{scan_id}:logs")
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE scans SET status = 'running', started_at = $1 WHERE id = $2",
+            now, uuid.UUID(scan_id),
+        )
+    await update_scan_progress(scan_id, f"shard:{label}", 5, job_id=job_id)
+
+    stop_heartbeat = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=send_heartbeats, args=(job_id, stop_heartbeat),
+        name=f"heartbeat-{job_id[:8]}", daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        try:
+            result = await run_scan(target, options, scan_id=scan_id, job_id=job_id)
+        except Exception as e:
+            result = {'target': target, 'error': str(e),
+                      'result': {'score': None, 'grade': None}, 'findings': []}
+            print(f"[{job_id[:8]}] Shard '{label}' run_scan error: {e}", flush=True)
+
+        result['job_id'] = job_id
+        result['scan_id'] = scan_id
+        result['shard_label'] = label
+        score = result.get('result', {}).get('score')
+        grade = result.get('result', {}).get('grade')
+        findings = result.get('findings', [])
+        error = result.get('error')
+        filepath = save_result_file(result, job_id)
+        completed_at = utc_now()
+        duration = int((completed_at - now).total_seconds())
+
+        async with db_pool.acquire() as conn:
+            current = await conn.fetchrow("SELECT status FROM scans WHERE id = $1", uuid.UUID(scan_id))
+            if current and current['status'] == 'failed':
+                pass  # stale checker already finalized this shard
+            elif error:
+                await conn.execute("""
+                    UPDATE scans SET status = 'failed', error_message = $1, result = $2,
+                        score = $3, grade = $4, findings_count = $5, completed_at = $6,
+                        duration_seconds = $7, progress = 100, current_phase = 'failed'
+                    WHERE id = $8
+                """, error, json.dumps(result), score, grade, len(findings),
+                     completed_at, duration, uuid.UUID(scan_id))
+            else:
+                await conn.execute("""
+                    UPDATE scans SET status = 'completed', result = $1, score = $2,
+                        grade = $3, findings_count = $4, completed_at = $5,
+                        duration_seconds = $6, progress = 100, current_phase = 'completed'
+                    WHERE id = $7
+                """, json.dumps(result), score, grade, len(findings),
+                     completed_at, duration, uuid.UUID(scan_id))
+
+        r.hset(f"job:{job_id}", mapping={
+            'status': 'failed' if error else 'completed',
+            'result_path': filepath,
+            'completed_at': completed_at.isoformat(),
+            'progress': '100',
+            'current_phase': 'failed' if error else 'completed',
+        })
+        r.expire(f"job:{job_id}", 86400)
+        print(f"[{job_id[:8]}] Shard '{label}' done | findings: {len(findings)} | error: {bool(error)}", flush=True)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
+        # Barrier + merge trigger. The DB all-terminal check in
+        # reconcile_parallel_parent is the source of truth (robust to a shard
+        # that crashed before reaching here and was failed by the stale checker).
+        if parent_id:
+            try:
+                r.decr(parallel_scan.shards_remaining_key(parent_id))
+            except Exception:
+                pass
+            try:
+                async with db_pool.acquire() as conn:
+                    enqueued = await parallel_scan.reconcile_parallel_parent(
+                        conn, parent_id, r, QUEUE_NAME
+                    )
+                if enqueued:
+                    print(f"[{job_id[:8]}] all shards terminal -> enqueued merge for {parent_id[:8]}", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] merge reconcile error: {e}", flush=True)
+
+
+async def process_scan_merge_job(job_data: dict):
+    """Merge stage: aggregate child shard results into the parent report."""
+    parent_id = job_data.get('parent_scan_id')
+    if not parent_id:
+        return
+    r = get_redis()
+    print(f"[merge {parent_id[:8]}] merging shards", flush=True)
+
+    async with db_pool.acquire() as conn:
+        parent = await conn.fetchrow("""
+            SELECT target_id, target_url, options, scan_type, created_at, started_at, job_id
+            FROM scans WHERE id = $1
+        """, uuid.UUID(parent_id))
+        if not parent:
+            print(f"[merge {parent_id[:8]}] parent not found; aborting", flush=True)
+            return
+        children = await conn.fetch("""
+            SELECT id, status, result, score, grade, findings_count, shard_index, options
+            FROM scans WHERE parent_scan_id = $1 ORDER BY shard_index
+        """, uuid.UUID(parent_id))
+
+    target_id = str(parent['target_id']) if parent['target_id'] else None
+    target_url = parent['target_url']
+    parent_job_id = parent['job_id'] or parent_id
+
+    # Aggregate findings (union, deduped by canonical fingerprint) and pick the
+    # richest completed child report as the base skeleton for the merged report.
+    union: dict[str, dict] = {}
+    base_result = None
+    base_section_count = -1
+    shard_summaries = []
+    min_score = None
+    min_score_grade = None
+    for ch in children:
+        cres = _as_report_dict(ch['result'])
+        status = ch['status']
+        shard_summaries.append({
+            'shard_index': ch['shard_index'],
+            'status': status,
+            'score': ch['score'],
+            'grade': ch['grade'],
+            'findings_count': ch['findings_count'],
+        })
+        if status == 'completed' and ch['score'] is not None:
+            if min_score is None or ch['score'] < min_score:
+                min_score = ch['score']
+                min_score_grade = ch['grade']
+        if not cres:
+            continue
+        if status == 'completed':
+            section_count = len(cres.get('result', {}) or {})
+            if section_count > base_section_count:
+                base_section_count = section_count
+                base_result = cres
+        for f in cres.get('findings', []) or []:
+            try:
+                fp = generate_finding_fingerprint(f)
+            except Exception:
+                fp = json.dumps(f, sort_keys=True, default=str)[:256]
+            union.setdefault(fp, f)
+
+    union_findings = list(union.values())
+
+    # Build merged report.
+    merged = copy.deepcopy(base_result) if base_result else {'target': target_url, 'result': {}, 'findings': []}
+    merged['findings'] = union_findings
+    if not isinstance(merged.get('result'), dict):
+        merged['result'] = {}
+
+    # Conservative aggregate: the parent is at least as bad as its worst shard.
+    agg_score = min_score if min_score is not None else merged['result'].get('score')
+    agg_grade = min_score_grade if min_score is not None else merged['result'].get('grade')
+    if agg_score is not None:
+        merged['result']['score'] = agg_score
+    if agg_grade is not None:
+        merged['result']['grade'] = agg_grade
+
+    # Recompute attack chains over the full union (they need every finding).
+    parent_options = _as_report_dict(parent['options']) or {}
+    try:
+        from scanner_tools.attack_chains import analyze_attack_chains
+        include_partial = bool(parent_options.get('include_partial_attack_chains'))
+        merged['result']['attack_chains'] = analyze_attack_chains(union_findings, include_partial)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] attack-chain recompute skipped: {e}", flush=True)
+
+    completed_n = sum(1 for c in children if c['status'] == 'completed')
+    failed_n = sum(1 for c in children if c['status'] == 'failed')
+    merged['parallel'] = {
+        'strategy': parent_options.get('parallel_strategy'),
+        'shards': shard_summaries,
+        'shards_total': len(children),
+        'shards_completed': completed_n,
+        'shards_failed': failed_n,
+    }
+    merged['job_id'] = parent_job_id
+    merged['scan_id'] = parent_id
+
+    filepath = save_result_file(merged, parent_job_id)
+
+    # Persist the deduped union under the PARENT scan id (clean ownership).
+    saved = 0
+    if target_id and union_findings:
+        try:
+            saved = await save_findings(parent_id, target_id, union_findings)
+        except Exception as e:
+            print(f"[merge {parent_id[:8]}] save_findings error: {e}", flush=True)
+
+    completed_at = utc_now()
+    start = parent['started_at'] or parent['created_at']
+    duration = None
+    if start is not None:
+        duration = int((completed_at - start.replace(tzinfo=None)).total_seconds())
+
+    # Parent is failed only if every shard failed; otherwise it completed.
+    parent_status = 'failed' if (children and completed_n == 0) else 'completed'
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE scans SET status = $1, result = $2, score = $3, grade = $4,
+                findings_count = $5, completed_at = $6, duration_seconds = $7,
+                progress = 100, current_phase = $8
+            WHERE id = $9
+        """, parent_status, json.dumps(merged), agg_score, agg_grade,
+             len(union_findings), completed_at, duration,
+             'completed' if parent_status == 'completed' else 'failed',
+             uuid.UUID(parent_id))
+
+    # Auto-retest severity-gated findings once, on the parent.
+    if parent_status == 'completed' and target_id and union_findings:
+        try:
+            await queue_auto_retests_for_scan(parent_id, target_id, target_url)
+        except Exception as e:
+            print(f"[merge {parent_id[:8]}] auto-retest error: {e}", flush=True)
+
+    r.hset(f"job:{parent_job_id}", mapping={
+        'status': parent_status,
+        'result_path': filepath,
+        'score': str(agg_score) if agg_score is not None else 'N/A',
+        'grade': str(agg_grade) if agg_grade else 'N/A',
+        'completed_at': completed_at.isoformat(),
+        'progress': '100',
+        'current_phase': parent_status,
+    })
+    r.expire(f"job:{parent_job_id}", 86400)
+    r.delete(parallel_scan.shards_remaining_key(parent_id))
+    print(
+        f"[merge {parent_id[:8]}] {parent_status} | shards {completed_n}/{len(children)} ok | "
+        f"findings(union): {len(union_findings)} saved:{saved} | score:{agg_score} grade:{agg_grade}",
+        flush=True,
+    )
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     job_type = job_data.get('type', 'scan')
@@ -3639,6 +4035,12 @@ async def process_job(job_data: dict):
         await process_discovery_job(job_data)
     elif job_type == 'finding_retest':
         await process_finding_retest_job(job_data)
+    elif job_type == parallel_scan.PLAN_JOB_TYPE:
+        await process_scan_plan_job(job_data)
+    elif job_type == parallel_scan.SHARD_JOB_TYPE:
+        await process_scan_shard_job(job_data)
+    elif job_type == parallel_scan.MERGE_JOB_TYPE:
+        await process_scan_merge_job(job_data)
     else:
         await process_scan_job(job_data)
 

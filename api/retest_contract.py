@@ -552,6 +552,19 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
 
+            # Parallel scan orchestration (parent/shard/merge fan-out).
+            await conn.execute("""
+                ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS scan_role TEXT NOT NULL DEFAULT 'standalone',
+                ADD COLUMN IF NOT EXISTS shard_index INTEGER,
+                ADD COLUMN IF NOT EXISTS shard_count INTEGER
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scans_parent
+                ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL
+            """)
+
             # AI Gate targets.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_targets (

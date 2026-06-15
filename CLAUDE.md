@@ -472,6 +472,49 @@ curl -X POST http://localhost:8080/scans \
 
 By default, smart scan stops early when 3+ critical or 5+ high findings are found, and uses the `balanced` budget. With `no_early_stop` and `thorough_params`, it keeps scanning regardless of findings and promotes to `thorough` (unless an explicit budget is set).
 
+### Parallel Scanning
+
+Split one scan of a single target across the worker fleet. The parent scan fans out into shard sub-scans (run by any free workers), then a merge step aggregates the deduped findings into the parent report. Design + status: `docs/parallel-scan-architecture.md`.
+
+```bash
+# Family strategy (default for non-endpoint scans): one broad shard + deeper
+# SQLi- and XSS-focused shards. More coverage/budget in ~the same wall-clock.
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart", "parallel": true, "shard_strategy": "family"}}'
+
+# Scope strategy: partition custom_endpoints across shards (genuine speed-up for APIs).
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://api.example.com",
+       "options": {"scan_type": "smart", "parallel": true, "shards": 4,
+                   "shard_strategy": "scope",
+                   "custom_endpoints": ["GET /api/a?id=1", "GET /api/b?id=2", "..."]}}'
+```
+
+| Option | Description |
+|--------|-------------|
+| `parallel` | Fan this scan out into shards (default false) |
+| `shards` | Shard count: integer or `"auto"` (scales to the worker fleet; family caps at 3: broad/sqli/xss) |
+| `shard_strategy` | `auto` (default), `scope` (partition `custom_endpoints`), or `family` (broad + deep sqli/xss) |
+
+The parent appears as one row on the Scans page; shard rows are hidden by default. `GET /scans/{id}` returns `shard_rollup` + a per-shard list. `family` requires an active scan type (`smart`/`full`/`aggressive`); passive types degrade to a single normal scan.
+
+### Custom Dictionaries (wordlists & payloads)
+
+Additive extension points (off by default — absence = no behavior change):
+
+```bash
+# Inline content-discovery keywords appended to ffuf directory fuzzing
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart",
+                   "custom_wordlist": ["admin", "backup", "api/internal/v2", ".git/config"],
+                   "custom_sqli_payloads": ["'\'' OR pg_sleep(5)--"],
+                   "custom_xss_payloads": ["<x onfocus=alert(1) autofocus>"]}}'
+```
+
+Payloads can also be dropped into `scanner/payloads/sqli/custom.txt` / `scanner/payloads/xss/custom.txt`. Custom SQLi/XSS payloads are appended to the active selection in `_select_sqli_payloads` / `_select_xss_payloads`; custom wordlist words feed an extra ffuf pass via `enhanced_url_discovery`.
+
 ## Scan Types Explained
 
 Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules; adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
