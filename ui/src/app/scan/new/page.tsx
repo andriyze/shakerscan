@@ -3,7 +3,16 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { submitScan } from '@/lib/api'
-import { BUDGET_PROFILES, SCAN_TYPES, getScanOptions, type BudgetProfile, type ScanType } from '@/lib/constants'
+import {
+  BUDGET_PROFILES,
+  PARALLEL_STRATEGIES,
+  SCAN_TYPES,
+  getScanOptions,
+  supportsParallelFamily,
+  type BudgetProfile,
+  type ParallelStrategy,
+  type ScanType
+} from '@/lib/constants'
 import { Button, Card, useToast } from '@/components/ui'
 
 const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
@@ -48,6 +57,10 @@ export default function NewScanPage() {
   const [scanType, setScanType] = useState<ScanType>('quick')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [loading, setLoading] = useState(false)
+  const [parallelEnabled, setParallelEnabled] = useState(false)
+  const [parallelStrategy, setParallelStrategy] = useState<ParallelStrategy>('auto')
+  const [parallelShards, setParallelShards] = useState<'auto' | '2' | '3' | '4' | '6'>('auto')
+  const [customEndpointsText, setCustomEndpointsText] = useState('')
 
   // Advanced options
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -75,6 +88,13 @@ export default function NewScanPage() {
     dom_xss_max_files: ''
   })
 
+  const customEndpoints = customEndpointsText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const parallelFamilySupported = supportsParallelFamily(scanType)
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const validationError = validateTarget(target)
@@ -87,6 +107,20 @@ export default function NewScanPage() {
     setTargetError(null)
 
     try {
+      if (parallelEnabled) {
+        const hasScopeEndpoints = customEndpoints.length >= 2
+        if (parallelStrategy === 'scope' && !hasScopeEndpoints) {
+          toast.error('Endpoint scope sharding needs at least two custom endpoints.')
+          setLoading(false)
+          return
+        }
+        if (parallelStrategy !== 'scope' && !hasScopeEndpoints && !parallelFamilySupported) {
+          toast.error('Parallel auto/family mode needs Smart, Full, or Aggressive scan type unless custom endpoints are provided.')
+          setLoading(false)
+          return
+        }
+      }
+
       // Combine scan type options with advanced options
       const customBudgetPayload = Object.fromEntries(
         Object.entries(customBudget)
@@ -97,6 +131,14 @@ export default function NewScanPage() {
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
         budget_profile: budgetProfile,
+        ...(customEndpoints.length > 0 ? { custom_endpoints: customEndpoints } : {}),
+        ...(parallelEnabled
+          ? {
+              parallel: true,
+              shards: parallelShards === 'auto' ? 'auto' : Number.parseInt(parallelShards, 10),
+              shard_strategy: parallelStrategy
+            }
+          : {}),
         ...(showAdvanced ? options : {}),
         ...(showAdvanced && customBudgetEnabled && Object.keys(customBudgetPayload).length > 0
           ? { custom_budget: customBudgetPayload }
@@ -208,6 +250,86 @@ export default function NewScanPage() {
               </button>
             ))}
           </div>
+        </Card>
+
+        {/* Execution Mode */}
+        <Card className="p-4">
+          <label className="block text-sm font-medium text-gray-400 mb-3">
+            Execution
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setParallelEnabled(false)}
+              className={`p-3 rounded-lg border text-left transition-colors ${
+                !parallelEnabled
+                  ? 'border-blue-500 bg-blue-500/10'
+                  : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+              }`}
+            >
+              <div className="font-medium text-white">Normal</div>
+              <div className="text-xs text-gray-500 mt-1">One worker handles this scan.</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setParallelEnabled(true)}
+              className={`p-3 rounded-lg border text-left transition-colors ${
+                parallelEnabled
+                  ? 'border-blue-500 bg-blue-500/10'
+                  : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+              }`}
+            >
+              <div className="font-medium text-white">Parallel</div>
+              <div className="text-xs text-gray-500 mt-1">Fan out work across available workers.</div>
+            </button>
+          </div>
+
+          {parallelEnabled && (
+            <div className="mt-4 space-y-4 border-t border-gray-800 pt-4">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="space-y-1">
+                  <span className="block text-xs text-gray-500">Shards</span>
+                  <select
+                    value={parallelShards}
+                    onChange={(event) => setParallelShards(event.target.value as typeof parallelShards)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="6">6</option>
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-xs text-gray-500">Strategy</span>
+                  <select
+                    value={parallelStrategy}
+                    onChange={(event) => setParallelStrategy(event.target.value as ParallelStrategy)}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {PARALLEL_STRATEGIES.map((strategy) => (
+                      <option key={strategy.value} value={strategy.value}>{strategy.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="space-y-1 block">
+                <span className="block text-xs text-gray-500">Known API endpoints for scope sharding</span>
+                <textarea
+                  value={customEndpointsText}
+                  onChange={(event) => setCustomEndpointsText(event.target.value)}
+                  rows={4}
+                  placeholder={'GET /api/users?id=1\nPOST /api/login username,password'}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+              </label>
+              <p className="text-xs text-gray-500">
+                Endpoint scope sharding is the fastest path when you provide known endpoints.
+                Without endpoints, parallel mode is useful for Smart, Full, and Aggressive scans through broad/SQLi/XSS family shards.
+              </p>
+            </div>
+          )}
         </Card>
 
         {/* Advanced Options */}

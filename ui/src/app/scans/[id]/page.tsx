@@ -89,6 +89,57 @@ function ScanVerdictCard({ scan }: { scan: any }) {
   )
 }
 
+function ParallelShardRollup({ scan }: { scan: any }) {
+  if (scan?.scan_role !== 'parent' || !Array.isArray(scan?.shards)) {
+    return null
+  }
+
+  const rollup = scan.shard_rollup || {}
+  return (
+    <Card className="p-4 mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-300">Parallel Shards</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {rollup.terminal || 0}/{rollup.total || scan.shards.length} terminal,
+            {' '}{rollup.completed || 0} completed,
+            {' '}{rollup.failed || 0} failed
+          </p>
+        </div>
+        {scan.options?.parallel_strategy && (
+          <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
+            {String(scan.options.parallel_strategy)} strategy
+          </span>
+        )}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {scan.shards.map((shard: any) => (
+          <Link
+            href={`/scans/${shard.id}`}
+            key={shard.id}
+            className="block rounded border border-gray-800 bg-gray-900/60 p-3 hover:border-gray-700"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm text-white">Shard {Number(shard.shard_index ?? 0) + 1}</span>
+              <span className="text-xs uppercase text-gray-400">{shard.status}</span>
+            </div>
+            <div className="mt-2 h-1.5 rounded bg-gray-800">
+              <div
+                className="h-1.5 rounded bg-blue-500"
+                style={{ width: `${Math.max(0, Math.min(100, Number(shard.progress || 0)))}%` }}
+              />
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+              <span>{shard.current_phase || 'queued'}</span>
+              <span>{shard.findings_count || 0} findings</span>
+            </div>
+          </Link>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
 function ScanDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
@@ -204,6 +255,7 @@ function ScanDetailContent() {
             The scan is in progress. This page will automatically update when complete.
           </p>
         </div>
+        <ParallelShardRollup scan={scan} />
 
         <Card className="p-4">
           <div className="flex items-center justify-between mb-2">
@@ -267,6 +319,7 @@ function ScanDetailContent() {
               </div>
             </div>
           </div>
+          <ParallelShardRollup scan={scan} />
           <ReportView
             scan={scan}
             isAuthenticated={true}
@@ -291,6 +344,7 @@ function ScanDetailContent() {
           <h2 className="text-lg font-semibold mb-2">Scan Failed</h2>
           <p>{scan.error_message || 'An unknown error occurred during the scan.'}</p>
         </div>
+        <ParallelShardRollup scan={scan} />
       </div>
     )
   }
@@ -307,6 +361,7 @@ function ScanDetailContent() {
         <span className="text-gray-500">Back to scans</span>
       </div>
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} />}
+      <ParallelShardRollup scan={scan} />
       <ReportView
         scan={scan}
         isAuthenticated={true}

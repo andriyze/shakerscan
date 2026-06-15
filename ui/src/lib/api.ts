@@ -84,6 +84,18 @@ export interface Scan {
   duration_seconds?: number
   error_message?: string
   options?: Record<string, unknown> | null
+  scan_role?: 'standalone' | 'parent' | 'shard' | string | null
+  parent_scan_id?: string | null
+  shard_index?: number | null
+  shard_count?: number | null
+  shard_rollup?: {
+    total: number
+    completed: number
+    failed: number
+    running: number
+    pending: number
+    terminal: number
+  }
 }
 
 export interface ModelIntakeScanRequest {
@@ -1005,7 +1017,7 @@ export async function createTarget(url: string, name?: string) {
   return res.json()
 }
 
-export async function scanTarget(targetId: string, options: Record<string, boolean | string> = {}) {
+export async function scanTarget(targetId: string, options: Record<string, unknown> = {}) {
   const res = await fetch(`${API_URL}/targets/${targetId}/scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

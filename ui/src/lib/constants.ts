@@ -2,6 +2,7 @@
 
 export type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
 export type BudgetProfile = 'fast' | 'balanced' | 'thorough' | 'exhaustive'
+export type ParallelStrategy = 'auto' | 'scope' | 'family'
 
 export interface ScanTypeOption {
   value: ScanType
@@ -70,6 +71,22 @@ export const BUDGET_PROFILES: Array<{
   { value: 'thorough', label: 'Thorough', description: 'Higher coverage for staging and release checks' },
   { value: 'exhaustive', label: 'Exhaustive', description: 'Maximum coverage; can run for hours' },
 ]
+
+export const PARALLEL_STRATEGIES: Array<{
+  value: ParallelStrategy
+  label: string
+  description: string
+}> = [
+  { value: 'auto', label: 'Auto', description: 'Use endpoint sharding when endpoints are provided; otherwise use active-family sharding.' },
+  { value: 'scope', label: 'Endpoint scope', description: 'Split known API endpoints across workers. Best for real speed-up.' },
+  { value: 'family', label: 'Check family', description: 'Run broad, SQLi-focused, and XSS-focused shards in parallel for active scans.' },
+]
+
+export const PARALLEL_ACTIVE_SCAN_TYPES: ScanType[] = ['smart', 'full', 'aggressive']
+
+export function supportsParallelFamily(scanType: ScanType): boolean {
+  return PARALLEL_ACTIVE_SCAN_TYPES.includes(scanType)
+}
 
 export const SEVERITY_LEVELS = ['critical', 'high', 'medium', 'low', 'info'] as const
 export type SeverityLevel = typeof SEVERITY_LEVELS[number]

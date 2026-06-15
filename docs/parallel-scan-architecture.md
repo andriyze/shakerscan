@@ -17,10 +17,57 @@
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. The scanner subprocess still does not poll the cancel flag mid-run.
 - **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
+- **UI controls:** New Scan exposes Normal/Parallel execution, shard count, strategy, and endpoint-scope input. Scans rerun actions expose parallel Smart/Full/Aggressive, and Scan Detail shows parent shard rollup.
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
 - **Tests:** `tests/test_parallel_scan.py` (23) + `tests/test_custom_dictionaries.py` (8). Verified live: scope run (2 findings, 94s) and family run (10 raw → 4 deduped findings, 3/3 shards).
 
-**Deferred (Phase 2, documented below):** the build_report carve-out for true "discover-once then endpoint-slice" raw speed-up (family currently repeats discovery per shard — depth over speed); a first-class check registry; cooperative cancellation polling inside the scanner subprocess; dedicated UI components for parent/shard progress.
+**Deferred (Phase 2, documented below):** the build_report carve-out for true "discover-once then endpoint-slice" raw speed-up (family currently repeats discovery per shard — depth over speed); a first-class check registry; cooperative cancellation polling inside the scanner subprocess; richer UI breakdowns for shard coverage contribution.
+
+---
+
+## Product behavior
+
+Parallel scanning is now a user-selectable execution mode, not an automatic default.
+Standalone scans remain the default for compatibility and resource control.
+
+User-facing rules:
+
+- **New Scan:** users can choose `Normal` or `Parallel`, select shard count
+  (`auto`, `2`, `3`, `4`, `6`), select strategy (`auto`, `scope`, `family`),
+  and optionally paste known API endpoints for endpoint-scope sharding.
+- **Scans page rerun:** normal reruns are still available for every scan type; Smart,
+  Full, and Aggressive also expose a `Parallel` rerun action using auto shards/strategy.
+- **Scan Detail:** parent scans show a shard rollup. Child shard rows are implementation
+  details and are hidden from the main Scans list unless the API caller explicitly asks
+  for `include_shards=true`.
+- **Automatic enablement:** not enabled by default yet. This avoids surprising users with
+  multiple active-testing shards or extra resource use.
+
+Performance expectations:
+
+- **Fastest real speed-up today:** `parallel=true` + `scope` strategy + at least two
+  `custom_endpoints`. Each shard receives a distinct endpoint slice.
+- **More depth in parallel today:** Smart, Full, and Aggressive can use `family`
+  strategy: broad + SQLi-focused + XSS-focused shards. This often improves coverage in
+  the same wall-clock window, but each shard still repeats discovery/pre-scan work.
+- **Still deferred:** the ideal "discover once, build endpoint worklist once, then shard
+  active checks" scanner refactor. That is the Phase 2 scanner-stage extraction below.
+
+Productization plan:
+
+1. **Expose parallel execution safely in the UI.** Implemented: New Scan has Normal vs
+   Parallel execution, shard count, strategy selection, and endpoint input. The Scans page
+   rerun menu exposes parallel Smart/Full/Aggressive actions.
+2. **Keep one logical scan visible.** Implemented: shard rows are hidden from the Scans
+   list by default, parent rows are labeled as Parallel, and Scan Detail shows a shard
+   rollup for parent scans.
+3. **Keep cancellation/state safe.** Implemented: cancelling a parent cancels child rows,
+   blocks merge, and prevents late shard writes from reviving cancelled scans.
+4. **Make statistics count logical scans.** Implemented: shard rows are excluded from
+   target scan totals, latest-scan views, and dashboard scan counts.
+5. **Implement true scanner-stage sharding.** Deferred: extract recon/discovery into a
+   reusable stage, persist the endpoint worklist/context, then run active checks over
+   endpoint slices without repeating discovery per shard.
 
 ---
 
