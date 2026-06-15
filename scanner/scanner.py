@@ -2780,6 +2780,16 @@ async def build_report(target: str,
                 "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
             }
 
+            # Flag this as a failed scan, not a graded "completed" one: the
+            # worker keys completed-vs-failed off result["error"]. Without this,
+            # an unreachable target was persisted as completed with a misleading
+            # placeholder grade.
+            report["error"] = (
+                "Target unreachable during pre-scan validation: "
+                + "; ".join(str(w) for w in pre_scan_issues)
+                if pre_scan_issues
+                else "Target unreachable during pre-scan validation"
+            )
             emit_progress("pre_scan_failed", 100, "target unreachable")
             return report
         else:

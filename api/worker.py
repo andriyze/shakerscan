@@ -1014,8 +1014,15 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                     return partial
             except Exception:
                 pass
+        # Always surface a non-empty error: the caller marks a scan failed only
+        # when result["error"] is truthy. A crashed/silent scanner (no JSON, no
+        # stderr, no timeout) must not be mislabeled "completed".
         return {
-            'error': timeout_reason or stderr_text,
+            'error': (
+                timeout_reason
+                or stderr_text
+                or f"Scanner produced no output (exit code {proc.returncode})"
+            ),
             'target': target,
             'exit_code': proc.returncode
         }
