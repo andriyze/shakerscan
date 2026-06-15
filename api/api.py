@@ -5191,6 +5191,7 @@ async def get_ai_inventory(
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE s.result IS NOT NULL
+              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND (
                 $1::text IS NULL
                 OR t.root_domain = $1::text
@@ -5773,7 +5774,9 @@ async def dashboard():
         metrics = await conn.fetchrow("SELECT * FROM dashboard_metrics")
         recent_scans = await conn.fetch("""
             SELECT id, target_url, status, score, grade, created_at, completed_at
-            FROM scans ORDER BY created_at DESC LIMIT 10
+            FROM scans
+            WHERE (scan_role IS NULL OR scan_role <> 'shard')
+            ORDER BY created_at DESC LIMIT 10
         """)
         recent_findings = await conn.fetch("""
             SELECT id, title, severity, status, tool, first_seen_at
@@ -5847,7 +5850,8 @@ async def exposure_graph(
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE (
+            WHERE (s.scan_role IS NULL OR s.scan_role <> 'shard')
+              AND (
                 $1::text IS NULL
                 OR t.root_domain = $1::text
                 OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%'
@@ -6265,6 +6269,7 @@ async def exposure_assets(
                        result ->> 'coverage_status' AS top_coverage_status
                 FROM scans s
                 WHERE s.target_id = t.id
+                  AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
                 ORDER BY s.created_at DESC
                 LIMIT 1
             ) ls ON true
@@ -6668,6 +6673,7 @@ async def exposure_changes(
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE s.status = 'failed' AND s.created_at > $1
+              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND ($2::text IS NULL OR t.root_domain = $2::text
                    OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
             ORDER BY s.created_at DESC
@@ -6844,6 +6850,7 @@ async def exposure_attack_paths(
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE s.status = 'completed' AND s.result IS NOT NULL
+              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
               AND ($1::text IS NULL OR t.root_domain = $1::text
                    OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
             ORDER BY s.created_at DESC
@@ -7773,10 +7780,11 @@ async def get_target(target_id: str):
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
 
-        # Get recent scans
+        # Get recent scans (exclude child shard rows of parallel scans)
         scans = await conn.fetch("""
             SELECT id, status, score, grade, created_at, completed_at
-            FROM scans WHERE target_id = $1
+            FROM scans
+            WHERE target_id = $1 AND (scan_role IS NULL OR scan_role <> 'shard')
             ORDER BY created_at DESC LIMIT 10
         """, uuid.UUID(target_id))
 
