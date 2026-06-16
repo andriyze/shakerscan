@@ -340,11 +340,12 @@ def test_run_scan_maps_skip_global_checks_flag(monkeypatch):
 
     result = asyncio.run(worker.run_scan(
         "https://example.com",
-        {"scan_type": "smart", "skip_global_checks": True},
+        {"scan_type": "smart", "skip_global_checks": True, "focused_endpoints_only": True},
     ))
 
     assert result.get("ok") is True
     assert "--skip-global-checks" in captured["cmd"]
+    assert "--focused-endpoints-only" in captured["cmd"]
 
 
 def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):

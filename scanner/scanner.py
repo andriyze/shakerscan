@@ -2423,6 +2423,7 @@ async def build_report(target: str,
                        avoid_rules_json: str | None=None,
                        verified_findings_only: bool | None=None,
                        skip_global_checks: bool=False,
+                       focused_endpoints_only: bool=False,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -2637,11 +2638,12 @@ async def build_report(target: str,
                 file=sys.stderr
             )
 
+    focused_scope_family = focused_active_family_name or ("endpoints" if focused_endpoints_only else None)
     focused_scope = FocusedScope.from_request(
         smart_mode=smart_mode,
         # Pass the resolved family name string (e.g. "xss"), not the bool
         # `focused_active_family` predicate.
-        family=focused_active_family_name,
+        family=focused_scope_family,
         manual_endpoints=manual_endpoints_norm,
     )
     # Backwards-compatible alias. New code should reference focused_scope.
@@ -2659,6 +2661,8 @@ async def build_report(target: str,
         print("[smart] Focused manual active scope: disabling generic discovery expansion", file=sys.stderr)
     if skip_global_checks:
         print("[scanner] Parallel child shard: skipping duplicate global exposure checks", file=sys.stderr)
+    if focused_endpoints_only and focused_manual_active_scope:
+        print("[scanner] Endpoint-focused shard: using assigned endpoints without generic discovery expansion", file=sys.stderr)
 
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
@@ -10865,6 +10869,7 @@ async def cli_main():
     ap.add_argument("--api-token", help="Bearer token for API testing (Authorization header)")
     ap.add_argument("--endpoints", action="append", help="Manual endpoint (e.g., 'GET /api/v1/users id,email' or '/api/login')")
     ap.add_argument("--endpoints-file", help="File with manual endpoints (one per line, same format as --endpoints)")
+    ap.add_argument("--focused-endpoints-only", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--active", action="store_true", help="Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs")
     ap.add_argument("--xss", action="store_true", help="Run only XSS active checks (implies --active)")
     ap.add_argument("--sqli", action="store_true", help="Run only SQLi active checks (implies --active)")
@@ -12087,6 +12092,7 @@ async def cli_main():
         avoid_rules_json=args.avoid_rules_json,
         verified_findings_only=args.verified_findings_only,
         skip_global_checks=args.skip_global_checks,
+        focused_endpoints_only=getattr(args, "focused_endpoints_only", False),
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
         # Smart scan tuning

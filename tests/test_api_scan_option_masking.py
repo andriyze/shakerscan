@@ -72,6 +72,37 @@ if "fastapi" not in sys.modules:
 import api as api_module  # noqa: E402
 
 
+def test_parallel_parent_rollup_derives_progress_from_shards():
+    result = {"status": "running", "progress": 5}
+    shards = [
+        {"status": "completed", "progress": 100},
+        {"status": "running", "progress": 80},
+        {"status": "pending", "progress": 0},
+    ]
+
+    api_module._attach_parallel_shard_rollup(result, shards)
+
+    assert result["progress"] == 60
+    assert result["shard_rollup"] == {
+        "total": 3,
+        "completed": 1,
+        "failed": 0,
+        "running": 1,
+        "pending": 1,
+        "terminal": 1,
+        "average_progress": 60,
+    }
+
+
+def test_parallel_parent_rollup_keeps_unfinished_parent_below_complete():
+    result = {"status": "running", "progress": 5}
+    shards = [{"status": "completed", "progress": 100}]
+
+    api_module._attach_parallel_shard_rollup(result, shards)
+
+    assert result["progress"] == 99
+
+
 class _FakeAsmRedis:
     def __init__(self):
         self.store = {}

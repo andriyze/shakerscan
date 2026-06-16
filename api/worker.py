@@ -709,6 +709,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.append('--include-partial-attack-chains')
     if options.get('skip_global_checks'):
         cmd.append('--skip-global-checks')
+    if options.get('focused_endpoints_only'):
+        cmd.append('--focused-endpoints-only')
 
     # Smart scan tuning options
     if options.get('no_early_stop'):
@@ -4308,10 +4310,12 @@ async def process_scan_merge_job(job_data: dict):
                 base_section_count = section_count
                 base_result = cres
         for f in cres.get('findings', []) or []:
-            try:
-                fp = generate_finding_fingerprint(f)
-            except Exception:
-                fp = json.dumps(f, sort_keys=True, default=str)[:256]
+            fp = parallel_scan.finding_merge_key(f)
+            if not fp:
+                try:
+                    fp = generate_finding_fingerprint(f)
+                except Exception:
+                    fp = json.dumps(f, sort_keys=True, default=str)[:256]
             union.setdefault(fp, f)
 
     union_findings = list(union.values())

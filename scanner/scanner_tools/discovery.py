@@ -335,6 +335,58 @@ def _is_api_candidate_path(target_url: str) -> bool:
     return any(marker in path for marker in api_markers)
 
 
+FILE_LIKE_DISCOVERY_EXTENSIONS = {
+    ".txt", ".json", ".yaml", ".yml", ".xml", ".php", ".asp", ".aspx",
+    ".jsp", ".config", ".ini", ".env", ".sql", ".log", ".bak", ".old",
+}
+
+
+def _is_file_like_segment(segment: str) -> bool:
+    if not segment:
+        return False
+    lowered = segment.lower().strip()
+    if lowered in {".well-known", ".."}:
+        return False
+    _, ext = os.path.splitext(lowered)
+    return ext in FILE_LIKE_DISCOVERY_EXTENSIONS
+
+
+def _has_file_like_parent_path(target_url: str) -> bool:
+    """True when a candidate was fuzzed below a static/document path."""
+    parsed = urllib.parse.urlparse(target_url)
+    segments = [s for s in (parsed.path or "").split("/") if s]
+    return any(_is_file_like_segment(segment) for segment in segments[:-1])
+
+
+def _is_file_like_path(target_url: str) -> bool:
+    parsed = urllib.parse.urlparse(target_url)
+    path = parsed.path or target_url
+    segment = path.rstrip("/").rsplit("/", 1)[-1]
+    return _is_file_like_segment(segment)
+
+
+def _is_api_probe_base_path(api_base: str) -> bool:
+    """Limit resource fan-out to paths that are actually API-style bases."""
+    parsed = urllib.parse.urlparse(api_base)
+    path = parsed.path or api_base
+    if _has_file_like_parent_path(path) or _is_file_like_path(path):
+        return False
+    segments = [s.lower() for s in path.strip("/").split("/") if s]
+    if not segments:
+        return False
+    api_segments = {"api", "rest", "graphql", "gql", "auth", "oauth", "oauth2"}
+    if any(segment in api_segments for segment in segments):
+        return True
+    first = segments[0]
+    return bool(re.fullmatch(r"v\d+(?:\.\d+)?", first))
+
+
+def _is_recursive_seed_path(path: str) -> bool:
+    if _has_file_like_parent_path(path) or _is_file_like_path(path):
+        return False
+    return path.endswith("/") and _is_interesting_path(path)
+
+
 def _looks_like_api_error(body: str) -> bool:
     if not body:
         return False
@@ -505,8 +557,12 @@ def path_exists(
     protected = status in (401, 403)
 
     if status in (200, 201, 202, 204):
+        if require_api_style and _has_file_like_parent_path(target_url):
+            return False, "file_parent_success", False
         if require_api_style and is_html:
             return False, "html_success", False
+        if require_api_style and status != 204 and not is_json and not _is_api_candidate_path(target_url):
+            return False, "non_api_success", protected
         return True, "success", protected
 
     if status in (301, 302, 303, 307, 308):
@@ -1617,7 +1673,7 @@ async def enhanced_url_discovery(
     if do_recursive_fuzzing and scan_type != "smart":
         print(f"[discovery] Running recursive directory discovery", file=sys.stderr)
         # Collect directory paths from discovered URLs
-        initial_dirs = [u for u in unique_urls if u.endswith("/")]
+        initial_dirs = [u for u in unique_urls if _is_recursive_seed_path(u)]
         # Also add common starting points
         parsed = urllib.parse.urlparse(url)
         base = f"{parsed.scheme}://{parsed.netloc}"
@@ -2997,7 +3053,7 @@ async def recursive_directory_discovery(
     signals = signals or {}
 
     all_paths: list[str] = list(initial_paths)
-    current_level = [p for p in initial_paths if p.endswith("/") and _is_interesting_path(p)]
+    current_level = [p for p in initial_paths if _is_recursive_seed_path(p)]
 
     stats = {
         "depth_reached": 0,
@@ -3027,7 +3083,7 @@ async def recursive_directory_discovery(
                 if path not in all_paths:
                     all_paths.append(path)
                     # Add directories to next level for recursive fuzzing
-                    if path.endswith("/") and _is_interesting_path(path):
+                    if _is_recursive_seed_path(path):
                         next_level.append(path)
 
         stats["paths_per_level"].append({
@@ -3450,7 +3506,7 @@ async def smart_discovery(
 
     # Get initial directories for recursive fuzzing
     all_urls = initial_discovery.get("all_urls", [])
-    directories = [u for u in all_urls if u.endswith("/")]
+    directories = [u for u in all_urls if _is_recursive_seed_path(u)]
 
     # Also get API base paths
     api_endpoints = initial_discovery.get("api_endpoints", [])
@@ -3460,7 +3516,7 @@ async def smart_discovery(
         path_parts = parsed.path.split("/")
         if len(path_parts) >= 2:
             api_base = "/".join(path_parts[:3]) + "/"
-            if api_base != "/":
+            if api_base != "/" and _is_api_probe_base_path(api_base):
                 api_bases.add(api_base)
 
     directories.extend(list(api_bases))
@@ -3516,7 +3572,7 @@ async def smart_discovery(
             # Add probed paths to directories for recursive fuzzing
             for p in probed:
                 path = p.get("path", "")
-                if path and not path.endswith("/"):
+                if path and not path.endswith("/") and not _is_file_like_path(path):
                     directories.append(path + "/")
 
         if probed_endpoints:

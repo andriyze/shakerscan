@@ -223,6 +223,27 @@ def row_to_dict(row) -> dict:
     return d
 
 
+def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str, Any]]) -> None:
+    """Attach shard rollup and derive live parent progress from child progress."""
+    terminal = {'completed', 'failed', 'cancelled'}
+    progress_values = [int(s.get('progress') or 0) for s in shards]
+    average_progress = int(round(sum(progress_values) / len(progress_values))) if progress_values else 0
+    result['shards'] = shards
+    result['shard_rollup'] = {
+        'total': len(shards),
+        'completed': sum(1 for s in shards if s.get('status') == 'completed'),
+        'failed': sum(1 for s in shards if s.get('status') == 'failed'),
+        'running': sum(1 for s in shards if s.get('status') == 'running'),
+        'pending': sum(1 for s in shards if s.get('status') == 'pending'),
+        'terminal': sum(1 for s in shards if s.get('status') in terminal),
+        'average_progress': average_progress,
+    }
+    if shards and result.get('status') in {'pending', 'running'}:
+        current = int(result.get('progress') or 0)
+        # Keep unfinished parents below 100; the merge job owns completion.
+        result['progress'] = min(99, max(current, average_progress))
+
+
 def get_redis():
     """Get Redis connection."""
     return redis.from_url(REDIS_URL, decode_responses=True)
@@ -7582,18 +7603,9 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 FROM scans
                 WHERE parent_scan_id = $1
                 ORDER BY shard_index
-            """, uuid.UUID(scan_id))
+        """, uuid.UUID(scan_id))
         shards = [row_to_dict(row) for row in shard_rows]
-        terminal = {'completed', 'failed', 'cancelled'}
-        result['shards'] = shards
-        result['shard_rollup'] = {
-            'total': len(shards),
-            'completed': sum(1 for s in shards if s.get('status') == 'completed'),
-            'failed': sum(1 for s in shards if s.get('status') == 'failed'),
-            'running': sum(1 for s in shards if s.get('status') == 'running'),
-            'pending': sum(1 for s in shards if s.get('status') == 'pending'),
-            'terminal': sum(1 for s in shards if s.get('status') in terminal),
-        }
+        _attach_parallel_shard_rollup(result, shards)
     return result
 
 

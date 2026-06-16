@@ -46,6 +46,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+try:
+    from constants import resolve_scan_budget
+except ModuleNotFoundError as exc:
+    if exc.name != "constants":
+        raise
+    from scanner.constants import resolve_scan_budget
+
 
 def _env_int(name: str, default: int) -> int:
     """Operator override for a shard cap via env var, falling back to default."""
@@ -93,6 +100,12 @@ COVERAGE_PER_SHARD_CAP = 150
 # Default harvested worklist size. The scanner also emits 5000 by default, but
 # callers can raise this with custom_budget.active_worklist_max.
 COVERAGE_WORKLIST_MAX = 5000
+
+STATIC_ASSET_EXTENSIONS = frozenset({
+    ".avif", ".bmp", ".css", ".eot", ".gif", ".ico", ".jpeg", ".jpg",
+    ".js", ".map", ".mp4", ".otf", ".png", ".svg", ".ttf", ".webm", ".webp",
+    ".woff", ".woff2",
+})
 
 # Lean discovery budget for the coverage "discover-once" recon pass. The recon
 # only needs to ENUMERATE the endpoint worklist quickly (the shards do the real
@@ -191,6 +204,7 @@ def _merge_custom_budget(options: dict[str, Any], overrides: dict[str, Any]) -> 
     budget = dict(options.get("custom_budget") or {})
     budget.update(overrides)
     options["custom_budget"] = budget
+    _sync_resolved_budget(options)
 
 
 def _merge_custom_budget_defaults(options: dict[str, Any], defaults: dict[str, Any]) -> None:
@@ -200,6 +214,28 @@ def _merge_custom_budget_defaults(options: dict[str, Any], defaults: dict[str, A
         if budget.get(key) is None:
             budget[key] = value
     options["custom_budget"] = budget
+    _sync_resolved_budget(options)
+
+
+def _sync_resolved_budget(options: dict[str, Any]) -> None:
+    """Keep child scan metadata aligned with the worker's effective budget.
+
+    Child shards execute from ``custom_budget`` CLI flags. Parent options often
+    already contain a resolved parent budget, so copying the dict into a shard
+    without recomputing it makes API/UI consumers think every shard still has
+    the full parent crawl/Nuclei budget.
+    """
+    custom_budget = options.get("custom_budget")
+    if not isinstance(custom_budget, dict):
+        return
+    budget_profile = options.get("budget_profile")
+    if options.get("thorough_params") and not budget_profile:
+        budget_profile = "exhaustive"
+    options["resolved_budget"] = resolve_scan_budget(
+        options.get("scan_type") or "standard",
+        budget_profile,
+        custom_budget,
+    )
 
 
 def _coerce_shard_request(requested_shards: Any, worker_count: int) -> int:
@@ -244,6 +280,70 @@ def _normalize_endpoint_list(endpoints: Any) -> list[str]:
         seen.add(value)
         normalized.append(value)
     return normalized
+
+
+def _endpoint_path(endpoint_spec: str) -> str:
+    """Extract the path part from a custom endpoint string."""
+    from urllib.parse import urlparse
+
+    raw = endpoint_spec.strip()
+    parts = raw.split(None, 2)
+    if len(parts) >= 2 and parts[0].upper() in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+        raw = parts[1]
+    if "://" not in raw:
+        raw = "http://x" + (raw if raw.startswith("/") else "/" + raw)
+    try:
+        return urlparse(raw).path or "/"
+    except Exception:
+        return "/"
+
+
+def _is_static_asset_endpoint(endpoint_spec: str) -> bool:
+    """Return true for static asset files that should not consume active budget."""
+    path = _endpoint_path(endpoint_spec).lower()
+    last_segment = path.rsplit("/", 1)[-1]
+    return any(last_segment.endswith(ext) for ext in STATIC_ASSET_EXTENSIONS)
+
+
+def finding_merge_key(finding: dict[str, Any]) -> str | None:
+    """Canonical key for parent shard merge dedupe.
+
+    Scanner fingerprints can include evidence details that differ slightly per
+    shard for passive/global context findings. Parent merge needs a stable
+    product-level key so the same target-wide finding does not appear once per
+    shard.
+    """
+    if not isinstance(finding, dict):
+        return None
+    tool = str(finding.get("tool") or finding.get("type") or "").strip().lower()
+    title = str(finding.get("title") or finding.get("name") or "").strip().lower()
+    severity = str(finding.get("severity") or "").strip().lower()
+    if not tool and not title:
+        return None
+    url = str(finding.get("url") or "").strip().lower()
+    parameter = str(
+        finding.get("parameter")
+        or finding.get("param")
+        or finding.get("param_name")
+        or ""
+    ).strip().lower()
+    cwe = str(finding.get("cwe") or "").strip().lower()
+    return "|".join(["finding", tool, title, severity, url, parameter, cwe])
+
+
+def _coverage_active_seconds(parent_options: dict[str, Any], endpoint_count: int) -> int:
+    """Size per-shard active time so deep coverage shards can finish both families."""
+    profile = str(parent_options.get("budget_profile") or "").strip().lower()
+    if parent_options.get("exploit_depth") or parent_options.get("no_early_stop") or profile == "exhaustive":
+        seconds_per_endpoint = 15
+        ceiling = 3600
+    elif profile == "thorough":
+        seconds_per_endpoint = 12
+        ceiling = 3000
+    else:
+        seconds_per_endpoint = 8
+        ceiling = 2400
+    return min(ceiling, max(300, seconds_per_endpoint * max(1, endpoint_count)))
 
 
 def _apply_exploit_depth(options: dict[str, Any]) -> None:
@@ -374,7 +474,7 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
     if isinstance(worklist, list) and worklist:
         full = _normalize_endpoint_list([w for w in worklist if isinstance(w, str)])
         if full:
-            return full[:max_endpoints]
+            return [endpoint for endpoint in full if not _is_static_asset_endpoint(endpoint)][:max_endpoints]
 
     # `discovery` is a TOP-LEVEL report section (report['result'] is only the
     # grade block). Fall back to the nested location defensively.
@@ -401,6 +501,8 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
         path = pu.path or "/"
         key = f"{(method or 'GET').upper()} {path}?{pu.query}" if pu.query else f"{(method or 'GET').upper()} {path}"
         if key in seen:
+            return
+        if _is_static_asset_endpoint(key):
             return
         seen.add(key)
         (with_params if pu.query else without_params).append(key)
@@ -529,6 +631,7 @@ def plan_coverage_shards(
     for i, slice_eps in enumerate(buckets):
         opts = _base_child_options(parent_options)
         opts["custom_endpoints"] = slice_eps
+        opts["focused_endpoints_only"] = True
         opts["no_early_stop"] = True
         cnt = max(1, len(slice_eps))
         # Endpoints are injected, so keep discovery lean but run the full active
@@ -536,12 +639,16 @@ def plan_coverage_shards(
         _merge_custom_budget_defaults(
             opts,
             {
-                "max_urls": 300,
-                "browser_max_pages": 8,
-                "browser_max_depth": 2,
+                "max_urls": max(200, min(1000, cnt + 50)),
+                "browser_max_pages": 0,
+                "browser_max_depth": 1,
+                "discovery_depth": 1,
+                "api_probe_limit": 0,
+                "param_discovery_url_limit": 0,
+                "param_discovery_max_params": 0,
                 "nuclei_max_targets": 300,
                 "active_max_endpoints": cnt,
-                "active_max_seconds": min(2400, max(300, 8 * cnt)),
+                "active_max_seconds": _coverage_active_seconds(parent_options, cnt),
                 "active_params_per_endpoint": 8,
                 "smart_bola_max_endpoints": cnt,
             },
@@ -554,6 +661,13 @@ def plan_coverage_shards(
         max_expanded_shards=expanded_cap,
         global_checks_once=True,
     )
+    skipped_nuclei = 0
+    for shard in shards:
+        if shard.options.get("skip_global_checks"):
+            _merge_custom_budget(shard.options, {"nuclei_max_targets": 0})
+            skipped_nuclei += 1
+    if skipped_nuclei:
+        notes.append(f"coverage: disabled duplicate nuclei waves on {skipped_nuclei} shard(s)")
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 

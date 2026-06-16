@@ -49,7 +49,16 @@ def test_coverage_partitions_all_endpoints_disjoint():
     assert len(union) == len(set(union)) == 320  # disjoint, no dup
     for s in plan.shards:
         cb = s.options["custom_budget"]
+        resolved = s.options["resolved_budget"]
         assert cb["active_max_endpoints"] == len(s.options["custom_endpoints"])
+        assert cb["api_probe_limit"] == 0
+        assert cb["param_discovery_url_limit"] == 0
+        assert cb["active_max_seconds"] == max(300, 8 * len(s.options["custom_endpoints"]))
+        assert resolved["api_probe_limit"] == 0
+        assert resolved["param_discovery_url_limit"] == 0
+        assert resolved["browser_max_pages"] == 0
+        assert resolved["active_max_endpoints"] == len(s.options["custom_endpoints"])
+        assert s.options["focused_endpoints_only"] is True
         assert s.options["no_early_stop"] is True
 
 
@@ -58,6 +67,43 @@ def test_coverage_runs_global_checks_once_per_plan():
     plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150)
 
     assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True]
+    assert [s.options["custom_budget"].get("nuclei_max_targets") for s in plan.shards] == [300, 0, 0]
+    assert [s.options["resolved_budget"].get("nuclei_max_targets") for s in plan.shards] == [300, 0, 0]
+    assert any("disabled duplicate nuclei waves" in n for n in plan.notes)
+
+
+def test_exhaustive_coverage_shards_get_deeper_active_budget():
+    eps = [f"GET /api/x{i}?id=1" for i in range(300)]
+    plan = p.plan_coverage_shards(
+        {"scan_type": "smart", "budget_profile": "exhaustive", "exploit_depth": True},
+        eps,
+        per_shard_cap=150,
+    )
+
+    assert plan.shard_count == 2
+    assert all(s.options["custom_budget"]["active_max_seconds"] == 2250 for s in plan.shards)
+    assert all(s.options["resolved_budget"]["active_max_seconds"] == 2250 for s in plan.shards)
+
+
+def test_finding_merge_key_collapses_repeated_passive_shard_findings():
+    first = {
+        "tool": "http_methods",
+        "title": "Risky HTTP methods advertised: DELETE, PUT (6 endpoints)",
+        "severity": "info",
+        "url": "http://host.docker.internal:3001",
+        "evidence": {"shard": 1},
+    }
+    second = {
+        **first,
+        "evidence": {"shard": 2, "methods": ["DELETE", "PUT"]},
+    }
+    distinct_url = {
+        **first,
+        "url": "http://host.docker.internal:3001/api",
+    }
+
+    assert p.finding_merge_key(first) == p.finding_merge_key(second)
+    assert p.finding_merge_key(first) != p.finding_merge_key(distinct_url)
 
 
 def test_coverage_caps_shards_without_dropping_endpoints():
@@ -107,6 +153,25 @@ def test_harvest_prefers_full_worklist_over_samples():
     }
     eps = p.harvest_endpoints(recon)
     assert eps == ["GET /a?x=1", "POST /b form:k=1", "GET /c"]
+
+
+def test_harvest_filters_static_asset_worklist_entries():
+    recon = {
+        "active_checks": {
+            "active_worklist": [
+                "GET /assets/public/images/logo.png?image_id=1&id=1",
+                "POST /assets/public/images/logo.png json:{\"id\":1}",
+                "PATCH /static/app.js json:{\"id\":1}",
+                "GET /api/users?id=1",
+                "POST /rest/login json:{\"email\":1}",
+            ]
+        }
+    }
+
+    assert p.harvest_endpoints(recon) == [
+        "GET /api/users?id=1",
+        "POST /rest/login json:{\"email\":1}",
+    ]
 
 
 def test_harvest_default_keeps_large_worklist():
