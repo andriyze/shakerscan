@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan } from '@/lib/api'
+import { submitScan, getScanExecutionSettings } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -21,6 +21,7 @@ type ExecutionMode = 'auto' | 'normal' | 'parallel' | 'coverage'
 type ShardSelection = 'auto' | '2' | '3' | '4' | '6' | '12' | '20'
 type CoveragePerShardSelection = '50' | '100' | '150' | '250'
 type CoverageMaxShardSelection = '32' | '64' | '128'
+type CoverageDepth = 'standard' | 'deep'
 
 function validateTarget(value: string): string | null {
   const trimmed = value.trim()
@@ -66,6 +67,16 @@ export default function NewScanPage() {
   const [parallelShards, setParallelShards] = useState<ShardSelection>('auto')
   const [coveragePerShardCap, setCoveragePerShardCap] = useState<CoveragePerShardSelection>('100')
   const [coverageMaxShards, setCoverageMaxShards] = useState<CoverageMaxShardSelection>('128')
+  const [coverageDepth, setCoverageDepth] = useState<CoverageDepth>('standard')
+  const [runningWorkers, setRunningWorkers] = useState<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    getScanExecutionSettings()
+      .then((s) => { if (!cancelled) setRunningWorkers(s.running_workers ?? null) })
+      .catch(() => { /* worker count is advisory; ignore failures */ })
+    return () => { cancelled = true }
+  }, [])
   const [customEndpointsText, setCustomEndpointsText] = useState('')
 
   // Advanced options
@@ -163,15 +174,22 @@ export default function NewScanPage() {
           .map(([key, value]) => [key, Number.parseInt(value, 10)])
           .filter(([, value]) => Number.isFinite(value as number))
       )
+      // Coverage breadth (test every endpoint) is decoupled from depth. Standard
+      // coverage stays broad-but-sane; Deep adds exhaustive budget + exploit-depth.
+      const isDeepCoverage = isCoverageMode && coverageDepth === 'deep'
       const coverageBudgetPayload = isCoverageMode
         ? {
             active_worklist_max: 50000,
             param_discovery_url_limit: 500,
             param_discovery_max_params: 100,
-            active_params_per_endpoint: 20,
-            max_findings_per_family: -1,
-            sqli_extract_max: 25,
-            oob_max_findings: 25
+            ...(isDeepCoverage
+              ? {
+                  active_params_per_endpoint: 20,
+                  max_findings_per_family: -1,
+                  sqli_extract_max: 25,
+                  oob_max_findings: 25
+                }
+              : {})
           }
         : {}
       const effectiveCustomBudget = {
@@ -186,7 +204,7 @@ export default function NewScanPage() {
       const shardAuthStates = isCoverageMode && Object.keys(authPayload).length > 0
       const scanOptions: Record<string, unknown> = {
         ...getScanOptions(scanType),
-        budget_profile: isCoverageMode ? 'exhaustive' : budgetProfile,
+        budget_profile: isCoverageMode ? (isDeepCoverage ? 'exhaustive' : 'thorough') : budgetProfile,
         ...(isParallelMode && customEndpoints.length > 0 ? { custom_endpoints: customEndpoints } : {}),
         ...(executionMode === 'normal' ? { parallel: false } : {}),
         ...(isParallelMode
@@ -198,7 +216,7 @@ export default function NewScanPage() {
                 ? {
                     coverage_per_shard_cap: Number.parseInt(coveragePerShardCap, 10),
                     coverage_max_shards: Number.parseInt(coverageMaxShards, 10),
-                    exploit_depth: true
+                    ...(isDeepCoverage ? { exploit_depth: true } : {})
                   }
                 : {})
             }
@@ -328,7 +346,7 @@ export default function NewScanPage() {
               ['auto', 'Auto', 'Use the global auto-sharding setting.'],
               ['normal', 'Normal', 'Force one worker.'],
               ['parallel', 'Parallel', 'Force shard fan-out.'],
-              ['coverage', 'Full Coverage', 'Discover once, then test every endpoint slice.']
+              ['coverage', 'Full Coverage', 'Discover once, test every endpoint — heaviest mode.']
             ] as const).map(([value, label, description]) => (
               <button
                 key={value}
@@ -400,21 +418,34 @@ export default function NewScanPage() {
                 )}
               </div>
               {(executionMode === 'coverage' || parallelStrategy === 'coverage') && (
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1">
-                    <span className="block text-xs text-gray-500">Endpoints per shard</span>
-                    <select
-                      value={coveragePerShardCap}
-                      onChange={(event) => setCoveragePerShardCap(event.target.value as CoveragePerShardSelection)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
-                    >
-                      <option value="50">50</option>
-                      <option value="100">100</option>
-                      <option value="150">150</option>
-                      <option value="250">250</option>
-                    </select>
-                  </label>
-                  <label className="space-y-1">
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="space-y-1">
+                      <span className="block text-xs text-gray-500">Coverage depth</span>
+                      <select
+                        value={coverageDepth}
+                        onChange={(event) => setCoverageDepth(event.target.value as CoverageDepth)}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="standard">Standard (broad, thorough budget)</option>
+                        <option value="deep">Deep (exhaustive + exploit-depth)</option>
+                      </select>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-xs text-gray-500">Target endpoints per shard</span>
+                      <select
+                        value={coveragePerShardCap}
+                        onChange={(event) => setCoveragePerShardCap(event.target.value as CoveragePerShardSelection)}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="150">150</option>
+                        <option value="250">250</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="space-y-1 block">
                     <span className="block text-xs text-gray-500">Max coverage shards</span>
                     <select
                       value={coverageMaxShards}
@@ -426,6 +457,12 @@ export default function NewScanPage() {
                       <option value="128">128</option>
                     </select>
                   </label>
+                  <p className="text-xs text-amber-400/80">
+                    ⚠ Heaviest mode: discovers once, then tests <em>every</em> endpoint across many shards
+                    {runningWorkers != null ? ` (currently ${runningWorkers} worker${runningWorkers === 1 ? '' : 's'} — scale workers to match shard count for speed)` : ' — scale workers to match shard count for speed'}.
+                    “Target endpoints per shard” is a goal; slices grow to preserve coverage when the worklist is large.
+                    {coverageDepth === 'deep' ? ' Deep adds exhaustive budget + exploit-depth — expect very heavy target load.' : ''}
+                  </p>
                 </div>
               )}
               <label className="space-y-1 block">

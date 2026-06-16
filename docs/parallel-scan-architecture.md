@@ -433,6 +433,19 @@ preserving every endpoint per state. `auto`/`scope` use the generic `MAX_SHARDS`
 `family` is intentionally fixed at 3 (broad/sqli/xss — the only capability lanes the scanner
 exposes). Concurrency is bounded by the worker fleet; excess shards queue and run as workers free up.
 
+**Coverage depth is decoupled from breadth.** Coverage always tests *every* endpoint, but depth is
+a choice: New Scan exposes **Standard** (thorough budget, no exploit-depth — broad but sane;
+default) vs **Deep** (exhaustive budget + exploit-depth — maximal). This stops "test all endpoints"
+from being welded to "test each one maximally." The UI flags Coverage as the heaviest mode, shows
+the current worker count as a scaling hint, and clarifies that "target endpoints per shard" is a
+goal (slices grow to preserve coverage when the worklist is large). When a forced slice would exceed
+the per-shard active ceiling, the planner emits a note.
+
+**Operator-tunable caps.** All shard ceilings are env-overridable: `SHAKERSCAN_MAX_SHARDS`,
+`SHAKERSCAN_AUTH_STATE_MAX_SHARDS`, `SHAKERSCAN_COVERAGE_MAX_SHARDS`,
+`SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS` — so operators can right-size for their fleet/DB without a
+code change.
+
 Also shipped earlier the same day: coverage-aware merge aggregation, `input.port 8080→3001` fix at
 source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 ("Discovering endpoints once, then sharding…").

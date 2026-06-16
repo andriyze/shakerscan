@@ -41,9 +41,19 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _env_int(name: str, default: int) -> int:
+    """Operator override for a shard cap via env var, falling back to default."""
+    try:
+        value = int(os.environ.get(name, "") or default)
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
 
 # Job ``type`` values routed by the worker's process_job().
 PLAN_JOB_TYPE = "scan_plan"
@@ -92,24 +102,29 @@ _PRIMARY_AUTH_KEYS = (
 )
 _SECONDARY_AUTH_KEYS = ("user2_header", "user2_cookies")
 
+# Shard caps. All overridable via env so operators can right-size for their
+# fleet/DB without a code change (e.g. SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS=64).
+
 # Hard ceiling on generic non-coverage shards regardless of request, so a stray
-# ``shards: 999`` cannot flood the queue. The worker fleet cap bounds
-# concurrency; this bounds row/queue growth for scope/family.
-MAX_SHARDS = 24
+# ``shards: 999`` cannot flood the queue.
+MAX_SHARDS = _env_int("SHAKERSCAN_MAX_SHARDS", 24)
 
 # Auth-state expansion multiplies useful work (anonymous/user1/user2), so it
 # needs its own cap instead of reusing the generic base-shard ceiling.
-AUTH_STATE_MAX_SHARDS = 96
+AUTH_STATE_MAX_SHARDS = _env_int("SHAKERSCAN_AUTH_STATE_MAX_SHARDS", 96)
 
 # Coverage strategy partitions the FULL endpoint worklist, so big estates need
-# more shards than the generic cap. Excess shards queue and run as workers free
-# up (more shards => smaller endpoint slices).
-COVERAGE_MAX_SHARDS = 128
+# more shards than the generic cap. Excess shards queue and run as workers free up.
+COVERAGE_MAX_SHARDS = _env_int("SHAKERSCAN_COVERAGE_MAX_SHARDS", 128)
 
 # Total expanded coverage shards after auth-state multiplication. If a target
 # would exceed this, we keep all endpoints but use fewer, larger base shards
 # before multiplying by auth state. We never silently drop endpoint buckets.
-COVERAGE_MAX_TOTAL_SHARDS = 256
+COVERAGE_MAX_TOTAL_SHARDS = _env_int("SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS", 256)
+
+# Per-shard active-endpoint ceiling (mirrors SCAN_BUDGET_CEILINGS["active_max_endpoints"]
+# in scanner/constants.py). Used only to warn when capped slices grow past it.
+ACTIVE_ENDPOINTS_CEILING = 10000
 
 # ``family`` strategy can express at most these distinct, non-overlapping shards
 # with the focused flags the scanner exposes today.
@@ -449,6 +464,13 @@ def plan_coverage_shards(
         notes.append(
             f"coverage: {len(eps)} endpoints exceed {len(buckets)} shards x {per_shard_cap} cap; "
             "using larger per-shard slices to preserve endpoint coverage"
+        )
+    biggest = max((len(b) for b in buckets), default=0)
+    if biggest > ACTIVE_ENDPOINTS_CEILING:
+        notes.append(
+            f"coverage: largest shard slice ({biggest}) exceeds the active_max_endpoints "
+            f"ceiling ({ACTIVE_ENDPOINTS_CEILING}); raise coverage_max_shards or lower "
+            "coverage_per_shard_cap to keep every endpoint actively tested"
         )
     shards: list[ShardSpec] = []
     for i, slice_eps in enumerate(buckets):
