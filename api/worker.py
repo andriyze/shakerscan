@@ -1012,7 +1012,18 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                     checkpoint_data = json.load(f)
                 partial = checkpoint_data.get("report")
                 if partial:
-                    partial["error"] = timeout_reason
+                    # Reaching the time budget with recovered partial results is a
+                    # soft success, not a failure: surface it as partial/timed-out
+                    # in metadata (NOT result['error']) so the caller marks the scan
+                    # 'completed' and its findings are kept. Only a timeout with no
+                    # recoverable results (handled below) is a hard failure.
+                    meta = partial.get("scan_metadata")
+                    if not isinstance(meta, dict):
+                        meta = {}
+                        partial["scan_metadata"] = meta
+                    meta["partial"] = True
+                    meta["timed_out"] = True
+                    meta["terminated_reason"] = timeout_reason
                     return partial
             except Exception:
                 pass

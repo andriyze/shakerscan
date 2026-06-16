@@ -443,6 +443,28 @@ def plan_coverage_shards(
             max_shards = COVERAGE_MAX_SHARDS
     max_shards = max(2, min(COVERAGE_MAX_SHARDS, int(max_shards)))
 
+    # Honor an explicit `shards` request as a HARD upper bound on the coverage
+    # fan-out. Least-surprise: a user capping shards (e.g. to avoid DoSing a
+    # small single-process target) must not be silently overridden by
+    # auto-sizing. "auto"/absent -> auto-size as before. Endpoints are preserved
+    # by using larger per-shard slices (handled below).
+    _req = parent_options.get("shards")
+    if isinstance(_req, bool):
+        _req = None
+    _req_n = None
+    if isinstance(_req, int) and _req > 0:
+        _req_n = _req
+    elif isinstance(_req, str) and _req.strip().isdigit():
+        _req_n = int(_req.strip())
+    if _req_n:
+        capped = max(2, min(max_shards, _req_n))
+        if capped < max_shards:
+            notes.append(
+                f"coverage: capping fan-out to requested {_req_n} shard(s) "
+                f"(auto-size would allow up to {max_shards}); per-shard slices grow accordingly"
+            )
+        max_shards = capped
+
     auth_state_count = 1
     if parent_options.get("auth_state_shards"):
         auth_state_count = max(1, len(available_auth_states(parent_options)))

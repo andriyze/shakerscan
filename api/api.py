@@ -163,6 +163,13 @@ try:
     ASM_DISPATCH_INTERVAL_SECONDS = int(os.environ.get("SHAKERSCAN_ASM_DISPATCH_INTERVAL", "60"))
 except (TypeError, ValueError):
     ASM_DISPATCH_INTERVAL_SECONDS = 60  # How often the continuous ASM dispatcher ticks
+# Grace minutes added to a scan's max_duration before the stale-checker safety
+# net force-terminates it, so the scanner's own termination (which returns
+# recovered results) wins the race on slow targets.
+try:
+    STALE_DURATION_GRACE_MINUTES = float(os.environ.get("SHAKERSCAN_STALE_DURATION_GRACE_MIN", "5"))
+except (TypeError, ValueError):
+    STALE_DURATION_GRACE_MINUTES = 5.0
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
@@ -1241,6 +1248,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 )
 
             is_stale = False
+            duration_exceeded = False
             reason = ""
 
             # Check 1: Heartbeat timeout
@@ -1292,13 +1300,22 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 max_duration = int(resolved_budget.get("max_duration_minutes") or MAX_SCAN_DURATION.get(scan_type, 120))
                 scan_duration = (now - started_at.replace(tzinfo=None)).total_seconds() / 60
 
-                if scan_duration > max_duration:
+                # Grace buffer so the safety net doesn't pre-empt a scan the
+                # instant it reaches its budget: the scanner's own termination
+                # (which returns recovered results -> 'completed') should win the
+                # race. Without this, a slow target (e.g. a high-latency API)
+                # that runs slightly past budget gets marked 'failed' even though
+                # results are seconds from being returned.
+                duration_grace = max(STALE_DURATION_GRACE_MINUTES, max_duration * 0.5)
+                if scan_duration > max_duration + duration_grace:
                     is_stale = True
+                    duration_exceeded = True
                     reason = f"Exceeded max duration ({scan_duration:.0f} min > {max_duration} min for {scan_type} scan)"
 
-            # Mark stale scan as failed
+            # Mark stale scan terminal (failed, or completed-partial when it
+            # merely hit its time budget but recovered results — decided below).
             if is_stale:
-                print(f"[cleanup] Marking scan {scan_id[:8]} as failed: {reason}", flush=True)
+                print(f"[cleanup] Terminating scan {scan_id[:8]}: {reason}", flush=True)
 
                 # Try to recover partial results from checkpoint file
                 partial_result = None
@@ -1348,9 +1365,18 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                     partial_result["scan_metadata"]["terminated_reason"] = reason
                     partial_result["scan_metadata"]["terminated_at_phase"] = checkpoint_phase
 
+                # A scan that reached its TIME BUDGET but recovered partial
+                # results (with a checkpoint) is a soft success, not a failure:
+                # it ran to its configured limit and produced findings. Mark it
+                # 'completed' (partial) so parallel rollups and the Scans list
+                # don't show alarming failures for shards/scans that contributed
+                # results. A genuine hang/crash (no heartbeat, Check 1) or a
+                # duration-exceed with NO recoverable results stays 'failed'.
+                stale_status = 'completed' if (duration_exceeded and partial_result) else 'failed'
+                stale_phase = 'completed' if stale_status == 'completed' else 'terminated'
                 await conn.execute("""
                     UPDATE scans
-                    SET status = 'failed',
+                    SET status = $8,
                         error_message = $1,
                         completed_at = $2,
                         result = $3,
@@ -1358,10 +1384,11 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                         grade = $5,
                         findings_count = $6,
                         progress = 100,
-                        current_phase = 'terminated'
+                        current_phase = $9
                     WHERE id = $7
                 """, error_msg, now, json.dumps(partial_result) if partial_result else None,
-                    partial_score, partial_grade, partial_findings_count, scan['id'])
+                    partial_score, partial_grade, partial_findings_count, scan['id'],
+                    stale_status, stale_phase)
 
                 # Save partial findings to findings table so they appear in /findings
                 partial_findings = partial_result.get("findings", []) if partial_result else []

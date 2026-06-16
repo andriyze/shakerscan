@@ -110,6 +110,22 @@ def test_coverage_per_shard_cap_option_controls_shard_count():
     assert sorted(union) == sorted(eps)
 
 
+def test_coverage_honors_explicit_shards_cap():
+    # 1800 endpoints would auto-size to ~12 shards (cap 150); an explicit
+    # shards=3 must cap the fan-out to 3 without dropping any endpoint.
+    eps = [f"GET /e{i}?id=1" for i in range(1800)]
+    auto = p.plan_coverage_shards({"scan_type": "smart"}, eps)
+    capped = p.plan_coverage_shards({"scan_type": "smart", "shards": 3}, eps)
+    assert auto.shard_count == 12
+    assert capped.shard_count == 3  # explicit request honored as a hard cap
+    union = [e for s in capped.shards for e in s.options["custom_endpoints"]]
+    assert sorted(union) == sorted(eps)  # every endpoint still covered
+    # string form also honored
+    assert p.plan_coverage_shards({"scan_type": "smart", "shards": "4"}, eps).shard_count == 4
+    # an explicit request LARGER than auto-size doesn't inflate beyond need
+    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 12
+
+
 def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
     eps = [f"GET /e{i}?id=1" for i in range(1800)]
     plan = p.plan_coverage_shards(
