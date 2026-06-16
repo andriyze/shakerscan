@@ -338,6 +338,33 @@ CREATE INDEX idx_scans_created ON scans(created_at DESC);
 CREATE INDEX idx_scans_job_id ON scans(job_id);
 CREATE INDEX idx_scans_parent ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
 
+-- ============================================================
+-- TARGET ENDPOINTS - Continuous ASM attack-surface inventory (docs §16)
+-- Recon upserts discovered endpoints; exploitation drains untested/stale ones.
+-- ============================================================
+CREATE TABLE target_endpoints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    method TEXT NOT NULL DEFAULT 'GET',
+    path TEXT NOT NULL,
+    param_shape TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL,                 -- method + normalized path + param names
+    source TEXT,                               -- crawl | har | js | ffuf | openapi | manual
+    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    content_hash TEXT,
+    priority_score INTEGER NOT NULL DEFAULT 10,
+    test_status TEXT NOT NULL DEFAULT 'untested',  -- untested|in_progress|tested|stale|gone
+    last_verdict TEXT,
+    last_finding_id UUID,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_tested_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_target_endpoints_fp ON target_endpoints(target_id, fingerprint);
+CREATE INDEX idx_target_endpoints_status ON target_endpoints(target_id, test_status, priority_score DESC);
+
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;
 CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);

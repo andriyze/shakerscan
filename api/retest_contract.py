@@ -564,6 +564,38 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_scans_parent
                 ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL
             """)
+
+            # Continuous ASM: persistent per-target endpoint inventory (docs §16).
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS target_endpoints (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    method TEXT NOT NULL DEFAULT 'GET',
+                    path TEXT NOT NULL,
+                    param_shape TEXT NOT NULL DEFAULT '',
+                    fingerprint TEXT NOT NULL,
+                    source TEXT,
+                    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+                    content_hash TEXT,
+                    priority_score INTEGER NOT NULL DEFAULT 10,
+                    test_status TEXT NOT NULL DEFAULT 'untested',
+                    last_verdict TEXT,
+                    last_finding_id UUID,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_tested_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_target_endpoints_fp
+                ON target_endpoints(target_id, fingerprint)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoints_status
+                ON target_endpoints(target_id, test_status, priority_score DESC)
+            """)
             await conn.execute("""
                 CREATE OR REPLACE VIEW latest_scans AS
                 SELECT DISTINCT ON (target_url) *

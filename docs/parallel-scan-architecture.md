@@ -1,9 +1,21 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Phase 0 + Phase 1 core implemented & deployed; high-budget coverage mode implemented; true zero-rediscovery shard execution remains deferred
+**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; true zero-rediscovery shard execution remains deferred. Continuous ASM (§16) Phase 1–2 shipped on top. *(Parallel-scan's "Phase N" and ASM's "Phase N" in §16 are separate numbering — see "How to read this doc.")*
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
+
+> **How to read this doc.** It grew into three layers, in order:
+> 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and
+>    its implementation status. The "Implementation status" block immediately below is the source of
+>    truth for what's live; the design sections behind it are kept for rationale.
+> 2. **§15 — `coverage` strategy (SHIPPED).** Discover-once recon → harvest full worklist →
+>    partition across auto-sized shards. The bridge from "fan out a scan" to "cover the whole target."
+> 3. **§16 — Continuous ASM (Phase 1–2 SHIPPED, 3–4 roadmap).** Persist the attack surface in
+>    `target_endpoints` and drain it with async `exploit_batch` jobs. This is forward-looking design
+>    plus the slice that's built; each subsection marks shipped vs. planned.
+>
+> When design prose and a "SHIPPED"/"Gap" note disagree, the note wins — the prose predates it.
 
 ---
 
@@ -273,7 +285,12 @@ Each shard:
 
 ## 6. Sharding strategies (pick per scan, combine)
 
-1. **By endpoint slice (intra-target, primary):** split the P5 work-list into N contiguous slices; each shard runs `smart_sqli_test`/`smart_xss_test` over its slice. Highest speedup because P5 is the serial bottleneck. Requires DBMS fingerprint broadcast (compute once in plan stage, put in context).
+> **Shipped names (see §15):** the design descriptions below map to the implemented
+> `options.shard_strategy` values: "by endpoint slice" shipped as **`coverage`**, "by check family"
+> as **`family`**, "by URL scope / custom_endpoints" as **`scope`**, plus **`auto`**. There is no
+> `"endpoint"` strategy value.
+
+1. **By endpoint slice → shipped as `coverage` (intra-target, primary):** discover once, harvest the full worklist, split it across N shards; each shard runs the active suite over its slice. Highest breadth.
 2. **By check family:** assign disjoint families (e.g. shard A = {file_upload, open_redirect, host_header}, shard B = {csrf, idor, path_traversal}, …) for P2–P4. Good when one target has few endpoints but many check types.
 3. **By URL scope / sub-path / subdomain (inter-target):** for large estates, shard by path prefix or subdomain. Works **today with almost no refactor** because there are no scan locks (see Phase 0).
 4. **By nuclei template category:** chunk template families across shards if Nuclei dominates wall-clock.
@@ -321,7 +338,7 @@ Splitting work means the **global budget must be split or shared**, or shards wi
 
 **Redis keys:** `scan:{parent}:context`, `scan:{parent}:shards:remaining`, `scan:{parent}:cap:{family}`, `scan:{parent}:score`, `scan:{parent}:stop`, `scan:{parent}:deadline`, `scan:{parent}:shard:{i}` (result), `scan:{parent}:cancel`.
 
-**API:** `POST /scans` gains `options.parallel: bool`, `options.shards: int|"auto"`, `options.shard_strategy: "endpoint"|"family"|"scope"|"auto"`. `GET /scans/{id}` returns parent rollup (`shard_count`, `shards_completed`, aggregate progress). The Scans UI shows the parent as one row with a shard sub-progress bar (mirror the retest history UI you already built).
+**API (shipped names):** `POST /scans` gains `options.parallel: bool`, `options.shards: int|"auto"`, `options.shard_strategy: "auto"|"scope"|"family"|"coverage"` (the design's "by endpoint slice" shipped as **`coverage`**; there is no `"endpoint"` value). `GET /scans/{id}` returns parent rollup (`shard_count`, `shards_completed`, aggregate progress). The Scans UI shows the parent as one row with a shard sub-progress bar.
 
 **Worker routing:** extend `process_job()` with `scan_plan` / `scan_shard` / `scan_merge` next to the existing `discovery` / `finding_retest` branches (`api/worker.py:3367`+).
 
@@ -479,3 +496,166 @@ source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
   aggregate budget consumption on the parent scan detail page.
 - **Global distributed rate limits:** required before multi-node fleets run hundreds of
   shards against the same root domain.
+
+---
+
+## 16. Continuous ASM — async reconnaissance & async exploitation
+
+**Status:** design complete; **Phase 1–2 shipped** (persistent inventory + async `exploit_batch`);
+Phases 3–4 (continuous dispatcher, time windows, new-surface auto-queue, UI) remain the roadmap.
+See §16.5 for shipped-vs-planned API surface and §16.8 for the per-phase gap list.
+**Date:** 2026-06-15
+**Scope:** evolve ShakerScan from "a scan is a one-shot job" into "a target has a living attack
+surface that we continuously discover and test," with discovery and exploitation **decoupled** and
+both **async** — spread across the worker fleet *and* across time.
+
+### 16.1 Motivation
+
+Today a `coverage` recon emits a full endpoint worklist (`active_checks.active_worklist`) and then
+**throws it away** when the scan ends. If the budget (e.g. 100 browser pages) couldn't reach
+everything, that work is lost and the next scan starts from zero. The shift: **persist the attack
+surface**, so unfinished recon/testing resumes later, work spreads across workers (shards — already
+built) *and* across time (rate windows / freshness), and discovery no longer blocks exploitation.
+
+This is continuous **Attack Surface Management (ASM) + continuous testing**: a durable per-target
+inventory of pages/endpoints/params that recon grows and exploitation drains, forever.
+
+### 16.2 Core primitive — persistent per-target endpoint inventory
+
+A new table is the keystone; everything else falls out of it.
+
+**`target_endpoints`**
+```
+id, target_id, method, path, param_shape,
+fingerprint,                       -- method+path+normalized-param-shape (IDs templated: /users/42 -> /users/{id})
+source,                            -- crawl | har | js | ffuf | openapi | manual
+auth_state,                        -- anonymous | user1 | user2
+content_hash,                      -- detect change between recons
+first_seen_at, last_seen_at,
+last_tested_at, test_status,       -- untested | in_progress | tested | stale | gone
+last_verdict, last_finding_id,
+priority_score,                    -- auth/admin/param-bearing rank higher
+created_at, updated_at
+UNIQUE(target_id, fingerprint)     -- same race-safe upsert as findings(target_id, fingerprint)
+```
+
+It reuses the exact `UNIQUE(target_id, fingerprint)` + `ON CONFLICT` upsert pattern already proven
+in `save_findings`. **Recon upserts; exploitation reads + stamps `last_tested_at`.**
+
+What this one table unlocks:
+- **Resume ("no budget now → do it later"):** untested rows persist; the next pass drains them.
+  Recon and testing both become resumable.
+- **Persistent, true coverage:** `tested / total` per *target over time*, not per scan. Coverage→1.0
+  becomes a target property we converge toward.
+- **New-surface detection (ASM):** a re-recon fingerprint not already in the table = new attack
+  surface → alert + auto-queue (mirrors how Gungnir alerts on new certs).
+- **Change detection:** `content_hash` differs → re-test just that endpoint ("diff testing").
+- **Work-stealing shards:** shards pull "the next N untested/stale endpoints" from the inventory
+  instead of a static round-robin partition — no stragglers, naturally balanced, resumable mid-run.
+
+### 16.3 Two async pipelines
+
+**Recon pipeline** (feeds the inventory): budget-bounded (the 100-page budget) but
+**frontier-persisted** — discovered-but-not-yet-crawled URLs are stored so the next recon continues
+the crawl frontier instead of restarting. "100 pages now, 100 more tomorrow" just works.
+
+**Exploitation pipeline** (drains the inventory): an `exploit_batch` job pulls K untested/stale
+endpoints (highest `priority_score` first), runs active checks over them (reusing `run_scan` with the
+batch as `custom_endpoints`), writes findings, stamps `last_tested_at`/`last_verdict`.
+
+Both are async queue consumers alongside `scan_plan`/`scan_shard`/`scan_merge`. A "scan" becomes a
+**rollup/snapshot view** over recent activity, not the unit of work.
+
+### 16.4 Spread across workers AND time
+
+- **Across workers:** the fleet + pull-based batches (strictly better than the static partition).
+- **Across time:**
+  1. **Freshness TTL** — only (re)test endpoints not tested in the last N days; idle capacity always
+     picks the stalest, highest-priority endpoints.
+  2. **Per-target rate budget** — a replenishing credit (`≤ X req/hour`, `≤ Y endpoints/day`) the
+     dispatcher spends. (Also the guardrail that would've stopped us crashing Juice Shop under load.)
+  3. **Allowed windows** — extend the existing `schedules` table to "test only 02:00–06:00 UTC
+     weekdays" per target. Off-hours continuous testing.
+
+### 16.5 New product surface: **Continuous ASM**
+
+A first-class surface separate from one-shot scans (the user-requested new surface):
+- **Per target:** the live attack-surface inventory (endpoints, sources, auth states, last-tested,
+  verdict), persistent coverage %, new-surface diff feed, and continuous-testing controls
+  (enable/disable, depth, rate, allowed windows).
+- **API namespace:** `/targets/{id}/asm/*`.
+  - **Shipped:** `GET .../endpoints` (inventory + coverage), `GET .../coverage` (counts/coverage),
+    `POST .../test` (queue an `exploit_batch`).
+  - **Planned (NOT yet built):** `POST .../recon` (queue a standalone recon pass — today recon only
+    runs as part of a `coverage` scan), `GET .../diff` (new/changed since last run), and per-target
+    ASM policy (rate/windows/freshness) under `/settings` or `metadata_json`.
+- **UI: NOT yet built.** No `/asm/*` route is called by the UI; the inventory is API-only so far.
+  Planned: a "Continuous ASM" / "Attack Surface" section (inventory, coverage trend, new-surface
+  alerts, engine status) distinct from the Scans list.
+
+### 16.6 Reuse map (how this rides existing ShakerScan)
+
+The new module **`api/asm_inventory.py`** holds the inventory logic: `parse_worklist_entry`,
+`normalize_path`, `endpoint_fingerprint`, `priority_score`, `to_custom_endpoint`, `normalize_worklist`
+(pure, unit-tested in `tests/test_asm_inventory.py`) plus the async DB helpers `upsert_endpoints`,
+`coverage_summary`, `claim_test_batch` (FOR UPDATE SKIP LOCKED), and `mark_tested`. It reuses:
+
+| Need | Existing primitive |
+|---|---|
+| Endpoint worklist | `active_checks.active_worklist` emit (scanner) + `harvest_endpoints` (`api/parallel_scan.py`) |
+| Endpoint dedup/identity | `generate_finding_fingerprint` pattern + `UNIQUE(target_id, fingerprint)` (now also on `target_endpoints`) |
+| Test a specific endpoint set | `run_scan(custom_endpoints=...)` |
+| Async jobs / fan-out | Redis `scan_jobs` queue + `process_job` routing (`exploit_batch` added) + retest slot/watchdog |
+| Scheduling / windows | `schedules` table + `schedule_runner` |
+| New-surface upstream | Gungnir CT monitoring (new hosts → recon → inventory → test) |
+| Target/asset model | `targets` table + `metadata_json` + exposure graph |
+
+### 16.7 Hard parts (eyes open)
+
+- **Endpoint identity:** normalize volatile path IDs (`/users/42` ≡ `/users/{id}`) so the inventory
+  doesn't explode into near-duplicates — reuse the fingerprint/`focused_scope` normalization.
+- **Crawl frontier persistence:** resumable crawl (store frontier + visited) is the trickiest new piece.
+- **Auth context:** an endpoint found under user1 needs user1 creds to re-test → store `auth_state`
+  and reference the credential; skip if creds rotated/absent.
+- **Storage discipline:** store the inventory + `content_hash` + sampled evidence, **not** full page
+  bodies (bloat).
+- **GC/staleness:** endpoints unseen across M recons → `gone`.
+- **Mental-model:** "scan" stops being the unit; keep one-shot scans as a snapshot view so UX doesn't break.
+- **Rate/abuse:** per-target + (later) per-root-domain distributed rate limits before multi-node.
+
+### 16.8 Phased delivery
+
+**Phase 1 — Persistent inventory (SHIPPED).** `target_endpoints` table (`db/init.sql` +
+`run_schema_migrations` in `api/retest_contract.py`); `api/asm_inventory.py` normalizes/fingerprints
+endpoints and upserts a worklist; the worklist is persisted on **standalone scan completion** and in
+the **`coverage` recon** branch (both in `api/worker.py`); read API `GET /targets/{id}/asm/endpoints`
++ `GET /targets/{id}/asm/coverage`. *Delivers: resume, persistent coverage, new-endpoint inventory —
+with no pipeline rewrite.* **Gap vs. design:** persistence is not yet wired into the `scan_merge`
+path (only standalone + coverage-recon); there is no `GET /asm/diff` feed yet.
+
+**Phase 2 — Async exploitation from inventory (SHIPPED).** `exploit_batch` job type
+(`process_exploit_batch_job` in `api/worker.py`, routed in `process_job`): `claim_test_batch` pulls
+K untested/stale endpoints (priority-ordered, `FOR UPDATE SKIP LOCKED` → `in_progress`) →
+`run_scan(custom_endpoints=batch)` → write findings → `mark_tested` stamps `last_tested_at`/
+`last_verdict`; on error the batch is released back to `untested`. Triggered via
+`POST /targets/{id}/asm/test` (creates a `scan_role='asm_batch'` row and enqueues the job).
+**Gap vs. design:** coverage shards are not yet pull-based (still planned-partition); triggering is
+manual (the Phase-3 dispatcher below is not built).
+
+**Phase 3 — Continuous dispatcher.** A background loop (like `schedule_runner`) that, per ASM-enabled
+target, spends a freshness-TTL + rate budget to keep enqueuing recon + exploit batches automatically.
+
+**Phase 4 — Windows + ASM loop (full engine).** Allowed-time-windows via `schedules`; Gungnir/new-
+surface auto-queues recon→test; per-root-domain distributed rate limits; new-surface alerting.
+
+### 16.9 Verification (Phase 1–2)
+
+1. Unit: inventory fingerprint/normalization/upsert + priority ordering (pure functions, like the
+   planner tests).
+2. Migration applies (`target_endpoints` present) on a fresh API/worker start.
+3. Run a `coverage` (or smart) scan on Juice Shop → `GET /targets/{id}/asm/endpoints` shows the
+   harvested worklist persisted with `untested` status and a coverage % < 1.0.
+4. `POST /targets/{id}/asm/test` → an `exploit_batch` runs over a slice; those rows flip to `tested`
+   with `last_tested_at`; coverage % rises; findings dedupe under the target.
+5. Re-run recon → unchanged endpoints keep `first_seen_at`; any new ones appear as new surface;
+   nothing is dropped.

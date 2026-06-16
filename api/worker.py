@@ -41,6 +41,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 import parallel_scan
+import asm_inventory
 
 try:
     from constants import resolve_scan_budget
@@ -3572,6 +3573,18 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
 
+        # Continuous ASM: persist this scan's discovered endpoint worklist into
+        # the per-target inventory (docs §16). Best-effort; never fails the scan.
+        if target_id and not error:
+            try:
+                worklist = (result.get('active_checks') or {}).get('active_worklist')
+                if worklist:
+                    async with db_pool.acquire() as conn:
+                        n = await asm_inventory.upsert_endpoints(conn, target_id, worklist, source='scan')
+                    print(f"[{job_id[:8]}] ASM inventory: upserted {n} endpoints", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] ASM inventory error: {e}", flush=True)
+
         try:
             await finalize_ai_finding_retest(
                 options=options,
@@ -3773,6 +3786,15 @@ async def process_scan_plan_job(job_data: dict):
             list(options.get('custom_endpoints') or []) + harvested
         )
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon", flush=True)
+        # Continuous ASM: the recon worklist is the richest endpoint source —
+        # persist the whole thing into the per-target inventory (docs §16).
+        if target_id and harvested:
+            try:
+                async with db_pool.acquire() as conn:
+                    n = await asm_inventory.upsert_endpoints(conn, target_id, harvested, source='recon')
+                print(f"[{parent_id[:8]}] ASM inventory: upserted {n} endpoints from recon", flush=True)
+            except Exception as e:
+                print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
         plan = parallel_scan.plan_coverage_shards(options, harvested)
     else:
         plan = parallel_scan.plan_shards(
@@ -4232,6 +4254,127 @@ async def process_scan_merge_job(job_data: dict):
     )
 
 
+async def process_exploit_batch_job(job_data: dict):
+    """Continuous ASM exploitation (docs §16): claim a batch of untested/stale
+    inventory endpoints, test them, save findings, and stamp the inventory."""
+    job_id = job_data.get('job_id', 'unknown')
+    scan_id = job_data.get('scan_id')
+    target_id = job_data.get('target_id')
+    target = job_data.get('target')
+    options = job_data.get('options', {}) or {}
+    batch_size = int(job_data.get('batch_size') or 100)
+    stale_days = int(job_data.get('stale_days') or 30)
+    exploit_depth = bool(job_data.get('exploit_depth'))
+    r = get_redis()
+    now = utc_now()
+
+    # Claim the next batch (priority-ordered, FOR UPDATE SKIP LOCKED → work-stealing).
+    claimed: list[dict] = []
+    try:
+        async with db_pool.acquire() as conn:
+            claimed = await asm_inventory.claim_test_batch(conn, target_id, limit=batch_size, stale_days=stale_days)
+    except Exception as e:
+        print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)
+
+    if not claimed:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET status='completed', current_phase='no_untested_endpoints', progress=100, completed_at=$1, findings_count=0 WHERE id=$2",
+                utc_now(), uuid.UUID(scan_id),
+            )
+        r.hset(f"job:{job_id}", mapping={'status': 'completed', 'current_phase': 'no_untested_endpoints', 'progress': '100'})
+        r.expire(f"job:{job_id}", 86400)
+        print(f"[asm {job_id[:8]}] no untested/stale endpoints to test", flush=True)
+        return
+
+    endpoints = [asm_inventory.to_custom_endpoint(c['method'], c['path'], c['param_shape']) for c in claimed]
+    endpoint_ids = [c['id'] for c in claimed]
+    print(f"[asm {job_id[:8]}] testing {len(endpoints)} inventory endpoints (exploit_depth={exploit_depth})", flush=True)
+
+    # Active testing over the injected endpoints; lean discovery (they're known).
+    scan_opts = dict(options)
+    scan_opts['scan_type'] = scan_opts.get('scan_type') or 'smart'
+    scan_opts['parallel'] = False
+    for k in ('shard_strategy', 'shards', 'auth_state_shards'):
+        scan_opts.pop(k, None)
+    scan_opts['custom_endpoints'] = endpoints
+    lean = {
+        'max_urls': 200, 'browser_max_pages': 5, 'browser_max_depth': 1,
+        'param_discovery_url_limit': 0, 'param_discovery_max_params': 0,
+        'nuclei_max_targets': 50,
+        'active_max_endpoints': len(endpoints),
+        'active_max_seconds': min(2400, max(120, 8 * len(endpoints))),
+    }
+    if exploit_depth:
+        scan_opts['no_early_stop'] = True
+        lean.update({'sqli_extract_max': 8, 'oob_max_findings': 8, 'max_findings_per_family': None})
+    parallel_scan._merge_custom_budget(scan_opts, lean)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE scans SET status='running', started_at=$1, current_phase='asm_exploit' WHERE id=$2", now, uuid.UUID(scan_id))
+    r.hset(f"job:{job_id}", mapping={'status': 'running', 'scan_id': scan_id, 'started_at': now.isoformat(), 'heartbeat': now.isoformat()})
+
+    stop_heartbeat = threading.Event()
+    hb = threading.Thread(target=send_heartbeats, args=(job_id, stop_heartbeat), name=f"heartbeat-{job_id[:8]}", daemon=True)
+    hb.start()
+    error = None
+    try:
+        try:
+            result = await run_scan(target, scan_opts, scan_id=scan_id, job_id=job_id)
+        except Exception as e:
+            result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}
+        findings = result.get('findings', []) or []
+        error = result.get('error')
+        score = result.get('result', {}).get('score')
+        grade = result.get('result', {}).get('grade')
+        filepath = save_result_file(result, job_id)
+        completed_at = utc_now()
+        duration = int((completed_at - now).total_seconds())
+        saved = 0
+        if target_id and findings and not error:
+            try:
+                saved = await save_findings(scan_id, target_id, findings)
+            except Exception as e:
+                print(f"[asm {job_id[:8]}] save_findings error: {e}", flush=True)
+        if not error:
+            try:
+                async with db_pool.acquire() as conn:
+                    await asm_inventory.mark_tested(conn, endpoint_ids, verdict=('findings' if findings else 'clean'))
+                    wl = (result.get('active_checks') or {}).get('active_worklist')
+                    if wl:  # keep inventory fresh with anything new this run surfaced
+                        await asm_inventory.upsert_endpoints(conn, target_id, wl, source='asm')
+            except Exception as e:
+                print(f"[asm {job_id[:8]}] inventory stamp error: {e}", flush=True)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4, findings_count=$5,
+                       completed_at=$6, duration_seconds=$7, progress=100, current_phase=$8,
+                       error_message=$10 WHERE id=$9""",
+                ('failed' if error else 'completed'), json.dumps(result), score, grade, len(findings),
+                completed_at, duration, ('failed' if error else 'completed'), uuid.UUID(scan_id),
+                (error if error else None),
+            )
+        r.hset(f"job:{job_id}", mapping={
+            'status': 'failed' if error else 'completed', 'result_path': filepath,
+            'completed_at': completed_at.isoformat(), 'progress': '100',
+            'current_phase': 'failed' if error else 'completed',
+        })
+        r.expire(f"job:{job_id}", 86400)
+        print(f"[asm {job_id[:8]}] done | tested {len(endpoints)} | findings {len(findings)} (saved {saved}) | error {bool(error)}", flush=True)
+    finally:
+        stop_heartbeat.set()
+        hb.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
+        # Release any endpoints still 'in_progress' (error/crash) back to 'untested' to retry later.
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE target_endpoints SET test_status='untested', updated_at=NOW() WHERE id = ANY($1::uuid[]) AND test_status='in_progress'",
+                    endpoint_ids,
+                )
+        except Exception:
+            pass
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     job_type = job_data.get('type', 'scan')
@@ -4246,6 +4389,8 @@ async def process_job(job_data: dict):
         await process_scan_shard_job(job_data)
     elif job_type == parallel_scan.MERGE_JOB_TYPE:
         await process_scan_merge_job(job_data)
+    elif job_type == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
+        await process_exploit_batch_job(job_data)
     else:
         await process_scan_job(job_data)
 

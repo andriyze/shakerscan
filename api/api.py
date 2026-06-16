@@ -81,6 +81,7 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 import parallel_scan
+import asm_inventory
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
@@ -7881,6 +7882,95 @@ async def scan_target(target_id: str, options: ScanOptions = None):
 
     request = ScanRequest(target=target['url'], options=ScanOptions(**merged_options))
     return await submit_scan(request)
+
+
+# ============================================================
+# CONTINUOUS ASM - per-target endpoint inventory + async testing (docs §16)
+# ============================================================
+
+class AsmTestRequest(BaseModel):
+    batch_size: int = Field(default=100, ge=1, le=1000)
+    stale_days: int = Field(default=30, ge=0)
+    exploit_depth: bool = False
+
+
+@app.get("/targets/{target_id}/asm/endpoints")
+async def asm_list_endpoints(
+    target_id: str,
+    status: Optional[str] = None,
+    limit: int = Query(200, le=1000),
+    offset: int = 0,
+):
+    """List the persistent attack-surface inventory for a target + coverage."""
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+            raise HTTPException(status_code=404, detail="Target not found")
+        params: list[Any] = [uuid.UUID(target_id)]
+        q = """SELECT id, method, path, param_shape, source, auth_state, priority_score,
+                      test_status, last_verdict, first_seen_at, last_seen_at, last_tested_at
+               FROM target_endpoints WHERE target_id = $1"""
+        if status:
+            params.append(status)
+            q += f" AND test_status = ${len(params)}"
+        q += " ORDER BY priority_score DESC, last_seen_at DESC"
+        params.append(limit)
+        q += f" LIMIT ${len(params)}"
+        params.append(offset)
+        q += f" OFFSET ${len(params)}"
+        rows = await conn.fetch(q, *params)
+        coverage = await asm_inventory.coverage_summary(conn, target_id)
+    return {"endpoints": [row_to_dict(r) for r in rows], "coverage": coverage}
+
+
+@app.get("/targets/{target_id}/asm/coverage")
+async def asm_coverage(target_id: str):
+    """Per-target ASM coverage counts (tested / total over time)."""
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+            raise HTTPException(status_code=404, detail="Target not found")
+        return await asm_inventory.coverage_summary(conn, target_id)
+
+
+@app.post("/targets/{target_id}/asm/test")
+async def asm_test(target_id: str, request: AsmTestRequest = None):
+    """Queue an async exploitation batch over untested/stale inventory endpoints."""
+    request = request or AsmTestRequest()
+    r = get_redis()
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        coverage = await asm_inventory.coverage_summary(conn, target_id)
+        if coverage["total"] == 0:
+            raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
+        stored = target["scan_options"]
+        base_opts = (json.loads(stored) if isinstance(stored, str) and stored else (stored or {}))
+        scan_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
+        await conn.execute(
+            """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
+               VALUES ($1, $2, $3, $4, 'pending', $5, $6, 'asm_batch')""",
+            uuid.UUID(scan_id), uuid.UUID(target_id), target["url"], job_id,
+            json.dumps(base_opts), (base_opts.get("scan_type") or "smart"),
+        )
+    r.rpush(QUEUE_NAME, json.dumps({
+        "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
+        "job_id": job_id,
+        "scan_id": scan_id,
+        "target_id": target_id,
+        "target": target["url"],
+        "batch_size": request.batch_size,
+        "stale_days": request.stale_days,
+        "exploit_depth": request.exploit_depth,
+        "options": base_opts,
+        "submitted_at": utc_now_iso(),
+    }))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["url"]})
+    return {
+        "scan_id": scan_id, "job_id": job_id, "status": "queued",
+        "batch_size": request.batch_size,
+        "inventory_total": coverage["total"], "untested": coverage["untested"],
+    }
 
 
 # ============================================================
