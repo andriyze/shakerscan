@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 # Job type for the async exploitation pipeline (routed in worker.process_job).
@@ -364,9 +364,22 @@ def merge_asm_config(config: Any) -> dict[str, Any]:
     return cfg
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """Normalize a datetime to tz-aware UTC. Callers mix naive (utc_now()) and
+    tz-aware (asyncpg TIMESTAMPTZ) datetimes; subtracting across the two raises
+    'can't subtract offset-naive and offset-aware'. Naive values are assumed UTC
+    (the project's utc_now() convention)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def within_window(now: datetime, config: Any) -> bool:
-    """True if `now` (tz-aware UTC) falls in the configured allowed window.
+    """True if `now` falls in the configured allowed window (interpreted in UTC).
     No window config = always allowed."""
+    now = _as_utc(now)
     cfg = merge_asm_config(config)
     days = cfg["window_days"]
     if days is not None and now.weekday() not in days:
@@ -394,6 +407,11 @@ def decide_asm_action(
     """Pure per-target dispatch decision. Returns {action, reason, config}
     where action is 'recon' | 'test' | 'none'. At most one action per tick so
     the engine never stacks load on a target."""
+    # Normalize datetime awareness up front (naive utc_now() vs tz-aware
+    # TIMESTAMPTZ) so the interval subtractions below never raise.
+    now = _as_utc(now)
+    last_test_at = _as_utc(last_test_at)
+    last_recon_at = _as_utc(last_recon_at)
     cfg = merge_asm_config(config)
 
     def result(action: str, reason: str) -> dict[str, Any]:

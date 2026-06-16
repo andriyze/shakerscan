@@ -103,6 +103,28 @@ def test_within_window():
     assert a.within_window(_utc(), {"window_days": [0]}) is True
 
 
+def test_decide_action_handles_mixed_datetime_awareness():
+    # Regression: the dispatcher passes a NAIVE now (utc_now()) but last_test_at
+    # comes from a TIMESTAMPTZ column (tz-aware). Subtracting the two must not
+    # raise "can't subtract offset-naive and offset-aware".
+    naive_now = datetime(2026, 6, 16, 13, 0)  # naive
+    aware_recent = datetime(2026, 6, 16, 12, 55, tzinfo=timezone.utc)  # aware, 5 min ago
+    d = a.decide_asm_action(
+        now=naive_now, last_test_at=aware_recent, last_recon_at=None,
+        has_active_scan=False, claimable=100, tested_today=0,
+        config={"recon_interval_hours": 0, "min_interval_minutes": 60},
+    )
+    assert d["action"] == "none"  # within min interval (5 < 60), no crash
+    # naive now + aware OLD last_test_at -> test fires
+    aware_old = datetime(2026, 6, 16, 10, 0, tzinfo=timezone.utc)  # 3h ago
+    d2 = a.decide_asm_action(
+        now=naive_now, last_test_at=aware_old, last_recon_at=None,
+        has_active_scan=False, claimable=100, tested_today=0,
+        config={"recon_interval_hours": 0, "min_interval_minutes": 60},
+    )
+    assert d2["action"] == "test"
+
+
 def test_decide_action_recon_when_due():
     d = a.decide_asm_action(
         now=_utc(), last_test_at=None, last_recon_at=None,
