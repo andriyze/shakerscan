@@ -5,7 +5,8 @@ production-ready fleet work is not implemented yet.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
 can scan more targets at once and run high-budget Full Coverage scans by using workers
 from many machines.
-**Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md).
+**Related designs:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
+[continuous-asm-architecture.md](continuous-asm-architecture.md).
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
 and merge jobs?" This document answers: "How can those worker jobs run on more than one

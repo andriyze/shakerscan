@@ -1,21 +1,19 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; true zero-rediscovery shard execution remains deferred. Continuous ASM (§16) has the first shipped loop, but the target architecture below calls out hardening needed before we treat ASM coverage as authoritative. *(Parallel-scan's "Phase N" and ASM's "Phase N" in §16 are separate numbering — see "How to read this doc.")*
+**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; true zero-rediscovery shard execution remains deferred. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
 
-> **How to read this doc.** It grew into three layers, in order:
+> **How to read this doc.** It is now scoped to one thing: parallel execution for one logical scan.
 > 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and
 >    its implementation status. The "Implementation status" block immediately below is the source of
 >    truth for what's live; the design sections behind it are kept for rationale.
 > 2. **§15 — `coverage` strategy (SHIPPED).** Discover-once recon → harvest full worklist →
 >    partition across auto-sized shards. The bridge from "fan out a scan" to "cover the whole target."
-> 3. **§16 — Continuous ASM (shipped loop + target architecture).** Persist the attack surface in
->    `target_endpoints`, drain it with async batches, and run it autonomously via the `asm_dispatcher`.
->    The shipped loop is useful, but §16 now separates shipped behavior from the required hardening:
->    auth-aware inventory, replay fidelity, lease-based work allocation, token-bucket rate limits, and
->    coverage semantics that only mark endpoints tested when scanner telemetry proves they were attempted.
+> 3. **§16 — ASM integration boundary.** A short description of how parallel scans feed ASM inventory,
+>    with the full ASM current state, target architecture, and roadmap moved to
+>    [continuous-asm-architecture.md](continuous-asm-architecture.md).
 >
 > When design prose and a "SHIPPED"/"Gap" note disagree, the note wins — the prose predates it.
 
@@ -501,252 +499,34 @@ source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 
 ---
 
-## 16. Continuous ASM — target architecture and shipped state
+## 16. Continuous ASM integration boundary
 
-**Status:** the first continuous ASM loop is shipped: `target_endpoints`, `/asm` UI, `/targets/{id}/asm/*`
-APIs, `exploit_batch`, `asm_dispatcher`, windows, daily caps, a per-root-domain cap check, and
-Gungnir new-surface policy inheritance. That is enough to start building a durable attack-surface
-inventory. It is not enough to declare persistent ASM coverage authoritative yet.
+Continuous ASM is documented separately in
+[continuous-asm-architecture.md](continuous-asm-architecture.md). Keep this parallel-scan document
+focused on one-shot scan orchestration.
 
-**Date:** 2026-06-16
+Parallel scanning touches ASM in three shipped places:
 
-**Scope:** evolve ShakerScan from "a scan is a one-shot job" into "a target has a living attack
-surface that is discovered, queued, tested, retried, and aged continuously." Parallel `coverage`
-scans and continuous ASM should become two views over the same inventory and allocator:
+1. `coverage` recon harvests the scanner's emitted active worklist.
+2. `scan_merge` persists the union of shard-discovered endpoint worklists into `target_endpoints`.
+3. ASM inventory identity preserves auth state, parameter location, and replay spec so later ASM
+   batches can replay the same surface safely.
 
-- **One-shot Full Coverage:** a user asks for a logical scan now; ShakerScan discovers once, allocates
-  a bounded campaign of endpoint-test work, fans it out across workers, and merges one parent report.
-- **Continuous ASM:** the system keeps the same inventory fresh over time; it spends small safe
-  budgets during allowed windows and converges toward high coverage without overwhelming the target.
+Current boundary:
 
-### 16.1 Current shipped loop
+- One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`.
+- Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`.
+- Both paths write into the same endpoint inventory, but they do not yet use the same campaign
+  allocator or attempt ledger.
 
-Shipped pieces:
-- `target_endpoints` persists discovered endpoint worklists from standalone scans, coverage recon,
-  and parallel scan merge.
-- `GET /targets/{id}/asm/endpoints`, `GET /targets/{id}/asm/coverage`, `GET /targets/{id}/asm/diff`,
-  `POST /targets/{id}/asm/test`, and `GET/PUT /targets/{id}/asm/policy` expose inventory, coverage,
-  new surface, manual batches, and policy.
-- `exploit_batch` claims untested/stale rows with `FOR UPDATE SKIP LOCKED`, runs `run_scan()` with
-  `custom_endpoints`, saves findings, and stamps inventory.
-- `asm_dispatcher` periodically decides recon vs. test using target policy: batch size, stale TTL,
-  min interval, daily cap, recon cadence, UTC windows, weekday windows, and a per-root-domain cap check.
-- `/asm` gives users a rollup, target inventory, coverage card, manual "test untested" action,
-  continuous policy card, local-time window helper, and new-surface feed.
+Target boundary:
 
-Known gaps to fix before treating ASM as robust:
-- Endpoint identity currently collapses auth states and replay shapes too aggressively.
-- The replay string can lose form/JSON/body semantics.
-- Partial timeout recovery can mark endpoints as tested even when telemetry only proves partial work.
-- The per-root-domain cap is checked after completed endpoint stamps, not reserved before dispatch.
-- Parallel `coverage` still uses planned static endpoint slices; ASM uses pull-based claims. These
-  should converge on one allocator.
+- One-shot Full Coverage should become an explicit campaign over the same allocator used by
+  Continuous ASM.
+- `scan_merge` should eventually consume attempt-ledger facts rather than relying only on child scan
+  JSON.
+- The parent scan report should show tested, partial, untested, auth-blocked, and rate-limited
+  endpoint counts when that campaign model ships.
 
-### 16.2 Architectural decision: inventory + allocator is the source of truth
-
-The desired architecture is not "parallel scans over here, ASM batches over there." Both should use
-the same durable primitives:
-
-1. **Endpoint inventory:** what exists and what auth/replay context is required to exercise it.
-2. **Work allocator:** who owns the next slice of test work, until what lease expiry, under which
-   campaign/policy, and with what rate budget.
-3. **Attempt ledger:** what the scanner actually attempted, what completed, what timed out, and which
-   findings or coverage gaps resulted.
-4. **Rollup views:** one-shot scan parent reports, `/asm` coverage, targets chips, and AI-agent
-   summaries all read from those facts instead of inferring coverage from scan rows alone.
-
-This keeps the user model simple: "run Full Coverage now" and "keep this target continuously covered"
-are different entry points, not different engines.
-
-### 16.3 Inventory v2
-
-`target_endpoints` should preserve enough context to replay the same attack surface safely.
-
-Recommended identity:
-
-```
-UNIQUE(target_id, auth_state, method, normalized_path, param_location, param_shape_hash)
-```
-
-Recommended fields beyond the current table:
-
-```
-auth_state                  -- anonymous | user1 | user2 | named role
-credential_ref              -- reference to current credential, not raw secret
-param_location              -- query | form | json | path | header | none
-param_shape_hash            -- stable hash of parameter names / JSON paths
-replay_spec                 -- canonical custom endpoint or richer JSON replay descriptor
-content_type                -- application/json, form-urlencoded, multipart, etc.
-source_set                  -- crawl, HAR, JS, OpenAPI, manual, Gungnir, previous scan
-campaign_id                 -- optional one-shot coverage campaign that discovered/claimed it
-lease_owner, lease_expires_at, attempt_count
-last_attempt_at, last_successful_test_at
-last_attempt_status         -- completed | partial | timeout | auth_failed | rate_limited | error
-coverage_status             -- untested | leased | tested | partial | stale | gone
-```
-
-Rules:
-- `auth_state` belongs in identity. A `GET /api/user/profile` found as anonymous, user1, and user2 is
-  three coverage obligations, not one.
-- Replay must preserve body semantics. `POST /login form:email=1&password=1` must not degrade to
-  `POST /login?email=1&password=1`.
-- Store compact descriptors and sampled evidence, not full response bodies.
-- When credentials rotate or disappear, rows move to `auth_failed` or `blocked_by_missing_credential`
-  rather than "clean."
-
-### 16.4 Work allocator: pull-based, leased, budget-aware
-
-Replace "queue a batch because a count looked available" with a real allocation step:
-
-1. Decide policy/campaign scope: target, root domain, auth states, depth, max endpoints, max requests,
-   allowed windows, and priority.
-2. Reserve rate/budget tokens before enqueue using Redis or DB-backed buckets:
-   `root_domain`, `target_id`, `auth_state`, and optional global/fleet buckets.
-3. Claim endpoint rows with `FOR UPDATE SKIP LOCKED`, set `lease_owner`, `lease_expires_at`, and
-   `coverage_status='leased'`.
-4. Queue a worker job that carries the claimed endpoint IDs and replay specs.
-5. On success, stamp only endpoints the scanner reports as attempted/completed.
-6. On timeout/partial, mark attempted endpoints as `partial` and release unattempted rows for retry.
-7. On worker crash, a lease reaper returns expired `leased` rows to `untested` or increments
-   `attempt_count` with backoff.
-
-This solves the high-risk cases:
-- A root-domain rate cap cannot be exceeded by several targets queueing at once.
-- A slow batch cannot claim 100 endpoints, time out after 3, and mark all 100 clean.
-- Many workers can drain one target without static stragglers.
-
-### 16.5 How this works with parallel scans
-
-Parallel `coverage` should become a campaign over the same allocator.
-
-Current shipped behavior:
-- `scan_plan` runs discover-once recon.
-- `harvest_endpoints()` partitions the worklist into static coverage shards.
-- `scan_shard` workers run lean scans over disjoint endpoint slices.
-- `scan_merge` produces one parent report and persists the union into ASM inventory.
-
-Target behavior:
-- `scan_plan` creates a `coverage_campaign` tied to the parent scan and upserts discovered endpoints.
-- The campaign asks the allocator for work until it hits its budget or all eligible rows are terminal.
-- Worker jobs are `coverage_batch`/`asm_batch` equivalents; the difference is the rollup target
-  (`parent_scan_id` for one-shot scans, target policy for continuous ASM).
-- `scan_merge` reads the attempt ledger for the campaign, not just child scan result JSON.
-- The parent report shows "tested, partial, untested, auth-blocked, rate-limited" counts so the grade
-  can be trusted or clearly marked limited.
-
-Static partitioning is still acceptable for the shipped path, but pull-based allocation is the end
-state because it handles uneven endpoints, retries, auth-state expansion, and large fleets better.
-
-### 16.6 User-facing model
-
-Keep the UI small. Users should not need 20 sharding controls.
-
-Recommended UI:
-- **New Scan:** keep `Auto`, `Normal`, `Parallel`, and `Full Coverage`. Hide shard counts, endpoint
-  caps, and depth under tuning. Default Full Coverage to broad-but-sane depth; make Deep explicit.
-- **Attack Surface (`/asm`):** show coverage posture, untested/stale/new counts, last recon, last test,
-  and one primary action: `Improve coverage`. The action should choose recon vs. test batch based on
-  current state. Keep manual `Run recon` and `Test next batch` as secondary actions.
-- **Continuous policy:** expose one enable switch plus simple presets:
-  `Safe`, `Balanced`, `Aggressive lab`. Advanced fields (batch size, windows, caps) stay expandable.
-- **Scans list:** keep one logical scan row. Hide child shards by default. Continuous ASM batch rows
-  should either be hidden by default or grouped under an "ASM activity" view so users do not see
-  hundreds of batch rows and think they ran hundreds of scans.
-- **Scan detail:** parent rows should show campaign coverage: endpoints discovered, tested, partial,
-  untested, auth states, and shard/batch progress.
-
-Recommended API/AI-agent affordances:
-
-```
-POST /scans { options: { scan_type: "smart", parallel: true, shard_strategy: "coverage" } }
-PUT  /targets/{id}/asm/policy       -- enable/disable continuous ASM with preset or config
-POST /targets/{id}/asm/recon        -- explicit recon refresh, optional budget preset
-POST /targets/{id}/asm/improve      -- choose next best recon/test action
-POST /targets/{id}/asm/test         -- manual test batch, advanced/manual use
-GET  /targets/{id}/asm/gaps         -- AI-friendly explanation of what remains untested and why
-GET  /targets/{id}/asm/activity     -- recent recon/test batches, grouped away from normal scans
-```
-
-AI skills should map natural requests to those APIs:
-- "Run full coverage on this target" -> one-shot coverage scan with safe defaults.
-- "Keep this target covered" -> enable Continuous ASM with a safe preset and report the policy.
-- "What is still untested?" -> `/asm/gaps` with auth/rate/timeout reasons.
-- "Spend more budget on APIs" -> raise endpoint/test budget for the next campaign, not global defaults.
-
-### 16.7 Safety and correctness invariants
-
-These should be enforced in tests and code review:
-
-- No endpoint is marked `tested` unless the scanner emitted per-endpoint attempted/completed telemetry.
-- Partial timeout results preserve findings but do not count unattempted endpoints as covered.
-- Root-domain and target rate tokens are reserved before work is queued.
-- Endpoint identity includes auth state and parameter location/shape.
-- Replay specs preserve query vs. form vs. JSON vs. multipart semantics.
-- Shard/batch rows are implementation details; user-facing lists show logical scans or ASM activity.
-- Parent/merge logic is idempotent under duplicate shard completion or worker retry.
-- Cancellation preserves state and releases leased inventory.
-
-### 16.8 Implementation plan from here
-
-**Phase A — Correctness hardening (next).**
-- Add inventory identity tests for auth state and param location.
-- Preserve `form:`/`json:` replay specs through `upsert_endpoints()` and `to_custom_endpoint()`.
-- Make `exploit_batch` apply endpoint auth state or mark rows blocked when creds are missing.
-- Treat timeout-recovered partial results as `partial`, not clean coverage.
-- Replace completed-stamp rate checks with token reservation before enqueue.
-- Clean the Scans list/ASM activity grouping if batch rows become noisy.
-
-**Phase B — Attempt ledger + leases.**
-- Add `asm_endpoint_attempts` (or equivalent JSONB attempt rollup) keyed by endpoint, job, campaign,
-  worker, status, started/completed time, and tested parameter counts.
-- Add lease expiry and reaper tests.
-- Make coverage percentages derive from attempt outcomes.
-
-**Phase C — Parallel coverage uses the allocator.**
-- `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
-- Merge consumes attempt ledger and child result files.
-- Keep current static partition path as fallback while campaign mode stabilizes.
-
-**Phase D — UX/API/AI simplification.**
-- Add `Improve coverage`, `gaps`, and `activity` APIs.
-- Add UI presets and hide raw knobs by default.
-- Update AGENTS/skills guidance so AI agents use presets instead of hand-crafting budgets.
-
-**Phase E — Multi-node readiness.**
-- Use the same token buckets and leases across fleet workers.
-- Add worker placement metadata and object-storage-backed artifacts before remote VPS workers are
-  allowed to run high-volume ASM/coverage campaigns.
-
-### 16.9 Test strategy
-
-Unit tests:
-- `asm_inventory`: fingerprint includes auth state and param location; volatile IDs still dedupe;
-  replay preserves query/form/json/body shape; priority is stable.
-- `parallel_scan`: coverage shard planning preserves every endpoint per auth state; explicit caps grow
-  slices instead of dropping endpoints; auth state credentials do not leak between users.
-- Dispatcher policy: UTC windows, wrap-midnight windows, min intervals, daily caps, and token-reserve
-  decisions.
-
-DB/integration tests:
-- Concurrent `claim_test_batch` workers claim disjoint rows.
-- Expired leases return to claimable state.
-- Rate-token reservation blocks a second batch before completed stamps exist.
-- Partial timeout result releases unattempted rows and marks only attempted rows partial/tested.
-
-Worker/API tests:
-- `POST /scans` with `parallel:true, shard_strategy:"coverage"` creates one parent and hidden shards.
-- Parent cancellation cancels/reconciles shards and releases leases.
-- `POST /targets/{id}/asm/test` creates an ASM activity row, not noisy user-facing scan spam.
-- `GET /targets/{id}/asm/gaps` explains untested/auth-blocked/rate-limited/partial rows.
-
-UI tests:
-- New Scan stays simple: Auto/Normal/Parallel/Full Coverage, advanced tuning collapsed.
-- `/asm` shows rollup, coverage, new surface, and policy presets without exposing all raw knobs.
-- Scans list shows one logical scan by default and no child shard flood.
-
-Live smoke tests before declaring this production-ready:
-- Juice Shop: full-coverage campaign discovers a large worklist, fans out many shards/batches, and
-  merges one parent with stable coverage counts.
-- crAPI: authenticated user1/user2 coverage keeps auth states separate and exercises BOLA/IDOR paths.
-- Honey/demo app: continuous ASM recon -> inventory -> improve coverage -> new-surface diff loop works.
-- Slow endpoint fixture: timeout produces partial coverage, not false-clean coverage.
+Do not add detailed ASM roadmap material back here. Update
+[continuous-asm-architecture.md](continuous-asm-architecture.md) instead.
