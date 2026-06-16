@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -85,6 +86,7 @@ def utc_now_iso() -> str:
 
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
+SCAN_CANCEL_POLL_SECONDS = max(0.5, float(os.environ.get('SCAN_CANCEL_POLL_SECONDS', '2')))
 RETEST_MAX_PARALLEL = max(1, int(os.environ.get("RETEST_MAX_PARALLEL", "2")))
 RETEST_SLOT_KEY = os.environ.get("RETEST_SLOT_KEY", "retest:active_workers")
 RETEST_SLOT_TTL_SECONDS = int(os.environ.get("RETEST_SLOT_TTL_SECONDS", "120"))
@@ -548,6 +550,72 @@ async def init_db():
     await run_schema_migrations(db_pool)
 
 
+def _scanner_process_kwargs() -> dict[str, Any]:
+    """Start scanner subprocesses in their own session on POSIX.
+
+    That lets cancellation terminate the whole scanner process group, including
+    child tools spawned by scanner.py.
+    """
+    if os.name == "posix":
+        return {"start_new_session": True}
+    return {}
+
+
+def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None) -> bool:
+    if not scan_id:
+        return False
+    try:
+        client = redis_client or get_redis()
+        return bool(client.get(f"scan:{scan_id}:cancel"))
+    except Exception:
+        return False
+
+
+async def _terminate_scanner_process(proc: Any) -> None:
+    """Terminate a scanner subprocess, preferring the process group on POSIX."""
+    if getattr(proc, "returncode", None) is not None:
+        return
+
+    try:
+        pid = getattr(proc, "pid", None)
+        if os.name == "posix" and pid:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=SCAN_KILL_GRACE_SECONDS)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    try:
+        pid = getattr(proc, "pid", None)
+        if os.name == "posix" and pid:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=max(1.0, SCAN_KILL_GRACE_SECONDS / 2))
+    except Exception:
+        pass
+
+
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
@@ -854,10 +922,12 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=scan_env
+        env=scan_env,
+        **_scanner_process_kwargs(),
     )
 
     timeout_reason: str | None = None
+    cancel_reason: str | None = None
     max_duration_minutes = DEFAULT_MAX_DURATION_MINUTES
     override_minutes = os.environ.get("SCAN_MAX_DURATION_MINUTES")
     if override_minutes:
@@ -891,19 +961,22 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             timeout_reason = (
                 f"Exceeded max duration ({max_duration_minutes} min for {scan_type or 'standard'} scan)"
             )
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                return
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=SCAN_KILL_GRACE_SECONDS)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+            await _terminate_scanner_process(proc)
 
     watchdog_task = asyncio.create_task(_watchdog_timeout())
+
+    async def _watchdog_cancel() -> None:
+        nonlocal cancel_reason
+        if not scan_id:
+            return
+        while proc.returncode is None:
+            if await asyncio.to_thread(_scan_cancel_requested, scan_id):
+                cancel_reason = "Cancelled by user"
+                await _terminate_scanner_process(proc)
+                return
+            await asyncio.sleep(SCAN_CANCEL_POLL_SECONDS)
+
+    cancel_task = asyncio.create_task(_watchdog_cancel())
 
     stdout_chunks: list[bytes] = []
     stderr_lines: list[str] = []
@@ -1001,10 +1074,10 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     stderr_task = asyncio.create_task(_read_stream_lines(proc.stderr, _handle_stderr))
 
     await proc.wait()
-    if watchdog_task:
-        watchdog_task.cancel()
+    for task in (watchdog_task, cancel_task):
+        task.cancel()
         try:
-            await watchdog_task
+            await task
         except BaseException:
             pass  # CancelledError is BaseException in Python 3.8+
     await stdout_task
@@ -1042,7 +1115,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         # stderr, no timeout) must not be mislabeled "completed".
         return {
             'error': (
-                timeout_reason
+                cancel_reason
+                or timeout_reason
                 or stderr_text
                 or f"Scanner produced no output (exit code {proc.returncode})"
             ),

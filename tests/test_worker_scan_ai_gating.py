@@ -33,6 +33,34 @@ class _FakeProcess:
         return self.returncode
 
 
+class _CancellableFakeProcess:
+    def __init__(self):
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self._done = asyncio.Event()
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._done.set()
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._done.set()
+
+    async def wait(self):
+        await self._done.wait()
+        return self.returncode
+
+
 class _FakeCredentialPool:
     async def fetchrow(self, query, target_id):
         return {
@@ -104,6 +132,14 @@ class _FakeSlotRedis:
     def delete(self, key):
         self.deleted.append(key)
         self.values.pop(key, None)
+
+
+class _FakeCancelRedis:
+    def __init__(self, cancelled: bool):
+        self.cancelled = cancelled
+
+    def get(self, key):
+        return b"1" if self.cancelled else None
 
 
 def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
@@ -251,6 +287,7 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
 
     async def _fake_create_subprocess_exec(*cmd, **kwargs):
         captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
         return _FakeProcess(b'{"ok": true, "findings": []}')
 
     monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
@@ -261,6 +298,34 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
     assert result.get("ok") is True
     assert "--standard" in captured["cmd"]
     assert "--quick" not in captured["cmd"]
+    if worker.os.name == "posix":
+        assert captured["kwargs"]["start_new_session"] is True
+
+
+def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        proc = _CancellableFakeProcess()
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=True))
+    monkeypatch.setattr(worker, "SCAN_CANCEL_POLL_SECONDS", 0.01)
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {"scan_type": "standard"},
+        scan_id="00000000-0000-0000-0000-000000000123",
+        job_id="job-cancel-test",
+    ))
+
+    proc = captured["proc"]
+    assert proc.terminated is True
+    assert proc.killed is False
+    assert result["error"] == "Cancelled by user"
 
 
 def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):

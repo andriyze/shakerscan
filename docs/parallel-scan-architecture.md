@@ -28,7 +28,7 @@
 - **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
-- **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. The scanner subprocess still does not poll the cancel flag mid-run.
+- **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. Workers now launch scanner subprocesses in their own process group and poll `scan:{id}:cancel`, so active shard subprocesses are terminated instead of running to natural completion after cancellation.
 - **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
 - **UI controls:** Settings exposes one `Auto-shard eligible scans` toggle. New Scan exposes `Auto`, `Normal`, and `Parallel`; shard count/strategy/endpoint input are tucked behind `Parallel tuning` only when Parallel is forced. Scans rerun actions stay one item per scan type and rely on the global auto policy. Scan Detail shows parent shard rollup.
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
@@ -43,8 +43,8 @@ no-rediscovery shard mode (children skip discovery entirely) and the `build_repo
 remain the deeper optimization.
 
 **Still deferred (Phase 2):** the true zero-rediscovery shard mode / `build_report` recon carve-out;
-a first-class check registry; cooperative cancellation polling inside the scanner subprocess; richer
-UI breakdowns for shard coverage contribution.
+a first-class check registry; deeper in-scanner cooperative cancellation checkpoints between
+long active-check loops; richer UI breakdowns for shard coverage contribution.
 
 ---
 
@@ -131,7 +131,8 @@ Productization plan:
    list by default, parent rows are labeled as Parallel, and Scan Detail shows a shard
    rollup for parent scans.
 3. **Keep cancellation/state safe.** Implemented: cancelling a parent cancels child rows,
-   blocks merge, and prevents late shard writes from reviving cancelled scans.
+   blocks merge, prevents late shard writes from reviving cancelled scans, and terminates
+   running scanner subprocess groups through the worker cancel watchdog.
 4. **Make statistics count logical scans.** Implemented: shard rows are excluded from
    target scan totals, latest-scan views, and dashboard scan counts.
 5. **Implement true scanner-stage sharding.** Partially implemented as `coverage`:
@@ -281,7 +282,7 @@ Each shard:
 ### 5.4 Failure & lifecycle handling
 - **Stale shards:** reuse the retest watchdog idea — a SETNX-locked reaper requeues or fails shards whose heartbeat expired, then still drives the barrier so merge isn't blocked forever.
 - **Partial success:** merge proceeds with whatever shards completed; parent result records `shards_succeeded/shards_total` and degrades grade confidence rather than failing the whole scan.
-- **Cancellation:** parent cancellation fans out to child shard rows and Redis cancel flags. Workers and merge jobs treat cancelled rows as terminal and refuse to overwrite them with late output. Remaining work: make the scanner subprocess poll `scan:{id}:cancel` so cancellation stops active probes earlier instead of only preserving final state.
+- **Cancellation:** parent cancellation fans out to child shard rows and Redis cancel flags. Workers and merge jobs treat cancelled rows as terminal and refuse to overwrite them with late output. Worker-level cancel polling terminates the scanner process group; remaining polish is in-scanner cooperative checkpoints so long inner loops can clean up even more gracefully before SIGTERM.
 - **Idempotency:** shard jobs carry `(parent_id, shard_index, attempt)` like retest jobs so requeues don't double-run.
 
 ---
@@ -376,7 +377,7 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 **Phase 2 — Breadth & polish**
 - Family-based and nuclei-category sharding (§6.2/6.4).
 - Check registry refactor (§8.3).
-- Cooperative cancel polling in the scanner subprocess (see Risks).
+- More granular cooperative cancel checkpoints inside scanner active-check loops (see Risks).
 - UI: parent progress with per-shard breakdown; coverage shows shard contribution.
 
 ---
@@ -384,7 +385,7 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 ## 12. Risks & mitigations
 
 - **Scanner monolith refactor risk.** Mitigate by keeping the single-worker path as `merge([shard(full)])` and golden-diffing reports against current output before/after.
-- **Cancellation preserves state but does not yet interrupt active subprocess work.** The API now cancels parent/shard rows and prevents late writes from reviving them, but `scanner/scanner.py` still needs to poll `scan:{id}:cancel` to stop active probes early.
+- **Cancellation cleanup is coarse-grained.** The worker now interrupts active scanner subprocess groups on cancel, and DB state stays terminal. `scanner/scanner.py` can still improve graceful cleanup by checking a cancel signal between long active-check loops before the worker has to send SIGTERM.
 - **Auth session sharing across shards.** Stateful logins may not be cleanly serializable; mitigate by capturing a reusable token/cookie recipe in the recon stage and re-authing per shard on expiry (the scanner already re-auths).
 - **DBMS-fingerprint coupling.** Broadcast the fingerprint from the recon/plan stage so shards don't each re-detect and diverge.
 - **Resource exhaustion / target overload.** Each worker uses 2–4 GB / 1–2 cores, and a small lab app can fail under 20 simultaneous active shards. The per-parent Redis slot cap is now implemented; keep the default conservative and raise `options.shard_concurrency` only for targets known to tolerate it.
