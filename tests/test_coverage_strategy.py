@@ -28,6 +28,15 @@ def test_exploit_depth_off_by_default():
     assert all(not (s.options.get("custom_budget") or {}).get("sqli_extract_max") for s in plan.shards)
 
 
+def test_coverage_recon_budget_skips_heavy_active_and_nuclei_work():
+    budget = p.RECON_DISCOVERY_BUDGET
+    assert budget["active_max_endpoints"] == 1
+    assert budget["active_max_seconds"] == 0
+    assert budget["param_discovery_url_limit"] == 0
+    assert budget["nuclei_max_targets"] == 0
+    assert budget["max_duration_minutes"] <= 10
+
+
 # --------------------------- coverage partition ---------------------------
 
 def test_coverage_partitions_all_endpoints_disjoint():

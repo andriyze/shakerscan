@@ -95,7 +95,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   }
 
   const shards = Array.isArray(scan?.shards) ? scan.shards : []
-  const strategy = scan.options?.parallel_strategy
+  const strategy = scan.options?.parallel_strategy || scan.options?.shard_strategy
   const strategyBadge = strategy ? (
     <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
       {String(strategy)} strategy

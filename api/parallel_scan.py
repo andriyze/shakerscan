@@ -97,12 +97,14 @@ COVERAGE_WORKLIST_MAX = 5000
 # Lean discovery budget for the coverage "discover-once" recon pass. The recon
 # only needs to ENUMERATE the endpoint worklist quickly (the shards do the real
 # active testing), so we cap browser crawl, skip parameter discovery, disable
-# active/nuclei, and hard-bound the runtime. Without this the recon inherits the
-# parent's heavy discovery budget and "planning" can run 6-12 min before fan-out.
+# active and Nuclei, and hard-bound the runtime. Without this the recon inherits
+# heavy scan work and "planning" can run for minutes before fan-out.
 RECON_DISCOVERY_BUDGET = {
-    "active_max_endpoints": 0,
-    "active_max_seconds": 1,
-    "nuclei_max_targets": 1,
+    # Keep one selected endpoint so the scanner still reaches the active block
+    # and emits the full pre-cap active_worklist, but give active probes no time.
+    "active_max_endpoints": 1,
+    "active_max_seconds": 0,
+    "nuclei_max_targets": 0,
     "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
     "browser_max_pages": 25,
     "browser_max_depth": 3,

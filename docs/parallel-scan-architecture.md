@@ -87,6 +87,8 @@ Performance expectations:
   `coverage_per_shard_cap`, and fans out up to `coverage_max_shards` base coverage
   shards. If auth-state sharding is enabled, shards multiply across anonymous/user1/user2
   without dropping endpoint buckets; the planner uses larger endpoint slices when needed.
+  The recon pass is endpoint-harvest only: active exploitation and Nuclei are disabled
+  there so heavyweight work starts after shard fan-out.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
