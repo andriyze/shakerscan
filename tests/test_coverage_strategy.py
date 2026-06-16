@@ -159,6 +159,86 @@ def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
         assert sorted(state_eps) == sorted(eps)
 
 
+def test_aggregate_coverage_uses_assigned_endpoint_union_for_coverage_strategy():
+    merged = p.aggregate_shard_coverage(
+        "coverage",
+        [
+            {
+                "status": "completed",
+                "options": {"custom_endpoints": ["GET /a?id=1", "GET /b?id=1"]},
+                "smart_coverage": {
+                    "endpoints": {"discovered": 200, "tested": 2, "coverage": 0.01},
+                    "discovery_sources": ["active_worklist"],
+                },
+            },
+            {
+                "status": "failed",
+                "options": {"custom_endpoints": ["GET /c?id=1"]},
+                "smart_coverage": {},
+            },
+        ],
+    )
+
+    assert merged["endpoints"] == {
+        "discovered": 3,
+        "tested": 2,
+        "coverage": 0.667,
+        "basis": "assigned_custom_endpoints",
+    }
+    assert merged["aggregated_from_shards"] == 2
+    assert merged["coverage_reports_from_shards"] == 1
+    assert merged["discovery_sources"] == ["active_worklist"]
+
+
+def test_aggregate_coverage_tracks_auth_attempts_separately():
+    endpoints = ["GET /profile?id=1", "POST /orders body:id=1"]
+    merged = p.aggregate_shard_coverage(
+        "coverage",
+        [
+            {
+                "status": "completed",
+                "options": {"auth_state": "anonymous", "custom_endpoints": endpoints},
+                "smart_coverage": {"auth_states_tested": ["anonymous"]},
+            },
+            {
+                "status": "completed",
+                "options": {"auth_state": "user1", "custom_endpoints": endpoints},
+                "smart_coverage": {"auth_states_tested": ["user1"]},
+            },
+            {
+                "status": "failed",
+                "options": {"auth_state": "user2", "custom_endpoints": endpoints},
+                "smart_coverage": {},
+            },
+        ],
+    )
+
+    assert merged["endpoints"]["discovered"] == 2
+    assert merged["endpoints"]["tested"] == 2
+    assert merged["endpoints"]["coverage"] == 1.0
+    assert merged["endpoints"]["basis"] == "assigned_custom_endpoints"
+    assert merged["endpoints"]["auth_attempts_assigned"] == 6
+    assert merged["endpoints"]["auth_attempts_completed"] == 4
+    assert merged["endpoints"]["auth_attempt_coverage"] == 0.667
+    assert merged["auth_states_tested"] == ["anonymous", "user1"]
+
+
+def test_aggregate_coverage_uses_completed_shard_auth_state_options():
+    endpoints = ["GET /profile?id=1"]
+    merged = p.aggregate_shard_coverage(
+        "coverage",
+        [
+            {
+                "status": "completed",
+                "options": {"auth_state": "user2", "custom_endpoints": endpoints},
+                "smart_coverage": {},
+            },
+        ],
+    )
+
+    assert merged["auth_states_tested"] == ["user2"]
+
+
 # --------------------------- auth-state ---------------------------
 
 def test_available_auth_states():

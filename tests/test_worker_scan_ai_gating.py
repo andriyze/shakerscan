@@ -84,6 +84,60 @@ class _FakeFinalizePool:
         return False
 
 
+class _FakeSlotRedis:
+    def __init__(self):
+        self.values = {}
+        self.expired = []
+        self.deleted = []
+
+    def incr(self, key):
+        self.values[key] = int(self.values.get(key, 0)) + 1
+        return self.values[key]
+
+    def decr(self, key):
+        self.values[key] = int(self.values.get(key, 0)) - 1
+        return self.values[key]
+
+    def expire(self, key, ttl):
+        self.expired.append((key, ttl))
+
+    def delete(self, key):
+        self.deleted.append(key)
+        self.values.pop(key, None)
+
+
+def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 2)
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_CONCURRENCY_HARD_MAX", 5)
+    r = _FakeSlotRedis()
+    parent_id = "parent-1"
+
+    first, limit = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+    second, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+    third, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+
+    assert first is True
+    assert second is True
+    assert third is False
+    assert limit == 2
+    assert r.values[worker._parallel_shard_slot_key(parent_id)] == 2
+
+    worker._release_parallel_shard_slot(r, parent_id)
+    fourth, _ = worker._try_acquire_parallel_shard_slot(r, parent_id, {})
+    assert fourth is True
+    assert r.values[worker._parallel_shard_slot_key(parent_id)] == 2
+
+
+def test_parallel_shard_concurrency_override_is_clamped(monkeypatch):
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 4)
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_CONCURRENCY_HARD_MAX", 8)
+
+    assert worker._parallel_shard_concurrency_limit({}) == 4
+    assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 6}) == 6
+    assert worker._parallel_shard_concurrency_limit({"parallel_shard_concurrency": 99}) == 8
+    assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 0}) == 1
+
+
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000001"
     monkeypatch.setattr(worker, "db_pool", _FakeCredentialPool())

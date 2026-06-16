@@ -705,6 +705,106 @@ def merge_job(parent_id: str) -> dict[str, Any]:
     return {"type": MERGE_JOB_TYPE, "parent_scan_id": parent_id}
 
 
+def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build parent smart_coverage fields from shard reports.
+
+    For scope/coverage strategies the assigned ``custom_endpoints`` are the
+    authoritative split contract. Per-shard scanner coverage is useful context,
+    but its ``discovered`` denominator is local to a child scan and can wildly
+    overstate parent coverage when merged with ``max(discovered)``. Use the
+    union of assigned endpoints for parent endpoint coverage and expose
+    endpoint-auth attempts separately when auth-state shards repeat the same
+    endpoint under multiple identities.
+    """
+    records = shard_records or []
+    covs = [r.get("smart_coverage") for r in records if isinstance(r.get("smart_coverage"), dict) and r.get("smart_coverage")]
+    if not records:
+        return {}
+
+    def _ep(c: dict[str, Any], key: str) -> int:
+        try:
+            return int(((c.get("endpoints") or {}).get(key)) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    normalized_strategy = (strategy or "").strip().lower()
+    disjoint_strategy = normalized_strategy in {"scope", "coverage"}
+    all_assigned: set[str] = set()
+    completed_assigned: set[str] = set()
+    assigned_attempts = 0
+    completed_attempts = 0
+    for record in records:
+        options = record.get("options") if isinstance(record.get("options"), dict) else {}
+        endpoints = _normalize_endpoint_list(options.get("custom_endpoints"))
+        if not endpoints:
+            continue
+        all_assigned.update(endpoints)
+        assigned_attempts += len(endpoints)
+        if record.get("status") == "completed":
+            completed_assigned.update(endpoints)
+            completed_attempts += len(endpoints)
+
+    endpoints_summary: dict[str, Any]
+    if disjoint_strategy and all_assigned:
+        discovered = len(all_assigned)
+        tested = min(discovered, len(completed_assigned))
+        endpoints_summary = {
+            "discovered": discovered,
+            "tested": tested,
+            "coverage": round(tested / discovered, 3) if discovered else 0.0,
+            "basis": "assigned_custom_endpoints",
+        }
+        if assigned_attempts != discovered:
+            endpoints_summary["auth_attempts_assigned"] = assigned_attempts
+            endpoints_summary["auth_attempts_completed"] = completed_attempts
+            endpoints_summary["auth_attempt_coverage"] = (
+                round(completed_attempts / assigned_attempts, 3) if assigned_attempts else 0.0
+            )
+    elif covs:
+        discovered = max((_ep(c, "discovered") for c in covs), default=0)
+        if disjoint_strategy:
+            tested = min(discovered or 10**9, sum(_ep(c, "tested") for c in covs))
+        else:
+            tested = max((_ep(c, "tested") for c in covs), default=0)
+        endpoints_summary = {
+            "discovered": discovered,
+            "tested": tested,
+            "coverage": round(tested / discovered, 3) if discovered else 0.0,
+            "basis": "shard_smart_coverage",
+        }
+    else:
+        return {}
+
+    auth_state_values = {
+        str(state)
+        for c in covs
+        for state in (c.get("auth_states_tested") or [])
+        if state
+    }
+    for record in records:
+        options = record.get("options") if isinstance(record.get("options"), dict) else {}
+        state = options.get("auth_state")
+        if record.get("status") == "completed" and state:
+            auth_state_values.add(str(state))
+    auth_states = sorted(auth_state_values)
+    sources = sorted({
+        str(source)
+        for c in covs
+        for source in (c.get("discovery_sources") or [])
+        if source
+    })
+    out: dict[str, Any] = {
+        "endpoints": endpoints_summary,
+        "aggregated_from_shards": len(records),
+        "coverage_reports_from_shards": len(covs),
+    }
+    if auth_states:
+        out["auth_states_tested"] = auth_states
+    if sources:
+        out["discovery_sources"] = sources
+    return out
+
+
 async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_name: str) -> bool:
     """Enqueue the merge job once all of a parent's shards are terminal.
 
@@ -734,8 +834,10 @@ async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_na
     )
     if non_terminal:
         return False
-    # All shards terminal — enqueue merge exactly once.
+    # All shards terminal — enqueue merge exactly once. Put merge jobs at the
+    # front of the shared scan queue so completed parents finalize before new
+    # shard work starts behind them.
     if redis_client.set(merge_guard_key(parent_id), "1", nx=True, ex=86400):
-        redis_client.rpush(queue_name, json.dumps(merge_job(parent_id)))
+        redis_client.lpush(queue_name, json.dumps(merge_job(parent_id)))
         return True
     return False

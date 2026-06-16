@@ -7,6 +7,8 @@ Tests cover:
 3. Active check enforcement for smart/full/aggressive scans
 """
 
+import asyncio
+import json
 import pytest
 import sys
 import os
@@ -14,6 +16,7 @@ import os
 # Add scanner directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scanner'))
 
+import scanner_tools.active_checks as active_checks  # noqa: E402
 from scanner_tools.active_checks import (
     detect_reflection_context,
     CONTEXT_XSS_PAYLOADS,
@@ -297,6 +300,56 @@ class TestIsHashRoute:
     def test_empty_fragment(self):
         """Test URL with empty fragment is not a hash route."""
         assert _is_hash_route("http://example.com/#") is False
+
+
+class TestJsonXxePrecision:
+    """Regression tests for JSON XXE reflection false positives."""
+
+    def test_json_xxe_ignores_escaped_payload_reflection(self, monkeypatch):
+        async def fake_run(cmd, timeout=12):
+            body = "{}"
+            if "-d" in cmd:
+                body = cmd[cmd.index("-d") + 1]
+            payload = json.loads(body)["email"]
+            reflected_error = json.dumps({
+                "message": "Validation failed",
+                "details": f"rejected value [{payload}]",
+            })
+            return reflected_error, "", 0
+
+        monkeypatch.setattr(active_checks, "run", fake_run)
+
+        result = asyncio.run(active_checks.xxe_injection_test_json_body(
+            url="https://example.test/login",
+            method="POST",
+            params=["email"],
+            body_template={"email": "user@example.test", "password": "pw"},
+            content_type="application/json",
+            max_params=1,
+            max_payloads=2,
+        ))
+
+        assert result["vulnerable"] is False
+        assert result["findings"] == []
+
+    def test_json_xxe_still_reports_parser_entity_block(self, monkeypatch):
+        async def fake_run(cmd, timeout=12):
+            return "XML parser error: External entity not allowed", "", 0
+
+        monkeypatch.setattr(active_checks, "run", fake_run)
+
+        result = asyncio.run(active_checks.xxe_injection_test_json_body(
+            url="https://example.test/upload",
+            method="POST",
+            params=["document"],
+            body_template={"document": "value"},
+            content_type="application/json",
+            max_params=1,
+            max_payloads=1,
+        ))
+
+        assert result["vulnerable"] is True
+        assert result["findings"][0]["payload_reflected"] is False
 
 
 if __name__ == "__main__":

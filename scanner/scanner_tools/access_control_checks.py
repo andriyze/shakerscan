@@ -513,9 +513,9 @@ def determine_severity(status_code: int, category: str, path: str) -> str:
     """Determine finding severity based on status code and category."""
     # 200 OK = accessible (highest severity)
     if status_code == 200:
-        if category in ["admin_panels", "sensitive_files", "debug_dev"]:
+        if category in ["admin_panels", "sensitive_files"]:
             return "critical"
-        elif category in ["api_endpoints", "user_management", "management_consoles"] or category in ["backup_files", "logs_monitoring"]:
+        elif category in ["api_endpoints", "user_management", "management_consoles", "debug_dev"] or category in ["backup_files", "logs_monitoring"]:
             return "high"
         else:
             return "medium"

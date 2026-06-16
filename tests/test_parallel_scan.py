@@ -231,6 +231,7 @@ class _FakeRedis:
     def __init__(self):
         self.store = {}
         self.pushed = []
+        self.calls = []
 
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.store:
@@ -240,6 +241,12 @@ class _FakeRedis:
 
     def rpush(self, key, value):
         self.pushed.append((key, value))
+        self.calls.append(("rpush", key, value))
+        return len(self.pushed)
+
+    def lpush(self, key, value):
+        self.pushed.insert(0, (key, value))
+        self.calls.append(("lpush", key, value))
         return len(self.pushed)
 
 
@@ -258,6 +265,7 @@ def test_reconcile_enqueues_merge_when_all_terminal():
     assert queue == "scan_jobs"
     assert parallel_scan.MERGE_JOB_TYPE in payload
     assert pid in payload
+    assert r.calls[0][0] == "lpush"
 
 
 def test_reconcile_waits_while_shards_pending():

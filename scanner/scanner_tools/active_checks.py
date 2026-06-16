@@ -2908,6 +2908,22 @@ async def xxe_injection_test_json_body(
         html_indicators = ["<!doctype", "<html", "<head>", "<body>", "<script", "<title>"]
         return sum(1 for ind in html_indicators if ind in content_lower) >= 2
 
+    def _strip_reflected_payload(content: str, payload: str) -> str:
+        """Remove echoed payload forms before checking for XXE success markers."""
+        variants = {payload}
+        try:
+            variants.add(json.dumps(payload)[1:-1])
+        except Exception:
+            pass
+        variants.add(payload.replace('"', r'\"'))
+        variants.add(urllib.parse.quote(payload, safe=""))
+        variants.add(urllib.parse.quote_plus(payload))
+
+        scrubbed = content
+        for variant in sorted((v for v in variants if v), key=len, reverse=True):
+            scrubbed = scrubbed.replace(variant, "")
+        return scrubbed
+
     auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
     base_body = _build_body_template({"body_template": body_template}) if body_template is not None else {}
     if isinstance(base_body, dict) and body_param_defaults:
@@ -2933,9 +2949,11 @@ async def xxe_injection_test_json_body(
             if rc == 0 and out:
                 if _is_html_response(out):
                     continue
-                has_file = any(ind in out for ind in file_indicators)
-                has_ssrf = any(ind in out for ind in ssrf_indicators)
-                has_error = any(re.search(pat, out, re.IGNORECASE) for pat in error_patterns)
+                signal_body = _strip_reflected_payload(out, payload)
+                payload_reflected = signal_body != out
+                has_file = any(ind in signal_body for ind in file_indicators)
+                has_ssrf = any(ind in signal_body for ind in ssrf_indicators)
+                has_error = any(re.search(pat, signal_body, re.IGNORECASE) for pat in error_patterns)
                 if (has_file or has_ssrf or has_error):
                     results["vulnerable"] = True
                     results["findings"].append({
@@ -2943,6 +2961,7 @@ async def xxe_injection_test_json_body(
                         "payload": payload[:120],
                         "url": url,
                         "method": method,
+                        "payload_reflected": payload_reflected,
                         "response_snippet": out[:500],
                     })
                     break

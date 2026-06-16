@@ -110,6 +110,16 @@ RETEST_STALE_REQUEUE_LIMIT = max(0, int(os.environ.get("RETEST_STALE_REQUEUE_LIM
 RETEST_WATCHDOG_LOCK_KEY = os.environ.get("RETEST_WATCHDOG_LOCK_KEY", "retest:watchdog:lock")
 RETEST_WATCHDOG_LOCK_SECONDS = max(10, int(os.environ.get("RETEST_WATCHDOG_LOCK_SECONDS", "30")))
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
+PARALLEL_SHARD_MAX_PER_PARENT = max(1, int(os.environ.get("PARALLEL_SHARD_MAX_PER_PARENT", "4")))
+PARALLEL_SHARD_CONCURRENCY_HARD_MAX = max(
+    PARALLEL_SHARD_MAX_PER_PARENT,
+    int(os.environ.get("PARALLEL_SHARD_CONCURRENCY_HARD_MAX", "20")),
+)
+PARALLEL_SHARD_SLOT_TTL_SECONDS = max(
+    300,
+    int(os.environ.get("PARALLEL_SHARD_SLOT_TTL_SECONDS", str(8 * 60 * 60))),
+)
+PARALLEL_SHARD_REQUEUE_DELAY_SECONDS = max(1, int(os.environ.get("PARALLEL_SHARD_REQUEUE_DELAY_SECONDS", "2")))
 
 # Verification policy: single source of truth for severity gates.
 # Legacy env vars (AUTO_RETEST_MIN_SEVERITY, AI_VERIFY_MIN_SEVERITY) are still
@@ -1883,6 +1893,51 @@ def _release_retest_slot(r) -> None:
         remaining = r.decr(RETEST_SLOT_KEY)
         if remaining <= 0:
             r.delete(RETEST_SLOT_KEY)
+    except Exception:
+        pass
+
+
+def _parallel_shard_slot_key(parent_id: str) -> str:
+    return f"scan:{parent_id}:active_shards"
+
+
+def _parallel_shard_concurrency_limit(options: dict[str, Any] | None = None) -> int:
+    raw = None
+    if isinstance(options, dict):
+        if options.get("shard_concurrency") is not None:
+            raw = options.get("shard_concurrency")
+        elif options.get("parallel_shard_concurrency") is not None:
+            raw = options.get("parallel_shard_concurrency")
+    if raw is None:
+        raw = PARALLEL_SHARD_MAX_PER_PARENT
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        limit = PARALLEL_SHARD_MAX_PER_PARENT
+    return max(1, min(PARALLEL_SHARD_CONCURRENCY_HARD_MAX, limit))
+
+
+def _try_acquire_parallel_shard_slot(r, parent_id: str | None, options: dict[str, Any] | None = None) -> tuple[bool, int]:
+    if not parent_id:
+        return True, 0
+    limit = _parallel_shard_concurrency_limit(options)
+    key = _parallel_shard_slot_key(parent_id)
+    active = r.incr(key)
+    if active <= limit:
+        r.expire(key, PARALLEL_SHARD_SLOT_TTL_SECONDS)
+        return True, limit
+    r.decr(key)
+    return False, limit
+
+
+def _release_parallel_shard_slot(r, parent_id: str | None) -> None:
+    if not parent_id:
+        return
+    key = _parallel_shard_slot_key(parent_id)
+    try:
+        remaining = r.decr(key)
+        if remaining <= 0:
+            r.delete(key)
     except Exception:
         pass
 
@@ -3925,6 +3980,7 @@ async def process_scan_shard_job(job_data: dict):
     r = get_redis()
     now = utc_now()
     print(f"[{job_id[:8]}] Shard '{label}' ({idx}/{total}) start: {target}", flush=True)
+    slot_acquired = False
 
     async with db_pool.acquire() as conn:
         current = await conn.fetchrow("""
@@ -3959,9 +4015,33 @@ async def process_scan_shard_job(job_data: dict):
                 print(f"[{job_id[:8]}] merge reconcile error after cancelled shard skip: {e}", flush=True)
         return
 
+    slot_acquired, shard_limit = _try_acquire_parallel_shard_slot(r, parent_id, options)
+    if not slot_acquired:
+        wait_cycles = int(job_data.get('shard_slot_wait_cycles') or 0) + 1
+        requeued = dict(job_data)
+        requeued['shard_slot_wait_cycles'] = wait_cycles
+        requeued['last_shard_slot_wait_at'] = utc_now_iso()
+        r.rpush(QUEUE_NAME, json.dumps(requeued))
+        r.hset(f"job:{job_id}", mapping={
+            'status': 'queued',
+            'scan_id': scan_id,
+            'current_phase': 'waiting_for_shard_slot',
+            'parallel_shard_concurrency': str(shard_limit),
+            'shard_slot_wait_cycles': str(wait_cycles),
+        })
+        r.expire(f"job:{job_id}", 86400)
+        print(
+            f"[{job_id[:8]}] Shard '{label}' waiting for parent slot "
+            f"({shard_limit} max active shards for {parent_id[:8]})",
+            flush=True,
+        )
+        await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
+        return
+
     r.hset(f"job:{job_id}", mapping={
         'status': 'running', 'scan_id': scan_id,
         'started_at': now.isoformat(), 'heartbeat': now.isoformat(),
+        'parallel_shard_concurrency': str(shard_limit),
     })
     r.delete(f"scan:{scan_id}:logs")
     async with db_pool.acquire() as conn:
@@ -3974,6 +4054,8 @@ async def process_scan_shard_job(job_data: dict):
         )
     if update_result.endswith("0"):
         print(f"[{job_id[:8]}] Shard '{label}' cancelled before start; skipping", flush=True)
+        _release_parallel_shard_slot(r, parent_id)
+        slot_acquired = False
         r.hset(
             f"job:{job_id}",
             mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
@@ -4051,6 +4133,8 @@ async def process_scan_shard_job(job_data: dict):
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
+        if slot_acquired:
+            _release_parallel_shard_slot(r, parent_id)
         # Barrier + merge trigger. The DB all-terminal check in
         # reconcile_parallel_parent is the source of truth (robust to a shard
         # that crashed before reaching here and was failed by the stale checker).
@@ -4111,13 +4195,20 @@ async def process_scan_merge_job(job_data: dict):
     base_result = None
     base_section_count = -1
     shard_summaries = []
-    shard_covs: list[dict] = []
+    shard_coverage_records: list[dict] = []
     shard_worklists_by_auth: dict[str, list] = {}  # ASM: union per auth identity
     min_score = None
     min_score_grade = None
     for ch in children:
         cres = _as_report_dict(ch['result'])
         status = ch['status']
+        child_options = _as_report_dict(ch['options']) or {}
+        sc = cres.get('smart_coverage') if isinstance(cres, dict) else None
+        shard_coverage_records.append({
+            'status': status,
+            'options': child_options,
+            'smart_coverage': sc if isinstance(sc, dict) else {},
+        })
         shard_summaries.append({
             'shard_index': ch['shard_index'],
             'status': status,
@@ -4131,12 +4222,8 @@ async def process_scan_merge_job(job_data: dict):
                 min_score_grade = ch['grade']
         if not cres:
             continue
-        sc = cres.get('smart_coverage')
-        if isinstance(sc, dict):
-            shard_covs.append(sc)
         wl = (cres.get('active_checks') or {}).get('active_worklist')
         if wl:
-            child_options = _as_report_dict(ch['options']) or {}
             auth_state = asm_inventory.auth_state_from_options(child_options)
             shard_worklists_by_auth.setdefault(auth_state, []).extend(wl)
         if status == 'completed':
@@ -4188,35 +4275,21 @@ async def process_scan_merge_job(job_data: dict):
         'shards_failed': failed_n,
     }
 
-    # Coverage-aware merge: the parent must reflect the WHOLE fan-out, not just
-    # the base shard. We only have per-shard counts (not the tested-endpoint
-    # sets), so aggregate honestly per strategy:
-    #   - scope/coverage shards test DISJOINT endpoint slices -> sum tested.
-    #   - family/auto shards OVERLAP (each picks top-N) -> take the best shard.
-    # auth states and discovery sources union cleanly in all cases.
-    if shard_covs:
-        def _ep(c, k):
-            try:
-                return int(((c.get('endpoints') or {}).get(k)) or 0)
-            except (TypeError, ValueError):
-                return 0
-        discovered = max((_ep(c, 'discovered') for c in shard_covs), default=0)
-        disjoint = strategy in ('scope', 'coverage')
-        if disjoint:
-            tested = min(discovered or 10**9, sum(_ep(c, 'tested') for c in shard_covs))
-        else:
-            tested = max((_ep(c, 'tested') for c in shard_covs), default=0)
-        coverage = round(tested / discovered, 3) if discovered else 0.0
-        auth_states = sorted({s for c in shard_covs for s in (c.get('auth_states_tested') or [])})
-        sources = sorted({s for c in shard_covs for s in (c.get('discovery_sources') or [])})
+    # Coverage-aware merge: the parent must reflect the whole fan-out, not just
+    # the base shard. For scope/coverage shards, use the assigned endpoint
+    # slices as the source of truth so failed shards still remain in the
+    # denominator. Family/auto shards fall back to reported shard coverage.
+    if shard_coverage_records:
+        coverage_merge = parallel_scan.aggregate_shard_coverage(strategy, shard_coverage_records)
         agg_cov = dict(merged.get('smart_coverage') or {})
-        agg_cov['endpoints'] = {**(agg_cov.get('endpoints') or {}),
-                                'discovered': discovered, 'tested': tested, 'coverage': coverage}
-        if auth_states:
-            agg_cov['auth_states_tested'] = auth_states
-        if sources:
-            agg_cov['discovery_sources'] = sources
-        agg_cov['aggregated_from_shards'] = len(shard_covs)
+        if coverage_merge.get('endpoints'):
+            agg_cov['endpoints'] = {**(agg_cov.get('endpoints') or {}), **coverage_merge['endpoints']}
+        if coverage_merge.get('auth_states_tested'):
+            agg_cov['auth_states_tested'] = coverage_merge['auth_states_tested']
+        if coverage_merge.get('discovery_sources'):
+            agg_cov['discovery_sources'] = coverage_merge['discovery_sources']
+        agg_cov['aggregated_from_shards'] = coverage_merge.get('aggregated_from_shards', 0)
+        agg_cov['coverage_reports_from_shards'] = coverage_merge.get('coverage_reports_from_shards', 0)
         merged['smart_coverage'] = agg_cov  # top-level report section
 
     # Correct the report's target identity to the actual scanned target (guards

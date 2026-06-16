@@ -2108,6 +2108,12 @@ class ScanOptions(BaseModel):
         le=parallel_scan.COVERAGE_MAX_SHARDS,
         description="Maximum base coverage shards before auth-state expansion.",
     )
+    shard_concurrency: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=20,
+        description="Advanced API/AI override for max active shard jobs per parent scan.",
+    )
 
 
 class ScanRequest(BaseModel):
