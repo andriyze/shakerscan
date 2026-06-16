@@ -4325,12 +4325,17 @@ async def process_exploit_batch_job(job_data: dict):
     for k in ('shard_strategy', 'shards', 'auth_state_shards'):
         scan_opts.pop(k, None)
     scan_opts['custom_endpoints'] = endpoints
+    _active_secs = min(2400, max(120, 8 * len(endpoints)))
     lean = {
         'max_urls': 200, 'browser_max_pages': 5, 'browser_max_depth': 1,
         'param_discovery_url_limit': 0, 'param_discovery_max_params': 0,
         'nuclei_max_targets': 50,
         'active_max_endpoints': len(endpoints),
-        'active_max_seconds': min(2400, max(120, 8 * len(endpoints))),
+        'active_max_seconds': _active_secs,
+        # Bound the WHOLE batch so a hang on a slow/remote endpoint can't tie up
+        # the claimed in_progress endpoints for hours (the target's default smart
+        # max_duration is 600 min). Active budget + overhead for discovery/nuclei.
+        'max_duration_minutes': max(5, min(30, (_active_secs // 60) + 5)),
     }
     if exploit_depth:
         scan_opts['no_early_stop'] = True
