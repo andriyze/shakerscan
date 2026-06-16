@@ -785,7 +785,8 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS content_type TEXT,
                 ADD COLUMN IF NOT EXISTS last_attempt_status TEXT
             """)
-            await _backfill_target_endpoint_fingerprints(conn)
+            async with conn.transaction():
+                await _backfill_target_endpoint_fingerprints(conn)
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_target_endpoints_fp
                 ON target_endpoints(target_id, fingerprint)
