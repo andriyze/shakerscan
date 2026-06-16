@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, Menu, Network, PackageCheck, X } from 'lucide-react'
+import { Bot, Crosshair, Menu, Network, PackageCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navItems = [
@@ -56,6 +56,11 @@ const navItems = [
     href: '/exposure',
     label: 'Exposure',
     icon: <Network className="w-5 h-5" />,
+  },
+  {
+    href: '/asm',
+    label: 'Attack Surface',
+    icon: <Crosshair className="w-5 h-5" />,
   },
   {
     href: '/settings/ai-gate',

@@ -7652,6 +7652,34 @@ async def list_targets_grouped(
 
         rows = await conn.fetch(query, *params)
 
+        # Per-target ASM coverage (one aggregate query over the persistent inventory).
+        asm_by_target: dict[str, dict] = {}
+        target_ids = [row['id'] for row in rows]
+        if target_ids:
+            asm_rows = await conn.fetch(
+                """SELECT target_id,
+                          COUNT(*) AS total,
+                          COUNT(*) FILTER (WHERE test_status = 'tested') AS tested
+                   FROM target_endpoints
+                   WHERE target_id = ANY($1::uuid[])
+                   GROUP BY target_id""",
+                target_ids,
+            )
+            for ar in asm_rows:
+                total = ar['total'] or 0
+                tested = ar['tested'] or 0
+                asm_by_target[str(ar['target_id'])] = {
+                    'total': total,
+                    'tested': tested,
+                    'untested': total - tested,
+                    'coverage': round(tested / total, 4) if total else 0.0,
+                }
+
+    def _attach_asm(target_data):
+        if target_data:
+            target_data['asm_coverage'] = asm_by_target.get(str(target_data['id']))
+        return target_data
+
     # Group by root_domain
     grouped = {}
     for row in rows:
@@ -7663,7 +7691,7 @@ async def list_targets_grouped(
                 'subdomains': []
             }
 
-        target_data = row_to_dict(row)
+        target_data = _attach_asm(row_to_dict(row))
         if row['is_root']:
             grouped[rd]['root_target'] = target_data
         else:
@@ -7683,6 +7711,16 @@ async def list_targets_grouped(
         data['earliest_created'] = data['root_target']['created_at'] if data['root_target'] else (
             min((s['created_at'] for s in data['subdomains']), default=None)
         )
+        # Domain-level ASM coverage rollup across root + subdomains.
+        cov_targets = ([data['root_target']] if data['root_target'] else []) + data['subdomains']
+        cov_total = sum((t.get('asm_coverage') or {}).get('total', 0) for t in cov_targets)
+        cov_tested = sum((t.get('asm_coverage') or {}).get('tested', 0) for t in cov_targets)
+        data['asm_coverage'] = {
+            'total': cov_total,
+            'tested': cov_tested,
+            'untested': cov_total - cov_tested,
+            'coverage': round(cov_tested / cov_total, 4) if cov_total else 0.0,
+        } if cov_total else None
         result.append(data)
 
     # Sort based on sort_by and sort_order

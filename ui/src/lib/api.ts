@@ -231,6 +231,14 @@ export interface AITestScenariosResponse {
   scenarios: AITestScenario[]
 }
 
+// Compact ASM coverage rollup attached to grouped targets/domains.
+export interface AsmCoverageRollup {
+  total: number
+  tested: number
+  untested: number
+  coverage: number
+}
+
 export interface Target {
   id: string
   url: string
@@ -245,6 +253,7 @@ export interface Target {
   total_scans: number
   active_findings_count: number
   created_at: string
+  asm_coverage?: AsmCoverageRollup | null
 }
 
 export interface GroupedDomain {
@@ -253,6 +262,33 @@ export interface GroupedDomain {
   subdomains: Target[]
   subdomain_count: number
   total_count: number
+  asm_coverage?: AsmCoverageRollup | null
+}
+
+// Full per-target ASM coverage breakdown (GET /targets/{id}/asm/coverage).
+export interface AsmCoverage {
+  total: number
+  tested: number
+  untested: number
+  in_progress: number
+  stale: number
+  gone: number
+  coverage: number
+}
+
+export interface AsmEndpoint {
+  id: string
+  method: string
+  path: string
+  param_shape?: string
+  source?: string
+  auth_state?: string
+  priority_score: number
+  test_status: 'untested' | 'in_progress' | 'tested' | 'stale' | 'gone'
+  last_verdict?: string | null
+  first_seen_at?: string
+  last_seen_at?: string
+  last_tested_at?: string | null
 }
 
 export interface PrecisionPolicy {
@@ -1020,6 +1056,50 @@ export async function getTargetsGrouped(params?: {
 
   const res = await fetch(`${API_URL}/targets/grouped?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch grouped targets')
+  return res.json()
+}
+
+// Continuous ASM — persistent attack-surface inventory (docs/parallel-scan-architecture.md §16)
+export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/coverage`)
+  if (!res.ok) throw new Error('Failed to fetch ASM coverage')
+  return res.json()
+}
+
+export async function getAsmEndpoints(
+  targetId: string,
+  params?: { status?: string; limit?: number; offset?: number }
+): Promise<{ endpoints: AsmEndpoint[]; coverage: AsmCoverage }> {
+  const searchParams = new URLSearchParams()
+  if (params?.status) searchParams.set('status', params.status)
+  if (params?.limit) searchParams.set('limit', params.limit.toString())
+  if (params?.offset) searchParams.set('offset', params.offset.toString())
+
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/endpoints?${searchParams}`)
+  if (!res.ok) throw new Error('Failed to fetch ASM endpoints')
+  return res.json()
+}
+
+export async function testAsmTarget(
+  targetId: string,
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean }
+): Promise<{
+  scan_id: string
+  job_id: string
+  status: string
+  batch_size: number
+  inventory_total: number
+  untested: number
+}> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts || {}),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail || 'Failed to queue ASM test batch')
+  }
   return res.json()
 }
 

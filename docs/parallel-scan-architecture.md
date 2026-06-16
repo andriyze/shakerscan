@@ -501,9 +501,10 @@ source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 
 ## 16. Continuous ASM — async reconnaissance & async exploitation
 
-**Status:** design complete; **Phase 1–2 shipped** (persistent inventory + async `exploit_batch`);
-Phases 3–4 (continuous dispatcher, time windows, new-surface auto-queue, UI) remain the roadmap.
-See §16.5 for shipped-vs-planned API surface and §16.8 for the per-phase gap list.
+**Status:** design complete; **Phase 1–2 shipped** (persistent inventory + async `exploit_batch` +
+the **Attack Surface UI** at `/asm`). Phases 3–4 (continuous dispatcher, time windows, new-surface
+auto-queue/diff, engine-status UI) remain the roadmap.
+See §16.5 for shipped-vs-planned API/UI surface and §16.8 for the per-phase gap list.
 **Date:** 2026-06-15
 **Scope:** evolve ShakerScan from "a scan is a one-shot job" into "a target has a living attack
 surface that we continuously discover and test," with discovery and exploitation **decoupled** and
@@ -589,9 +590,13 @@ A first-class surface separate from one-shot scans (the user-requested new surfa
   - **Planned (NOT yet built):** `POST .../recon` (queue a standalone recon pass — today recon only
     runs as part of a `coverage` scan), `GET .../diff` (new/changed since last run), and per-target
     ASM policy (rate/windows/freshness) under `/settings` or `metadata_json`.
-- **UI: NOT yet built.** No `/asm/*` route is called by the UI; the inventory is API-only so far.
-  Planned: a "Continuous ASM" / "Attack Surface" section (inventory, coverage trend, new-surface
-  alerts, engine status) distinct from the Scans list.
+- **UI (SHIPPED):** an **Attack Surface** section (`/asm`, sidebar nav) distinct from the Scans
+  list: a cross-target coverage **rollup** (fed by `asm_coverage` now returned from
+  `GET /targets/grouped`), a per-target **inventory table** + **coverage card** (status filter,
+  priority order), and a **"Test untested"** action wired to `POST /asm/test` with a worker
+  guardrail. The `/targets` rows show a coverage chip linking into it.
+  - **Still planned:** coverage **trend** over time, new-surface **alerts/diff feed** (needs
+    `GET /asm/diff`), and continuous-engine **status/policy** controls (needs the Phase-3 dispatcher).
 
 ### 16.6 Reuse map (how this rides existing ShakerScan)
 

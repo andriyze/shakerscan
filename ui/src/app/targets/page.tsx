@@ -512,6 +512,16 @@ function TargetsContent() {
                           {domain.root_target.active_findings_count} findings
                         </Link>
                       )}
+                      {domain.root_target.asm_coverage && (
+                        <Link
+                          href={`/asm?target_id=${domain.root_target.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-blue-400 hover:text-blue-300 transition-colors"
+                          title="Attack surface coverage"
+                        >
+                          {(domain.root_target.asm_coverage.coverage * 100).toFixed(0)}% covered
+                        </Link>
+                      )}
                     </div>
                     {domain.root_target.last_grade && (
                       <span className={`text-xl font-bold ${getGradeColor(domain.root_target.last_grade)}`}>
@@ -697,6 +707,15 @@ function TargetsContent() {
                             className="text-yellow-500 hover:text-yellow-400 transition-colors"
                           >
                             {subdomain.active_findings_count}
+                          </Link>
+                        )}
+                        {subdomain.asm_coverage && (
+                          <Link
+                            href={`/asm?target_id=${subdomain.id}`}
+                            className="text-blue-400 hover:text-blue-300 transition-colors"
+                            title="Attack surface coverage"
+                          >
+                            {(subdomain.asm_coverage.coverage * 100).toFixed(0)}% covered
                           </Link>
                         )}
                       </div>
