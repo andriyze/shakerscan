@@ -487,13 +487,27 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       : 'bg-slate-700 text-slate-300'
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
-  const showCompletionBanner = !isAIScan && !isModelIntakeScan && (
+  // Continuous ASM recon is a DISCOVERY pass (active testing off by design) that
+  // refreshes the endpoint inventory; active vuln testing runs as separate ASM
+  // test batches. Don't frame its intentionally-off active modules as a
+  // "budget exhausted / coverage incomplete" failure.
+  const isAsmRecon = scan.scan_role === 'asm_recon'
+  const isAsmBatch = scan.scan_role === 'asm_batch'
+  const showCompletionBanner = !isAIScan && !isModelIntakeScan && !isAsmRecon && (
     scanCompletionStatus.complete === false ||
     scanCompletionStatus.limited === true ||
     completionSkippedModules.length > 0 ||
     completionCappedEntries.length > 0
   )
-  const scanTypeLabel = isAIScan ? 'AI Gate' : isModelIntakeScan ? 'Model Intake' : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const scanTypeLabel = isAIScan
+    ? 'AI Gate'
+    : isModelIntakeScan
+      ? 'Model Intake'
+      : isAsmRecon
+        ? 'ASM recon (discovery)'
+        : isAsmBatch
+          ? 'ASM test batch'
+          : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
   const modelIntakeDecision = String(result?.decision || '').toLowerCase()
   const modelIntakeDecisionClass =
     modelIntakeDecision === 'block'
@@ -720,6 +734,25 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>
+
+      {isAsmRecon && (
+        <div className="mb-8 rounded-lg border border-blue-500/40 bg-blue-950/20 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-blue-300" />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-base font-semibold text-white">Continuous ASM — discovery pass</h2>
+              <p className="mt-1 text-sm text-gray-300">
+                This is an automated recon scan that re-enumerates the attack surface to keep the
+                target&apos;s endpoint inventory fresh. Active vulnerability testing (SQLi, XSS, BOLA,
+                etc.) is intentionally <span className="text-gray-100">off</span> here — it runs as
+                separate <span className="text-gray-100">ASM test batches</span>, so a small finding
+                count is expected. See coverage on the{' '}
+                <a href="/asm" className="text-blue-300 hover:text-blue-200">Attack Surface</a> page.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCompletionBanner && (
         <div className={`mb-8 rounded-lg border p-4 ${
