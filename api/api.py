@@ -159,6 +159,10 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
+try:
+    ASM_DISPATCH_INTERVAL_SECONDS = int(os.environ.get("SHAKERSCAN_ASM_DISPATCH_INTERVAL", "60"))
+except (TypeError, ValueError):
+    ASM_DISPATCH_INTERVAL_SECONDS = 60  # How often the continuous ASM dispatcher ticks
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
@@ -1610,6 +1614,91 @@ async def schedule_runner(pool: asyncpg.Pool):
             print(f"[scheduler] Error running schedules: {e}", flush=True)
 
 
+async def run_asm_dispatch(pool: asyncpg.Pool):
+    """One tick of the Continuous ASM dispatcher (docs §16 Phase 3/4): for each
+    ASM-enabled target, pick at most ONE action (recon or exploit batch) within
+    its freshness/rate/window budget and enqueue it. Never stacks load on a
+    target (the crash lesson) and honours a per-root-domain rate cap."""
+    r = get_redis()
+    now = utc_now()
+
+    async with pool.acquire() as conn:
+        targets = await conn.fetch("""
+            SELECT id, url, root_domain, scan_options, asm_config,
+                   asm_last_test_at, asm_last_recon_at
+            FROM targets
+            WHERE asm_enabled = true AND is_active = true
+        """)
+
+    for t in targets:
+        target_id = str(t['id'])
+        target_url = t['url']
+        root_domain = t['root_domain']
+        raw_config = _decode_asm_config(t['asm_config'])
+        cfg = asm_inventory.merge_asm_config(raw_config)
+        try:
+            async with pool.acquire() as conn:
+                active = await conn.fetchval("""
+                    SELECT COUNT(*) FROM scans
+                    WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
+                """, t['id'])
+                claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg['stale_days'])
+                tested_today = await asm_inventory.tested_recently_count(conn, target_id, hours=24)
+                domain_rate_exceeded = False
+                cap = cfg['max_requests_per_hour_per_domain']
+                if cap > 0 and root_domain:
+                    used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
+                    domain_rate_exceeded = used >= cap
+
+                decision = asm_inventory.decide_asm_action(
+                    now=now,
+                    last_test_at=t['asm_last_test_at'],
+                    last_recon_at=t['asm_last_recon_at'],
+                    has_active_scan=bool(active and active > 0),
+                    claimable=claimable,
+                    tested_today=tested_today,
+                    domain_rate_exceeded=domain_rate_exceeded,
+                    config=raw_config,
+                )
+                action = decision['action']
+                if action == 'none':
+                    continue
+
+                base_opts = _decode_json_value(t['scan_options']) or {}
+                if not isinstance(base_opts, dict):
+                    base_opts = {}
+
+                if action == 'recon':
+                    enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
+                    await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
+                    print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
+                elif action == 'test':
+                    enq = await _enqueue_asm_exploit_batch(
+                        conn, r, target_id, target_url, base_opts,
+                        batch_size=cfg['batch_size'], stale_days=cfg['stale_days'],
+                        exploit_depth=cfg['exploit_depth'], triggered_by='dispatcher',
+                    )
+                    await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
+                    print(f"[asm] test batch queued for {target_url} "
+                          f"({cfg['batch_size']} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
+        except Exception as e:
+            print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
+
+
+async def asm_dispatcher(pool: asyncpg.Pool):
+    """Background loop driving Continuous ASM (docs §16 Phase 3)."""
+    print("[asm] Continuous ASM dispatcher started", flush=True)
+    while True:
+        try:
+            await asyncio.sleep(ASM_DISPATCH_INTERVAL_SECONDS)
+            await run_asm_dispatch(pool)
+        except asyncio.CancelledError:
+            print("[asm] Continuous ASM dispatcher stopped", flush=True)
+            break
+        except Exception as e:
+            print(f"[asm] dispatcher error: {e}", flush=True)
+
+
 # Database connection pool
 db_pool: Optional[asyncpg.Pool] = None
 
@@ -1669,20 +1758,19 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     cleanup_task = asyncio.create_task(stale_scan_checker(db_pool))
     scheduler_task = asyncio.create_task(schedule_runner(db_pool))
+    asm_task = asyncio.create_task(asm_dispatcher(db_pool))
 
     yield
 
     # Stop background tasks
     cleanup_task.cancel()
     scheduler_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await scheduler_task
-    except asyncio.CancelledError:
-        pass
+    asm_task.cancel()
+    for task in (cleanup_task, scheduler_task, asm_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     await db_pool.close()
 
@@ -7932,6 +8020,69 @@ class AsmTestRequest(BaseModel):
     exploit_depth: bool = False
 
 
+class AsmPolicyUpdate(BaseModel):
+    """Per-target Continuous ASM policy (docs §16 Phase 3/4)."""
+    enabled: Optional[bool] = None
+    config: Optional[dict] = None
+
+
+async def _enqueue_asm_exploit_batch(
+    conn, r, target_id: str, target_url: str, base_opts: dict,
+    *, batch_size: int, stale_days: int, exploit_depth: bool,
+    triggered_by: str = "api",
+) -> dict:
+    """Create an asm_batch scan row and enqueue the exploit_batch job. Shared by
+    POST /asm/test and the continuous dispatcher."""
+    scan_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    await conn.execute(
+        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
+           VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)""",
+        uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
+        json.dumps(base_opts or {}), ((base_opts or {}).get("scan_type") or "smart"),
+        asm_inventory.ASM_BATCH_ROLE,
+    )
+    r.rpush(QUEUE_NAME, json.dumps({
+        "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
+        "job_id": job_id, "scan_id": scan_id,
+        "target_id": target_id, "target": target_url,
+        "batch_size": batch_size, "stale_days": stale_days, "exploit_depth": exploit_depth,
+        "options": base_opts or {}, "triggered_by": triggered_by,
+        "submitted_at": utc_now_iso(),
+    }))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    return {"scan_id": scan_id, "job_id": job_id}
+
+
+async def _enqueue_asm_recon(
+    conn, r, target_id: str, target_url: str, base_opts: dict,
+    *, triggered_by: str = "dispatcher",
+) -> dict:
+    """Create an asm_recon scan row and enqueue a lean standalone discovery scan
+    that refreshes/grows the inventory (worklist persisted on completion)."""
+    opts = dict(base_opts or {})
+    opts["scan_type"] = "smart"
+    opts.pop("parallel", None)  # recon is one lightweight standalone scan
+    cb = dict(opts.get("custom_budget") or {})
+    cb.update(parallel_scan.RECON_DISCOVERY_BUDGET)  # lean enumeration, active off
+    opts["custom_budget"] = cb
+    scan_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    await conn.execute(
+        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
+           VALUES ($1, $2, $3, $4, 'pending', $5, 'smart', $6)""",
+        uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
+        json.dumps(opts), asm_inventory.ASM_RECON_ROLE,
+    )
+    r.rpush(QUEUE_NAME, json.dumps({
+        "job_id": job_id, "scan_id": scan_id, "target": target_url,
+        "options": opts, "triggered_by": triggered_by, "asm_recon": True,
+        "submitted_at": utc_now_iso(),
+    }))
+    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
+    return {"scan_id": scan_id, "job_id": job_id}
+
+
 @app.get("/targets/{target_id}/asm/endpoints")
 async def asm_list_endpoints(
     target_id: str,
@@ -7983,32 +8134,82 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
         stored = target["scan_options"]
         base_opts = (json.loads(stored) if isinstance(stored, str) and stored else (stored or {}))
-        scan_id = str(uuid.uuid4())
-        job_id = str(uuid.uuid4())
-        await conn.execute(
-            """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
-               VALUES ($1, $2, $3, $4, 'pending', $5, $6, 'asm_batch')""",
-            uuid.UUID(scan_id), uuid.UUID(target_id), target["url"], job_id,
-            json.dumps(base_opts), (base_opts.get("scan_type") or "smart"),
+        enq = await _enqueue_asm_exploit_batch(
+            conn, r, target_id, target["url"], base_opts,
+            batch_size=request.batch_size, stale_days=request.stale_days,
+            exploit_depth=request.exploit_depth, triggered_by="api",
         )
-    r.rpush(QUEUE_NAME, json.dumps({
-        "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
-        "job_id": job_id,
-        "scan_id": scan_id,
-        "target_id": target_id,
-        "target": target["url"],
-        "batch_size": request.batch_size,
-        "stale_days": request.stale_days,
-        "exploit_depth": request.exploit_depth,
-        "options": base_opts,
-        "submitted_at": utc_now_iso(),
-    }))
-    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["url"]})
     return {
-        "scan_id": scan_id, "job_id": job_id, "status": "queued",
+        "scan_id": enq["scan_id"], "job_id": enq["job_id"], "status": "queued",
         "batch_size": request.batch_size,
         "inventory_total": coverage["total"], "untested": coverage["untested"],
     }
+
+
+def _decode_asm_config(raw) -> dict:
+    decoded = _decode_json_value(raw) or {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+@app.get("/targets/{target_id}/asm/policy")
+async def asm_get_policy(target_id: str):
+    """Return the effective Continuous ASM policy for a target."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT asm_enabled, asm_config, asm_last_test_at, asm_last_recon_at FROM targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Target not found")
+    return {
+        "enabled": bool(row["asm_enabled"]),
+        "config": asm_inventory.merge_asm_config(_decode_asm_config(row["asm_config"])),
+        "last_test_at": row["asm_last_test_at"].isoformat() if row["asm_last_test_at"] else None,
+        "last_recon_at": row["asm_last_recon_at"].isoformat() if row["asm_last_recon_at"] else None,
+    }
+
+
+@app.put("/targets/{target_id}/asm/policy")
+async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
+    """Enable/disable continuous ASM and update the per-target policy (validated
+    + clamped to safe bounds)."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
+        if not row:
+            raise HTTPException(status_code=404, detail="Target not found")
+        current = _decode_asm_config(row["asm_config"])
+        new_config = asm_inventory.merge_asm_config(
+            {**current, **body.config} if isinstance(body.config, dict) else current
+        )
+        await conn.execute(
+            """UPDATE targets
+               SET asm_enabled = COALESCE($1, asm_enabled), asm_config = $2, updated_at = NOW()
+               WHERE id = $3""",
+            body.enabled, json.dumps(new_config), uuid.UUID(target_id),
+        )
+        out = await conn.fetchrow(
+            "SELECT asm_enabled, asm_last_test_at, asm_last_recon_at FROM targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
+    return {
+        "enabled": bool(out["asm_enabled"]),
+        "config": new_config,
+        "last_test_at": out["asm_last_test_at"].isoformat() if out["asm_last_test_at"] else None,
+        "last_recon_at": out["asm_last_recon_at"].isoformat() if out["asm_last_recon_at"] else None,
+    }
+
+
+@app.get("/targets/{target_id}/asm/diff")
+async def asm_diff(
+    target_id: str,
+    days: int = Query(7, ge=1, le=365),
+    limit: int = Query(100, le=500),
+):
+    """New attack surface for a target: endpoints first seen within N days."""
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+            raise HTTPException(status_code=404, detail="Target not found")
+        return await asm_inventory.new_surface(conn, target_id, days=days, limit=limit)
 
 
 # ============================================================

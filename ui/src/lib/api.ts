@@ -1103,6 +1103,61 @@ export async function testAsmTarget(
   return res.json()
 }
 
+// Continuous ASM policy (docs §16 Phase 3/4)
+export interface AsmConfig {
+  batch_size: number
+  stale_days: number
+  min_interval_minutes: number
+  daily_endpoint_cap: number
+  recon_interval_hours: number
+  exploit_depth: boolean
+  window_start_hour: number | null
+  window_end_hour: number | null
+  window_days: number[] | null
+  max_requests_per_hour_per_domain: number
+}
+
+export interface AsmPolicy {
+  enabled: boolean
+  config: AsmConfig
+  last_test_at: string | null
+  last_recon_at: string | null
+}
+
+export async function getAsmPolicy(targetId: string): Promise<AsmPolicy> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/policy`)
+  if (!res.ok) throw new Error('Failed to fetch ASM policy')
+  return res.json()
+}
+
+export async function updateAsmPolicy(
+  targetId: string,
+  body: { enabled?: boolean; config?: Partial<AsmConfig> }
+): Promise<AsmPolicy> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/policy`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail || 'Failed to update ASM policy')
+  }
+  return res.json()
+}
+
+export async function getAsmDiff(
+  targetId: string,
+  params?: { days?: number; limit?: number }
+): Promise<{ days: number; total_new: number; endpoints: AsmEndpoint[] }> {
+  const searchParams = new URLSearchParams()
+  if (params?.days) searchParams.set('days', params.days.toString())
+  if (params?.limit) searchParams.set('limit', params.limit.toString())
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/diff?${searchParams}`)
+  if (!res.ok) throw new Error('Failed to fetch ASM diff')
+  return res.json()
+}
+
 export async function createTarget(url: string, name?: string) {
   const res = await fetch(`${API_URL}/targets`, {
     method: 'POST',

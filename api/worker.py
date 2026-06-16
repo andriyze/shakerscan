@@ -4081,6 +4081,7 @@ async def process_scan_merge_job(job_data: dict):
     base_section_count = -1
     shard_summaries = []
     shard_covs: list[dict] = []
+    shard_worklists: list = []  # ASM: union of each shard's discovered endpoint worklist
     min_score = None
     min_score_grade = None
     for ch in children:
@@ -4102,6 +4103,9 @@ async def process_scan_merge_job(job_data: dict):
         sc = cres.get('smart_coverage')
         if isinstance(sc, dict):
             shard_covs.append(sc)
+        wl = (cres.get('active_checks') or {}).get('active_worklist')
+        if wl:
+            shard_worklists.extend(wl)
         if status == 'completed':
             section_count = len(cres.get('result', {}) or {})
             if section_count > base_section_count:
@@ -4228,6 +4232,18 @@ async def process_scan_merge_job(job_data: dict):
              len(union_findings), completed_at, duration,
              'completed' if parent_status == 'completed' else 'failed',
              uuid.UUID(parent_id))
+
+    # Continuous ASM: persist the UNION of every shard's discovered worklist
+    # into the per-target inventory (docs §16). Closes the Phase-1 gap so
+    # parallel/sharded scans populate the attack surface, not just standalone
+    # scans. Best-effort; never fails the merge.
+    if parent_status == 'completed' and target_id and shard_worklists:
+        try:
+            async with db_pool.acquire() as conn:
+                n = await asm_inventory.upsert_endpoints(conn, target_id, shard_worklists, source='scan')
+            print(f"[merge {parent_id[:8]}] ASM inventory: upserted {n} endpoints from {len(children)} shards", flush=True)
+        except Exception as e:
+            print(f"[merge {parent_id[:8]}] ASM inventory error: {e}", flush=True)
 
     # Auto-retest severity-gated findings once, on the parent.
     if parent_status == 'completed' and target_id and union_findings:

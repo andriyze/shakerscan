@@ -552,6 +552,21 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
 
+            # Continuous ASM policy (docs §16 Phase 3/4): per-target enable +
+            # config for the background dispatcher that auto-drains/refreshes
+            # the endpoint inventory.
+            await conn.execute("""
+                ALTER TABLE targets
+                ADD COLUMN IF NOT EXISTS asm_enabled BOOLEAN NOT NULL DEFAULT false,
+                ADD COLUMN IF NOT EXISTS asm_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS asm_last_test_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS asm_last_recon_at TIMESTAMPTZ
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_targets_asm_enabled
+                ON targets(asm_enabled) WHERE asm_enabled = true
+            """)
+
             # Parallel scan orchestration (parent/shard/merge fan-out).
             await conn.execute("""
                 ALTER TABLE scans

@@ -431,6 +431,8 @@ function ScansContent() {
                 const aiTargetType = formatAITargetType(scan.ai_target_type)
                 const scanTypeLabel = formatScanTypeLabel(scan)
                 const parallelParent = isParallelParent(scan)
+                const asmBatch = scan.scan_role === 'asm_batch'
+                const asmRecon = scan.scan_role === 'asm_recon'
                 return (
                 <tr key={scan.id} className="hover:bg-gray-800/50 transition-colors">
                   <td className="px-4 py-3 max-w-[20rem]">
@@ -450,9 +452,9 @@ function ScansContent() {
                   <td className="hidden xl:table-cell px-4 py-3">
                     <div className="min-w-0">
                       <span className="text-sm text-gray-300">{scanTypeLabel}</span>
-                      {(parallelParent || aiTargetType || authenticated) && (
+                      {(asmBatch || asmRecon || parallelParent || aiTargetType || authenticated) && (
                         <div className="mt-0.5 truncate text-xs text-gray-500">
-                          {parallelParent ? 'Parallel' : aiTargetType || 'Authenticated'}
+                          {asmBatch ? 'ASM batch' : asmRecon ? 'ASM recon' : parallelParent ? 'Parallel' : aiTargetType || 'Authenticated'}
                         </div>
                       )}
                     </div>

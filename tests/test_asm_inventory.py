@@ -58,3 +58,86 @@ def test_normalize_worklist_dedupes_by_fingerprint():
 def test_normalize_worklist_respects_limit():
     wl = [f"GET /e{i}?x=1" for i in range(100)]
     assert len(a.normalize_worklist(wl, limit=10)) == 10
+
+
+# ---- Continuous dispatcher policy (Phase 3/4) -----------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _utc(y=2026, mo=6, d=15, h=12, mi=0):
+    return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
+
+
+def test_merge_asm_config_defaults_and_clamping():
+    cfg = a.merge_asm_config(None)
+    assert cfg["batch_size"] == a.DEFAULT_ASM_CONFIG["batch_size"]
+    # clamps out-of-range and ignores junk, keeps valid overrides
+    cfg = a.merge_asm_config({"batch_size": 99999, "stale_days": -5, "exploit_depth": 1, "bogus": "x"})
+    assert cfg["batch_size"] == 1000          # clamped to max
+    assert cfg["stale_days"] == 0             # clamped to min
+    assert cfg["exploit_depth"] is True
+    assert "bogus" not in cfg
+
+
+def test_merge_asm_config_window_days():
+    cfg = a.merge_asm_config({"window_days": [0, 1, 7, "x", 4]})
+    assert cfg["window_days"] == [0, 1, 4]    # dedup, drop invalid (7, "x")
+    assert a.merge_asm_config({"window_days": []})["window_days"] is None
+
+
+def test_within_window():
+    # no window config -> always allowed
+    assert a.within_window(_utc(h=3), {}) is True
+    # 2:00-6:00 window
+    win = {"window_start_hour": 2, "window_end_hour": 6}
+    assert a.within_window(_utc(h=3), win) is True
+    assert a.within_window(_utc(h=7), win) is False
+    # wraps midnight 22:00-04:00
+    wrap = {"window_start_hour": 22, "window_end_hour": 4}
+    assert a.within_window(_utc(h=23), wrap) is True
+    assert a.within_window(_utc(h=2), wrap) is True
+    assert a.within_window(_utc(h=12), wrap) is False
+    # 2026-06-15 is a Monday (weekday 0); restrict to Tue/Wed
+    assert a.within_window(_utc(), {"window_days": [1, 2]}) is False
+    assert a.within_window(_utc(), {"window_days": [0]}) is True
+
+
+def test_decide_action_recon_when_due():
+    d = a.decide_asm_action(
+        now=_utc(), last_test_at=None, last_recon_at=None,
+        has_active_scan=False, claimable=100, tested_today=0,
+        config={"recon_interval_hours": 168},
+    )
+    assert d["action"] == "recon"
+
+
+def test_decide_action_test_when_recon_not_due():
+    d = a.decide_asm_action(
+        now=_utc(), last_test_at=None,
+        last_recon_at=_utc() - timedelta(hours=1),  # recent recon
+        has_active_scan=False, claimable=100, tested_today=0,
+        config={"recon_interval_hours": 168},
+    )
+    assert d["action"] == "test"
+
+
+def test_decide_action_skips():
+    base = dict(now=_utc(), last_test_at=None, last_recon_at=_utc(),
+                has_active_scan=False, claimable=100, tested_today=0,
+                config={"recon_interval_hours": 0})  # recon off -> consider test
+    # active scan blocks everything
+    assert a.decide_asm_action(**{**base, "has_active_scan": True})["action"] == "none"
+    # nothing claimable
+    assert a.decide_asm_action(**{**base, "claimable": 0})["action"] == "none"
+    # within min interval
+    assert a.decide_asm_action(**{**base, "last_test_at": _utc() - timedelta(minutes=5),
+                                  "config": {"recon_interval_hours": 0, "min_interval_minutes": 60}})["action"] == "none"
+    # daily cap reached
+    assert a.decide_asm_action(**{**base, "tested_today": 5000,
+                                  "config": {"recon_interval_hours": 0, "daily_endpoint_cap": 2000}})["action"] == "none"
+    # per-domain rate limit
+    assert a.decide_asm_action(**{**base, "domain_rate_exceeded": True})["action"] == "none"
+    # outside time window
+    assert a.decide_asm_action(**{**base, "config": {"recon_interval_hours": 0,
+                                  "window_start_hour": 2, "window_end_hour": 6}})["action"] == "none"

@@ -26,6 +26,13 @@ CREATE TABLE targets (
     -- ai_targets.metadata_json
     metadata_json JSONB NOT NULL DEFAULT '{}',
 
+    -- Continuous ASM policy (docs §16 Phase 3/4): the background dispatcher
+    -- auto-drains/refreshes this target's endpoint inventory when enabled.
+    asm_enabled BOOLEAN NOT NULL DEFAULT false,
+    asm_config JSONB NOT NULL DEFAULT '{}',   -- batch_size, stale_days, intervals, caps, time windows
+    asm_last_test_at TIMESTAMPTZ,
+    asm_last_recon_at TIMESTAMPTZ,
+
     -- Statistics (updated after each scan)
     last_scan_id UUID,
     last_scanned_at TIMESTAMPTZ,

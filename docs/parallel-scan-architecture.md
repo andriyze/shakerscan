@@ -11,9 +11,10 @@
 >    truth for what's live; the design sections behind it are kept for rationale.
 > 2. **§15 — `coverage` strategy (SHIPPED).** Discover-once recon → harvest full worklist →
 >    partition across auto-sized shards. The bridge from "fan out a scan" to "cover the whole target."
-> 3. **§16 — Continuous ASM (Phase 1–2 SHIPPED, 3–4 roadmap).** Persist the attack surface in
->    `target_endpoints` and drain it with async `exploit_batch` jobs. This is forward-looking design
->    plus the slice that's built; each subsection marks shipped vs. planned.
+> 3. **§16 — Continuous ASM (Phases 1–4 SHIPPED).** Persist the attack surface in `target_endpoints`,
+>    drain it with async `exploit_batch` jobs, and run it autonomously via the `asm_dispatcher`
+>    background loop (freshness/rate/window budgets, per-domain caps, Gungnir new-surface auto-queue).
+>    Each subsection marks what's built vs. the small deferred polish.
 >
 > When design prose and a "SHIPPED"/"Gap" note disagree, the note wins — the prose predates it.
 
@@ -501,11 +502,12 @@ source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 
 ## 16. Continuous ASM — async reconnaissance & async exploitation
 
-**Status:** design complete; **Phase 1–2 shipped** (persistent inventory + async `exploit_batch` +
-the **Attack Surface UI** at `/asm`). Phases 3–4 (continuous dispatcher, time windows, new-surface
-auto-queue/diff, engine-status UI) remain the roadmap.
-See §16.5 for shipped-vs-planned API/UI surface and §16.8 for the per-phase gap list.
-**Date:** 2026-06-15
+**Status:** **Phases 1–4 shipped.** Persistent inventory + async `exploit_batch` + the **Attack
+Surface UI** at `/asm` + the **continuous dispatcher** (recon/test automation with freshness, rate,
+daily-cap and time-window budgets), **per-root-domain rate limit**, and **Gungnir new-surface
+auto-queue**. Deferred polish: `gone`-GC sweep, push alerting, coverage-trend chart.
+See §16.5 for the API/UI surface and §16.8 for the per-phase detail + remaining gaps.
+**Date:** 2026-06-16
 **Scope:** evolve ShakerScan from "a scan is a one-shot job" into "a target has a living attack
 surface that we continuously discover and test," with discovery and exploitation **decoupled** and
 both **async** — spread across the worker fleet *and* across time.
@@ -584,19 +586,21 @@ A first-class surface separate from one-shot scans (the user-requested new surfa
 - **Per target:** the live attack-surface inventory (endpoints, sources, auth states, last-tested,
   verdict), persistent coverage %, new-surface diff feed, and continuous-testing controls
   (enable/disable, depth, rate, allowed windows).
-- **API namespace:** `/targets/{id}/asm/*`.
-  - **Shipped:** `GET .../endpoints` (inventory + coverage), `GET .../coverage` (counts/coverage),
-    `POST .../test` (queue an `exploit_batch`).
-  - **Planned (NOT yet built):** `POST .../recon` (queue a standalone recon pass — today recon only
-    runs as part of a `coverage` scan), `GET .../diff` (new/changed since last run), and per-target
-    ASM policy (rate/windows/freshness) under `/settings` or `metadata_json`.
+- **API namespace:** `/targets/{id}/asm/*` (all SHIPPED): `GET .../endpoints` (inventory + coverage),
+  `GET .../coverage` (counts/coverage), `POST .../test` (queue an `exploit_batch`),
+  `GET .../diff` (new surface — endpoints first seen in N days), `GET/PUT .../policy`
+  (per-target continuous-testing policy: enable, batch size, freshness TTL, intervals, daily cap,
+  recon cadence, time windows, per-root-domain rate). Standalone `POST .../recon` is still folded
+  into the dispatcher's recon action rather than a separate manual route.
 - **UI (SHIPPED):** an **Attack Surface** section (`/asm`, sidebar nav) distinct from the Scans
-  list: a cross-target coverage **rollup** (fed by `asm_coverage` now returned from
-  `GET /targets/grouped`), a per-target **inventory table** + **coverage card** (status filter,
-  priority order), and a **"Test untested"** action wired to `POST /asm/test` with a worker
-  guardrail. The `/targets` rows show a coverage chip linking into it.
-  - **Still planned:** coverage **trend** over time, new-surface **alerts/diff feed** (needs
-    `GET /asm/diff`), and continuous-engine **status/policy** controls (needs the Phase-3 dispatcher).
+  list: a cross-target coverage **rollup** (fed by `asm_coverage` from `GET /targets/grouped`), a
+  per-target **inventory table** + **coverage card** (status filter, priority order), a **"Test
+  untested"** action (worker guardrail), a **Continuous testing** policy card (enable toggle + full
+  config + last-recon/last-test status, wired to `GET/PUT .../policy`), and a **New surface** feed
+  (from `GET .../diff`). The `/targets` rows show a coverage chip; `/scans` labels `asm_batch` /
+  `asm_recon` rows.
+  - **Still planned:** a coverage **trend** chart over time, and push **alerting** on new surface
+    (today new surface is a pull feed, not a notification).
 
 ### 16.6 Reuse map (how this rides existing ShakerScan)
 
@@ -635,8 +639,9 @@ The new module **`api/asm_inventory.py`** holds the inventory logic: `parse_work
 endpoints and upserts a worklist; the worklist is persisted on **standalone scan completion** and in
 the **`coverage` recon** branch (both in `api/worker.py`); read API `GET /targets/{id}/asm/endpoints`
 + `GET /targets/{id}/asm/coverage`. *Delivers: resume, persistent coverage, new-endpoint inventory —
-with no pipeline rewrite.* **Gap vs. design:** persistence is not yet wired into the `scan_merge`
-path (only standalone + coverage-recon); there is no `GET /asm/diff` feed yet.
+with no pipeline rewrite.* Persistence is now wired into **standalone completion**, the **`coverage`
+recon** branch, **and the parallel `scan_merge`** path (the union of every shard's worklist), so
+sharded scans populate the inventory too. New surface is exposed via `GET /targets/{id}/asm/diff`.
 
 **Phase 2 — Async exploitation from inventory (SHIPPED).** `exploit_batch` job type
 (`process_exploit_batch_job` in `api/worker.py`, routed in `process_job`): `claim_test_batch` pulls
@@ -647,11 +652,25 @@ K untested/stale endpoints (priority-ordered, `FOR UPDATE SKIP LOCKED` → `in_p
 **Gap vs. design:** coverage shards are not yet pull-based (still planned-partition); triggering is
 manual (the Phase-3 dispatcher below is not built).
 
-**Phase 3 — Continuous dispatcher.** A background loop (like `schedule_runner`) that, per ASM-enabled
-target, spends a freshness-TTL + rate budget to keep enqueuing recon + exploit batches automatically.
+**Phase 3 — Continuous dispatcher (SHIPPED).** `asm_dispatcher` background loop in the API lifespan
+(alongside `stale_scan_checker` / `schedule_runner`), ticking every `SHAKERSCAN_ASM_DISPATCH_INTERVAL`
+seconds (default 60). Per ASM-enabled target it picks **at most one** action per tick via the pure
+`decide_asm_action` (unit-tested): a **recon** when the recon interval has elapsed, else an **exploit
+batch** when there are claimable (untested/stale/expired) endpoints, gated by `min_interval_minutes`,
+a 24h `daily_endpoint_cap`, and a no-stacking rule (skip if the target already has any active scan).
+Recon reuses a lean standalone scan (`RECON_DISCOVERY_BUDGET`, `scan_role='asm_recon'`); tests reuse
+`exploit_batch` (`asm_batch`). Policy lives on `targets` (`asm_enabled`, `asm_config`,
+`asm_last_test_at`, `asm_last_recon_at`) and is edited via `GET/PUT /asm/policy`. *Now testing +
+discovery are fully autonomous and resumable.*
 
-**Phase 4 — Windows + ASM loop (full engine).** Allowed-time-windows via `schedules`; Gungnir/new-
-surface auto-queues recon→test; per-root-domain distributed rate limits; new-surface alerting.
+**Phase 4 — Windows + ASM loop (SHIPPED).** Allowed-time-windows (`window_start_hour`/
+`window_end_hour` UTC, wrap-midnight aware, + `window_days`) enforced in `decide_asm_action`;
+**per-root-domain distributed rate limit** (`max_requests_per_hour_per_domain` via
+`domain_tested_recently_count`); **Gungnir new-surface auto-queue** — a newly discovered subdomain
+under an ASM-enabled root inherits the root's ASM policy (`store_subdomain` in `gungnir_worker.py`),
+so the dispatcher auto-recons then tests it; new surface surfaced as a pull feed (`GET /asm/diff` +
+UI). *Remaining (deferred):* GC of long-unseen endpoints to `gone` (the `stale`/`gone` buckets exist
+but are not swept yet), push notifications on new surface, and a coverage-trend chart.
 
 ### 16.9 Verification (Phase 1–2)
 

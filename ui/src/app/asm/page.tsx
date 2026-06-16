@@ -2,16 +2,21 @@
 
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { ArrowLeft, Crosshair, ExternalLink, Play, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Crosshair, ExternalLink, Play, RefreshCw, Radar, Repeat } from 'lucide-react'
 import {
   getAsmEndpoints,
+  getAsmDiff,
+  getAsmPolicy,
   getDomains,
   getTargetsGrouped,
   getWorkers,
   testAsmTarget,
+  updateAsmPolicy,
   formatDate,
+  type AsmConfig,
   type AsmCoverage,
   type AsmEndpoint,
+  type AsmPolicy,
   type Target,
 } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -22,6 +27,7 @@ import {
   ConfirmDialog,
   EmptyState,
   ErrorState,
+  Skeleton,
   TableSkeleton,
   useToast,
 } from '@/components/ui'
@@ -207,6 +213,217 @@ function RollupView({
   )
 }
 
+// ---- Continuous testing policy card ---------------------------------------
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function NumField({
+  label, value, onChange, min = 0, hint,
+}: {
+  label: string; value: number; onChange: (n: number) => void; min?: number; hint?: string
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs text-gray-400">{label}</span>
+      <input
+        type="number"
+        min={min}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      />
+      {hint && <span className="text-[11px] text-gray-600">{hint}</span>}
+    </label>
+  )
+}
+
+function ContinuousCard({ targetId }: { targetId: string }) {
+  const toast = useToast()
+  const [policy, setPolicy] = useState<AsmPolicy | null>(null)
+  const [cfg, setCfg] = useState<AsmConfig | null>(null)
+  const [enabled, setEnabled] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(false)
+
+  const load = useCallback(() => {
+    setError(false)
+    getAsmPolicy(targetId)
+      .then((p) => {
+        setPolicy(p)
+        setCfg(p.config)
+        setEnabled(p.enabled)
+      })
+      .catch(() => setError(true))
+  }, [targetId])
+
+  useEffect(() => { load() }, [load])
+
+  const save = async () => {
+    if (!cfg) return
+    setSaving(true)
+    try {
+      const updated = await updateAsmPolicy(targetId, { enabled, config: cfg })
+      setPolicy(updated)
+      setCfg(updated.config)
+      setEnabled(updated.enabled)
+      toast.success(enabled ? 'Continuous ASM enabled' : 'Policy saved')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save policy')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const set = (patch: Partial<AsmConfig>) => setCfg((c) => (c ? { ...c, ...patch } : c))
+
+  if (error) return <ErrorState message="Failed to load continuous policy." onRetry={load} />
+  if (!cfg) return <Card className="p-4"><Skeleton className="h-6 w-48" /></Card>
+
+  const toggleDay = (d: number) => {
+    const days = new Set(cfg.window_days || [])
+    days.has(d) ? days.delete(d) : days.add(d)
+    set({ window_days: days.size ? Array.from(days).sort((a, b) => a - b) : null })
+  }
+
+  return (
+    <Card className="p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Repeat className="h-5 w-5 text-blue-400" />
+          <h2 className="text-sm font-medium text-gray-300">Continuous testing</h2>
+          <Badge className={enabled ? 'bg-green-500/15 text-green-400' : 'bg-gray-700/50 text-gray-400'}>
+            {enabled ? 'on' : 'off'}
+          </Badge>
+        </div>
+        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+          />
+          Enable background dispatcher
+        </label>
+      </div>
+
+      <p className="text-xs text-gray-500">
+        When enabled, ShakerScan automatically refreshes this target&apos;s surface (recon) and drains
+        untested/stale endpoints (test batches) within the budget below — one action at a time, never
+        stacking load.
+      </p>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <NumField label="Batch size" value={cfg.batch_size} min={1} onChange={(n) => set({ batch_size: n })} hint="endpoints / batch" />
+        <NumField label="Re-test after (days)" value={cfg.stale_days} onChange={(n) => set({ stale_days: n })} hint="freshness TTL" />
+        <NumField label="Min interval (min)" value={cfg.min_interval_minutes} min={5} onChange={(n) => set({ min_interval_minutes: n })} hint="between batches" />
+        <NumField label="Daily cap" value={cfg.daily_endpoint_cap} onChange={(n) => set({ daily_endpoint_cap: n })} hint="0 = unlimited / 24h" />
+        <NumField label="Recon every (h)" value={cfg.recon_interval_hours} onChange={(n) => set({ recon_interval_hours: n })} hint="0 = never" />
+        <NumField label="Domain rate /h" value={cfg.max_requests_per_hour_per_domain} onChange={(n) => set({ max_requests_per_hour_per_domain: n })} hint="0 = unlimited" />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-4">
+        <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={cfg.exploit_depth}
+            onChange={(e) => set({ exploit_depth: e.target.checked })}
+            className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+          />
+          Deeper active checks
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400">Window (UTC h):</span>
+          <input
+            type="number" min={0} max={23} placeholder="start"
+            value={cfg.window_start_hour ?? ''}
+            onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
+            className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+          />
+          <span className="text-gray-600">–</span>
+          <input
+            type="number" min={0} max={23} placeholder="end"
+            value={cfg.window_end_hour ?? ''}
+            onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
+            className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+          />
+          <span className="text-[11px] text-gray-600">blank = any</span>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-xs text-gray-400">Days:</span>
+        {WEEKDAYS.map((d, i) => {
+          const on = (cfg.window_days || []).includes(i)
+          return (
+            <button
+              key={d}
+              type="button"
+              onClick={() => toggleDay(i)}
+              className={`rounded px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+            >
+              {d}
+            </button>
+          )
+        })}
+        <span className="ml-1 text-[11px] text-gray-600">none = every day</span>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-3">
+        <div className="text-xs text-gray-500">
+          Last recon: {policy?.last_recon_at ? formatDate(policy.last_recon_at) : '—'} · Last test:{' '}
+          {policy?.last_test_at ? formatDate(policy.last_test_at) : '—'}
+        </div>
+        <Button size="sm" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : 'Save policy'}
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
+// ---- New-surface (diff) feed ----------------------------------------------
+
+function NewSurfaceCard({ targetId }: { targetId: string }) {
+  const [data, setData] = useState<{ total_new: number; endpoints: AsmEndpoint[] } | null>(null)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    getAsmDiff(targetId, { days: 7, limit: 50 })
+      .then((d) => setData(d))
+      .catch(() => setData(null))
+      .finally(() => setLoaded(true))
+  }, [targetId])
+
+  if (!loaded || !data || data.total_new === 0) return null
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Radar className="h-5 w-5 text-yellow-400" />
+        <h2 className="text-sm font-medium text-gray-300">New surface</h2>
+        <Badge className="bg-yellow-500/15 text-yellow-400">{data.total_new} in 7 days</Badge>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <tbody>
+            {data.endpoints.slice(0, 15).map((e) => (
+              <tr key={e.id} className="border-b border-gray-800/60">
+                <td className="px-2 py-1.5">
+                  <Badge className={METHOD_BADGE[e.method] || 'bg-gray-700/50 text-gray-300'}>{e.method}</Badge>
+                </td>
+                <td className="px-2 py-1.5 font-mono text-xs text-gray-300">{e.path}</td>
+                <td className="px-2 py-1.5 text-right text-xs text-gray-500">
+                  {e.first_seen_at ? formatDate(e.first_seen_at) : ''}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
 // ---- Per-target view ------------------------------------------------------
 
 function TargetView({ targetId }: { targetId: string }) {
@@ -306,6 +523,9 @@ function TargetView({ targetId }: { targetId: string }) {
           </div>
         </Card>
       )}
+
+      <ContinuousCard targetId={targetId} />
+      <NewSurfaceCard targetId={targetId} />
 
       <Card className="p-4 space-y-4">
         <div className="flex flex-wrap items-center gap-3">
