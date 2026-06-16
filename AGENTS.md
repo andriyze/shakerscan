@@ -319,6 +319,39 @@ curl -X POST http://localhost:8080/targets/{target_id}/scan \
 | `sort_by` | root_domain, last_scanned_at, active_findings_count, last_score, created_at |
 | `sort_order` | asc or desc |
 
+### Continuous ASM
+
+Continuous ASM keeps a persistent endpoint inventory per target, then lets users improve coverage without starting many separate visible scans. The `/asm/improve` endpoint is the simplest API for UI and AI agents: it queues discovery when no inventory exists, queues the next endpoint test batch when endpoints are untested/stale, or returns `wait` when work is already active for the target.
+
+```bash
+# Get inventory and coverage
+curl http://localhost:8080/targets/{target_id}/asm/endpoints
+curl http://localhost:8080/targets/{target_id}/asm/coverage
+
+# Explain what remains untested and what to do next
+curl http://localhost:8080/targets/{target_id}/asm/gaps
+
+# Queue the recommended next action: discovery, endpoint test batch, or wait
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "stale_days": 30}'
+
+# Force a discovery refresh only
+curl -X POST http://localhost:8080/targets/{target_id}/asm/recon \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Force an endpoint test batch over untested/stale inventory
+curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "stale_days": 30, "exploit_depth": false}'
+
+# View recent ASM recon/test jobs without cluttering the normal scans list
+curl http://localhost:8080/targets/{target_id}/asm/activity
+```
+
+ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+
 ### Subdomain Discovery
 
 ```bash

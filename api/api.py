@@ -8119,10 +8119,100 @@ class AsmTestRequest(BaseModel):
     exploit_depth: bool = False
 
 
+class AsmReconRequest(BaseModel):
+    budget_profile: Optional[str] = None
+
+
+class AsmImproveRequest(BaseModel):
+    batch_size: Optional[int] = Field(default=None, ge=1, le=1000)
+    stale_days: Optional[int] = Field(default=None, ge=0)
+    exploit_depth: Optional[bool] = None
+
+
 class AsmPolicyUpdate(BaseModel):
     """Per-target Continuous ASM policy (docs §16 Phase 3/4)."""
     enabled: Optional[bool] = None
     config: Optional[dict] = None
+
+
+def _decode_target_scan_options(raw) -> dict:
+    decoded = _decode_json_value(raw) or {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+async def _asm_active_scan_count(conn, target_id: str) -> int:
+    return int(await conn.fetchval(
+        """
+        SELECT COUNT(*) FROM scans
+        WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
+        """,
+        uuid.UUID(target_id),
+    ) or 0)
+
+
+def _asm_recommendation(
+    coverage: dict[str, Any],
+    *,
+    claimable: int = 0,
+    active_scans: int = 0,
+    last_attempt_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Small, stable decision model for UI/API/AI callers.
+
+    This intentionally exposes one recommended next action instead of every
+    allocator knob. It is conservative: active scan first, then empty inventory
+    recon, then claimable endpoint testing, then recon refresh.
+    """
+    attempts = last_attempt_counts or {}
+    total = int(coverage.get("total") or 0)
+    untested = int(coverage.get("untested") or 0)
+    stale = int(coverage.get("stale") or 0)
+    in_progress = int(coverage.get("in_progress") or 0)
+    auth_missing = int(attempts.get("auth_missing") or attempts.get("auth_failed") or 0)
+    partial = sum(v for k, v in attempts.items() if str(k or "").startswith("partial"))
+
+    blockers: list[dict[str, Any]] = []
+    if active_scans > 0:
+        blockers.append({"kind": "active_scan", "count": active_scans, "message": "A scan is already active for this target."})
+    if auth_missing > 0:
+        blockers.append({"kind": "auth_missing", "count": auth_missing, "message": "Some authenticated endpoints need credentials before they can be replayed."})
+    if partial > 0:
+        blockers.append({"kind": "partial", "count": partial, "message": "Some endpoints have partial attempts and need another pass."})
+
+    if active_scans > 0:
+        return {
+            "next_action": "wait",
+            "label": "Wait for current work",
+            "reason": "A scan is already queued or running for this target.",
+            "blockers": blockers,
+        }
+    if total == 0:
+        return {
+            "next_action": "recon",
+            "label": "Discover endpoints",
+            "reason": "No persistent endpoint inventory exists yet.",
+            "blockers": blockers,
+        }
+    if claimable > 0 or untested > 0 or stale > 0:
+        return {
+            "next_action": "test",
+            "label": "Test next endpoint batch",
+            "reason": f"{max(claimable, untested + stale)} endpoint(s) are untested or stale.",
+            "blockers": blockers,
+        }
+    if in_progress > 0:
+        return {
+            "next_action": "wait",
+            "label": "Wait for current batch",
+            "reason": f"{in_progress} endpoint(s) are currently being tested.",
+            "blockers": blockers,
+        }
+    return {
+        "next_action": "recon",
+        "label": "Refresh discovery",
+        "reason": "Current inventory has no claimable endpoints; refresh discovery to find new surface.",
+        "blockers": blockers,
+    }
 
 
 async def _enqueue_asm_exploit_batch(
@@ -8229,11 +8319,12 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
+        if await _asm_active_scan_count(conn, target_id) > 0:
+            raise HTTPException(status_code=409, detail="Target already has an active scan; wait for it to finish before queueing another ASM action")
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
-        stored = target["scan_options"]
-        base_opts = (json.loads(stored) if isinstance(stored, str) and stored else (stored or {}))
+        base_opts = _decode_target_scan_options(target["scan_options"])
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
@@ -8243,6 +8334,96 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         "scan_id": enq["scan_id"], "job_id": enq["job_id"], "status": "queued",
         "batch_size": request.batch_size,
         "inventory_total": coverage["total"], "untested": coverage["untested"],
+    }
+
+
+@app.post("/targets/{target_id}/asm/recon")
+async def asm_recon(target_id: str, request: AsmReconRequest = None):
+    """Queue an explicit ASM recon refresh for a target."""
+    request = request or AsmReconRequest()
+    r = get_redis()
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        if await _asm_active_scan_count(conn, target_id) > 0:
+            raise HTTPException(status_code=409, detail="Target already has an active scan; wait for it to finish before queueing another ASM action")
+        base_opts = _decode_target_scan_options(target["scan_options"])
+        if request.budget_profile:
+            base_opts["budget_profile"] = request.budget_profile
+        enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="api")
+        await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+    return {
+        "action": "recon",
+        "scan_id": enq["scan_id"],
+        "job_id": enq["job_id"],
+        "status": "queued",
+        "reason": "Queued discovery refresh for the persistent ASM inventory",
+    }
+
+
+@app.post("/targets/{target_id}/asm/improve")
+async def asm_improve(target_id: str, request: AsmImproveRequest = None):
+    """Choose and queue the next best ASM action: recon if inventory is empty,
+    otherwise a test batch when endpoints are claimable."""
+    request = request or AsmImproveRequest()
+    r = get_redis()
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT url, scan_options, asm_config FROM targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        active = await _asm_active_scan_count(conn, target_id)
+        coverage = await asm_inventory.coverage_summary(conn, target_id)
+        cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
+        stale_days = request.stale_days if request.stale_days is not None else cfg["stale_days"]
+        claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=stale_days)
+        attempts = await conn.fetch(
+            """
+            SELECT COALESCE(last_attempt_status, 'none') AS status, COUNT(*) AS count
+            FROM target_endpoints WHERE target_id = $1
+            GROUP BY COALESCE(last_attempt_status, 'none')
+            """,
+            uuid.UUID(target_id),
+        )
+        attempt_counts = {str(rw["status"]): int(rw["count"] or 0) for rw in attempts}
+        rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, last_attempt_counts=attempt_counts)
+        if rec["next_action"] == "wait":
+            return {"action": "wait", "status": "busy", **rec}
+
+        base_opts = _decode_target_scan_options(target["scan_options"])
+        if rec["next_action"] == "recon":
+            enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
+            await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+            return {
+                "action": "recon",
+                "scan_id": enq["scan_id"],
+                "job_id": enq["job_id"],
+                "status": "queued",
+                "reason": rec["reason"],
+                "recommendation": rec,
+            }
+
+        batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
+        if claimable > 0:
+            batch_size = min(batch_size, claimable)
+        exploit_depth = request.exploit_depth if request.exploit_depth is not None else bool(cfg["exploit_depth"])
+        enq = await _enqueue_asm_exploit_batch(
+            conn, r, target_id, target["url"], base_opts,
+            batch_size=batch_size, stale_days=stale_days,
+            exploit_depth=exploit_depth, triggered_by="improve",
+        )
+        await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", uuid.UUID(target_id))
+    return {
+        "action": "test",
+        "scan_id": enq["scan_id"],
+        "job_id": enq["job_id"],
+        "status": "queued",
+        "batch_size": batch_size,
+        "reason": rec["reason"],
+        "recommendation": rec,
     }
 
 
@@ -8310,6 +8491,105 @@ async def asm_diff(
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
             raise HTTPException(status_code=404, detail="Target not found")
         return await asm_inventory.new_surface(conn, target_id, days=days, limit=limit)
+
+
+@app.get("/targets/{target_id}/asm/gaps")
+async def asm_gaps(target_id: str):
+    """Explain remaining ASM coverage gaps for UI and AI agents."""
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+            raise HTTPException(status_code=404, detail="Target not found")
+        coverage = await asm_inventory.coverage_summary(conn, target_id)
+        cfg_row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
+        cfg = asm_inventory.merge_asm_config(_decode_asm_config(cfg_row["asm_config"] if cfg_row else {}))
+        claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg["stale_days"])
+        active = await _asm_active_scan_count(conn, target_id)
+        by_auth_rows = await conn.fetch(
+            """
+            SELECT auth_state, test_status, COUNT(*) AS count
+            FROM target_endpoints WHERE target_id = $1
+            GROUP BY auth_state, test_status
+            ORDER BY auth_state, test_status
+            """,
+            uuid.UUID(target_id),
+        )
+        by_location_rows = await conn.fetch(
+            """
+            SELECT COALESCE(param_location, 'none') AS param_location, COUNT(*) AS count
+            FROM target_endpoints WHERE target_id = $1
+            GROUP BY COALESCE(param_location, 'none')
+            ORDER BY count DESC
+            """,
+            uuid.UUID(target_id),
+        )
+        attempt_rows = await conn.fetch(
+            """
+            SELECT COALESCE(last_attempt_status, 'none') AS status, COUNT(*) AS count
+            FROM target_endpoints WHERE target_id = $1
+            GROUP BY COALESCE(last_attempt_status, 'none')
+            ORDER BY count DESC
+            """,
+            uuid.UUID(target_id),
+        )
+        samples = await conn.fetch(
+            """
+            SELECT id, method, path, param_shape, param_location, auth_state, priority_score,
+                   test_status, last_attempt_status, last_verdict, last_seen_at, last_tested_at
+            FROM target_endpoints
+            WHERE target_id = $1
+              AND (test_status IN ('untested', 'stale', 'in_progress')
+                   OR last_attempt_status IN ('auth_missing', 'partial', 'partial_timeout', 'partial_findings'))
+            ORDER BY priority_score DESC, last_seen_at DESC
+            LIMIT 25
+            """,
+            uuid.UUID(target_id),
+        )
+
+    attempt_counts = {str(r["status"]): int(r["count"] or 0) for r in attempt_rows}
+    recommendation = _asm_recommendation(
+        coverage,
+        claimable=claimable,
+        active_scans=active,
+        last_attempt_counts=attempt_counts,
+    )
+    by_auth: dict[str, dict[str, int]] = {}
+    for row in by_auth_rows:
+        state = str(row["auth_state"] or "anonymous")
+        by_auth.setdefault(state, {})[str(row["test_status"])] = int(row["count"] or 0)
+    return {
+        "coverage": coverage,
+        "claimable": claimable,
+        "active_scans": active,
+        "recommendation": recommendation,
+        "by_auth_state": by_auth,
+        "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},
+        "last_attempt_status": attempt_counts,
+        "sample_gaps": [row_to_dict(r) for r in samples],
+    }
+
+
+@app.get("/targets/{target_id}/asm/activity")
+async def asm_activity(
+    target_id: str,
+    limit: int = Query(25, ge=1, le=100),
+):
+    """Recent ASM recon/test jobs for a target, grouped away from normal scan rows."""
+    async with db_pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
+            raise HTTPException(status_code=404, detail="Target not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, job_id, scan_role, scan_type, status, current_phase, progress,
+                   findings_count, score, grade, error_message,
+                   created_at, started_at, completed_at, duration_seconds
+            FROM scans
+            WHERE target_id = $1 AND scan_role IN ($2, $3)
+            ORDER BY created_at DESC
+            LIMIT $4
+            """,
+            uuid.UUID(target_id), asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE, limit,
+        )
+    return {"activity": [row_to_dict(r) for r in rows]}
 
 
 # ============================================================

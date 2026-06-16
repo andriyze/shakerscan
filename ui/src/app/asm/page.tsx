@@ -2,20 +2,40 @@
 
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { ArrowLeft, Crosshair, ExternalLink, Play, RefreshCw, Radar, Repeat } from 'lucide-react'
 import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Crosshair,
+  ExternalLink,
+  Play,
+  Radar,
+  RefreshCw,
+  Repeat,
+  Search,
+  SlidersHorizontal,
+  Sparkles,
+} from 'lucide-react'
+import {
+  getAsmActivity,
   getAsmEndpoints,
   getAsmDiff,
+  getAsmGaps,
   getAsmPolicy,
   getDomains,
   getTargetsGrouped,
   getWorkers,
+  improveAsmTarget,
+  reconAsmTarget,
   testAsmTarget,
   updateAsmPolicy,
   formatDate,
+  type AsmActivity,
   type AsmConfig,
   type AsmCoverage,
   type AsmEndpoint,
+  type AsmGaps,
   type AsmPolicy,
   type Target,
 } from '@/lib/api'
@@ -264,6 +284,60 @@ function NumField({
   )
 }
 
+const ASM_PRESETS: Array<{ key: string; label: string; description: string; config: Partial<AsmConfig> }> = [
+  {
+    key: 'safe',
+    label: 'Safe',
+    description: 'Slow, low-load coverage for production targets.',
+    config: {
+      batch_size: 50,
+      stale_days: 30,
+      min_interval_minutes: 120,
+      daily_endpoint_cap: 500,
+      recon_interval_hours: 168,
+      exploit_depth: false,
+      max_requests_per_hour_per_domain: 250,
+      window_start_hour: null,
+      window_end_hour: null,
+      window_days: null,
+    },
+  },
+  {
+    key: 'balanced',
+    label: 'Balanced',
+    description: 'Default steady coverage for owned apps.',
+    config: {
+      batch_size: 100,
+      stale_days: 21,
+      min_interval_minutes: 60,
+      daily_endpoint_cap: 2000,
+      recon_interval_hours: 72,
+      exploit_depth: false,
+      max_requests_per_hour_per_domain: 1000,
+      window_start_hour: null,
+      window_end_hour: null,
+      window_days: null,
+    },
+  },
+  {
+    key: 'lab',
+    label: 'Lab',
+    description: 'Higher budget for Juice Shop, crAPI, Honey, and staging labs.',
+    config: {
+      batch_size: 250,
+      stale_days: 7,
+      min_interval_minutes: 15,
+      daily_endpoint_cap: 10000,
+      recon_interval_hours: 24,
+      exploit_depth: true,
+      max_requests_per_hour_per_domain: 0,
+      window_start_hour: null,
+      window_end_hour: null,
+      window_days: null,
+    },
+  },
+]
+
 function ContinuousCard({ targetId }: { targetId: string }) {
   const toast = useToast()
   const [policy, setPolicy] = useState<AsmPolicy | null>(null)
@@ -271,6 +345,7 @@ function ContinuousCard({ targetId }: { targetId: string }) {
   const [enabled, setEnabled] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const load = useCallback(() => {
     setError(false)
@@ -334,78 +409,111 @@ function ContinuousCard({ targetId }: { targetId: string }) {
       </div>
 
       <p className="text-xs text-gray-500">
-        When enabled, ShakerScan automatically refreshes this target&apos;s surface (recon) and drains
-        untested/stale endpoints (test batches) within the budget below — one action at a time, never
-        stacking load.
+        When enabled, ShakerScan refreshes discovery and tests untested/stale endpoints in small
+        background batches. It chooses one action at a time and respects the caps below.
       </p>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <NumField label="Batch size" value={cfg.batch_size} min={1} onChange={(n) => set({ batch_size: n })} hint="endpoints / batch" />
-        <NumField label="Re-test after (days)" value={cfg.stale_days} onChange={(n) => set({ stale_days: n })} hint="freshness TTL" />
-        <NumField label="Min interval (min)" value={cfg.min_interval_minutes} min={5} onChange={(n) => set({ min_interval_minutes: n })} hint="between batches" />
-        <NumField label="Daily cap" value={cfg.daily_endpoint_cap} onChange={(n) => set({ daily_endpoint_cap: n })} hint="0 = unlimited / 24h" />
-        <NumField label="Recon every (h)" value={cfg.recon_interval_hours} onChange={(n) => set({ recon_interval_hours: n })} hint="0 = never" />
-        <NumField label="Domain rate /h" value={cfg.max_requests_per_hour_per_domain} onChange={(n) => set({ max_requests_per_hour_per_domain: n })} hint="0 = unlimited" />
+      <div className="grid gap-2 sm:grid-cols-3">
+        {ASM_PRESETS.map((preset) => (
+          <button
+            key={preset.key}
+            type="button"
+            onClick={() => set(preset.config)}
+            className="rounded-lg border border-gray-800 bg-gray-900/70 p-3 text-left hover:border-blue-700 hover:bg-blue-950/20"
+          >
+            <div className="text-sm font-medium text-gray-200">{preset.label}</div>
+            <div className="mt-1 text-xs text-gray-500">{preset.description}</div>
+          </button>
+        ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-4">
-        <label className="inline-flex items-center gap-2 text-sm text-gray-300">
-          <input
-            type="checkbox"
-            checked={cfg.exploit_depth}
-            onChange={(e) => set({ exploit_depth: e.target.checked })}
-            className="h-4 w-4 rounded border-gray-600 bg-gray-800"
-          />
-          Deeper active checks
-        </label>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-400">Window (UTC h):</span>
-          <input
-            type="number" min={0} max={23} placeholder="start"
-            value={cfg.window_start_hour ?? ''}
-            onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
-            className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
-          />
-          <span className="text-gray-600">–</span>
-          <input
-            type="number" min={0} max={23} placeholder="end"
-            value={cfg.window_end_hour ?? ''}
-            onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
-            className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
-          />
-          {cfg.window_start_hour !== null && cfg.window_end_hour !== null ? (
-            <span className="text-[11px] text-blue-300">
-              = {utcHourToLocalLabel(cfg.window_start_hour)}–{utcHourToLocalLabel(cfg.window_end_hour)} {LOCAL_TZ}
-            </span>
-          ) : (
-            <span className="text-[11px] text-gray-600">blank = any</span>
-          )}
+      <div className="grid gap-3 rounded-lg border border-gray-800 bg-gray-950/60 p-3 sm:grid-cols-4">
+        <CoverageStat label="Batch" value={cfg.batch_size} />
+        <CoverageStat label="Daily cap" value={cfg.daily_endpoint_cap || '∞'} />
+        <CoverageStat label="Recon every" value={`${cfg.recon_interval_hours}h`} />
+        <CoverageStat label="Depth" value={cfg.exploit_depth ? 'Deep' : 'Standard'} accent={cfg.exploit_depth ? 'text-yellow-400' : 'text-gray-200'} />
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200"
+      >
+        <SlidersHorizontal className="h-4 w-4" />
+        {showAdvanced ? 'Hide advanced policy' : 'Advanced policy'}
+      </button>
+
+      {showAdvanced && (
+        <div className="space-y-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <NumField label="Batch size" value={cfg.batch_size} min={1} onChange={(n) => set({ batch_size: n })} hint="endpoints / batch" />
+            <NumField label="Re-test after (days)" value={cfg.stale_days} onChange={(n) => set({ stale_days: n })} hint="freshness TTL" />
+            <NumField label="Min interval (min)" value={cfg.min_interval_minutes} min={5} onChange={(n) => set({ min_interval_minutes: n })} hint="between batches" />
+            <NumField label="Daily cap" value={cfg.daily_endpoint_cap} onChange={(n) => set({ daily_endpoint_cap: n })} hint="0 = unlimited / 24h" />
+            <NumField label="Recon every (h)" value={cfg.recon_interval_hours} onChange={(n) => set({ recon_interval_hours: n })} hint="0 = never" />
+            <NumField label="Domain rate /h" value={cfg.max_requests_per_hour_per_domain} onChange={(n) => set({ max_requests_per_hour_per_domain: n })} hint="0 = unlimited" />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={cfg.exploit_depth}
+                onChange={(e) => set({ exploit_depth: e.target.checked })}
+                className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+              />
+              Deeper active checks
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Window (UTC h):</span>
+              <input
+                type="number" min={0} max={23} placeholder="start"
+                value={cfg.window_start_hour ?? ''}
+                onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
+                className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+              />
+              <span className="text-gray-600">–</span>
+              <input
+                type="number" min={0} max={23} placeholder="end"
+                value={cfg.window_end_hour ?? ''}
+                onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
+                className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+              />
+              {cfg.window_start_hour !== null && cfg.window_end_hour !== null ? (
+                <span className="text-[11px] text-blue-300">
+                  = {utcHourToLocalLabel(cfg.window_start_hour)}–{utcHourToLocalLabel(cfg.window_end_hour)} {LOCAL_TZ}
+                </span>
+              ) : (
+                <span className="text-[11px] text-gray-600">blank = any</span>
+              )}
+            </div>
+          </div>
+
+          <p className="text-[11px] text-gray-500">
+            Scheduling is in <span className="text-gray-400">UTC</span>. Your timezone:{' '}
+            <span className="text-gray-400">{LOCAL_TZ} ({localOffsetLabel()})</span> — now {nowLocalUtcLabel()}.
+            Days are UTC weekdays.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-xs text-gray-400">Days:</span>
+            {WEEKDAYS.map((d, i) => {
+              const on = (cfg.window_days || []).includes(i)
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => toggleDay(i)}
+                  className={`rounded px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                >
+                  {d}
+                </button>
+              )
+            })}
+            <span className="ml-1 text-[11px] text-gray-600">none = every day</span>
+          </div>
         </div>
-      </div>
-
-      <p className="text-[11px] text-gray-500">
-        Scheduling is in <span className="text-gray-400">UTC</span>. Your timezone:{' '}
-        <span className="text-gray-400">{LOCAL_TZ} ({localOffsetLabel()})</span> — now {nowLocalUtcLabel()}.
-        Days are UTC weekdays.
-      </p>
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 text-xs text-gray-400">Days:</span>
-        {WEEKDAYS.map((d, i) => {
-          const on = (cfg.window_days || []).includes(i)
-          return (
-            <button
-              key={d}
-              type="button"
-              onClick={() => toggleDay(i)}
-              className={`rounded px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-            >
-              {d}
-            </button>
-          )
-        })}
-        <span className="ml-1 text-[11px] text-gray-600">none = every day</span>
-      </div>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-3">
         <div className="text-xs text-gray-500">
@@ -463,6 +571,250 @@ function NewSurfaceCard({ targetId }: { targetId: string }) {
   )
 }
 
+function CoverageAdvisorCard({
+  targetId,
+  coverage,
+  gaps,
+  onRefresh,
+}: {
+  targetId: string
+  coverage: AsmCoverage | null
+  gaps: AsmGaps | null
+  onRefresh: () => void
+}) {
+  const toast = useToast()
+  const [busy, setBusy] = useState<'improve' | 'recon' | null>(null)
+
+  const queueImprove = async () => {
+    setBusy('improve')
+    try {
+      const res = await improveAsmTarget(targetId)
+      if (res.action === 'wait') {
+        toast.success(res.reason || 'ASM work is already active for this target')
+      } else {
+        toast.success(res.action === 'recon' ? 'Queued ASM discovery refresh' : 'Queued ASM test batch', {
+          link: res.scan_id ? { href: `/scans/${res.scan_id}`, label: 'View activity' } : undefined,
+        })
+      }
+      setTimeout(onRefresh, 700)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to improve coverage')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const queueRecon = async () => {
+    setBusy('recon')
+    try {
+      const res = await reconAsmTarget(targetId)
+      toast.success('Queued ASM discovery refresh', {
+        link: res.scan_id ? { href: `/scans/${res.scan_id}`, label: 'View activity' } : undefined,
+      })
+      setTimeout(onRefresh, 700)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to queue ASM recon')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const rec = gaps?.recommendation
+    ?? (coverage
+      ? {
+          next_action: coverage.total === 0 ? 'recon' as const : (coverage.untested + coverage.stale > 0 ? 'test' as const : 'recon' as const),
+          label: coverage.total === 0 ? 'Discover endpoints' : (coverage.untested + coverage.stale > 0 ? 'Test next endpoint batch' : 'Refresh discovery'),
+          reason: coverage.total === 0
+            ? 'No persistent endpoint inventory exists yet.'
+            : (coverage.untested + coverage.stale > 0
+                ? `${coverage.untested + coverage.stale} endpoint(s) are untested or stale.`
+                : 'Current inventory has no claimable endpoints; refresh discovery to find new surface.'),
+          blockers: [],
+        }
+      : null)
+  const next = rec?.next_action
+  const icon = next === 'test' ? Play : next === 'recon' ? Search : CheckCircle2
+  const Icon = icon
+  const coveragePct = coverage ? pct(coverage.coverage) : '—'
+
+  return (
+    <Card className="p-4">
+      <div className="grid gap-4 lg:grid-cols-[1fr_auto]">
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-blue-400" />
+            <h2 className="text-sm font-medium text-gray-300">Coverage advisor</h2>
+            {rec && (
+              <Badge className={next === 'wait' ? 'bg-yellow-500/15 text-yellow-400' : 'bg-blue-500/15 text-blue-300'}>
+                {rec.label}
+              </Badge>
+            )}
+          </div>
+          <div>
+            <div className="text-2xl font-semibold text-white">{coveragePct}</div>
+            <p className="mt-1 text-sm text-gray-400">
+              {rec?.reason || 'Load a target inventory to see the next ASM action.'}
+            </p>
+          </div>
+          {gaps?.recommendation.blockers.length ? (
+            <div className="space-y-1">
+              {gaps.recommendation.blockers.map((b) => (
+                <div key={b.kind} className="flex items-start gap-2 text-xs text-yellow-300">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{b.message} ({b.count})</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {gaps && (
+            <div className="flex flex-wrap gap-2 text-xs">
+              <Badge className="bg-gray-800 text-gray-300">{gaps.claimable} claimable</Badge>
+              {Object.entries(gaps.last_attempt_status).slice(0, 4).map(([status, count]) => (
+                <Badge key={status} className="bg-gray-800 text-gray-400">
+                  {status.replace(/_/g, ' ')}: {count}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-2 sm:min-w-48">
+          <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
+            <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
+          </Button>
+          <Button variant="secondary" onClick={queueRecon} disabled={!!busy}>
+            <Search className="h-4 w-4" /> {busy === 'recon' ? 'Queuing…' : 'Run discovery'}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean }) {
+  if (!gaps) {
+    return loading
+      ? <Card className="p-4"><Skeleton className="h-20 w-full" /></Card>
+      : (
+        <Card className="p-4">
+          <EmptyState
+            message="Gap detail unavailable"
+            hint="Coverage summary is still usable. Refresh after the API service has picked up the latest ASM endpoints."
+          />
+        </Card>
+      )
+  }
+
+  const authRows = Object.entries(gaps.by_auth_state)
+  const sample = gaps.sample_gaps.slice(0, 8)
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <AlertTriangle className="h-5 w-5 text-yellow-400" />
+        <h2 className="text-sm font-medium text-gray-300">Coverage gaps</h2>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+          <div className="mb-2 text-xs uppercase text-gray-500">Auth states</div>
+          {authRows.length === 0 ? (
+            <div className="text-sm text-gray-500">No inventory yet.</div>
+          ) : (
+            <div className="space-y-1">
+              {authRows.map(([state, counts]) => (
+                <div key={state} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-gray-300">{state}</span>
+                  <span className="text-xs text-gray-500">
+                    tested {counts.tested || 0} · untested {(counts.untested || 0) + (counts.stale || 0)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+          <div className="mb-2 text-xs uppercase text-gray-500">Parameter shapes</div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(gaps.by_param_location).length ? Object.entries(gaps.by_param_location).map(([loc, count]) => (
+              <Badge key={loc} className="bg-gray-800 text-gray-300">{loc}: {count}</Badge>
+            )) : <span className="text-sm text-gray-500">No parameters discovered yet.</span>}
+          </div>
+        </div>
+      </div>
+
+      {sample.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
+                <th className="px-2 py-2 font-medium">Endpoint</th>
+                <th className="px-2 py-2 font-medium">State</th>
+                <th className="px-2 py-2 font-medium">Auth</th>
+                <th className="px-2 py-2 font-medium">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sample.map((e) => (
+                <tr key={e.id} className="border-b border-gray-800/60">
+                  <td className="px-2 py-2 font-mono text-xs text-gray-300">
+                    <span className="mr-2 text-gray-500">{e.method}</span>{e.path}
+                  </td>
+                  <td className="px-2 py-2">
+                    <Badge className={STATUS_BADGE[e.test_status] || 'bg-gray-700/50 text-gray-300'}>{e.test_status}</Badge>
+                  </td>
+                  <td className="px-2 py-2 text-gray-400">{e.auth_state || 'anonymous'}</td>
+                  <td className="px-2 py-2 text-gray-400">{e.last_attempt_status || e.last_verdict || 'not attempted'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ActivityCard({ activity }: { activity: AsmActivity[] }) {
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Activity className="h-5 w-5 text-blue-400" />
+        <h2 className="text-sm font-medium text-gray-300">ASM activity</h2>
+      </div>
+      {activity.length === 0 ? (
+        <EmptyState message="No ASM activity yet" hint="Run discovery or improve coverage to start building the activity history." />
+      ) : (
+        <div className="space-y-2">
+          {activity.slice(0, 8).map((item) => {
+            const label = item.scan_role === 'asm_recon' ? 'Discovery' : 'Test batch'
+            return (
+              <Link
+                key={item.id}
+                href={`/scans/${item.id}`}
+                className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700"
+              >
+                <div>
+                  <div className="text-sm text-gray-200">{label}</div>
+                  <div className="text-xs text-gray-500">{formatDate(item.created_at)}</div>
+                </div>
+                <div className="text-right">
+                  <Badge className={STATUS_BADGE[item.status] || 'bg-gray-700/50 text-gray-300'}>
+                    {item.status}
+                  </Badge>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {item.findings_count || 0} findings
+                  </div>
+                </div>
+              </Link>
+            )
+          })}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 // ---- Per-target view ------------------------------------------------------
 
 function TargetView({ targetId }: { targetId: string }) {
@@ -470,6 +822,8 @@ function TargetView({ targetId }: { targetId: string }) {
   const toast = useToast()
   const [endpoints, setEndpoints] = useState<AsmEndpoint[]>([])
   const [coverage, setCoverage] = useState<AsmCoverage | null>(null)
+  const [gaps, setGaps] = useState<AsmGaps | null>(null)
+  const [activity, setActivity] = useState<AsmActivity[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -479,10 +833,16 @@ function TargetView({ targetId }: { targetId: string }) {
   const load = useCallback(() => {
     setLoading(true)
     setError(false)
-    getAsmEndpoints(targetId, { status: filters.status || undefined, limit: 200 })
-      .then((data) => {
-        setEndpoints(data.endpoints)
-        setCoverage(data.coverage)
+    Promise.all([
+      getAsmEndpoints(targetId, { status: filters.status || undefined, limit: 200 }),
+      getAsmGaps(targetId).catch(() => null),
+      getAsmActivity(targetId, { limit: 12 }).catch(() => ({ activity: [] })),
+    ])
+      .then(([endpointData, gapData, activityData]) => {
+        setEndpoints(endpointData.endpoints)
+        setCoverage(endpointData.coverage)
+        setGaps(gapData)
+        setActivity(activityData.activity)
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false))
@@ -543,6 +903,8 @@ function TargetView({ targetId }: { targetId: string }) {
         </div>
       </div>
 
+      <CoverageAdvisorCard targetId={targetId} coverage={coverage} gaps={gaps} onRefresh={load} />
+
       {coverage && (
         <Card className="p-4 space-y-3">
           <div className="flex items-center justify-between">
@@ -563,8 +925,15 @@ function TargetView({ targetId }: { targetId: string }) {
         </Card>
       )}
 
-      <ContinuousCard targetId={targetId} />
-      <NewSurfaceCard targetId={targetId} />
+      <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <GapsCard gaps={gaps} loading={loading} />
+        <ActivityCard activity={activity} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <ContinuousCard targetId={targetId} />
+        <NewSurfaceCard targetId={targetId} />
+      </div>
 
       <Card className="p-4 space-y-4">
         <div className="flex flex-wrap items-center gap-3">

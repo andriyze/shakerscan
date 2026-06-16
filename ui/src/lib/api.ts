@@ -295,6 +295,52 @@ export interface AsmEndpoint {
   last_tested_at?: string | null
 }
 
+export interface AsmRecommendation {
+  next_action: 'recon' | 'test' | 'wait'
+  label: string
+  reason: string
+  blockers: Array<{ kind: string; count: number; message: string }>
+}
+
+export interface AsmGaps {
+  coverage: AsmCoverage
+  claimable: number
+  active_scans: number
+  recommendation: AsmRecommendation
+  by_auth_state: Record<string, Record<string, number>>
+  by_param_location: Record<string, number>
+  last_attempt_status: Record<string, number>
+  sample_gaps: AsmEndpoint[]
+}
+
+export interface AsmActivity {
+  id: string
+  job_id?: string | null
+  scan_role: 'asm_batch' | 'asm_recon' | string
+  scan_type?: string
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  current_phase?: string | null
+  progress?: number | null
+  findings_count?: number | null
+  score?: number | null
+  grade?: string | null
+  error_message?: string | null
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  duration_seconds?: number | null
+}
+
+export interface AsmActionResponse {
+  action: 'recon' | 'test' | 'wait'
+  scan_id?: string
+  job_id?: string
+  status: string
+  batch_size?: number
+  reason?: string
+  recommendation?: AsmRecommendation
+}
+
 export interface PrecisionPolicy {
   original_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
   original_confidence?: number
@@ -1107,6 +1153,38 @@ export async function testAsmTarget(
   return res.json()
 }
 
+export async function reconAsmTarget(
+  targetId: string,
+  opts?: { budget_profile?: string }
+): Promise<AsmActionResponse> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/recon`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts || {}),
+  })
+  if (!res.ok) {
+    const msg = await getApiErrorMessage(res, 'Failed to queue ASM recon')
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
+export async function improveAsmTarget(
+  targetId: string,
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean }
+): Promise<AsmActionResponse> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts || {}),
+  })
+  if (!res.ok) {
+    const msg = await getApiErrorMessage(res, 'Failed to improve ASM coverage')
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
 // Continuous ASM policy (docs §16 Phase 3/4)
 export interface AsmConfig {
   batch_size: number
@@ -1159,6 +1237,23 @@ export async function getAsmDiff(
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/diff?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM diff')
+  return res.json()
+}
+
+export async function getAsmGaps(targetId: string): Promise<AsmGaps> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/gaps`)
+  if (!res.ok) throw new Error('Failed to fetch ASM gaps')
+  return res.json()
+}
+
+export async function getAsmActivity(
+  targetId: string,
+  params?: { limit?: number }
+): Promise<{ activity: AsmActivity[] }> {
+  const searchParams = new URLSearchParams()
+  if (params?.limit) searchParams.set('limit', params.limit.toString())
+  const res = await fetch(`${API_URL}/targets/${targetId}/asm/activity?${searchParams}`)
+  if (!res.ok) throw new Error('Failed to fetch ASM activity')
   return res.json()
 }
 

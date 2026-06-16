@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import types
@@ -108,6 +109,190 @@ def test_asm_domain_rate_reservation_uses_root_domain_key():
     assert api_module._reserve_asm_domain_rate(r, "api.example.com", 5, 3) == 3
     assert api_module._asm_reserved_count(r, "example.com") == 3
     assert api_module._asm_reserved_count(r, "api.example.com") == 3
+
+
+def test_asm_recommendation_empty_inventory_runs_recon():
+    rec = api_module._asm_recommendation(
+        {"total": 0, "tested": 0, "untested": 0, "stale": 0, "in_progress": 0}
+    )
+
+    assert rec["next_action"] == "recon"
+    assert "No persistent endpoint inventory" in rec["reason"]
+
+
+def test_asm_recommendation_claimable_inventory_runs_test():
+    rec = api_module._asm_recommendation(
+        {"total": 20, "tested": 10, "untested": 5, "stale": 5, "in_progress": 0},
+        claimable=10,
+    )
+
+    assert rec["next_action"] == "test"
+    assert "10 endpoint" in rec["reason"]
+
+
+def test_asm_recommendation_active_scan_waits_and_reports_blocker():
+    rec = api_module._asm_recommendation(
+        {"total": 20, "tested": 10, "untested": 10, "stale": 0, "in_progress": 0},
+        claimable=10,
+        active_scans=1,
+    )
+
+    assert rec["next_action"] == "wait"
+    assert rec["blockers"][0]["kind"] == "active_scan"
+
+
+def test_asm_recommendation_auth_missing_is_visible_but_does_not_block_recon():
+    rec = api_module._asm_recommendation(
+        {"total": 20, "tested": 20, "untested": 0, "stale": 0, "in_progress": 0},
+        claimable=0,
+        last_attempt_counts={"auth_missing": 2},
+    )
+
+    assert rec["next_action"] == "recon"
+    assert any(b["kind"] == "auth_missing" for b in rec["blockers"])
+
+
+class _FakeAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeAsmPool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _FakeAcquire(self.conn)
+
+
+class _RecordingAsmRedis:
+    def __init__(self):
+        self.rpush_calls = []
+        self.hset_calls = []
+
+    def rpush(self, *args):
+        self.rpush_calls.append(args)
+
+    def hset(self, *args, **kwargs):
+        self.hset_calls.append((args, kwargs))
+
+
+class _AsmActionConn:
+    def __init__(self, *, active=0, target=None, attempts=None):
+        self.active = active
+        self.target = target or {
+            "url": "https://example.test",
+            "scan_options": {},
+            "asm_config": {},
+        }
+        self.attempts = attempts or []
+        self.executes = []
+
+    async def fetchrow(self, query, *args):
+        if "SELECT url, scan_options, asm_config" in query:
+            return self.target
+        if "SELECT url, scan_options" in query:
+            return {"url": self.target["url"], "scan_options": self.target["scan_options"]}
+        if "SELECT 1 FROM targets" in query:
+            return {"exists": 1}
+        if "SELECT asm_config FROM targets" in query:
+            return {"asm_config": self.target.get("asm_config")}
+        return None
+
+    async def fetchval(self, query, *args):
+        if "COUNT(*) FROM scans" in query:
+            return self.active
+        return 0
+
+    async def fetch(self, query, *args):
+        if "last_attempt_status" in query and "GROUP BY" in query:
+            return self.attempts
+        return []
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        return "OK"
+
+
+def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn()
+    redis_client = _RecordingAsmRedis()
+
+    async def fake_coverage(_conn, _target_id):
+        return {"total": 0, "tested": 0, "untested": 0, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0}
+
+    async def fake_claimable(_conn, _target_id, *, stale_days):
+        return 0
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
+    monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+
+    result = asyncio.run(api_module.asm_improve(target_id, api_module.AsmImproveRequest()))
+
+    assert result["action"] == "recon"
+    assert result["status"] == "queued"
+    queued = json.loads(redis_client.rpush_calls[0][1])
+    assert queued["asm_recon"] is True
+    assert queued["triggered_by"] == "improve"
+    assert "custom_budget" in queued["options"]
+    assert any("INSERT INTO scans" in query for query, _args in conn.executes)
+    assert any("asm_last_recon_at" in query for query, _args in conn.executes)
+
+
+def test_asm_improve_queues_claimable_test_batch(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn(target={
+        "url": "https://example.test",
+        "scan_options": json.dumps({"scan_type": "smart", "auth_header": "Bearer token"}),
+        "asm_config": json.dumps({"batch_size": 20, "stale_days": 14, "exploit_depth": True}),
+    })
+    redis_client = _RecordingAsmRedis()
+
+    async def fake_coverage(_conn, _target_id):
+        return {"total": 50, "tested": 10, "untested": 40, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0.2}
+
+    async def fake_claimable(_conn, _target_id, *, stale_days):
+        assert stale_days == 14
+        return 8
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
+    monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+
+    result = asyncio.run(api_module.asm_improve(target_id, api_module.AsmImproveRequest()))
+
+    assert result["action"] == "test"
+    assert result["batch_size"] == 8
+    queued = json.loads(redis_client.rpush_calls[0][1])
+    assert queued["type"] == api_module.asm_inventory.EXPLOIT_BATCH_JOB_TYPE
+    assert queued["batch_size"] == 8
+    assert queued["stale_days"] == 14
+    assert queued["exploit_depth"] is True
+    assert queued["options"]["auth_header"] == "Bearer token"
+    assert any("asm_last_test_at" in query for query, _args in conn.executes)
+
+
+def test_asm_test_rejects_concurrent_target_work(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn(active=1)
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: _RecordingAsmRedis())
+
+    with pytest.raises(api_module.HTTPException) as excinfo:
+        asyncio.run(api_module.asm_test(target_id, api_module.AsmTestRequest()))
+
+    assert excinfo.value.status_code == 409
 
 
 def test_sanitize_scan_options_masks_sensitive_keys():

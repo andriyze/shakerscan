@@ -34,19 +34,24 @@ Shipped pieces:
 
 - `target_endpoints` persists discovered endpoint worklists from standalone scans, coverage recon,
   parallel scan merge, and ASM batches.
-- Existing APIs:
+- Current APIs:
   - `GET /targets/{id}/asm/endpoints`
   - `GET /targets/{id}/asm/coverage`
   - `GET /targets/{id}/asm/diff`
   - `POST /targets/{id}/asm/test`
+  - `POST /targets/{id}/asm/recon`
+  - `POST /targets/{id}/asm/improve`
+  - `GET /targets/{id}/asm/gaps`
+  - `GET /targets/{id}/asm/activity`
   - `GET /targets/{id}/asm/policy`
   - `PUT /targets/{id}/asm/policy`
 - `exploit_batch` claims untested/stale rows with `FOR UPDATE SKIP LOCKED`, runs `run_scan()` with
   `custom_endpoints`, saves findings, and stamps inventory.
 - `asm_dispatcher` periodically decides recon vs. test using target policy: batch size, stale TTL,
   min interval, daily cap, recon cadence, UTC windows, weekday windows, and per-root-domain caps.
-- `/asm` gives users a rollup, target inventory, coverage card, manual "test untested" action,
-  continuous policy card, local-time window helper, and new-surface feed.
+- `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
+  inventory, coverage gaps, ASM activity, policy presets, local-time window helper, and
+  new-surface feed.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 
 ### Current Table Shape
@@ -242,6 +247,8 @@ Keep the UI small. Users should not need twenty sharding controls.
 Current UI/API:
 
 - `/asm` shows coverage posture, new surface, inventory, policy, and manual test actions.
+- `/asm` now leads with a coverage advisor and one-click Improve Coverage action.
+- Policy setup is preset-first (`Safe`, `Balanced`, `Lab`) with raw knobs hidden behind Advanced.
 - New Scan exposes the parallel/coverage path without requiring users to understand every shard knob.
 - Child shard rows are hidden from the main Scans list by default.
 
@@ -264,17 +271,12 @@ GET  /targets/{id}/asm/endpoints
 GET  /targets/{id}/asm/coverage
 GET  /targets/{id}/asm/diff
 POST /targets/{id}/asm/test
+POST /targets/{id}/asm/recon
+POST /targets/{id}/asm/improve
+GET  /targets/{id}/asm/gaps
+GET  /targets/{id}/asm/activity
 GET  /targets/{id}/asm/policy
 PUT  /targets/{id}/asm/policy
-```
-
-Proposed API:
-
-```text
-POST /targets/{id}/asm/recon        -- proposed: explicit recon refresh, optional budget preset
-POST /targets/{id}/asm/improve      -- proposed: choose next best recon/test action
-GET  /targets/{id}/asm/gaps         -- proposed: AI-friendly explanation of untested/blocked work
-GET  /targets/{id}/asm/activity     -- proposed: recent recon/test batches grouped away from scans
 ```
 
 AI skills should map natural requests to these APIs:
@@ -333,8 +335,8 @@ Remaining:
 
 ### Phase D — UX/API/AI Simplification
 
-- Add `Improve coverage`, `gaps`, and `activity` APIs.
-- Add UI presets and hide raw knobs by default.
+- Add `Improve coverage`, `gaps`, and `activity` APIs. **Implemented.**
+- Add UI presets and hide raw knobs by default. **Implemented.**
 - Update AGENTS/skills guidance so AI agents use presets instead of hand-crafted budgets.
 
 ### Phase E — Multi-Node Readiness
@@ -368,7 +370,7 @@ Worker/API tests:
 - `POST /scans` with `parallel:true, shard_strategy:"coverage"` creates one parent and hidden shards.
 - Parent cancellation cancels/reconciles shards and releases leases.
 - `POST /targets/{id}/asm/test` creates an ASM activity row, not noisy user-facing scan spam.
-- Proposed `GET /targets/{id}/asm/gaps` explains untested/auth-blocked/rate-limited/partial rows.
+- `GET /targets/{id}/asm/gaps` explains untested/auth-blocked/rate-limited/partial rows.
 
 UI tests:
 
