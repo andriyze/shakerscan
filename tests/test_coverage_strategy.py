@@ -53,6 +53,13 @@ def test_coverage_partitions_all_endpoints_disjoint():
         assert s.options["no_early_stop"] is True
 
 
+def test_coverage_runs_global_checks_once_per_plan():
+    eps = [f"GET /api/x{i}?id=1" for i in range(320)]
+    plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150)
+
+    assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True]
+
+
 def test_coverage_caps_shards_without_dropping_endpoints():
     eps = [f"GET /a{i}?x=1" for i in range(5000)]
     plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150, max_shards=12)
@@ -157,6 +164,8 @@ def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
             for endpoint in shard.options["custom_endpoints"]
         ]
         assert sorted(state_eps) == sorted(eps)
+        state_shards = [s for s in plan.shards if s.options.get("auth_state") == state]
+        assert sum(1 for s in state_shards if not s.options.get("skip_global_checks")) == 1
 
 
 def test_aggregate_coverage_uses_assigned_endpoint_union_for_coverage_strategy():

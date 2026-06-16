@@ -707,6 +707,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.append('--options-method-discovery')
     if options.get('include_partial_attack_chains'):
         cmd.append('--include-partial-attack-chains')
+    if options.get('skip_global_checks'):
+        cmd.append('--skip-global-checks')
 
     # Smart scan tuning options
     if options.get('no_early_stop'):

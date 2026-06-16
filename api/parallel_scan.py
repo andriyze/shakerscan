@@ -334,6 +334,7 @@ def _finalize_shards(
     notes: list[str],
     *,
     max_expanded_shards: int | None = None,
+    global_checks_once: bool = False,
 ) -> list[ShardSpec]:
     """Apply cross-strategy shard transforms (exploit-depth, auth-state)."""
     if parent_options.get("exploit_depth"):
@@ -345,6 +346,15 @@ def _finalize_shards(
         notes,
         max_expanded_shards=max_expanded_shards,
     )
+    if global_checks_once:
+        seen_auth_states: set[str] = set()
+        for shard in shards:
+            state = str(shard.options.get("auth_state") or "anonymous")
+            if state in seen_auth_states:
+                shard.options["skip_global_checks"] = True
+            else:
+                shard.options["skip_global_checks"] = False
+                seen_auth_states.add(state)
     return shards
 
 
@@ -496,6 +506,7 @@ def plan_coverage_shards(
             parent_options,
             notes,
             max_expanded_shards=expanded_cap,
+            global_checks_once=True,
         )
         return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
@@ -541,6 +552,7 @@ def plan_coverage_shards(
         parent_options,
         notes,
         max_expanded_shards=expanded_cap,
+        global_checks_once=True,
     )
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 

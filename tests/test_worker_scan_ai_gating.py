@@ -328,6 +328,25 @@ def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch
     assert result["error"] == "Cancelled by user"
 
 
+def test_run_scan_maps_skip_global_checks_flag(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {"scan_type": "smart", "skip_global_checks": True},
+    ))
+
+    assert result.get("ok") is True
+    assert "--skip-global-checks" in captured["cmd"]
+
+
 def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
     captured = {}
 

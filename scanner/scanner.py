@@ -2422,6 +2422,7 @@ async def build_report(target: str,
                        focus_rules_json: str | None=None,
                        avoid_rules_json: str | None=None,
                        verified_findings_only: bool | None=None,
+                       skip_global_checks: bool=False,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -2656,6 +2657,8 @@ async def build_report(target: str,
         discovery_budget["disable_recursive_fuzzing"] = True
         discovery_budget["discovery_depth"] = min(int(discovery_budget.get("discovery_depth") or 1), 1)
         print("[smart] Focused manual active scope: disabling generic discovery expansion", file=sys.stderr)
+    if skip_global_checks:
+        print("[scanner] Parallel child shard: skipping duplicate global exposure checks", file=sys.stderr)
 
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
@@ -3611,11 +3614,15 @@ async def build_report(target: str,
 
     # Additional security checks
     if not public_only:
-        if focused_scope.skip_posture():
-            print("[smart] Focused manual active scope: skipping unrelated passive exposure probes", file=sys.stderr)
-            cors_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CORS_SHAPE)))
-            takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SUBDOMAIN_TAKEOVER_SHAPE)))
-            exposed_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(EXPOSED_FILES_SHAPE)))
+        if focused_scope.skip_posture() or skip_global_checks:
+            if focused_scope.skip_posture():
+                print("[smart] Focused manual active scope: skipping unrelated passive exposure probes", file=sys.stderr)
+            if skip_global_checks:
+                print("[scanner] Parallel child shard: skipping duplicate passive exposure probes", file=sys.stderr)
+            skip_reason = "focused_manual_active_scope" if focused_scope.skip_posture() else "parallel_child_skip_global_checks"
+            cors_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CORS_SHAPE, reason=skip_reason)))
+            takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SUBDOMAIN_TAKEOVER_SHAPE, reason=skip_reason)))
+            exposed_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(EXPOSED_FILES_SHAPE, reason=skip_reason)))
         else:
             cors_task = asyncio.create_task(check_cors(base_url))
             takeover_task = asyncio.create_task(check_subdomain_takeover(host))
@@ -3725,7 +3732,7 @@ async def build_report(target: str,
         rate_limit_task = asyncio.create_task(dummy_rate_limit())
 
     # Enhanced security checks (will be run after headers are available)
-    if not public_only and not focused_manual_active_scope:
+    if not public_only and not focused_manual_active_scope and not skip_global_checks:
         api_sec_task = asyncio.create_task(api_security_test(base_url))
         subdomain_takeover_task = asyncio.create_task(subdomain_takeover_check(host))
         xxe_task = asyncio.create_task(xxe_injection_test(base_url))
@@ -3741,6 +3748,11 @@ async def build_report(target: str,
             api_sec_empty = focused_scope.skipped_result(api_sec_empty)
             subdomain_empty = focused_scope.skipped_result(subdomain_empty)
             xxe_empty = focused_scope.skipped_result(xxe_empty)
+        elif skip_global_checks:
+            print("[scanner] Parallel child shard: skipping duplicate auxiliary API/XXE discovery probes", file=sys.stderr)
+            api_sec_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
+            subdomain_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
+            xxe_empty.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
         api_sec_task = asyncio.create_task(_focused_async_value(api_sec_empty))
         subdomain_takeover_task = asyncio.create_task(_focused_async_value(subdomain_empty))
         xxe_task = asyncio.create_task(_focused_async_value(xxe_empty))
@@ -4706,21 +4718,29 @@ async def build_report(target: str,
         async def dummy_injection_extra(): return {"findings": [], "tested": {}, "checks_run": [], "skipped_checks": []}
         injection_extra_task = asyncio.create_task(dummy_injection_extra())
 
-    if api_security_testing and not public_only:
+    if api_security_testing and not public_only and not skip_global_checks:
         api_security_p4_task = asyncio.create_task(test_api_security(base_url, discovered_urls=crawl_urls, auth_session=auth_session, safe_mode=True))
     else:
-        async def dummy_api_security_p4(): return {"vulnerable": False, "mass_assignment_risks": [], "bfla_endpoints": []}
+        async def dummy_api_security_p4():
+            res = {"vulnerable": False, "mass_assignment_risks": [], "bfla_endpoints": []}
+            if skip_global_checks:
+                res.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
+            return res
         api_security_p4_task = asyncio.create_task(dummy_api_security_p4())
 
     # Access Control Checks - Forced Browsing (can run in parallel with Phase 4)
-    if forced_browsing_testing and not public_only:
+    if forced_browsing_testing and not public_only and not skip_global_checks:
         forced_browsing_task = asyncio.create_task(check_forced_browsing(
             base_url,
             max_concurrent=10,
             max_total_time=forced_browsing_max_seconds,
         ))
     else:
-        async def dummy_forced_browsing(): return {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}
+        async def dummy_forced_browsing():
+            res = {"vulnerable": False, "findings": [], "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0}, "paths_tested": 0}
+            if skip_global_checks:
+                res.update({"skipped": True, "reason": "parallel_child_skip_global_checks"})
+            return res
         forced_browsing_task = asyncio.create_task(dummy_forced_browsing())
 
     # Mass Assignment Check (requires auth for best results)
@@ -11015,6 +11035,8 @@ async def cli_main():
                     help="Only keep findings with exploit verification evidence (default for smart scans)")
     ap.add_argument("--no-verified-findings-only", dest="verified_findings_only", action="store_false",
                     help="Keep all findings regardless of verification status")
+    ap.add_argument("--skip-global-checks", action="store_true",
+                    help="Skip duplicate global exposure/posture checks in a parallel child shard")
 
     # Category convenience flags (enable groups of checks)
     ap.add_argument("--vuln-auth", action="store_true", help="Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds)")
@@ -12064,6 +12086,7 @@ async def cli_main():
         focus_rules_json=args.focus_rules_json,
         avoid_rules_json=args.avoid_rules_json,
         verified_findings_only=args.verified_findings_only,
+        skip_global_checks=args.skip_global_checks,
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
         # Smart scan tuning
