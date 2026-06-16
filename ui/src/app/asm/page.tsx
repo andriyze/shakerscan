@@ -68,6 +68,33 @@ function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
 }
 
+// The ASM scheduling window is stored/evaluated in UTC; these helpers surface
+// the local-time equivalent so users can schedule against their own clock.
+const LOCAL_TZ =
+  typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'local'
+
+function localOffsetLabel(): string {
+  const off = -new Date().getTimezoneOffset() // minutes east of UTC
+  const sign = off >= 0 ? '+' : '-'
+  const abs = Math.abs(off)
+  const h = Math.floor(abs / 60)
+  const m = abs % 60
+  return `UTC${sign}${h}${m ? ':' + String(m).padStart(2, '0') : ''}`
+}
+
+function utcHourToLocalLabel(h: number | null | undefined): string | null {
+  if (h === null || h === undefined) return null
+  const d = new Date()
+  d.setUTCHours(((h % 24) + 24) % 24, 0, 0, 0)
+  return `${String(d.getHours()).padStart(2, '0')}:00`
+}
+
+function nowLocalUtcLabel(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())} local = ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
+}
+
 function CoverageBar({ coverage }: { coverage: number }) {
   const width = Math.max(0, Math.min(100, coverage * 100))
   const color = width >= 80 ? 'bg-green-500' : width >= 30 ? 'bg-yellow-500' : 'bg-blue-500'
@@ -346,9 +373,21 @@ function ContinuousCard({ targetId }: { targetId: string }) {
             onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
             className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
           />
-          <span className="text-[11px] text-gray-600">blank = any</span>
+          {cfg.window_start_hour !== null && cfg.window_end_hour !== null ? (
+            <span className="text-[11px] text-blue-300">
+              = {utcHourToLocalLabel(cfg.window_start_hour)}–{utcHourToLocalLabel(cfg.window_end_hour)} {LOCAL_TZ}
+            </span>
+          ) : (
+            <span className="text-[11px] text-gray-600">blank = any</span>
+          )}
         </div>
       </div>
+
+      <p className="text-[11px] text-gray-500">
+        Scheduling is in <span className="text-gray-400">UTC</span>. Your timezone:{' '}
+        <span className="text-gray-400">{LOCAL_TZ} ({localOffsetLabel()})</span> — now {nowLocalUtcLabel()}.
+        Days are UTC weekdays.
+      </p>
 
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-xs text-gray-400">Days:</span>
