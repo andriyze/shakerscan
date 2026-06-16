@@ -44,11 +44,13 @@ def test_coverage_partitions_all_endpoints_disjoint():
         assert s.options["no_early_stop"] is True
 
 
-def test_coverage_caps_shards_and_notes_partial():
+def test_coverage_caps_shards_without_dropping_endpoints():
     eps = [f"GET /a{i}?x=1" for i in range(5000)]
     plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150, max_shards=12)
     assert plan.shard_count == 12
-    assert any("partial" in n for n in plan.notes)
+    union = [e for s in plan.shards for e in s.options["custom_endpoints"]]
+    assert sorted(union) == sorted(eps)
+    assert any("preserve endpoint coverage" in n for n in plan.notes)
 
 
 def test_coverage_single_endpoint_falls_back_to_one_shard():
@@ -91,6 +93,12 @@ def test_harvest_prefers_full_worklist_over_samples():
     assert eps == ["GET /a?x=1", "POST /b form:k=1", "GET /c"]
 
 
+def test_harvest_default_keeps_large_worklist():
+    worklist = [f"GET /e{i}?id=1" for i in range(3000)]
+    eps = p.harvest_endpoints({"active_checks": {"active_worklist": worklist}})
+    assert eps == worklist
+
+
 def test_coverage_per_shard_cap_option_controls_shard_count():
     eps = [f"GET /e{i}?id=1" for i in range(390)]
     few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # default cap 150
@@ -100,6 +108,30 @@ def test_coverage_per_shard_cap_option_controls_shard_count():
     # still covers every endpoint, disjoint
     union = [e for s in many.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)
+
+
+def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
+    eps = [f"GET /e{i}?id=1" for i in range(1800)]
+    plan = p.plan_coverage_shards(
+        {
+            "scan_type": "smart",
+            "auth_state_shards": True,
+            "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2",
+        },
+        eps,
+        per_shard_cap=100,
+    )
+
+    assert plan.shard_count == 54  # 18 coverage buckets x anon/user1/user2
+    for state in ("anonymous", "user1", "user2"):
+        state_eps = [
+            endpoint
+            for shard in plan.shards
+            if shard.options.get("auth_state") == state
+            for endpoint in shard.options["custom_endpoints"]
+        ]
+        assert sorted(state_eps) == sorted(eps)
 
 
 # --------------------------- auth-state ---------------------------

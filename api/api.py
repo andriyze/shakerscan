@@ -1873,6 +1873,12 @@ class ScanOptions(BaseModel):
     exploit_depth: bool = False                      # Raise exploitation caps + no early stop on shards
     auth_state_shards: bool = False                  # Fan shards out per auth identity (anon/user1/user2)
     coverage_per_shard_cap: Optional[int] = None     # Endpoints per coverage shard (smaller -> more shards)
+    coverage_max_shards: Optional[int] = Field(
+        default=None,
+        ge=2,
+        le=parallel_scan.COVERAGE_MAX_SHARDS,
+        description="Maximum base coverage shards before auth-state expansion.",
+    )
 
 
 class ScanRequest(BaseModel):

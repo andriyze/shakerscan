@@ -655,6 +655,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             "active_max_seconds": "--budget-active-max-seconds",
             "active_max_endpoints": "--budget-active-max-endpoints",
             "active_params_per_endpoint": "--budget-active-params-per-endpoint",
+            "active_worklist_max": "--budget-active-worklist-max",
             "dom_xss_max_files": "--dom-xss-max-files",
             "smart_bola_max_endpoints": "--smart-bola-max-endpoints",
             "sqli_extract_max": "--sqli-extract-max",
@@ -3761,7 +3762,14 @@ async def process_scan_plan_job(job_data: dict):
         except Exception as e:
             recon_result = {}
             print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
-        harvested = parallel_scan.harvest_endpoints(recon_result)
+        try:
+            harvest_limit = int(
+                ((options.get('custom_budget') or {}).get('active_worklist_max'))
+                or parallel_scan.COVERAGE_WORKLIST_MAX
+            )
+        except (TypeError, ValueError):
+            harvest_limit = parallel_scan.COVERAGE_WORKLIST_MAX
+        harvested = parallel_scan.harvest_endpoints(recon_result, max_endpoints=harvest_limit)
         harvested = parallel_scan._normalize_endpoint_list(
             list(options.get('custom_endpoints') or []) + harvested
         )

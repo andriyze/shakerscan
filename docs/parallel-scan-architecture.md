@@ -1,6 +1,6 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Phase 0 + Phase 1 core implemented & deployed; Phase 2 deferred
+**Status:** Phase 0 + Phase 1 core implemented & deployed; high-budget coverage mode implemented; true zero-rediscovery shard execution remains deferred
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -13,7 +13,7 @@
 - **Parent → plan → shard → merge orchestration** on the existing Redis queue. New job types `scan_plan` / `scan_shard` / `scan_merge` routed in `api/worker.py::process_job`. Planner in `api/parallel_scan.py`.
 - **DB:** `scans.parent_scan_id`, `scan_role`, `shard_index`, `shard_count` (+ `idx_scans_parent`), in `db/init.sql` and `run_schema_migrations()`.
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows hidden from `GET /scans` by default (`include_shards=true` to show).
-- **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI.
+- **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. The scanner subprocess still does not poll the cancel flag mid-run.
 - **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
@@ -69,11 +69,43 @@ Performance expectations:
 - **More depth in parallel today:** Smart, Full, and Aggressive can use `family`
   strategy: broad + SQLi-focused + XSS-focused shards. This often improves coverage in
   the same wall-clock window, but each shard still repeats discovery/pre-scan work.
+- **Most endpoint breadth today:** Smart, Full, and Aggressive can use `coverage`
+  strategy, exposed in the UI as **Full Coverage**. The plan job runs one recon scan,
+  harvests up to `custom_budget.active_worklist_max` endpoints, partitions them by
+  `coverage_per_shard_cap`, and fans out up to `coverage_max_shards` base coverage
+  shards. If auth-state sharding is enabled, shards multiply across anonymous/user1/user2
+  without dropping endpoint buckets; the planner uses larger endpoint slices when needed.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
-- **Still deferred:** the ideal "discover once, build endpoint worklist once, then shard
-  active checks" scanner refactor. That is the Phase 2 scanner-stage extraction below.
+- **Still deferred:** the ideal zero-rediscovery scanner refactor where children skip
+  discovery entirely and run only an injected active-check stage. Current coverage mode is
+  discover-once recon plus lean child scans.
+
+API shape for the high-budget path:
+
+```json
+{
+  "target": "https://example.com",
+  "options": {
+    "scan_type": "smart",
+    "budget_profile": "exhaustive",
+    "parallel": true,
+    "shard_strategy": "coverage",
+    "coverage_per_shard_cap": 100,
+    "coverage_max_shards": 128,
+    "exploit_depth": true,
+    "auth_state_shards": true,
+    "custom_budget": {
+      "active_worklist_max": 50000,
+      "active_params_per_endpoint": 20,
+      "max_findings_per_family": -1,
+      "sqli_extract_max": 25,
+      "oob_max_findings": 25
+    }
+  }
+}
+```
 
 Productization plan:
 
@@ -87,9 +119,9 @@ Productization plan:
    blocks merge, and prevents late shard writes from reviving cancelled scans.
 4. **Make statistics count logical scans.** Implemented: shard rows are excluded from
    target scan totals, latest-scan views, and dashboard scan counts.
-5. **Implement true scanner-stage sharding.** Deferred: extract recon/discovery into a
-   reusable stage, persist the endpoint worklist/context, then run active checks over
-   endpoint slices without repeating discovery per shard.
+5. **Implement true scanner-stage sharding.** Partially implemented as `coverage`:
+   discover once, emit the active worklist, then run lean child scans over endpoint
+   slices. Deferred: extract an active-check-only child stage that skips discovery entirely.
 
 ---
 
@@ -395,38 +427,42 @@ endpoints** (vs 390 from samples) and fanned out **18 disjoint coverage shards o
 in very large budgets without changing default profile behavior.
 
 **Shard count scales:** `coverage` fans out `N = ceil(worklist / coverage_per_shard_cap)` shards
-(default cap 150, tunable per scan), bounded by `COVERAGE_MAX_SHARDS` (32). `auto` scales to the
-worker fleet up to `MAX_SHARDS` (12). `family` is intentionally fixed at 3 (broad/sqli/xss — the
-only capability lanes the scanner exposes). Concurrency is bounded by the worker fleet; excess
-shards queue and run as workers free up.
+(default cap 150, tunable per scan), bounded by `coverage_max_shards` / `COVERAGE_MAX_SHARDS`
+(128 today). Auth-state expansion can multiply that up to the total coverage shard ceiling while
+preserving every endpoint per state. `auto`/`scope` use the generic `MAX_SHARDS` ceiling (24 today).
+`family` is intentionally fixed at 3 (broad/sqli/xss — the only capability lanes the scanner
+exposes). Concurrency is bounded by the worker fleet; excess shards queue and run as workers free up.
 
 Also shipped earlier the same day: coverage-aware merge aggregation, `input.port 8080→3001` fix at
 source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 ("Discovering endpoints once, then sharding…").
 
-### The fix set (in priority order)
+### Shipped high-budget coverage behavior
 
-1. **Coverage-aware merge (quick, do first).** The merge must **union `smart_coverage` across shards** (tested endpoints/params, `auth_states_tested`, `discovery_sources`) and recompute `coverage = |union tested| / |union discovered|`, instead of inheriting the broad shard's. Also fix `input.port` in the merged report. Without this, none of the breadth work below is even visible. Worker-side only (`process_scan_merge_job`).
+1. **Coverage-aware merge.** Parent reports aggregate shard coverage for disjoint
+   `scope`/`coverage` shards, union auth states and discovery sources, and correct the
+   merged `input` identity back to the parent target.
+2. **`coverage` strategy.** Plan/recon runs once, harvests the full emitted active
+   worklist, partitions every harvested endpoint round-robin across coverage shards, and
+   runs the full active suite over each slice with lean child discovery/nuclei budgets.
+3. **Large budget overrides.** `custom_budget` values are capped by
+   `SCAN_BUDGET_CEILINGS`, not the smaller exhaustive profile defaults. This includes
+   `active_worklist_max`, so API/UI callers can ask recon to emit much larger endpoint
+   worklists.
+4. **Auth-state sharding.** `auth_state_shards` expands coverage across anonymous,
+   user1, and user2 when credentials are supplied. Expansion preserves every endpoint per
+   auth state; if the total shard ceiling would be too high, the planner uses larger
+   base endpoint slices instead of dropping buckets.
+5. **Exploit-depth mode.** `exploit_depth` disables early stop and raises proof caps so
+   confirmed findings get driven further instead of stopping after a few examples.
 
-2. **`coverage` shard strategy = discover-once + endpoint-worklist partitioning (the headline).** This is the deferred recon carve-out, now the top priority:
-   - Plan/recon stage runs discovery **once**, persists the full deduped endpoint worklist (the ~520 unique endpoints) + shared context (tech, DBMS, auth recipe) to Redis.
-   - Fan out: partition the worklist round-robin across N shards; each shard runs the **full active suite (all families)** over its slice with **discovery disabled** (inject the worklist).
-   - `N = ceil(discovered_endpoints / per_shard_active_cap)` so the union approaches **100% coverage**.
-   - Merge (with fix #1) then reports true aggregate coverage.
-   - Eliminates the 3× redundant crawl and the 300-endpoint single-scan ceiling.
+### Remaining next work
 
-3. **`saturate` budget profile / auto-sizing.** A profile whose goal is `coverage → 1.0`: it sizes shard count and per-shard caps to the *discovered* endpoint count rather than a fixed number. Pairs with `shards: "auto"` and the worker fleet.
-
-4. **Authenticated & multi-auth-state sharding.** Accept creds/token; shard by auth state (`anonymous`, `user1`, `user2`) so authenticated endpoints and BOLA/IDOR get covered. `auth_states_tested` becomes a first-class coverage axis.
-
-5. **Exploit-depth mode ("exploit all").** Raise per-finding exploitation caps (`sqli_extract_max`, `oob_max_findings`, `max_findings_per_family`) and run attack-chain correlation on the full union, so confirmed issues are driven to proof, not capped at 3.
-
-6. **Hybrid `coverage × family` (the "scan + exploit everything" mode).** Two-level fan-out: partition endpoints across a first axis, and within each partition run deep per-family passes. Highest coverage *and* depth; scales to the fleet/budget directive.
-
-### Going bigger on budget today (no refactor)
-Until #2 lands, the largest achievable in one parallel scan: `budget_profile: exhaustive` + `custom_budget` raising `active_max_endpoints` toward the ceiling, plus `scope` strategy with the endpoint list partitioned across shards (each shard ≤300 active endpoints, N shards = ceil(total/300)). That already beats `family` for breadth — it's `coverage` strategy done manually with a known endpoint list.
-
-### Effort
-- #1 coverage-merge + port fix: **S** (worker merge only).
-- #2 `coverage` strategy (recon carve-out): **L** (the `run_recon_stage` extraction).
-- #3 saturate profile: **S–M**. #4 auth sharding: **M**. #5 exploit depth: **S**. #6 hybrid: **M** (composes #2+#4/#5).
+- **True zero-rediscovery child execution:** extract a scanner stage that accepts the
+  persisted recon context and runs only active checks over injected endpoint slices.
+- **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
+  when a very large fleet is available.
+- **Richer UI rollups:** show per-shard endpoint contribution, auth-state coverage, and
+  aggregate budget consumption on the parent scan detail page.
+- **Global distributed rate limits:** required before multi-node fleets run hundreds of
+  shards against the same root domain.

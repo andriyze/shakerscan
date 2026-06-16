@@ -3,7 +3,8 @@
 **Status:** RFC / design note. The near-term path is operationally feasible, but the
 production-ready fleet work is not implemented yet.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
-can scan more targets at once by using workers from many machines.
+can scan more targets at once and run high-budget Full Coverage scans by using workers
+from many machines.
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md).
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
@@ -42,7 +43,10 @@ worker instances joined to the same fleet.
    ran each shard. Multi-node therefore adds *capacity* (more workers draining the same shard
    queue → more concurrent shards, so `coverage` fan-outs finish faster); it does not change the
    orchestration. The remaining multi-node work is the transport/trust substrate (how remote
-   workers reach the queue safely), not the fan-out itself.
+   workers reach the queue safely), not the fan-out itself. This is important for the
+   Honey/Juice Shop/crAPI class of targets: fleet capacity lets one logical Full Coverage
+   scan discover once, queue many endpoint shards, and try many more probes without forcing
+   all work through one VPS.
 7. **The hard parts are lifecycle, evidence, queue reliability, routing, rate limiting,
    and security.** The existing queue/dedup model is a good substrate, but a production
    fleet needs more than "point workers at the same Redis."
@@ -76,8 +80,9 @@ After joining, the operator should see every VPS in one fleet view:
 
 When the operator submits many scans, the control plane should distribute them across
 all registered worker instances. For example, five VPSs with four workers each should
-support roughly twenty concurrent scan jobs, constrained by global target rate limits and
-available memory/CPU.
+support roughly twenty concurrent worker jobs, constrained by global target rate limits and
+available memory/CPU. Those jobs may be independent scans, or they may be coverage shards
+belonging to one logical scan.
 
 ### Instance Roles
 
@@ -116,6 +121,7 @@ Multi-node does not change that shape. It changes where those jobs can execute.
 |---|---|
 | Before parallel scan fan-out | More total throughput for independent scans and batch scans. Each scan still runs on one worker, but the shared queue spreads scans across VPSs. |
 | After `scan_plan` / `scan_shard` / `scan_merge` | Shards from one logical scan can be consumed by workers on different VPSs. |
+| After Full Coverage mode | One target can queue many endpoint shards; more VPSs drain those shards faster while the parent scan still merges into one report. |
 | After routing and affinity | The control plane can place jobs by region, egress IP, internal-network reachability, scan tier, or tool capability. |
 
 The shared requirements between the two designs are:

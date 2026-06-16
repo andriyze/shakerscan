@@ -209,6 +209,26 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
     assert "--quick" not in captured["cmd"]
 
 
+def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {"scan_type": "smart", "custom_budget": {"active_worklist_max": 50000}},
+    ))
+
+    assert result.get("ok") is True
+    assert "--budget-active-worklist-max" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--budget-active-worklist-max") + 1] == "50000"
+
+
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):
     captured = {}
 

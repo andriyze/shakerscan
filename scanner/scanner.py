@@ -11050,6 +11050,7 @@ async def cli_main():
     ap.add_argument("--budget-active-max-seconds", type=int, dest="budget_active_max_seconds")
     ap.add_argument("--budget-active-max-endpoints", type=int, dest="budget_active_max_endpoints")
     ap.add_argument("--budget-active-params-per-endpoint", type=int, dest="budget_active_params_per_endpoint")
+    ap.add_argument("--budget-active-worklist-max", type=int, dest="budget_active_worklist_max")
     ap.add_argument("--budget-max-findings-per-family", type=int, dest="budget_max_findings_per_family",
                     help="-1 disables the per-family active finding cap")
     # Safety/performance limits
@@ -11933,6 +11934,7 @@ async def cli_main():
             "active_max_seconds": getattr(args, "budget_active_max_seconds", None),
             "active_max_endpoints": getattr(args, "budget_active_max_endpoints", None),
             "active_params_per_endpoint": getattr(args, "budget_active_params_per_endpoint", None),
+            "active_worklist_max": getattr(args, "budget_active_worklist_max", None),
             "max_findings_per_family": (
                 None if getattr(args, "budget_max_findings_per_family", None) == -1
                 else getattr(args, "budget_max_findings_per_family", None)

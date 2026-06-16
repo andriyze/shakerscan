@@ -15,7 +15,7 @@ This module is the *planner*: it is pure logic (no I/O) so it can be unit
 tested. Given the parent scan options it returns a ParallelPlan whose shards
 each carry a full child-options dict (parent options + a focused override).
 
-Two strategies:
+Strategies:
 
   - ``scope``: partition an explicit ``custom_endpoints`` list across shards.
     Each shard tests only its slice with a trimmed discovery budget. This is a
@@ -27,8 +27,11 @@ Two strategies:
     parent budget; additional shards run deeper, higher-budget SQLi- and
     XSS-focused passes. This buys *depth* (more coverage / larger budget in the
     same wall-clock), not raw speed, because discovery repeats per shard. The
-    raw-speed "discover once, slice endpoints" path requires the scanner
-    carve-out documented as a follow-up in the architecture doc.
+    raw-speed "discover once, slice endpoints" path is handled by ``coverage``.
+
+  - ``coverage``: run a single recon pass, harvest the emitted active worklist,
+    then partition that full endpoint list across coverage shards. This is the
+    high-budget path for testing the whole target, not just the top endpoints.
 
 ``auto`` resolves to ``scope`` when >=2 custom endpoints are present, else
 ``family``.
@@ -73,10 +76,13 @@ EXPLOIT_DEPTH_BUDGET = {
     "max_findings_per_family": None,  # None -> unlimited (worker maps to -1)
 }
 
-# coverage strategy: active endpoints tested per shard. Kept <= the exhaustive
-# active_max_endpoints ceiling (300) so the resolved budget honors it; shard
-# count auto-scales to cover the whole discovered worklist.
+# coverage strategy: active endpoints tested per shard. Smaller values create
+# more shards and more queue fan-out; larger values create fewer heavier shards.
 COVERAGE_PER_SHARD_CAP = 150
+
+# Default harvested worklist size. The scanner also emits 5000 by default, but
+# callers can raise this with custom_budget.active_worklist_max.
+COVERAGE_WORKLIST_MAX = 5000
 
 # Auth fields that establish the primary (user1) authenticated identity.
 _PRIMARY_AUTH_KEYS = (
@@ -86,15 +92,24 @@ _PRIMARY_AUTH_KEYS = (
 )
 _SECONDARY_AUTH_KEYS = ("user2_header", "user2_cookies")
 
-# Hard ceiling on shards regardless of request, so a stray ``shards: 999`` can't
-# flood the queue. The worker fleet cap (POST /workers, 1-20) bounds throughput
-# anyway; this just bounds the row/queue explosion per scan.
-MAX_SHARDS = 12
+# Hard ceiling on generic non-coverage shards regardless of request, so a stray
+# ``shards: 999`` cannot flood the queue. The worker fleet cap bounds
+# concurrency; this bounds row/queue growth for scope/family.
+MAX_SHARDS = 24
+
+# Auth-state expansion multiplies useful work (anonymous/user1/user2), so it
+# needs its own cap instead of reusing the generic base-shard ceiling.
+AUTH_STATE_MAX_SHARDS = 96
 
 # Coverage strategy partitions the FULL endpoint worklist, so big estates need
-# more shards than the generic cap. Bounded higher; excess shards simply queue
-# and run as workers free up (more shards => finer partition => more coverage).
-COVERAGE_MAX_SHARDS = 32
+# more shards than the generic cap. Excess shards queue and run as workers free
+# up (more shards => smaller endpoint slices).
+COVERAGE_MAX_SHARDS = 128
+
+# Total expanded coverage shards after auth-state multiplication. If a target
+# would exceed this, we keep all endpoints but use fewer, larger base shards
+# before multiplying by auth state. We never silently drop endpoint buckets.
+COVERAGE_MAX_TOTAL_SHARDS = 256
 
 # ``family`` strategy can express at most these distinct, non-overlapping shards
 # with the focused flags the scanner exposes today.
@@ -243,21 +258,34 @@ def _expand_auth_states(
     shards: list[ShardSpec],
     parent_options: dict[str, Any],
     notes: list[str],
+    *,
+    max_expanded_shards: int | None = None,
 ) -> list[ShardSpec]:
     """If auth-state sharding is requested and >1 identity is available, fan each
-    base shard out per identity (anonymous/user1/user2), bounded by MAX_SHARDS."""
+    base shard out per identity (anonymous/user1/user2).
+
+    The caller controls the cap. When the expansion would exceed it, this
+    function returns the original shards instead of truncating endpoint buckets;
+    coverage planning should reduce base shard count before calling this.
+    """
     if not parent_options.get("auth_state_shards"):
         return shards
     states = available_auth_states(parent_options)
     if len(states) < 2:
         notes.append("auth_state_shards requested but no credentials supplied; staying anonymous")
         return shards
+    cap = max_expanded_shards if max_expanded_shards is not None else AUTH_STATE_MAX_SHARDS
+    required = len(shards) * len(states)
+    if required > cap:
+        notes.append(
+            f"auth-state expansion needs {required} shards, cap is {cap}; "
+            "leaving base shards unexpanded to avoid dropping endpoint coverage"
+        )
+        return shards
+
     expanded: list[ShardSpec] = []
     for shard in shards:
         for state in states:
-            if len(expanded) >= MAX_SHARDS:
-                notes.append(f"auth-state expansion capped at {MAX_SHARDS} shards")
-                break
             opts = _apply_auth_state(shard.options, state)
             expanded.append(ShardSpec(index=len(expanded), label=f"{shard.label}:{state}", options=opts))
     for i, shard in enumerate(expanded):
@@ -269,16 +297,23 @@ def _finalize_shards(
     shards: list[ShardSpec],
     parent_options: dict[str, Any],
     notes: list[str],
+    *,
+    max_expanded_shards: int | None = None,
 ) -> list[ShardSpec]:
     """Apply cross-strategy shard transforms (exploit-depth, auth-state)."""
     if parent_options.get("exploit_depth"):
         for shard in shards:
             _apply_exploit_depth(shard.options)
-    shards = _expand_auth_states(shards, parent_options, notes)
+    shards = _expand_auth_states(
+        shards,
+        parent_options,
+        notes,
+        max_expanded_shards=max_expanded_shards,
+    )
     return shards
 
 
-def harvest_endpoints(recon_result: Any, *, max_endpoints: int = 2000) -> list[str]:
+def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLIST_MAX) -> list[str]:
     """Extract a testable endpoint worklist ("METHOD /path?query" strings) from a
     discover-once recon scan result. Endpoints that carry query params (the ones
     worth active injection testing) are ordered first. Defensive against the many
@@ -356,7 +391,7 @@ def plan_coverage_shards(
     endpoints: Any,
     *,
     per_shard_cap: int | None = None,
-    max_shards: int = COVERAGE_MAX_SHARDS,
+    max_shards: int | None = None,
     notes: list[str] | None = None,
 ) -> "ParallelPlan":
     """Partition a discovered endpoint worklist across N=ceil(len/cap) shards so
@@ -368,6 +403,26 @@ def plan_coverage_shards(
     re-crawl (not a zero-rediscovery carve-out).
     """
     notes = notes if notes is not None else []
+    if max_shards is None:
+        try:
+            max_shards = int(parent_options.get("coverage_max_shards") or COVERAGE_MAX_SHARDS)
+        except (TypeError, ValueError):
+            max_shards = COVERAGE_MAX_SHARDS
+    max_shards = max(2, min(COVERAGE_MAX_SHARDS, int(max_shards)))
+
+    auth_state_count = 1
+    if parent_options.get("auth_state_shards"):
+        auth_state_count = max(1, len(available_auth_states(parent_options)))
+    expanded_cap = COVERAGE_MAX_TOTAL_SHARDS
+    if auth_state_count > 1:
+        max_base_for_auth = max(1, expanded_cap // auth_state_count)
+        if max_shards > max_base_for_auth:
+            notes.append(
+                f"coverage max shards reduced from {max_shards} to {max_base_for_auth} "
+                f"to preserve all endpoints across {auth_state_count} auth states"
+            )
+            max_shards = max_base_for_auth
+
     # Tunable per-shard endpoint cap: smaller cap -> more (smaller) shards.
     if per_shard_cap is None:
         try:
@@ -379,7 +434,12 @@ def plan_coverage_shards(
     if len(eps) < 2:
         notes.append(f"coverage: only {len(eps)} endpoints to partition; single shard")
         opts = _base_child_options(parent_options)
-        shards = _finalize_shards([ShardSpec(0, "coverage[0]", opts)], parent_options, notes)
+        shards = _finalize_shards(
+            [ShardSpec(0, "coverage[0]", opts)],
+            parent_options,
+            notes,
+            max_expanded_shards=expanded_cap,
+        )
         return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
     import math
@@ -388,7 +448,7 @@ def plan_coverage_shards(
     if len(eps) > len(buckets) * per_shard_cap:
         notes.append(
             f"coverage: {len(eps)} endpoints exceed {len(buckets)} shards x {per_shard_cap} cap; "
-            "coverage will be partial (raise shards or per-shard cap)"
+            "using larger per-shard slices to preserve endpoint coverage"
         )
     shards: list[ShardSpec] = []
     for i, slice_eps in enumerate(buckets):
@@ -412,7 +472,12 @@ def plan_coverage_shards(
             },
         )
         shards.append(ShardSpec(index=i, label=f"coverage[{i}]", options=opts))
-    shards = _finalize_shards(shards, parent_options, notes)
+    shards = _finalize_shards(
+        shards,
+        parent_options,
+        notes,
+        max_expanded_shards=expanded_cap,
+    )
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 
@@ -522,7 +587,7 @@ def plan_shards(
         parent_options: the parent scan's options dict (as submitted).
         scan_type: resolved scan type (quick/standard/deep/full/aggressive/smart).
         requested_shards: int, numeric string, or "auto".
-        strategy: "auto" | "scope" | "family".
+        strategy: "auto" | "scope" | "family" | "coverage".
         worker_count: current worker fleet size (used to auto-scale shards).
     """
     notes: list[str] = []
