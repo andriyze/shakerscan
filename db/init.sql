@@ -1,6 +1,11 @@
 -- ShakerScan - PostgreSQL Schema
 -- Open Source Edition (no auth, single-user)
 
+CREATE TABLE app_schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ============================================================
 -- TARGETS - Assets to scan
 -- ============================================================

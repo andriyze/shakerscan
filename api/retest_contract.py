@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
+ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 
 # ---------------------------------------------------------------------------
 # Verification Policy: single source of truth for severity gates
@@ -516,6 +517,169 @@ def auth_context_to_headers(auth_context: dict[str, str] | None) -> dict[str, st
     return headers
 
 
+async def _backfill_target_endpoint_fingerprints(conn) -> None:
+    """One-time ASM inventory backfill for the auth-aware endpoint identity."""
+    applied = await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name = $1",
+        ASM_ENDPOINT_FINGERPRINT_MIGRATION,
+    )
+    if applied:
+        return
+
+    from asm_inventory import endpoint_fingerprint, normalize_auth_state
+
+    rows = await conn.fetch("""
+        SELECT
+            id, target_id, method, path, param_shape, fingerprint, source,
+            auth_state, param_location, replay_spec, content_type, content_hash,
+            priority_score, test_status, last_attempt_status, last_verdict,
+            last_finding_id, first_seen_at, last_seen_at, last_tested_at,
+            updated_at
+        FROM target_endpoints
+    """)
+
+    if not rows:
+        await conn.execute(
+            "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+            ASM_ENDPOINT_FINGERPRINT_MIGRATION,
+        )
+        return
+
+    final_fingerprints: dict[Any, str] = {}
+    groups: dict[tuple[Any, str], list[Any]] = {}
+    for row in rows:
+        final_fp = endpoint_fingerprint(
+            row["method"],
+            row["path"],
+            row["param_shape"] or "",
+            param_location=row["param_location"] or "query",
+            auth_state=normalize_auth_state(row["auth_state"]),
+        )
+        final_fingerprints[row["id"]] = final_fp
+        groups.setdefault((row["target_id"], final_fp), []).append(row)
+
+    # Avoid transient UNIQUE(target_id, fingerprint) conflicts such as
+    # A(old=x -> new=y) while B still has old=y.
+    temp_updates = [
+        (f"__asm_fp_v2_tmp__{row['id']}", row["id"])
+        for row in rows
+        if row["fingerprint"] != final_fingerprints[row["id"]]
+    ]
+    if temp_updates:
+        await conn.executemany(
+            """
+            UPDATE target_endpoints
+            SET fingerprint = $1, updated_at = NOW()
+            WHERE id = $2
+            """,
+            temp_updates,
+        )
+
+    def _ts(value: Any) -> float:
+        if not isinstance(value, datetime):
+            return 0.0
+        try:
+            return value.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return 0.0
+
+    status_rank = {
+        "tested": 5,
+        "in_progress": 4,
+        "stale": 3,
+        "untested": 2,
+        "gone": 1,
+    }
+    deleted_ids: set[Any] = set()
+    for group_rows in groups.values():
+        if len(group_rows) <= 1:
+            continue
+        keeper = max(
+            group_rows,
+            key=lambda row: (
+                status_rank.get(str(row["test_status"] or ""), 0),
+                _ts(row["last_tested_at"]),
+                _ts(row["last_seen_at"]),
+                _ts(row["updated_at"]),
+                str(row["id"]),
+            ),
+        )
+        group_ids = [row["id"] for row in group_rows]
+        loser_ids = [row_id for row_id in group_ids if row_id != keeper["id"]]
+        await conn.execute(
+            """
+            WITH merged AS (
+                SELECT
+                    MIN(first_seen_at) AS first_seen_at,
+                    MAX(last_seen_at) AS last_seen_at,
+                    MAX(last_tested_at) AS last_tested_at,
+                    MAX(priority_score) AS priority_score,
+                    BOOL_OR(test_status = 'tested') AS has_tested,
+                    BOOL_OR(test_status = 'in_progress') AS has_in_progress,
+                    BOOL_OR(test_status = 'stale') AS has_stale,
+                    (array_remove(array_agg(source ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS source,
+                    (array_remove(array_agg(replay_spec ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS replay_spec,
+                    (array_remove(array_agg(content_type ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS content_type,
+                    (array_remove(array_agg(content_hash ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS content_hash,
+                    (array_remove(array_agg(last_attempt_status ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS last_attempt_status,
+                    (array_remove(array_agg(last_verdict ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS last_verdict,
+                    (array_remove(array_agg(last_finding_id ORDER BY last_seen_at DESC NULLS LAST), NULL))[1] AS last_finding_id
+                FROM target_endpoints
+                WHERE id = ANY($2::uuid[])
+            )
+            UPDATE target_endpoints kept
+            SET
+                first_seen_at = LEAST(kept.first_seen_at, merged.first_seen_at),
+                last_seen_at = GREATEST(kept.last_seen_at, merged.last_seen_at),
+                last_tested_at = GREATEST(kept.last_tested_at, merged.last_tested_at),
+                priority_score = GREATEST(kept.priority_score, merged.priority_score),
+                test_status = CASE
+                    WHEN merged.has_tested THEN 'tested'
+                    WHEN merged.has_in_progress THEN 'in_progress'
+                    WHEN merged.has_stale THEN 'stale'
+                    ELSE kept.test_status
+                END,
+                source = COALESCE(kept.source, merged.source),
+                replay_spec = COALESCE(kept.replay_spec, merged.replay_spec),
+                content_type = COALESCE(kept.content_type, merged.content_type),
+                content_hash = COALESCE(kept.content_hash, merged.content_hash),
+                last_attempt_status = COALESCE(kept.last_attempt_status, merged.last_attempt_status),
+                last_verdict = COALESCE(kept.last_verdict, merged.last_verdict),
+                last_finding_id = COALESCE(kept.last_finding_id, merged.last_finding_id),
+                updated_at = NOW()
+            FROM merged
+            WHERE kept.id = $1
+            """,
+            keeper["id"],
+            group_ids,
+        )
+        await conn.execute(
+            "DELETE FROM target_endpoints WHERE id = ANY($1::uuid[])",
+            loser_ids,
+        )
+        deleted_ids.update(loser_ids)
+
+    final_updates = [
+        (fingerprint, row_id)
+        for row_id, fingerprint in final_fingerprints.items()
+        if row_id not in deleted_ids
+    ]
+    if final_updates:
+        await conn.executemany(
+            """
+            UPDATE target_endpoints
+            SET fingerprint = $1, updated_at = NOW()
+            WHERE id = $2 AND fingerprint <> $1
+            """,
+            final_updates,
+        )
+
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        ASM_ENDPOINT_FINGERPRINT_MIGRATION,
+    )
+
+
 async def run_schema_migrations(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
@@ -526,6 +690,13 @@ async def run_schema_migrations(pool) -> None:
         # Advisory lock key: arbitrary 64-bit int unique to this migration set
         await conn.execute("SELECT pg_advisory_lock(8675309)")
         try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
             # findings table verification columns
             await conn.execute("""
                 ALTER TABLE findings
@@ -614,6 +785,7 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS content_type TEXT,
                 ADD COLUMN IF NOT EXISTS last_attempt_status TEXT
             """)
+            await _backfill_target_endpoint_fingerprints(conn)
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_target_endpoints_fp
                 ON target_endpoints(target_id, fingerprint)
