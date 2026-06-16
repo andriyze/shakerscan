@@ -13,7 +13,7 @@
 - **Parent → plan → shard → merge orchestration** on the existing Redis queue. New job types `scan_plan` / `scan_shard` / `scan_merge` routed in `api/worker.py::process_job`. Planner in `api/parallel_scan.py`.
 - **DB:** `scans.parent_scan_id`, `scan_role`, `shard_index`, `shard_count` (+ `idx_scans_parent`), in `db/init.sql` and `run_schema_migrations()`.
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows hidden from `GET /scans` by default (`include_shards=true` to show).
-- **Two strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up) and `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget). `auto` picks scope when ≥2 endpoints are present.
+- **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. The scanner subprocess still does not poll the cancel flag mid-run.
 - **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
@@ -21,7 +21,17 @@
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
 - **Tests:** `tests/test_parallel_scan.py`, `tests/test_custom_dictionaries.py`, scan budget coverage in `tests/test_scan_budget_profiles.py`, and auto-sharding policy coverage in `tests/test_api_scan_option_masking.py`. Verified live on Juice Shop after rebuilding images: auto scope run completed and merged 4/4 shards into one parent in 195s (2 deduped findings); family run completed 3/3 shards and merged duplicate findings under the parent.
 
-**Deferred (Phase 2, documented below):** the build_report carve-out for true "discover-once then endpoint-slice" raw speed-up (family currently repeats discovery per shard — depth over speed); a first-class check registry; cooperative cancellation polling inside the scanner subprocess; richer UI breakdowns for shard coverage contribution.
+**Discover-once is now implemented** as the `coverage` strategy (§15): the plan stage runs one
+discovery-focused recon, harvests the scanner's full emitted worklist, and partitions it across
+shards. **Caveat (precise):** this is *discover-once recon + lean child scans*, not a
+zero-rediscovery carve-out — each shard still runs a normal scan over its injected endpoint slice
+with a reduced crawl/nuclei budget, so there is some bounded re-crawl per shard. A true
+no-rediscovery shard mode (children skip discovery entirely) and the `build_report` recon carve-out
+remain the deeper optimization.
+
+**Still deferred (Phase 2):** the true zero-rediscovery shard mode / `build_report` recon carve-out;
+a first-class check registry; cooperative cancellation polling inside the scanner subprocess; richer
+UI breakdowns for shard coverage contribution.
 
 ---
 
@@ -98,8 +108,12 @@ The headline answer to #6 is in §4: **use the existing Redis queue + worker fle
 
 ## 2. Current architecture (audited)
 
+> **Note:** Line numbers in this section are from the original audit (2026-06-14) and drift as the
+> code grows — prefer the named symbols (e.g. `submit_scan`, `process_job`). Locate with
+> `grep -n 'def submit_scan' api/api.py`. (Example drift: `submit_scan` moved from ~6730 to ~7057.)
+
 ### 2.1 Queue & worker model
-- **Submit:** `POST /scans` writes a `scans` row (`status='pending'`) and `RPUSH`es a job onto the Redis list `scan_jobs` (`api/api.py:6730-6824`, queue name `api/worker.py:52-53`).
+- **Submit:** `POST /scans` (`submit_scan`, ~`api/api.py:7057`) writes a `scans` row (`status='pending'`) and `RPUSH`es a job onto the Redis list `scan_jobs` (queue name `api/worker.py:52-53`).
 - **Consume:** each worker process runs one blocking `BLPOP scan_jobs/retest_jobs` loop and processes **one job to completion before popping the next** (`api/worker.py:3646-3703`). Scan execution spawns the scanner as a subprocess.
 - **Scale:** `POST /workers` (1–20) drives the Docker socket to add/remove identical `shakerscan-oss-worker-N` replicas (`api/api.py:9120-9250`, `docker-compose.yml:120-193`). Workers are **stateless, no per-target affinity, no sharding.**
 - **Concurrency today:** `N workers × 1 scan = N parallel scans`, but **each individual scan is single-worker and internally serial**.

@@ -437,7 +437,7 @@ export interface AISettingsUpdate {
 
 export interface ScanExecutionSettings {
   auto_sharding_enabled: boolean
-  auto_sharding_strategy: 'auto' | 'scope' | 'family'
+  auto_sharding_strategy: 'auto' | 'scope' | 'family' | 'coverage'
   auto_sharding_max_shards: number
   auto_sharding_min_workers: number
   eligible_scan_types: string[]
@@ -446,7 +446,7 @@ export interface ScanExecutionSettings {
 
 export interface ScanExecutionSettingsUpdate {
   auto_sharding_enabled?: boolean
-  auto_sharding_strategy?: 'auto' | 'scope' | 'family'
+  auto_sharding_strategy?: 'auto' | 'scope' | 'family' | 'coverage'
   auto_sharding_max_shards?: number
   auto_sharding_min_workers?: number
 }

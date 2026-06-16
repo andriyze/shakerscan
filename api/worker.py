@@ -3740,7 +3740,9 @@ async def process_scan_plan_job(job_data: dict):
     if requested_strategy == 'coverage':
         # Discover-once: run a discovery-focused recon pass (active disabled),
         # harvest the endpoint worklist, then partition it across shards so the
-        # union approaches full endpoint coverage. Discovery is NOT repeated.
+        # union approaches full endpoint coverage. Full discovery runs ONCE here;
+        # shards then run lean scans (reduced crawl/nuclei) over their injected
+        # slice -- bounded re-crawl, not a zero-rediscovery carve-out.
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET status = 'running', started_at = $1, current_phase = 'recon', progress = 3 WHERE id = $2",

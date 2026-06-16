@@ -2173,7 +2173,7 @@ class ScanExecutionSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     auto_sharding_enabled: Optional[bool] = None
-    auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family)$")
+    auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family|coverage)$")
     auto_sharding_max_shards: Optional[int] = Field(default=None, ge=2, le=AUTO_SHARD_MAX_SHARDS)
     auto_sharding_min_workers: Optional[int] = Field(default=None, ge=1, le=20)
 

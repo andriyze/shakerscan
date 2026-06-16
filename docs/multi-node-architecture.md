@@ -34,10 +34,15 @@ worker instances joined to the same fleet.
 5. **The long-term zero-trust version should use an HTTPS job broker.** In that model,
    workers never receive database or Redis credentials. They lease jobs, heartbeat, upload
    evidence, and submit results through a narrow API.
-6. **Multi-node is not a replacement for the parallel-scan work.** Before true
-   intra-target fan-out lands, extra VPSs increase throughput for independent scans. After
-   `scan_plan -> scan_shard -> scan_merge` lands, shards of one logical scan can run on
-   any eligible worker instance.
+6. **Multi-node composes with the parallel-scan work, which has shipped.** Intra-target
+   fan-out (`scan_plan -> scan_shard -> scan_merge`, plus the `scope`/`family`/`coverage`
+   strategies) is implemented today — see `docs/parallel-scan-architecture.md`. Shard jobs are
+   plain entries on the shared `scan_jobs` Redis list, so any fleet worker that consumes that
+   queue already runs shards of one logical scan; the merge reconciles regardless of which node
+   ran each shard. Multi-node therefore adds *capacity* (more workers draining the same shard
+   queue → more concurrent shards, so `coverage` fan-outs finish faster); it does not change the
+   orchestration. The remaining multi-node work is the transport/trust substrate (how remote
+   workers reach the queue safely), not the fan-out itself.
 7. **The hard parts are lifecycle, evidence, queue reliability, routing, rate limiting,
    and security.** The existing queue/dedup model is a good substrate, but a production
    fleet needs more than "point workers at the same Redis."

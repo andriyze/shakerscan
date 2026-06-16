@@ -2,7 +2,7 @@
 
 export type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
 export type BudgetProfile = 'fast' | 'balanced' | 'thorough' | 'exhaustive'
-export type ParallelStrategy = 'auto' | 'scope' | 'family'
+export type ParallelStrategy = 'auto' | 'scope' | 'family' | 'coverage'
 
 export interface ScanTypeOption {
   value: ScanType
@@ -80,6 +80,7 @@ export const PARALLEL_STRATEGIES: Array<{
   { value: 'auto', label: 'Auto', description: 'Use endpoint sharding when endpoints are provided; otherwise use active-family sharding.' },
   { value: 'scope', label: 'Endpoint scope', description: 'Split known API endpoints across workers. Best for real speed-up.' },
   { value: 'family', label: 'Check family', description: 'Run broad, SQLi-focused, and XSS-focused shards in parallel for active scans.' },
+  { value: 'coverage', label: 'Full coverage', description: 'Discover once, then partition every discovered endpoint across shards to test the whole target. Heaviest; scale workers to match.' },
 ]
 
 export const PARALLEL_ACTIVE_SCAN_TYPES: ScanType[] = ['smart', 'full', 'aggressive']

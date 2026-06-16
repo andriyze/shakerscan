@@ -120,6 +120,21 @@ def test_apply_auth_state_scopes_credentials():
     assert u2["auth_header"] == "Bearer u2" and "user2_header" not in u2
 
 
+def test_user2_does_not_inherit_primary_credentials():
+    # Only user2_cookies provided (no user2_header) alongside a primary header.
+    # The user2 shard must NOT inherit the primary auth_header (BOLA correctness).
+    opts = {"auth_header": "Bearer u1", "user2_cookies": "sess=u2"}
+    u2 = p._apply_auth_state(opts, "user2")
+    assert u2.get("auth_cookies") == "sess=u2"
+    assert "auth_header" not in u2          # no fallback to primary header
+    assert "user2_cookies" not in u2
+    # Symmetric: only user2_header + primary cookies -> no primary cookie leak.
+    opts2 = {"auth_cookies": "sess=u1", "user2_header": "Bearer u2"}
+    u2b = p._apply_auth_state(opts2, "user2")
+    assert u2b.get("auth_header") == "Bearer u2"
+    assert "auth_cookies" not in u2b
+
+
 def test_auth_state_expansion_multiplies_shards():
     plan = p.plan_shards(
         {"scan_type": "smart", "auth_state_shards": True, "auth_header": "x", "user2_header": "y"},

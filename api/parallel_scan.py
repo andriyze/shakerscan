@@ -224,9 +224,16 @@ def _apply_auth_state(options: dict[str, Any], state: str) -> dict[str, Any]:
         for k in _SECONDARY_AUTH_KEYS:
             o.pop(k, None)
     elif state == "user2":
-        o["auth_header"] = options.get("user2_header") or options.get("auth_header")
-        o["auth_cookies"] = options.get("user2_cookies") or options.get("auth_cookies")
-        for k in (*_SECONDARY_AUTH_KEYS, "login_username", "login_password"):
+        # Use ONLY the secondary identity. Never fall back to primary creds, or a
+        # user2 shard given just user2_cookies would inherit user1's auth_header
+        # and corrupt BOLA/IDOR results. Clear all primary creds first.
+        for k in _PRIMARY_AUTH_KEYS:
+            o.pop(k, None)
+        if options.get("user2_header"):
+            o["auth_header"] = options["user2_header"]
+        if options.get("user2_cookies"):
+            o["auth_cookies"] = options["user2_cookies"]
+        for k in _SECONDARY_AUTH_KEYS:
             o.pop(k, None)
     o["auth_state"] = state
     return o
@@ -355,8 +362,10 @@ def plan_coverage_shards(
     """Partition a discovered endpoint worklist across N=ceil(len/cap) shards so
     the union approaches full endpoint coverage. Unlike ``scope`` (lean,
     known-API speed path), each coverage shard runs the FULL active suite over
-    its slice. The plan handler harvests ``endpoints`` from a discover-once recon
-    pass, so discovery is not repeated per shard.
+    its slice. The plan handler harvests ``endpoints`` from a single discover-once
+    recon pass; shards then run lean scans (reduced crawl/nuclei) over their
+    injected slice -- so full discovery happens once, with bounded per-shard
+    re-crawl (not a zero-rediscovery carve-out).
     """
     notes = notes if notes is not None else []
     # Tunable per-shard endpoint cap: smaller cap -> more (smaller) shards.
