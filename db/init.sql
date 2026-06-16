@@ -355,12 +355,16 @@ CREATE TABLE target_endpoints (
     method TEXT NOT NULL DEFAULT 'GET',
     path TEXT NOT NULL,
     param_shape TEXT NOT NULL DEFAULT '',
-    fingerprint TEXT NOT NULL,                 -- method + normalized path + param names
+    fingerprint TEXT NOT NULL,                 -- auth + method + normalized path + param location/names
     source TEXT,                               -- crawl | har | js | ffuf | openapi | manual
     auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    param_location TEXT NOT NULL DEFAULT 'query', -- query|form|json|none
+    replay_spec TEXT,                          -- scanner custom-endpoint string preserving body/query shape
+    content_type TEXT,
     content_hash TEXT,
     priority_score INTEGER NOT NULL DEFAULT 10,
     test_status TEXT NOT NULL DEFAULT 'untested',  -- untested|in_progress|tested|stale|gone
+    last_attempt_status TEXT,                  -- leased|completed|partial|auth_missing|failed
     last_verdict TEXT,
     last_finding_id UUID,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -371,6 +375,7 @@ CREATE TABLE target_endpoints (
 );
 CREATE UNIQUE INDEX idx_target_endpoints_fp ON target_endpoints(target_id, fingerprint);
 CREATE INDEX idx_target_endpoints_status ON target_endpoints(target_id, test_status, priority_score DESC);
+CREATE INDEX idx_target_endpoints_auth_status ON target_endpoints(target_id, auth_state, test_status, priority_score DESC);
 
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;

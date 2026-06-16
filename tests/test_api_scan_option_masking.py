@@ -71,6 +71,45 @@ if "fastapi" not in sys.modules:
 import api as api_module  # noqa: E402
 
 
+class _FakeAsmRedis:
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def eval(self, _script, _numkeys, key, amount, cap, _ttl):
+        current = int(self.store.get(key) or 0)
+        amount = int(amount)
+        cap = int(cap)
+        if amount <= 0:
+            return 0
+        if cap <= 0:
+            return amount
+        if current >= cap:
+            return 0
+        granted = min(amount, cap - current)
+        self.store[key] = current + granted
+        return granted
+
+
+def test_asm_domain_rate_reservation_clamps_remaining_budget():
+    r = _FakeAsmRedis()
+
+    assert api_module._reserve_asm_domain_rate(r, "example.com", 5, 10) == 5
+    assert api_module._asm_reserved_count(r, "example.com") == 5
+    assert api_module._reserve_asm_domain_rate(r, "example.com", 5, 1) == 0
+
+
+def test_asm_domain_rate_reservation_uses_root_domain_key():
+    r = _FakeAsmRedis()
+
+    assert api_module._reserve_asm_domain_rate(r, "example.com", 5, 3) == 3
+    assert api_module._reserve_asm_domain_rate(r, "api.example.com", 5, 3) == 3
+    assert api_module._asm_reserved_count(r, "example.com") == 3
+    assert api_module._asm_reserved_count(r, "api.example.com") == 3
+
+
 def test_sanitize_scan_options_masks_sensitive_keys():
     options = {
         "scan_type": "smart",

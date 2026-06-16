@@ -591,9 +591,13 @@ async def run_schema_migrations(pool) -> None:
                     fingerprint TEXT NOT NULL,
                     source TEXT,
                     auth_state TEXT NOT NULL DEFAULT 'anonymous',
+                    param_location TEXT NOT NULL DEFAULT 'query',
+                    replay_spec TEXT,
+                    content_type TEXT,
                     content_hash TEXT,
                     priority_score INTEGER NOT NULL DEFAULT 10,
                     test_status TEXT NOT NULL DEFAULT 'untested',
+                    last_attempt_status TEXT,
                     last_verdict TEXT,
                     last_finding_id UUID,
                     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -604,12 +608,23 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("""
+                ALTER TABLE target_endpoints
+                ADD COLUMN IF NOT EXISTS param_location TEXT NOT NULL DEFAULT 'query',
+                ADD COLUMN IF NOT EXISTS replay_spec TEXT,
+                ADD COLUMN IF NOT EXISTS content_type TEXT,
+                ADD COLUMN IF NOT EXISTS last_attempt_status TEXT
+            """)
+            await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_target_endpoints_fp
                 ON target_endpoints(target_id, fingerprint)
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_target_endpoints_status
                 ON target_endpoints(target_id, test_status, priority_score DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoints_auth_status
+                ON target_endpoints(target_id, auth_state, test_status, priority_score DESC)
             """)
             await conn.execute("""
                 CREATE OR REPLACE VIEW latest_scans AS

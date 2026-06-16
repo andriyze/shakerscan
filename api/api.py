@@ -163,6 +163,23 @@ try:
     ASM_DISPATCH_INTERVAL_SECONDS = int(os.environ.get("SHAKERSCAN_ASM_DISPATCH_INTERVAL", "60"))
 except (TypeError, ValueError):
     ASM_DISPATCH_INTERVAL_SECONDS = 60  # How often the continuous ASM dispatcher ticks
+ASM_RATE_RESERVATION_TTL_SECONDS = 3600
+ASM_RATE_RESERVE_LUA = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+local requested = tonumber(ARGV[1]) or 0
+local cap = tonumber(ARGV[2]) or 0
+local ttl = tonumber(ARGV[3]) or 3600
+if requested <= 0 then return 0 end
+if cap <= 0 then return requested end
+if current >= cap then return 0 end
+local grant = requested
+if current + grant > cap then
+  grant = cap - current
+end
+redis.call('INCRBY', KEYS[1], grant)
+redis.call('EXPIRE', KEYS[1], ttl)
+return grant
+"""
 # Grace minutes added to a scan's max_duration before the stale-checker safety
 # net force-terminates it, so the scanner's own termination (which returns
 # recovered results) wins the race on slow targets.
@@ -208,6 +225,52 @@ def row_to_dict(row) -> dict:
 def get_redis():
     """Get Redis connection."""
     return redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _asm_domain_rate_key(root_domain: str) -> str:
+    normalized = str(root_domain or "").strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"asm:domain_rate:{digest}"
+
+
+def _asm_reserved_count(r, root_domain: str) -> int:
+    if not root_domain:
+        return 0
+    try:
+        return max(0, int(r.get(_asm_domain_rate_key(root_domain)) or 0))
+    except Exception:
+        return 0
+
+
+def _reserve_asm_domain_rate(r, root_domain: str, cap: int, amount: int) -> int:
+    """Reserve endpoint budget before queuing an ASM batch.
+
+    The DB count only sees endpoints after they finish. This Redis counter
+    closes the race where several targets under one root all queue full batches
+    in the same dispatcher tick and exceed the per-hour domain cap.
+    """
+    try:
+        cap = max(0, int(cap or 0))
+        amount = max(0, int(amount or 0))
+    except (TypeError, ValueError):
+        return 0
+    if amount <= 0:
+        return 0
+    if not root_domain or cap <= 0:
+        return amount
+    try:
+        granted = r.eval(
+            ASM_RATE_RESERVE_LUA,
+            1,
+            _asm_domain_rate_key(root_domain),
+            amount,
+            cap,
+            ASM_RATE_RESERVATION_TTL_SECONDS,
+        )
+        return max(0, int(granted or 0))
+    except Exception as exc:
+        print(f"[asm] domain rate reservation failed for {root_domain}: {exc}", flush=True)
+        return 0
 
 
 def _is_truthy(value: Any, default: bool = False) -> bool:
@@ -1675,7 +1738,8 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 cap = cfg['max_requests_per_hour_per_domain']
                 if cap > 0 and root_domain:
                     used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
-                    domain_rate_exceeded = used >= cap
+                    reserved = _asm_reserved_count(r, root_domain)
+                    domain_rate_exceeded = (used + reserved) >= cap
 
                 decision = asm_inventory.decide_asm_action(
                     now=now,
@@ -1700,14 +1764,22 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
                     print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
                 elif action == 'test':
+                    dispatch_batch_size = min(cfg['batch_size'], claimable)
+                    daily_cap = cfg['daily_endpoint_cap']
+                    if daily_cap > 0:
+                        dispatch_batch_size = min(dispatch_batch_size, max(0, daily_cap - tested_today))
+                    if cap > 0 and root_domain:
+                        dispatch_batch_size = _reserve_asm_domain_rate(r, root_domain, cap, dispatch_batch_size)
+                    if dispatch_batch_size <= 0:
+                        continue
                     enq = await _enqueue_asm_exploit_batch(
                         conn, r, target_id, target_url, base_opts,
-                        batch_size=cfg['batch_size'], stale_days=cfg['stale_days'],
+                        batch_size=dispatch_batch_size, stale_days=cfg['stale_days'],
                         exploit_depth=cfg['exploit_depth'], triggered_by='dispatcher',
                     )
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
                     print(f"[asm] test batch queued for {target_url} "
-                          f"({cfg['batch_size']} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
+                          f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
             print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
 
@@ -8122,8 +8194,9 @@ async def asm_list_endpoints(
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
             raise HTTPException(status_code=404, detail="Target not found")
         params: list[Any] = [uuid.UUID(target_id)]
-        q = """SELECT id, method, path, param_shape, source, auth_state, priority_score,
-                      test_status, last_verdict, first_seen_at, last_seen_at, last_tested_at
+        q = """SELECT id, method, path, param_shape, param_location, replay_spec, content_type,
+                      source, auth_state, priority_score, test_status, last_attempt_status,
+                      last_verdict, first_seen_at, last_seen_at, last_tested_at
                FROM target_endpoints WHERE target_id = $1"""
         if status:
             params.append(status)

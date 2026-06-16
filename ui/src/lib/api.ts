@@ -281,10 +281,14 @@ export interface AsmEndpoint {
   method: string
   path: string
   param_shape?: string
+  param_location?: 'query' | 'form' | 'json' | 'none'
+  replay_spec?: string | null
+  content_type?: string | null
   source?: string
   auth_state?: string
   priority_score: number
   test_status: 'untested' | 'in_progress' | 'tested' | 'stale' | 'gone'
+  last_attempt_status?: string | null
   last_verdict?: string | null
   first_seen_at?: string
   last_seen_at?: string

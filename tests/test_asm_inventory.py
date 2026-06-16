@@ -19,10 +19,29 @@ def test_parse_worklist_entry_shapes():
     assert a.parse_worklist_entry("GET /rest/products/1?q=x&id=2") == ("GET", "/rest/products/1", "id,q")
     assert a.parse_worklist_entry("POST /login form:email=1&password=1") == ("POST", "/login", "email,password")
     assert a.parse_worklist_entry('POST /api json:{"a":1,"b":2}') == ("POST", "/api", "a,b")
+    assert a.parse_worklist_entry('POST /api json:{"user":{"id":1},"qty":2}') == ("POST", "/api", "qty,user.id")
     assert a.parse_worklist_entry("/ftp") == ("GET", "/ftp", "")
     assert a.parse_worklist_entry("GET rel/path") == ("GET", "/rel/path", "")
     assert a.parse_worklist_entry("") is None
     assert a.parse_worklist_entry(None) is None
+
+
+def test_parse_worklist_entry_detail_preserves_replay_context():
+    form = a.parse_worklist_entry_detail("POST /login form:email=1&password=1")
+    assert form is not None
+    assert form.param_location == "form"
+    assert form.content_type == "application/x-www-form-urlencoded"
+    assert form.replay_spec == "POST /login form:email=1&password=1"
+
+    json_body = a.parse_worklist_entry_detail('POST /api json:{"a":1,"b":2}')
+    assert json_body is not None
+    assert json_body.param_location == "json"
+    assert json_body.content_type == "application/json"
+    assert json_body.replay_spec == 'POST /api json:{"a":1,"b":2}'
+
+    query = a.parse_worklist_entry_detail("GET rel/path?x=seed")
+    assert query is not None
+    assert query.replay_spec == "GET /rel/path?x=seed"
 
 
 def test_fingerprint_collapses_volatile_ids():
@@ -33,6 +52,15 @@ def test_fingerprint_collapses_volatile_ids():
     assert a.endpoint_fingerprint("POST", "/users/42", "id") != f1
     assert a.endpoint_fingerprint("GET", "/orders/42", "id") != f1
     assert a.endpoint_fingerprint("GET", "/users/42", "id,extra") != f1
+    assert a.endpoint_fingerprint("GET", "/users/42", "id", auth_state="user1") != f1
+    assert a.endpoint_fingerprint("GET", "/users/42", "id", param_location="form") != f1
+
+
+def test_auth_state_from_options_prefers_explicit_and_primary_auth():
+    assert a.auth_state_from_options({}) == "anonymous"
+    assert a.auth_state_from_options({"auth_header": "Bearer x"}) == "user1"
+    assert a.auth_state_from_options({"auth_state": "user2", "auth_header": "Bearer x"}) == "user2"
+    assert a.auth_state_from_options({"auth_state": "invalid"}) == "anonymous"
 
 
 def test_priority_score_ranks_high_value_and_params():
@@ -45,6 +73,22 @@ def test_priority_score_ranks_high_value_and_params():
 
 def test_to_custom_endpoint_roundtrips_params():
     assert a.to_custom_endpoint("POST", "/login", "email,password") == "POST /login?email=1&password=1"
+    assert (
+        a.to_custom_endpoint("POST", "/login", "email,password", param_location="form")
+        == "POST /login form:email=1&password=1"
+    )
+    assert (
+        a.to_custom_endpoint("POST", "/api", "a,b", param_location="json")
+        == 'POST /api json:{"a":1,"b":1}'
+    )
+    assert (
+        a.to_custom_endpoint("POST", "/api", "qty,user.id", param_location="json")
+        == 'POST /api json:{"qty":1,"user":{"id":1}}'
+    )
+    assert (
+        a.to_custom_endpoint("POST", "/api", "a,b", replay_spec='POST /api json:{"a":"seed","b":2}')
+        == 'POST /api json:{"a":"seed","b":2}'
+    )
     assert a.to_custom_endpoint("GET", "/ftp", "") == "GET /ftp"
 
 

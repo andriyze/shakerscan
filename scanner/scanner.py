@@ -2283,7 +2283,15 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
         elif params:
             entry = f"{method} {path}?" + "&".join(f"{p}=1" for p in params)
         elif body and method in ("POST", "PUT", "PATCH"):
-            entry = f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
+            content_type = str(e.get("content_type") or "").lower()
+            body_template = e.get("body_template")
+            if "json" in content_type:
+                if isinstance(body_template, dict) and body_template:
+                    entry = f"{method} {path} json:" + json.dumps(body_template, separators=(",", ":"))
+                else:
+                    entry = f"{method} {path} json:" + json.dumps({b: 1 for b in body}, separators=(",", ":"))
+            else:
+                entry = f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
         else:
             entry = f"{method} {path}"
         if entry in seen:
