@@ -84,3 +84,74 @@ def test_phase4_api_security_does_not_report_html_contact_data_as_verified(monke
 
     assert result["vulnerable"] is False
     assert not any(exposure.get("verified") for exposure in result["excessive_data_exposure"])
+
+
+def test_phase4_api_security_ignores_documentation_example_credentials(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if "-I" in command:
+            return ("HTTP/1.1 404 Not Found\r\n\r\n", "", 0)
+        if url.endswith("/api/scenarios"):
+            return (
+                _http(
+                    200,
+                    "Content-Type: application/json",
+                    (
+                        '{"packs":[{"representative_endpoints":[{"request_template_example":'
+                        '{"body":{"email":"demo@example.test","password":"welcome123"}}}]}],'
+                        '"scenarios":[{"curl_example":{"body":{"password":"welcome123"}}}]}'
+                    ),
+                ),
+                "",
+                0,
+            )
+        return (_http(200, "Content-Type: text/html", "<html><body>home</body></html>"), "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(
+        phase4_checks.test_api_security(
+            "https://example.test",
+            discovered_urls=["https://example.test/api/scenarios"],
+        )
+    )
+
+    assert result["vulnerable"] is False
+    assert result["excessive_data_exposure"] == []
+
+
+def test_phase4_api_security_keeps_public_credential_catalog_tokens(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if "-I" in command:
+            return ("HTTP/1.1 404 Not Found\r\n\r\n", "", 0)
+        if url.endswith("/api/credentials"):
+            return (
+                _http(
+                    200,
+                    "Content-Type: application/json",
+                    (
+                        '{"auth_types":[{"method":"bearer","token":"live-token-123"},'
+                        '{"method":"basic","username":"demo","password":"demo-pass"}]}'
+                    ),
+                ),
+                "",
+                0,
+            )
+        return (_http(200, "Content-Type: text/html", "<html><body>home</body></html>"), "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(
+        phase4_checks.test_api_security(
+            "https://example.test",
+            discovered_urls=["https://example.test/api/credentials"],
+        )
+    )
+
+    exposure = result["excessive_data_exposure"][0]
+    assert result["vulnerable"] is True
+    assert exposure["verified"] is True
+    assert set(exposure["sensitive_markers"]) == {"password", "token"}
