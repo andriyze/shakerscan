@@ -3752,10 +3752,9 @@ async def process_scan_plan_job(job_data: dict):
         recon_opts = parallel_scan._base_child_options(options)
         recon_opts['scan_type'] = 'smart'
         recon_opts.pop('custom_endpoints', None)
-        parallel_scan._merge_custom_budget(recon_opts, {
-            'active_max_endpoints': 0, 'active_max_seconds': 1,
-            'nuclei_max_targets': 1, 'max_urls': 3000, 'max_duration_minutes': 30,
-        })
+        # Lean enumeration budget so "planning" finishes fast (overrides any
+        # heavy discovery knobs inherited from the parent/coverage payload).
+        parallel_scan._merge_custom_budget(recon_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET))
         print(f"[{parent_id[:8]}] coverage: running discover-once recon", flush=True)
         try:
             recon_result = await run_scan(target, recon_opts, scan_id=parent_id, job_id=parent_job_id)

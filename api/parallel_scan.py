@@ -94,6 +94,24 @@ COVERAGE_PER_SHARD_CAP = 150
 # callers can raise this with custom_budget.active_worklist_max.
 COVERAGE_WORKLIST_MAX = 5000
 
+# Lean discovery budget for the coverage "discover-once" recon pass. The recon
+# only needs to ENUMERATE the endpoint worklist quickly (the shards do the real
+# active testing), so we cap browser crawl, skip parameter discovery, disable
+# active/nuclei, and hard-bound the runtime. Without this the recon inherits the
+# parent's heavy discovery budget and "planning" can run 6-12 min before fan-out.
+RECON_DISCOVERY_BUDGET = {
+    "active_max_endpoints": 0,
+    "active_max_seconds": 1,
+    "nuclei_max_targets": 1,
+    "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
+    "browser_max_pages": 25,
+    "browser_max_depth": 3,
+    "discovery_depth": 3,
+    "param_discovery_url_limit": 0,   # skip per-URL param discovery in recon
+    "param_discovery_max_params": 0,
+    "max_duration_minutes": 10,       # hard bound so planning can't run away
+}
+
 # Auth fields that establish the primary (user1) authenticated identity.
 _PRIMARY_AUTH_KEYS = (
     "auth_header", "auth_cookies", "auth_headers_json",
