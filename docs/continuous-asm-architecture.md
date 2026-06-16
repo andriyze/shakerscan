@@ -53,6 +53,9 @@ Shipped pieces:
   inventory, coverage gaps, ASM activity, policy presets, local-time window helper, and
   new-surface feed.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
+- `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and
+  `include_internal=true` expose them for debugging.
+- ASM test/improve can request the currently supported focused active families: `sqli` and `xss`.
 
 ### Current Table Shape
 
@@ -107,8 +110,10 @@ Still limited:
   successful batch can only stamp the claimed batch as tested/partial as a group.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
-- ASM batch scan rows still exist in the `scans` table. Product UI should group or hide them as ASM
-  activity as volume grows.
+- ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
+  list and exposed through ASM activity.
+- Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
+  registry for all families does not exist yet.
 
 ---
 
@@ -124,6 +129,90 @@ the same durable primitives:
    findings or coverage gaps resulted.
 4. **Rollup views:** one-shot scan parent reports, `/asm` coverage, targets chips, and AI-agent
    summaries all read from those facts instead of inferring coverage from scan rows alone.
+
+### Campaign Model
+
+Everything that spends meaningful target budget should be represented as a campaign, even if the
+current API still starts from `POST /scans` or `/asm/improve`.
+
+Recommended campaign kinds:
+
+```text
+full_coverage       -- one logical scan now; discover once, fan out, merge into one parent report
+continuous_asm      -- background policy loop; small budget slices during allowed windows
+focused_family      -- run one check family such as SQLi, XSS, BOLA, auth, headers, or nuclei tags
+finding_retest      -- replay evidence for known findings and update verification state
+surface_recon       -- passive/low-impact discovery refresh without active exploitation
+```
+
+Common campaign fields:
+
+```text
+target_id
+root_domain
+requested_by        -- ui | api | ai | scheduler | dispatcher
+mode
+priority
+budget_profile
+wide_budget         -- max endpoints/routes/auth-states to cover
+deep_budget         -- max params/payloads/extraction/OOB/proof effort per endpoint
+check_families      -- all | passive | sqli | xss | bola | auth | headers | nuclei:<tags>
+auth_states
+allowed_windows
+daily_cap
+rate_caps
+parent_scan_id      -- optional logical scan rollup
+policy_id           -- optional continuous ASM policy
+```
+
+This keeps "run Full Coverage now", "keep this target covered", and "test only SQLi tonight" as
+different campaign modes over one allocator, not separate engines.
+
+### Wide vs. Deep Budgeting
+
+Large targets need an explicit split between breadth and depth:
+
+- **Wide work:** discover and exercise more endpoints, methods, auth states, forms, API routes,
+  JavaScript-discovered routes, OpenAPI/HAR routes, and newly observed surface.
+- **Deep work:** spend more payloads, parameters, proof attempts, extraction attempts, OOB checks,
+  BOLA comparisons, and tool-specific templates on selected endpoints.
+
+The allocator should be able to choose "go wider" or "go deeper" per campaign:
+
+- Full Coverage defaults to wide first, then a bounded deep pass on higher-priority endpoints.
+- Continuous ASM defaults to small wide refreshes plus small test batches, spread over time.
+- Focused family campaigns default to deep work for one vulnerability class over a selected subset.
+- Finding retests are narrow and deep against known proof paths.
+
+UI should expose this as presets, not knobs:
+
+```text
+Safe       -- mostly wide/passive, small active batches, conservative depth
+Balanced   -- wider endpoint batches plus normal active checks
+Lab        -- high breadth, deeper active checks, explicit user confirmation
+```
+
+API and AI callers can still pass explicit budgets, but default user workflows should map to these
+presets.
+
+### Modular Check Execution
+
+The DAST engine should become a registry of check families that can be scheduled independently:
+
+```text
+recon/passive   -- crawl, DNS/TLS/headers, JS links, OpenAPI/HAR import, content discovery
+nuclei          -- template tags/severity filters
+sqli            -- SQL injection probes and extraction/proof depth
+xss             -- reflected/stored/DOM XSS probes
+bola            -- IDOR/BOLA multi-user comparison checks
+auth            -- access control, weak JWT/session/cookie checks
+ssrf/lfi/rce    -- high-risk active families, permission-gated
+business_logic  -- AI/manual-assisted flows over discovered workflows
+```
+
+Workers should be able to run one family against claimed endpoint IDs. That makes it possible to run
+wide passive recon during the day, deep SQLi/XSS during a maintenance window, BOLA only when two
+credential sets exist, and lightweight retests immediately after a fix.
 
 ### Inventory v2
 
@@ -250,7 +339,10 @@ Current UI/API:
 - `/asm` now leads with a coverage advisor and one-click Improve Coverage action.
 - Policy setup is preset-first (`Safe`, `Balanced`, `Lab`) with raw knobs hidden behind Advanced.
 - New Scan exposes the parallel/coverage path without requiring users to understand every shard knob.
-- Child shard rows are hidden from the main Scans list by default.
+- Child shard and ASM implementation rows are hidden from the main Scans list by default.
+- Auto-sharding exists behind `/settings/scan-execution`; current code defaults it off unless
+  configured.
+- Continuous ASM exists per target; current code defaults it off until a policy enables it.
 
 Recommended UI:
 
@@ -258,6 +350,10 @@ Recommended UI:
   batch based on current state. Keep manual `Run recon` and `Test next batch` secondary.
 - **Continuous policy:** one enable switch plus presets: `Safe`, `Balanced`, `Aggressive lab`.
   Advanced fields stay expandable.
+- **Automation defaults:** fresh installs should enable safe automation by default: auto-shard
+  eligible active scans when enough workers exist, and enable passive ASM recon/new-surface tracking
+  for new targets. Active ASM exploitation should use small safe batches by default and require an
+  explicit `Lab`/aggressive policy for deep exploit mode.
 - **Scans list:** keep one logical scan row. Hide child shards by default. Group Continuous ASM batch
   rows under ASM activity so users do not see hundreds of implementation rows.
 - **Scan detail:** parent rows show campaign coverage: endpoints discovered, tested, partial,
@@ -285,6 +381,8 @@ AI skills should map natural requests to these APIs:
 - "Keep this target covered" -> enable Continuous ASM with a safe preset and report the policy.
 - "What is still untested?" -> gaps response with auth/rate/timeout reasons.
 - "Spend more budget on APIs" -> raise endpoint/test budget for the next campaign, not global defaults.
+- "Only retest SQLi/XSS/BOLA tonight" -> focused family campaign over known inventory.
+- "What changed since yesterday?" -> new-surface diff plus current untested gap summary.
 
 ---
 
@@ -300,6 +398,9 @@ These should be enforced in tests and code review:
 - Shard/batch rows are implementation details; user-facing lists show logical scans or ASM activity.
 - Parent/merge logic is idempotent under duplicate shard completion or worker retry.
 - Cancellation preserves state and releases leased inventory.
+- Default automation must stay bounded: passive/recon can be safe-on, active exploitation must respect
+  low default caps, auth scope, rate limits, and explicit lab/deep policy.
+- A focused family campaign must not silently run unrelated high-risk check families.
 
 ---
 
@@ -316,9 +417,17 @@ Implemented:
 - Timeout-recovered partial results are `partial`/`stale`, not clean coverage.
 - Dispatcher uses Redis token reservation before enqueue for per-root-domain caps.
 
+Implemented in this pass:
+
+- Default `/scans` hides shard, ASM batch, and ASM recon rows unless internal flags are supplied.
+- ASM batches can request `check_family=sqli` or `check_family=xss` where the current scanner already
+  supports narrow active flags.
+- AGENTS, CLAUDE, and the scanner skill now describe Full Coverage, ASM improve/gaps/activity, and
+  focused ASM batches.
+
 Remaining:
 
-- Clean Scans list/ASM activity grouping if batch rows become noisy.
+- Add a first-class check registry for families beyond the current `sqli` and `xss` flags.
 
 ### Phase B — Attempt Ledger + Durable Leases
 
@@ -332,12 +441,19 @@ Remaining:
 - `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
 - Merge consumes attempt ledger and child result files.
 - Keep current static partition path as fallback while campaign mode stabilizes.
+- Add campaign records so both one-shot parent scans and continuous ASM batches can report the same
+  wide/deep budget, family, auth-state, and gap outcomes.
 
 ### Phase D — UX/API/AI Simplification
 
 - Add `Improve coverage`, `gaps`, and `activity` APIs. **Implemented.**
 - Add UI presets and hide raw knobs by default. **Implemented.**
 - Update AGENTS/skills guidance so AI agents use presets instead of hand-crafted budgets.
+  **Implemented.**
+- Hide ASM batch/recon implementation rows from the default Scans list once ASM activity is available.
+  **Implemented.**
+- Add a compact Settings view for safe automation defaults: auto-sharding, default ASM policy, and
+  active-depth confirmation boundaries.
 
 ### Phase E — Multi-Node Readiness
 
@@ -371,12 +487,15 @@ Worker/API tests:
 - Parent cancellation cancels/reconciles shards and releases leases.
 - `POST /targets/{id}/asm/test` creates an ASM activity row, not noisy user-facing scan spam.
 - `GET /targets/{id}/asm/gaps` explains untested/auth-blocked/rate-limited/partial rows.
+- Focused ASM family requests (`sqli`, `xss`, later `bola`) only set the matching scanner options.
+- Default scan listing hides shard and ASM implementation rows unless the caller asks for internals.
 
 UI tests:
 
 - New Scan stays simple: Auto/Normal/Parallel/Full Coverage, advanced tuning collapsed.
 - `/asm` shows rollup, coverage, new surface, and policy presets without exposing all raw knobs.
 - Scans list shows one logical scan by default and no child shard flood.
+- Settings communicates safe defaults without exposing allocator internals.
 
 Live smoke tests before declaring the target architecture production-ready:
 

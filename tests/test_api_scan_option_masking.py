@@ -152,6 +152,38 @@ def test_asm_recommendation_auth_missing_is_visible_but_does_not_block_recon():
     assert any(b["kind"] == "auth_missing" for b in rec["blockers"])
 
 
+def test_asm_check_family_focuses_supported_scanner_flags():
+    focused = api_module._apply_asm_check_family({"scan_type": "smart", "xss": True}, "sqli")
+
+    assert focused["sqli"] is True
+    assert focused["xss"] is False
+    assert focused["asm_check_family"] == "sqli"
+
+
+def test_asm_check_family_all_keeps_normal_active_mix():
+    focused = api_module._apply_asm_check_family({"scan_type": "smart", "sqli": True}, "all")
+
+    assert focused["sqli"] is True
+    assert "asm_check_family" not in focused
+
+
+def test_default_scan_list_hides_shards_and_asm_activity_rows():
+    assert api_module._hidden_scan_roles_for_list() == [
+        "shard",
+        api_module.asm_inventory.ASM_BATCH_ROLE,
+        api_module.asm_inventory.ASM_RECON_ROLE,
+    ]
+
+
+def test_scan_list_internal_flags_reveal_requested_implementation_rows():
+    assert api_module._hidden_scan_roles_for_list(include_shards=True) == [
+        api_module.asm_inventory.ASM_BATCH_ROLE,
+        api_module.asm_inventory.ASM_RECON_ROLE,
+    ]
+    assert api_module._hidden_scan_roles_for_list(include_internal=True) == ["shard"]
+    assert api_module._hidden_scan_roles_for_list(include_shards=True, include_internal=True) == []
+
+
 class _FakeAcquire:
     def __init__(self, conn):
         self.conn = conn
@@ -269,16 +301,24 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
 
-    result = asyncio.run(api_module.asm_improve(target_id, api_module.AsmImproveRequest()))
+    result = asyncio.run(api_module.asm_improve(
+        target_id,
+        api_module.AsmImproveRequest(check_family="sqli"),
+    ))
 
     assert result["action"] == "test"
     assert result["batch_size"] == 8
+    assert result["check_family"] == "sqli"
     queued = json.loads(redis_client.rpush_calls[0][1])
     assert queued["type"] == api_module.asm_inventory.EXPLOIT_BATCH_JOB_TYPE
     assert queued["batch_size"] == 8
     assert queued["stale_days"] == 14
     assert queued["exploit_depth"] is True
+    assert queued["check_family"] == "sqli"
     assert queued["options"]["auth_header"] == "Bearer token"
+    assert queued["options"]["sqli"] is True
+    assert queued["options"]["xss"] is False
+    assert queued["options"]["asm_check_family"] == "sqli"
     assert any("asm_last_test_at" in query for query, _args in conn.executes)
 
 

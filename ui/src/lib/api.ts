@@ -337,6 +337,7 @@ export interface AsmActionResponse {
   job_id?: string
   status: string
   batch_size?: number
+  check_family?: 'all' | 'sqli' | 'xss'
   reason?: string
   recommendation?: AsmRecommendation
 }
@@ -995,6 +996,8 @@ export async function getScans(params?: {
   root_domain?: string
   target?: string
   created_within_days?: number
+  include_shards?: boolean
+  include_internal?: boolean
 }): Promise<{ scans: Scan[]; total: number; limit: number; offset: number }> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
@@ -1003,6 +1006,8 @@ export async function getScans(params?: {
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.target) searchParams.set('target', params.target)
   if (params?.created_within_days) searchParams.set('created_within_days', params.created_within_days.toString())
+  if (params?.include_shards) searchParams.set('include_shards', 'true')
+  if (params?.include_internal) searchParams.set('include_internal', 'true')
 
   const res = await fetch(`${API_URL}/scans?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch scans')
@@ -1132,12 +1137,13 @@ export async function getAsmEndpoints(
 
 export async function testAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: 'all' | 'sqli' | 'xss' }
 ): Promise<{
   scan_id: string
   job_id: string
   status: string
   batch_size: number
+  check_family?: 'all' | 'sqli' | 'xss'
   inventory_total: number
   untested: number
 }> {
@@ -1171,7 +1177,7 @@ export async function reconAsmTarget(
 
 export async function improveAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: 'all' | 'sqli' | 'xss' }
 ): Promise<AsmActionResponse> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
     method: 'POST',

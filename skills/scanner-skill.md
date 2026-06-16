@@ -118,6 +118,42 @@ curl -X POST http://localhost:8080/scans \
 - Use `skills/js-analyze/` or the project command `/js-analyze <target>` to turn completed scan results or supplied JS bundles into `custom_endpoints`.
 - Use `skills/content-discovery/` or the project command `/content-discovery <target>` to build a high-signal `custom_list` plus `custom_endpoints` for smart scan seeding.
 
+### Parallel Coverage and Continuous ASM
+
+Use parallel coverage when the user wants one logical scan now, and use Continuous ASM when the user
+wants the target kept covered over time.
+
+```bash
+# One-shot Full Coverage: one parent scan, hidden shards, merged report.
+curl -X POST http://localhost:8080/scans \
+  -H "Content-Type: application/json" \
+  -d '{"target": "https://example.com", "options": {
+    "scan_type": "smart",
+    "parallel": true,
+    "shard_strategy": "coverage",
+    "budget_profile": "thorough"
+  }}'
+
+# Continuous ASM: ask what remains and queue the next safe action.
+curl http://localhost:8080/targets/{target_id}/asm/gaps
+
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Focus the next ASM batch on a currently supported family.
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "xss"}'
+```
+
+`check_family` currently supports `all`, `sqli`, and `xss`. Normal scan lists hide shard and ASM
+implementation rows by default; use `/targets/{target_id}/asm/activity` for ASM activity and
+`/scans?include_shards=true&include_internal=true` only for debugging.
+
+After queueing a scan or ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless
+the user explicitly asks you to poll.
+
 **Performance/Safety Limits:**
 
 | Option | Description | Default |

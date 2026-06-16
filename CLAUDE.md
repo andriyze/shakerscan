@@ -81,6 +81,7 @@ Valid `scan_type` values: `quick`, `standard`, `deep`, `full`, `aggressive`, `sm
 curl http://localhost:8080/scans/{scan_id}                         # Get scan by ID
 curl "http://localhost:8080/scans?limit=10"                        # List recent scans
 curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
+curl "http://localhost:8080/scans?include_shards=true&include_internal=true&limit=50"  # Debug implementation rows
 curl http://localhost:8080/scans/{scan_id}/result                  # Full result JSON
 curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"        # Logs (default 200, max 1000)
 curl -X POST http://localhost:8080/scans/{scan_id}/cancel          # Cancel running/pending scan
@@ -489,15 +490,46 @@ curl -X POST http://localhost:8080/scans \
        "options": {"scan_type": "smart", "parallel": true, "shards": 4,
                    "shard_strategy": "scope",
                    "custom_endpoints": ["GET /api/a?id=1", "GET /api/b?id=2", "..."]}}'
+
+# Full Coverage: discover once, partition the harvested endpoint worklist, merge one parent report.
+curl -X POST http://localhost:8080/scans \
+  -d '{"target": "https://example.com",
+       "options": {"scan_type": "smart", "parallel": true,
+                   "shard_strategy": "coverage",
+                   "budget_profile": "thorough"}}'
 ```
 
 | Option | Description |
 |--------|-------------|
 | `parallel` | Fan this scan out into shards (default false) |
 | `shards` | Shard count: integer or `"auto"` (scales to the worker fleet; family caps at 3: broad/sqli/xss) |
-| `shard_strategy` | `auto` (default), `scope` (partition `custom_endpoints`), or `family` (broad + deep sqli/xss) |
+| `shard_strategy` | `auto` (default), `scope` (partition `custom_endpoints`), `family` (broad + deep sqli/xss), or `coverage` (discover once, then shard the harvested worklist) |
 
-The parent appears as one row on the Scans page; shard rows are hidden by default. `GET /scans/{id}` returns `shard_rollup` + a per-shard list. `family` requires an active scan type (`smart`/`full`/`aggressive`); passive types degrade to a single normal scan.
+The parent appears as one row on the Scans page; shard rows are hidden by default. `GET /scans/{id}` returns `shard_rollup` + a per-shard list. `family` requires an active scan type (`smart`/`full`/`aggressive`); passive types degrade to a single normal scan. Continuous ASM batch/recon rows are also hidden from `/scans` by default; use `include_internal=true` only for debugging.
+
+### Continuous ASM
+
+Continuous ASM keeps a persistent endpoint inventory per target and improves coverage over time. Prefer `/asm/improve` for AI/agent workflows because it chooses recon vs. test batch vs. wait from the current gaps.
+
+```bash
+# Explain gaps and next action
+curl http://localhost:8080/targets/{target_id}/asm/gaps
+
+# Queue the recommended next action
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Focus the next test batch on a supported family
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "sqli"}'
+
+# Show ASM activity instead of using the normal scans list
+curl http://localhost:8080/targets/{target_id}/asm/activity
+```
+
+Supported `check_family` values today: `all`, `sqli`, `xss`. Omit it for the normal active mix. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
 
 ### Custom Dictionaries (wordlists & payloads)
 

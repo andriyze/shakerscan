@@ -85,6 +85,7 @@ import asm_inventory
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
+ASM_CHECK_FAMILIES = {"all", "sqli", "xss"}
 
 try:
     from ai_demo_scenarios import get_ai_test_scenarios
@@ -783,6 +784,46 @@ def _apply_auto_sharding_policy(
     options_payload["auto_sharded"] = True
     options_payload["auto_sharding_reason"] = reason
     return True, worker_count
+
+
+def _normalize_asm_check_family(value: Any) -> str | None:
+    candidate = str(value or "").strip().lower()
+    if not candidate or candidate == "all":
+        return None
+    if candidate not in ASM_CHECK_FAMILIES:
+        return None
+    return candidate
+
+
+def _apply_asm_check_family(options: dict[str, Any], check_family: Any) -> dict[str, Any]:
+    """Apply a supported focused ASM family to scan options.
+
+    This intentionally covers only families the current scanner already exposes
+    as stable active-check flags. The broader check-registry design remains a
+    future architecture item.
+    """
+    opts = dict(options or {})
+    family = _normalize_asm_check_family(check_family)
+    if family == "sqli":
+        opts["sqli"] = True
+        opts["xss"] = False
+        opts["asm_check_family"] = "sqli"
+    elif family == "xss":
+        opts["xss"] = True
+        opts["sqli"] = False
+        opts["asm_check_family"] = "xss"
+    else:
+        opts.pop("asm_check_family", None)
+    return opts
+
+
+def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_internal: bool = False) -> list[str]:
+    hidden: list[str] = []
+    if not include_shards:
+        hidden.append("shard")
+    if not include_internal:
+        hidden.extend([asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE])
+    return hidden
 
 
 def _normalize_demo_base_url(value: Any, *, default: str = "") -> str:
@@ -7378,13 +7419,15 @@ async def list_scans(
     root_domain: Optional[str] = None,
     created_within_days: Optional[int] = Query(None, ge=1),
     include_shards: bool = False,
+    include_internal: bool = False,
     limit: int = Query(50, le=200),
     offset: int = 0
 ):
     """List scans with optional filtering.
 
-    Child shard rows of parallel scans are hidden by default so the Scans page
-    shows the parent as a single row (mirrors how retests stay off this list).
+    Child shard rows and Continuous ASM implementation rows are hidden by
+    default so the Scans page shows logical user actions. Use include_shards
+    and include_internal for debugging or administrative views.
     """
     async with db_pool.acquire() as conn:
         query = """
@@ -7404,10 +7447,15 @@ async def list_scans(
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
             WHERE 1=1
         """
-        if not include_shards:
-            shard_filter = " AND (s.scan_role IS NULL OR s.scan_role <> 'shard')"
-            query += shard_filter
-            count_query += shard_filter
+        hidden_roles = _hidden_scan_roles_for_list(
+            include_shards=include_shards,
+            include_internal=include_internal,
+        )
+        if hidden_roles:
+            role_values = ", ".join(f"'{role}'" for role in hidden_roles)
+            role_filter = f" AND (s.scan_role IS NULL OR s.scan_role NOT IN ({role_values}))"
+            query += role_filter
+            count_query += role_filter
 
         params = []
         count_params = []
@@ -8117,6 +8165,7 @@ class AsmTestRequest(BaseModel):
     batch_size: int = Field(default=100, ge=1, le=1000)
     stale_days: int = Field(default=30, ge=0)
     exploit_depth: bool = False
+    check_family: Optional[str] = Field(default=None, pattern="^(all|sqli|xss)$")
 
 
 class AsmReconRequest(BaseModel):
@@ -8127,6 +8176,7 @@ class AsmImproveRequest(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=1, le=1000)
     stale_days: Optional[int] = Field(default=None, ge=0)
     exploit_depth: Optional[bool] = None
+    check_family: Optional[str] = Field(default=None, pattern="^(all|sqli|xss)$")
 
 
 class AsmPolicyUpdate(BaseModel):
@@ -8218,17 +8268,20 @@ def _asm_recommendation(
 async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
+    check_family: str | None = None,
     triggered_by: str = "api",
 ) -> dict:
     """Create an asm_batch scan row and enqueue the exploit_batch job. Shared by
     POST /asm/test and the continuous dispatcher."""
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
+    opts = _apply_asm_check_family(base_opts or {}, check_family)
+    family = _normalize_asm_check_family(check_family)
     await conn.execute(
         """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
            VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(base_opts or {}), ((base_opts or {}).get("scan_type") or "smart"),
+        json.dumps(opts), (opts.get("scan_type") or "smart"),
         asm_inventory.ASM_BATCH_ROLE,
     )
     r.rpush(QUEUE_NAME, json.dumps({
@@ -8236,7 +8289,8 @@ async def _enqueue_asm_exploit_batch(
         "job_id": job_id, "scan_id": scan_id,
         "target_id": target_id, "target": target_url,
         "batch_size": batch_size, "stale_days": stale_days, "exploit_depth": exploit_depth,
-        "options": base_opts or {}, "triggered_by": triggered_by,
+        "check_family": family,
+        "options": opts, "triggered_by": triggered_by,
         "submitted_at": utc_now_iso(),
     }))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
@@ -8328,11 +8382,13 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
-            exploit_depth=request.exploit_depth, triggered_by="api",
+            exploit_depth=request.exploit_depth, check_family=request.check_family,
+            triggered_by="api",
         )
     return {
         "scan_id": enq["scan_id"], "job_id": enq["job_id"], "status": "queued",
         "batch_size": request.batch_size,
+        "check_family": _normalize_asm_check_family(request.check_family) or "all",
         "inventory_total": coverage["total"], "untested": coverage["untested"],
     }
 
@@ -8413,7 +8469,8 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=batch_size, stale_days=stale_days,
-            exploit_depth=exploit_depth, triggered_by="improve",
+            exploit_depth=exploit_depth, check_family=request.check_family,
+            triggered_by="improve",
         )
         await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", uuid.UUID(target_id))
     return {
@@ -8422,6 +8479,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "job_id": enq["job_id"],
         "status": "queued",
         "batch_size": batch_size,
+        "check_family": _normalize_asm_check_family(request.check_family) or "all",
         "reason": rec["reason"],
         "recommendation": rec,
     }

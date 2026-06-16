@@ -133,6 +133,9 @@ curl http://localhost:8080/scans/{scan_id}
 curl "http://localhost:8080/scans?limit=10"
 curl "http://localhost:8080/scans?status=completed&root_domain=example.com&limit=50"
 
+# The scan list hides implementation rows by default. Use these only for debugging:
+curl "http://localhost:8080/scans?include_shards=true&include_internal=true&limit=50"
+
 # Get full result JSON
 curl http://localhost:8080/scans/{scan_id}/result
 
@@ -346,11 +349,20 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
   -H "Content-Type: application/json" \
   -d '{"batch_size": 100, "stale_days": 30, "exploit_depth": false}'
 
+# Focus the next ASM test batch on one supported active family
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "sqli"}'
+
+curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
+  -H "Content-Type: application/json" \
+  -d '{"batch_size": 100, "check_family": "xss"}'
+
 # View recent ASM recon/test jobs without cluttering the normal scans list
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `sqli` and `xss`; omit it or use `all` for the normal ASM mix. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
 
 ### Subdomain Discovery
 

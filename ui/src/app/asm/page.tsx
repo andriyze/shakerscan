@@ -338,6 +338,14 @@ const ASM_PRESETS: Array<{ key: string; label: string; description: string; conf
   },
 ]
 
+type AsmCheckFamily = 'all' | 'sqli' | 'xss'
+
+const ASM_CHECK_FAMILY_OPTIONS: Array<{ value: AsmCheckFamily; label: string; description: string }> = [
+  { value: 'all', label: 'All checks', description: 'Use the normal ASM active mix.' },
+  { value: 'sqli', label: 'SQLi only', description: 'Focus the next test batch on SQL injection.' },
+  { value: 'xss', label: 'XSS only', description: 'Focus the next test batch on cross-site scripting.' },
+]
+
 function ContinuousCard({ targetId }: { targetId: string }) {
   const toast = useToast()
   const [policy, setPolicy] = useState<AsmPolicy | null>(null)
@@ -584,15 +592,17 @@ function CoverageAdvisorCard({
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState<'improve' | 'recon' | null>(null)
+  const [checkFamily, setCheckFamily] = useState<AsmCheckFamily>('all')
 
   const queueImprove = async () => {
     setBusy('improve')
     try {
-      const res = await improveAsmTarget(targetId)
+      const res = await improveAsmTarget(targetId, checkFamily === 'all' ? undefined : { check_family: checkFamily })
       if (res.action === 'wait') {
         toast.success(res.reason || 'ASM work is already active for this target')
       } else {
-        toast.success(res.action === 'recon' ? 'Queued ASM discovery refresh' : 'Queued ASM test batch', {
+        const focus = res.check_family && res.check_family !== 'all' ? ` (${res.check_family.toUpperCase()})` : ''
+        toast.success(res.action === 'recon' ? 'Queued ASM discovery refresh' : `Queued ASM test batch${focus}`, {
           link: res.scan_id ? { href: `/scans/${res.scan_id}`, label: 'View activity' } : undefined,
         })
       }
@@ -679,6 +689,18 @@ function CoverageAdvisorCard({
         </div>
 
         <div className="flex flex-col gap-2 sm:min-w-48">
+          <label className="space-y-1 text-xs text-gray-500">
+            <span>Next batch focus</span>
+            <select
+              value={checkFamily}
+              onChange={(e) => setCheckFamily(e.target.value as AsmCheckFamily)}
+              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+            >
+              {ASM_CHECK_FAMILY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
           <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
