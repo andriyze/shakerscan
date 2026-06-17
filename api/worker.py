@@ -681,6 +681,9 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Note: public is not allowed for smart/full/aggressive (validated above)
     if options.get('public'):
         cmd.append('--public')
+    check_family = options.get('asm_check_family') or options.get('check_family')
+    if check_family:
+        cmd.extend(['--check-family', str(check_family)])
     if options.get('xss'):
         cmd.append('--xss')
     if options.get('sqli'):

@@ -2303,7 +2303,64 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
     return out
 
 
-def build_check_family_scope(active_checks: bool, active_xss: bool, active_sqli: bool) -> dict[str, Any]:
+SCANNER_ACTIVE_FAMILY_FLAGS: dict[str, tuple[bool, bool]] = {
+    "all": (True, True),
+    "sqli": (False, True),
+    "xss": (True, False),
+}
+
+SCANNER_ACTIVE_FAMILY_ALIASES: dict[str, str] = {
+    "all": "all",
+    "sql": "sqli",
+    "sql-injection": "sqli",
+    "sql_injection": "sqli",
+    "cross-site-scripting": "xss",
+    "cross_site_scripting": "xss",
+}
+
+
+def normalize_scanner_check_family(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    return SCANNER_ACTIVE_FAMILY_ALIASES.get(raw, raw)
+
+
+def resolve_active_check_flags(
+    *,
+    check_family: Any = None,
+    xss: bool = False,
+    sqli: bool = False,
+) -> tuple[bool, bool, str | None]:
+    """Resolve the active-family contract at the scanner boundary.
+
+    The API owns the full check-family registry. The scanner currently has
+    runnable active implementations for SQLi and XSS, so it fails closed for
+    every other family instead of silently widening a focused campaign.
+    """
+    family = normalize_scanner_check_family(check_family)
+    legacy_xss = bool(xss)
+    legacy_sqli = bool(sqli)
+    if family:
+        allowed = ", ".join(SCANNER_ACTIVE_FAMILY_FLAGS)
+        if family not in SCANNER_ACTIVE_FAMILY_FLAGS:
+            raise ValueError(f"check_family '{family}' is not runnable by this scanner; allowed families: {allowed}")
+        active_xss, active_sqli = SCANNER_ACTIVE_FAMILY_FLAGS[family]
+        if (legacy_xss or legacy_sqli) and (legacy_xss, legacy_sqli) != (active_xss, active_sqli):
+            raise ValueError(
+                f"check_family '{family}' conflicts with legacy --xss/--sqli flags; "
+                "use one family selector per scan"
+            )
+        return active_xss, active_sqli, family
+    return legacy_xss or not (legacy_xss or legacy_sqli), legacy_sqli or not (legacy_xss or legacy_sqli), None
+
+
+def build_check_family_scope(
+    active_checks: bool,
+    active_xss: bool,
+    active_sqli: bool,
+    requested_family: str | None = None,
+) -> dict[str, Any]:
     families: list[str] = []
     if active_checks and active_xss:
         families.append("xss")
@@ -2325,7 +2382,8 @@ def build_check_family_scope(active_checks: bool, active_xss: bool, active_sqli:
         "focused": bool(focused_family),
         "focused_family": focused_family,
         "families": families,
-        "source": "scanner_flags",
+        "source": "check_family" if requested_family else "scanner_flags",
+        "requested_family": requested_family,
         "legacy_flags": {
             "xss": bool(active_xss),
             "sqli": bool(active_sqli),
@@ -2341,6 +2399,7 @@ async def build_report(target: str,
                        active_checks: bool=False,
                        active_xss: bool=True,
                        active_sqli: bool=True,
+                       active_check_family: str | None = None,
                        deep_domxss: bool | None = None,
                        max_active: int=10,
                        quick_mode: bool=False,
@@ -2500,7 +2559,12 @@ async def build_report(target: str,
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
     focused_active_family = bool(active_checks and (bool(active_xss) != bool(active_sqli)))
     focused_active_family_name = "xss" if focused_active_family and active_xss else ("sqli" if focused_active_family else None)
-    check_family_scope = build_check_family_scope(active_checks, active_xss, active_sqli)
+    check_family_scope = build_check_family_scope(
+        active_checks,
+        active_xss,
+        active_sqli,
+        requested_family=active_check_family,
+    )
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
         csrf_testing = False
@@ -10938,6 +11002,7 @@ async def cli_main():
     ap.add_argument("--active", action="store_true", help="Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs")
     ap.add_argument("--xss", action="store_true", help="Run only XSS active checks (implies --active)")
     ap.add_argument("--sqli", action="store_true", help="Run only SQLi active checks (implies --active)")
+    ap.add_argument("--check-family", help="Run a scanner-supported active check family: all, sqli, or xss")
     ap.add_argument("--deep-domxss", action="store_true", default=None, help="Enable dalfox deep DOM XSS (spawns headless browser; heavy)")
     ap.add_argument("--max-active", type=int, default=10, help="Max URLs for active checks (default 10)")
     ap.add_argument("--quick", action="store_true", help="Quick scan mode - faster but less thorough (affects active checks)")
@@ -11274,6 +11339,7 @@ async def cli_main():
                        active: bool = False,
                        xss: bool = False,
                        sqli: bool = False,
+                       check_family: str | None = Query(default=None, alias="check-family"),
                        deep_domxss: bool | None = None,
                        max_active: int = 10,
                        quick: bool = False,
@@ -11506,10 +11572,16 @@ async def cli_main():
                 vendor_risk = True
 
             # Active check filters
-            if xss or sqli:
+            try:
+                active_xss, active_sqli, resolved_check_family = resolve_active_check_flags(
+                    check_family=check_family,
+                    xss=xss,
+                    sqli=sqli,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            if xss or sqli or resolved_check_family:
                 active = True
-            active_xss = xss or not (xss or sqli)
-            active_sqli = sqli or not (xss or sqli)
 
             rep = await build_report(
                 target, sels,
@@ -11518,6 +11590,7 @@ async def cli_main():
                 active_checks=active,
                 active_xss=active_xss,
                 active_sqli=active_sqli,
+                active_check_family=resolved_check_family,
                 deep_domxss=deep_domxss,
                 max_active=max_active,
                 quick_mode=quick,
@@ -11954,7 +12027,16 @@ async def cli_main():
         args.active_enforced = False
 
     # Active check filters
-    if args.xss or args.sqli:
+    try:
+        active_xss, active_sqli, resolved_check_family = resolve_active_check_flags(
+            check_family=args.check_family,
+            xss=args.xss,
+            sqli=args.sqli,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if args.xss or args.sqli or resolved_check_family:
         args.active = True
 
     # Handle category convenience flags
@@ -12015,9 +12097,6 @@ async def cli_main():
     dkim_enumeration = threat_intel or args.dkim_enumeration
     zone_transfer_test = threat_intel or args.zone_transfer_test
 
-    # Active check selection (defaults to both unless filtered)
-    active_xss = args.xss or not (args.xss or args.sqli)
-    active_sqli = args.sqli or not (args.xss or args.sqli)
     custom_budget = {
         key: value
         for key, value in {
@@ -12058,6 +12137,7 @@ async def cli_main():
         active_checks=args.active,
         active_xss=active_xss,
         active_sqli=active_sqli,
+        active_check_family=resolved_check_family,
         deep_domxss=args.deep_domxss,
         max_active=args.max_active,
         quick_mode=args.quick,

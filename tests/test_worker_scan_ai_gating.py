@@ -417,6 +417,28 @@ def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
         assert captured["kwargs"]["start_new_session"] is True
 
 
+def test_run_scan_maps_asm_check_family_to_scanner_flag(monkeypatch):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _FakeProcess(b'{"ok": true, "findings": []}')
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {"scan_type": "smart", "asm_check_family": "sqli", "sqli": True, "xss": False},
+    ))
+
+    assert result.get("ok") is True
+    assert "--check-family" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--check-family") + 1] == "sqli"
+    assert "--sqli" in captured["cmd"]
+    assert "--xss" not in captured["cmd"]
+
+
 def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch):
     captured = {}
 

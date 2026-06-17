@@ -30,7 +30,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| First-class check registry | Foundation shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
+| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -521,8 +521,10 @@ Implemented in this pass:
   not runnable, so they fail closed instead of silently running all checks.
 - `/asm/check-families` is consumed by the ASM UI for focused batch labels/options instead of
   hardcoding `sqli`/`xss`.
-- Scanner reports now emit `check_family_scope` under `scan_config`, `scan_metadata.options`, and
-  `active_checks`; the report UI shows a compact focused-scope badge such as `SQLi only`.
+- Worker jobs now pass registry-selected `asm_check_family` values to the scanner as
+  `--check-family`; the scanner resolves aliases, rejects unsupported/planned families fail-closed,
+  and emits `check_family_scope.source=check_family` under `scan_config`, `scan_metadata.options`,
+  and `active_checks`. The report UI shows a compact focused-scope badge such as `SQLi only`.
 - AGENTS, CLAUDE, and the scanner skill now describe Full Coverage, ASM improve/gaps/activity, and
   focused ASM batches.
 

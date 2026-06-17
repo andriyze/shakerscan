@@ -33,7 +33,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| First-class check registry | Foundation shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
+| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -64,9 +64,9 @@ partitions it across shards. Coverage child shards carry `zero_rediscovery=true`
 active checks over only their assigned endpoint slice. Duplicate target-global probes are still
 suppressed after the first shard per auth state.
 
-**Still deferred (Phase 2):** scanner execution migration to the first-class check registry;
-deeper in-scanner cooperative cancellation checkpoints between long active-check loops; richer UI
-breakdowns for per-shard/batch contribution and budget spend.
+**Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
+registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
+richer UI breakdowns for per-shard/batch contribution and budget spend.
 
 ---
 
@@ -364,6 +364,9 @@ Splitting work means the **global budget must be split or shared**, or shards wi
   metadata (`name`, `phase`, `family`, profiles, active/risk/auth requirements, telemetry schema,
   scanner option mapping, runnable/planned state), ASM validation rejects unknown or planned-only
   families, and the parallel `family` planner derives focused SQLi/XSS lanes from the registry.
+- Scanner boundary wiring is shipped: workers pass registry-selected `asm_check_family` values as
+  `--check-family`, the scanner resolves aliases (`sql` -> `sqli`), rejects unsupported/planned
+  families fail-closed, and reports `check_family_scope.source=check_family` for focused shards.
 - Remaining scanner refactor: make `build_report()` iterate registry entries per phase so adding a
   runnable check is one registry entry plus module integration, not another set of scattered boolean
   parameters.

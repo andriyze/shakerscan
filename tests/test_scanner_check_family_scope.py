@@ -2,6 +2,8 @@ import importlib.util
 import os
 import sys
 
+import pytest
+
 
 _SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
 if _SCANNER_DIR not in sys.path:
@@ -15,12 +17,19 @@ _spec.loader.exec_module(scanner_mod)
 
 
 def test_check_family_scope_marks_focused_sqli():
-    scope = scanner_mod.build_check_family_scope(True, active_xss=False, active_sqli=True)
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=False,
+        active_sqli=True,
+        requested_family="sqli",
+    )
 
     assert scope["mode"] == "focused"
     assert scope["focused"] is True
     assert scope["focused_family"] == "sqli"
     assert scope["families"] == ["sqli"]
+    assert scope["source"] == "check_family"
+    assert scope["requested_family"] == "sqli"
     assert scope["legacy_flags"] == {"xss": False, "sqli": True}
 
 
@@ -39,3 +48,29 @@ def test_check_family_scope_marks_inactive_scan():
     assert scope["mode"] == "inactive"
     assert scope["focused"] is False
     assert scope["families"] == []
+
+
+def test_resolve_active_check_flags_uses_registry_family_aliases():
+    active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="sql")
+
+    assert active_xss is False
+    assert active_sqli is True
+    assert family == "sqli"
+
+
+def test_resolve_active_check_flags_all_family_keeps_active_mix():
+    active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="all")
+
+    assert active_xss is True
+    assert active_sqli is True
+    assert family == "all"
+
+
+def test_resolve_active_check_flags_rejects_unsupported_family():
+    with pytest.raises(ValueError, match="not runnable"):
+        scanner_mod.resolve_active_check_flags(check_family="bola")
+
+
+def test_resolve_active_check_flags_rejects_conflicting_legacy_flags():
+    with pytest.raises(ValueError, match="conflicts"):
+        scanner_mod.resolve_active_check_flags(check_family="sqli", xss=True)
