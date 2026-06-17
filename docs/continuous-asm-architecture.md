@@ -424,7 +424,9 @@ Current UI/API:
 - Policy setup is preset-first (`Safe`, `Balanced`, `Lab`) with raw knobs hidden behind Advanced.
 - New Scan exposes the parallel/coverage path without requiring users to understand every shard knob.
 - `/asm` loads focused batch labels from `/asm/check-families`, so the UI only offers registry-approved
-  runnable families while keeping the control to one compact selector.
+  runnable families while keeping the control to one compact selector. Registered active families
+  that are not runnable yet are shown as disabled `planned` options with their risk tier instead of
+  disappearing from the selector.
 - Child shard and ASM implementation rows are hidden from the main Scans list by default.
 - Auto-sharding exists behind `/settings/scan-execution`; fresh installs default it on for
   eligible scans, while explicit `Normal`/`parallel:false` still forces standalone execution.

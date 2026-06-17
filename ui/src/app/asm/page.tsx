@@ -340,13 +340,31 @@ const ASM_PRESETS: Array<{ key: string; label: string; description: string; conf
   },
 ]
 
-type AsmCheckFamilyOption = { value: string; label: string; description: string; riskLevel?: string }
+type AsmCheckFamilyOption = {
+  value: string
+  label: string
+  description: string
+  riskLevel?: string
+  disabled?: boolean
+}
 
 const FALLBACK_ASM_CHECK_FAMILY_OPTIONS: AsmCheckFamilyOption[] = [
   { value: 'all', label: 'All checks', description: 'Use the normal ASM active mix.' },
-  { value: 'sqli', label: 'SQLi only', description: 'Focus the next test batch on SQL injection.' },
-  { value: 'xss', label: 'XSS only', description: 'Focus the next test batch on cross-site scripting.' },
+  { value: 'sqli', label: 'SQLi only · medium risk', description: 'Focus the next test batch on SQL injection.', riskLevel: 'medium' },
+  { value: 'xss', label: 'XSS only · medium risk', description: 'Focus the next test batch on cross-site scripting.', riskLevel: 'medium' },
 ]
+
+function formatRiskLevel(value?: string): string | null {
+  const risk = String(value || '').trim().toLowerCase()
+  return risk ? `${risk.replace(/_/g, ' ')} risk` : null
+}
+
+function riskBadgeClass(value?: string): string {
+  const risk = String(value || '').trim().toLowerCase()
+  if (risk === 'high') return 'bg-red-500/15 text-red-300'
+  if (risk === 'medium') return 'bg-yellow-500/15 text-yellow-300'
+  return 'bg-gray-800 text-gray-300'
+}
 
 function toAsmCheckFamilyOptions(
   families: AsmCheckFamily[] | undefined,
@@ -355,12 +373,14 @@ function toAsmCheckFamilyOptions(
 ): AsmCheckFamilyOption[] {
   const allowedNames = new Set((allowed && allowed.length ? allowed : ['all', 'sqli', 'xss']).map((v) => String(v)))
   const byName = new Map((families || []).map((family) => [family.name, family]))
+  const defaultFamily = byName.get(defaultValue || 'all')
   const options: AsmCheckFamilyOption[] = [
-    byName.get(defaultValue || 'all')
+    defaultFamily
       ? {
           value: defaultValue || 'all',
-          label: byName.get(defaultValue || 'all')?.label || 'All checks',
-          description: byName.get(defaultValue || 'all')?.description || 'Use the normal ASM active mix.',
+          label: defaultFamily.label || 'All checks',
+          description: defaultFamily.description || 'Use the normal ASM active mix.',
+          riskLevel: defaultFamily.risk_level,
         }
       : FALLBACK_ASM_CHECK_FAMILY_OPTIONS[0],
   ]
@@ -370,9 +390,10 @@ function toAsmCheckFamilyOptions(
     if (name === 'all') return
     const family = byName.get(name)
     if (family && family.runnable) {
+      const riskLabel = formatRiskLevel(family.risk_level)
       options.push({
         value: family.name,
-        label: `${family.label} only`,
+        label: `${family.label} only${riskLabel ? ` · ${riskLabel}` : ''}`,
         description: family.description,
         riskLevel: family.risk_level,
       })
@@ -381,6 +402,18 @@ function toAsmCheckFamilyOptions(
     const fallback = FALLBACK_ASM_CHECK_FAMILY_OPTIONS.find((option) => option.value === name)
     if (fallback) options.push(fallback)
   })
+
+  for (const family of families || []) {
+    if (!family.is_active || family.runnable || allowedNames.has(family.name)) continue
+    const riskLabel = formatRiskLevel(family.risk_level)
+    options.push({
+      value: `planned:${family.name}`,
+      label: `${family.label} · planned · ${riskLabel || 'risk pending'} · unavailable`,
+      description: family.description || 'Registered but not available for ASM endpoint batches yet.',
+      riskLevel: family.risk_level,
+      disabled: true,
+    })
+  }
 
   return options.length ? options : FALLBACK_ASM_CHECK_FAMILY_OPTIONS
 }
@@ -642,7 +675,7 @@ function CoverageAdvisorCard({
         const options = toAsmCheckFamilyOptions(res.families, res.asm_focus_allowed, res.default)
         setCheckFamilyOptions(options)
         setCheckFamily((current) => (
-          options.some((option) => option.value === current) ? current : (res.default || 'all')
+          options.some((option) => option.value === current && !option.disabled) ? current : (res.default || 'all')
         ))
       })
       .catch(() => {
@@ -703,6 +736,8 @@ function CoverageAdvisorCard({
   const icon = next === 'test' ? Play : next === 'recon' ? Search : CheckCircle2
   const Icon = icon
   const coveragePct = coverage ? pct(coverage.coverage) : '—'
+  const selectedFamilyOption = checkFamilyOptions.find((option) => option.value === checkFamily && !option.disabled)
+  const selectedRiskLabel = formatRiskLevel(selectedFamilyOption?.riskLevel)
 
   return (
     <Card className="p-4">
@@ -754,10 +789,22 @@ function CoverageAdvisorCard({
               className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
             >
               {checkFamilyOptions.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
+                <option key={option.value} value={option.value} disabled={option.disabled}>
+                  {option.label}
+                </option>
               ))}
             </select>
           </label>
+          {selectedFamilyOption && (
+            <div className="space-y-1 rounded border border-gray-800 bg-gray-950/50 p-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-gray-400">{selectedFamilyOption.description}</span>
+                {selectedRiskLabel && (
+                  <Badge className={riskBadgeClass(selectedFamilyOption.riskLevel)}>{selectedRiskLabel}</Badge>
+                )}
+              </div>
+            </div>
+          )}
           <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
