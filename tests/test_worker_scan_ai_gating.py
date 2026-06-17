@@ -148,6 +148,9 @@ class _FakeJobRedis:
     def hset(self, key, *args, mapping=None):
         self.hashes.append((key, args, dict(mapping or {})))
 
+    def get(self, key):
+        return self.values.get(key)
+
     def expire(self, key, ttl):
         self.expired.append((key, ttl))
 
@@ -162,6 +165,22 @@ class _FakeJobRedis:
     def rpush(self, key, value):
         self.pushed.append((key, value))
         return len(self.pushed)
+
+    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
+        current = int(self.values.get(key) or 0)
+        amount = int(amount)
+        cap = int(cap)
+        if amount <= 0:
+            return 0
+        if cap <= 0:
+            return 0
+        if current >= cap:
+            return 0
+        if str(all_or_nothing) == "1" and current + amount > cap:
+            return 0
+        granted = min(amount, cap - current)
+        self.values[key] = current + granted
+        return granted
 
     def set(self, key, value, nx=False, ex=None):
         self.sets.append((key, value, nx, ex))
@@ -198,6 +217,33 @@ class _FakeAsmConn:
         if "LEFT JOIN scans parent" in query:
             return {"status": self.child_status, "parent_status": self.parent_status}
         return {"status": self.child_status}
+
+
+class _FakeRateConn:
+    def __init__(self, *, root_domain="example.test", cap=5, used=0):
+        self.root_domain = root_domain
+        self.cap = cap
+        self.used = used
+        self.executions = []
+        self.fetchrow_calls = []
+        self.fetchval_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "SELECT root_domain, asm_config FROM targets" in query:
+            return {
+                "root_domain": self.root_domain,
+                "asm_config": json.dumps({"max_requests_per_hour_per_domain": self.cap}),
+            }
+        return {"status": "running", "parent_status": "running"}
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        return self.used
+
+    async def execute(self, query, *args):
+        self.executions.append((query, args))
+        return "UPDATE 1"
 
 
 class _FakeAsmPool:
@@ -287,6 +333,96 @@ def test_parallel_shard_concurrency_override_is_clamped(monkeypatch):
     assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 6}) == 6
     assert worker._parallel_shard_concurrency_limit({"parallel_shard_concurrency": 99}) == 8
     assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 0}) == 1
+
+
+def test_domain_endpoint_budget_reservation_accounts_for_db_and_redis_usage():
+    target_id = "33333333-3333-3333-3333-333333333333"
+    conn = _FakeRateConn(root_domain="example.test", cap=5, used=2)
+    redis = _FakeJobRedis()
+    redis.values[worker.asm_inventory.domain_rate_key("example.test")] = 1
+
+    granted = asyncio.run(
+        worker._reserve_target_domain_endpoint_budget(
+            conn,
+            redis,
+            target_id=target_id,
+            amount=2,
+            all_or_nothing=True,
+        )
+    )
+
+    assert granted["granted"] == 2
+    assert granted["limited"] is False
+    assert granted["used"] == 2
+    assert granted["reserved"] == 3
+
+
+def test_domain_endpoint_budget_reservation_denies_exhausted_db_budget():
+    target_id = "33333333-3333-3333-3333-333333333333"
+    conn = _FakeRateConn(root_domain="example.test", cap=5, used=5)
+    redis = _FakeJobRedis()
+
+    granted = asyncio.run(
+        worker._reserve_target_domain_endpoint_budget(
+            conn,
+            redis,
+            target_id=target_id,
+            amount=1,
+        )
+    )
+
+    assert granted["granted"] == 0
+    assert granted["limited"] is True
+    assert granted["used"] == 5
+    assert granted["reserved"] == 0
+
+
+def test_parallel_shard_waits_when_domain_endpoint_budget_exhausted(monkeypatch):
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn()
+    called = {"run": 0}
+
+    async def fake_run_scan(*args, **kwargs):
+        called["run"] += 1
+        raise AssertionError("rate-limited shard must not run")
+
+    async def fake_reserve(*args, **kwargs):
+        return {
+            "granted": 0,
+            "limited": True,
+            "requested": 2,
+            "root_domain": "example.test",
+            "cap": 1,
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", fake_reserve)
+
+    asyncio.run(
+        worker.process_scan_shard_job(
+            {
+                "job_id": "job-rate-shard",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "options": {"scan_type": "smart", "custom_endpoints": ["GET /a?id=1", "GET /b?id=1"]},
+                "shard_label": "coverage[0]",
+                "shard_index": 0,
+                "shard_count": 1,
+            }
+        )
+    )
+
+    assert called["run"] == 0
+    assert redis.pushed
+    queued = json.loads(redis.pushed[0][1])
+    assert queued["domain_rate_wait_cycles"] == 1
+    assert redis.hashes[-1][2]["current_phase"] == "waiting_for_domain_rate"
+    assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
 
 
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
@@ -1097,6 +1233,106 @@ def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypat
     assert calls["mark_tested"] == {"endpoint_ids": [endpoint_id], "verdict": "findings"}
     assert calls["reconcile"]["parent_id"] == "55555555-5555-5555-5555-555555555555"
     assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
+
+
+def test_exploit_batch_partial_domain_rate_grant_releases_ungranted_endpoints(monkeypatch):
+    first_id = "11111111-1111-1111-1111-111111111111"
+    second_id = "22222222-2222-2222-2222-222222222222"
+    conn = _FakeAsmConn()
+    calls = {"run": None, "record": None, "mark_tested": None}
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        return [
+            {
+                "id": first_id,
+                "method": "GET",
+                "path": "/api/a",
+                "param_shape": "id",
+                "auth_state": "anonymous",
+                "param_location": "query",
+                "replay_spec": None,
+            },
+            {
+                "id": second_id,
+                "method": "GET",
+                "path": "/api/b",
+                "param_shape": "id",
+                "auth_state": "anonymous",
+                "param_location": "query",
+                "replay_spec": None,
+            },
+        ]
+
+    async def fake_reserve(*args, **kwargs):
+        return {
+            "granted": 1,
+            "limited": True,
+            "requested": 2,
+            "root_domain": "example.test",
+            "cap": 1,
+        }
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        calls["run"] = dict(options)
+        assert options["custom_endpoints"] == ["GET /api/a?id=1"]
+        return {
+            "target": target,
+            "findings": [],
+            "result": {"score": 95, "grade": "A"},
+            "active_checks": {
+                "per_endpoint_telemetry": True,
+                "endpoint_attempts": [
+                    {
+                        "custom_endpoint": "GET /api/a?id=1",
+                        "status": "completed",
+                        "attempted_params_count": 1,
+                        "completed_params_count": 1,
+                    }
+                ],
+            },
+        }
+
+    async def fake_record_endpoint_telemetry_attempts(conn, **kwargs):
+        calls["record"] = kwargs
+        return {"written": 1, "completed_ids": [first_id], "partial_ids": [], "error_ids": []}
+
+    async def fake_mark_tested(conn, endpoint_ids, *, verdict):
+        calls["mark_tested"] = {"endpoint_ids": endpoint_ids, "verdict": verdict}
+
+    async def fake_upsert_endpoints(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeJobRedis())
+    monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", fake_reserve)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
+    monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
+    monkeypatch.setattr(worker.asm_inventory, "upsert_endpoints", fake_upsert_endpoints)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-partial-rate",
+                "scan_id": "33333333-3333-3333-3333-333333333333",
+                "target_id": "44444444-4444-4444-4444-444444444444",
+                "target": "https://example.test",
+                "campaign_id": "55555555-5555-5555-5555-555555555555",
+                "batch_size": 2,
+                "options": {"scan_type": "smart", "coverage_dynamic_worker": True},
+            }
+        )
+    )
+
+    assert calls["run"]["custom_endpoints"] == ["GET /api/a?id=1"]
+    assert calls["record"]["attempts"][0]["custom_endpoint"] == "GET /api/a?id=1"
+    assert calls["mark_tested"] == {"endpoint_ids": [first_id], "verdict": "clean"}
+    assert any(
+        "last_attempt_status='rate_limited'" in query and args[0] == [second_id]
+        for query, args in conn.executions
+    )
 
 
 def test_dynamic_coverage_batch_parent_cancelled_before_claim_does_not_claim(monkeypatch):

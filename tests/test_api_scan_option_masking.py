@@ -200,15 +200,17 @@ class _FakeAsmRedis:
     def get(self, key):
         return self.store.get(key)
 
-    def eval(self, _script, _numkeys, key, amount, cap, _ttl):
+    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
         current = int(self.store.get(key) or 0)
         amount = int(amount)
         cap = int(cap)
         if amount <= 0:
             return 0
         if cap <= 0:
-            return amount
+            return 0
         if current >= cap:
+            return 0
+        if str(all_or_nothing) == "1" and current + amount > cap:
             return 0
         granted = min(amount, cap - current)
         self.store[key] = current + granted

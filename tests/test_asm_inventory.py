@@ -10,6 +10,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import asm_inventory as a  # noqa: E402
 
 
+class _FakeRedis:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
+        current = int(self.values.get(key) or 0)
+        amount = int(amount)
+        cap = int(cap)
+        if amount <= 0:
+            return 0
+        if cap <= 0:
+            return 0
+        if current >= cap:
+            return 0
+        if str(all_or_nothing) == "1" and current + amount > cap:
+            return 0
+        granted = min(amount, cap - current)
+        self.values[key] = current + granted
+        return granted
+
+
+def test_domain_rate_reservation_zero_remaining_cap_denies():
+    redis = _FakeRedis()
+
+    assert a.reserve_domain_rate(redis, "example.test", 0, 1) == 0
+    assert a.reserved_domain_rate_count(redis, "example.test") == 0
+
+
 def test_normalize_path_templates_volatile_ids():
     assert a.normalize_path("/users/42") == "/users/{id}"
     assert a.normalize_path("/u/550e8400-e29b-41d4-a716-446655440000/x") == "/u/{uuid}/x"

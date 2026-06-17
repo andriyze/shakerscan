@@ -122,6 +122,7 @@ PARALLEL_SHARD_SLOT_TTL_SECONDS = max(
     int(os.environ.get("PARALLEL_SHARD_SLOT_TTL_SECONDS", str(8 * 60 * 60))),
 )
 PARALLEL_SHARD_REQUEUE_DELAY_SECONDS = max(1, int(os.environ.get("PARALLEL_SHARD_REQUEUE_DELAY_SECONDS", "2")))
+DOMAIN_RATE_REQUEUE_DELAY_SECONDS = max(1, int(os.environ.get("DOMAIN_RATE_REQUEUE_DELAY_SECONDS", "60")))
 
 # Verification policy: single source of truth for severity gates.
 # Legacy env vars (AUTO_RETEST_MIN_SEVERITY, AI_VERIFY_MIN_SEVERITY) are still
@@ -2023,6 +2024,135 @@ def _release_parallel_shard_slot(r, parent_id: str | None) -> None:
             r.delete(key)
     except Exception:
         pass
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row.get(key, default)
+        except Exception:
+            return default
+
+
+def _known_endpoint_count(options: dict[str, Any] | None) -> int:
+    endpoints = (options or {}).get("custom_endpoints") if isinstance(options, dict) else None
+    return len(endpoints) if isinstance(endpoints, list) else 0
+
+
+async def _reserve_target_domain_endpoint_budget(
+    conn,
+    r,
+    *,
+    target_id: str | None,
+    amount: int,
+    already_reserved: int = 0,
+    all_or_nothing: bool = False,
+) -> dict[str, Any]:
+    """Reserve known-endpoint execution budget for a target root domain.
+
+    The cap lives in the target's ASM config and is enforced by combining
+    completed endpoint attempts from Postgres with in-flight reservations in
+    Redis. This is intentionally endpoint-count based because that is the
+    durable unit Full Coverage and ASM allocators can prove before execution.
+    """
+    try:
+        amount = max(0, int(amount or 0))
+        already_reserved = max(0, int(already_reserved or 0))
+    except (TypeError, ValueError):
+        amount = 0
+        already_reserved = 0
+    if amount <= 0:
+        return {"granted": 0, "limited": False, "reason": "no_known_endpoints"}
+    if not target_id:
+        return {"granted": amount, "limited": False, "reason": "no_target_id"}
+    try:
+        tid = uuid.UUID(str(target_id))
+    except (TypeError, ValueError):
+        return {"granted": amount, "limited": False, "reason": "invalid_target_id"}
+
+    row = await conn.fetchrow("SELECT root_domain, asm_config FROM targets WHERE id = $1", tid)
+    root_domain = str(_row_get(row, "root_domain") or "").strip().lower()
+    cfg = asm_inventory.merge_asm_config(parse_json_field(_row_get(row, "asm_config")) or {})
+    cap = int(cfg.get("max_requests_per_hour_per_domain") or 0)
+    if not root_domain or cap <= 0:
+        return {"granted": amount, "limited": False, "reason": "unlimited", "root_domain": root_domain, "cap": cap}
+
+    used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
+    remaining_cap = max(0, cap - int(used or 0))
+    needed = max(0, amount - already_reserved)
+    granted_new = asm_inventory.reserve_domain_rate(
+        r,
+        root_domain,
+        remaining_cap,
+        needed,
+        all_or_nothing=all_or_nothing,
+    )
+    granted = min(amount, already_reserved + granted_new)
+    return {
+        "granted": granted,
+        "limited": granted < amount,
+        "root_domain": root_domain,
+        "cap": cap,
+        "used": int(used or 0),
+        "reserved": asm_inventory.reserved_domain_rate_count(r, root_domain),
+        "already_reserved": already_reserved,
+        "requested": amount,
+        "reason": "reserved" if granted >= amount else "domain_rate_limited",
+    }
+
+
+async def _requeue_for_domain_rate(
+    r,
+    job_data: dict[str, Any],
+    *,
+    job_id: str,
+    scan_id: str | None,
+    parent_id: str | None = None,
+    log_prefix: str,
+    rate: dict[str, Any],
+) -> None:
+    wait_cycles = int(job_data.get("domain_rate_wait_cycles") or 0) + 1
+    requeued = dict(job_data)
+    requeued["domain_rate_wait_cycles"] = wait_cycles
+    requeued["last_domain_rate_wait_at"] = utc_now_iso()
+    r.rpush(QUEUE_NAME, json.dumps(requeued))
+    mapping = {
+        "status": "queued",
+        "scan_id": scan_id or "",
+        "current_phase": "waiting_for_domain_rate",
+        "domain_rate_wait_cycles": str(wait_cycles),
+        "domain_rate_root_domain": str(rate.get("root_domain") or ""),
+        "domain_rate_requested": str(rate.get("requested") or ""),
+        "domain_rate_granted": str(rate.get("granted") or 0),
+        "domain_rate_cap": str(rate.get("cap") or ""),
+    }
+    if parent_id:
+        mapping["parent_scan_id"] = parent_id
+    r.hset(f"job:{job_id}", mapping=mapping)
+    r.expire(f"job:{job_id}", 86400)
+    print(
+        f"[{log_prefix}] waiting for domain rate budget "
+        f"({rate.get('root_domain') or 'unknown'}: granted {rate.get('granted') or 0}/"
+        f"{rate.get('requested') or 0}, cap={rate.get('cap') or 'unlimited'})",
+        flush=True,
+    )
+    await asyncio.sleep(DOMAIN_RATE_REQUEUE_DELAY_SECONDS)
+
+
+async def _release_claimed_endpoints_for_domain_rate(conn, endpoint_ids: list[Any]) -> None:
+    if not endpoint_ids:
+        return
+    await conn.execute(
+        """UPDATE target_endpoints
+           SET test_status='stale', last_attempt_status='rate_limited',
+               lease_owner=NULL, lease_expires_at=NULL, updated_at=NOW()
+           WHERE id = ANY($1::uuid[]) AND test_status='in_progress'""",
+        endpoint_ids,
+    )
 
 
 def _parse_iso_datetime(raw: Any) -> datetime | None:
@@ -4361,6 +4491,7 @@ async def process_scan_shard_job(job_data: dict):
     job_id = job_data.get('job_id', 'unknown')
     scan_id = job_data.get('scan_id')            # child scan id
     parent_id = job_data.get('parent_scan_id')
+    target_id = job_data.get('target_id')
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
     label = job_data.get('shard_label', 'shard')
@@ -4427,6 +4558,33 @@ async def process_scan_shard_job(job_data: dict):
         )
         await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
         return
+
+    endpoint_count = _known_endpoint_count(options)
+    if endpoint_count > 0:
+        try:
+            async with db_pool.acquire() as conn:
+                rate = await _reserve_target_domain_endpoint_budget(
+                    conn,
+                    r,
+                    target_id=target_id,
+                    amount=endpoint_count,
+                    all_or_nothing=True,
+                )
+        except Exception as exc:
+            rate = {"granted": 0, "limited": True, "requested": endpoint_count, "reason": str(exc)}
+        if rate.get("limited"):
+            _release_parallel_shard_slot(r, parent_id)
+            slot_acquired = False
+            await _requeue_for_domain_rate(
+                r,
+                job_data,
+                job_id=job_id,
+                scan_id=scan_id,
+                parent_id=parent_id,
+                log_prefix=job_id[:8],
+                rate=rate,
+            )
+            return
 
     r.hset(f"job:{job_id}", mapping={
         'status': 'running', 'scan_id': scan_id,
@@ -5100,6 +5258,55 @@ async def process_exploit_batch_job(job_data: dict):
         for c in claimed
     ]
     endpoint_ids = [c['id'] for c in claimed]
+
+    try:
+        async with db_pool.acquire() as conn:
+            rate = await _reserve_target_domain_endpoint_budget(
+                conn,
+                r,
+                target_id=target_id,
+                amount=len(endpoint_ids),
+                already_reserved=int(job_data.get('domain_rate_reserved') or 0),
+                all_or_nothing=False,
+            )
+    except Exception as exc:
+        rate = {"granted": 0, "limited": True, "requested": len(endpoint_ids), "reason": str(exc)}
+    granted = max(0, int(rate.get("granted") or 0))
+    if granted <= 0 and endpoint_ids:
+        try:
+            async with db_pool.acquire() as conn:
+                await _release_claimed_endpoints_for_domain_rate(conn, endpoint_ids)
+        except Exception as exc:
+            print(f"[asm {job_id[:8]}] domain-rate release error: {exc}", flush=True)
+        if slot_acquired:
+            _release_parallel_shard_slot(r, parent_id)
+            slot_acquired = False
+        await _requeue_for_domain_rate(
+            r,
+            job_data,
+            job_id=job_id,
+            scan_id=scan_id,
+            parent_id=parent_id,
+            log_prefix=f"asm {job_id[:8]}",
+            rate=rate,
+        )
+        return
+    if 0 < granted < len(endpoint_ids):
+        denied_ids = endpoint_ids[granted:]
+        try:
+            async with db_pool.acquire() as conn:
+                await _release_claimed_endpoints_for_domain_rate(conn, denied_ids)
+        except Exception as exc:
+            print(f"[asm {job_id[:8]}] partial domain-rate release error: {exc}", flush=True)
+        claimed = claimed[:granted]
+        endpoints = endpoints[:granted]
+        endpoint_ids = endpoint_ids[:granted]
+        print(
+            f"[asm {job_id[:8]}] domain rate limited batch to {granted} endpoint(s) "
+            f"for {rate.get('root_domain') or 'unknown'}",
+            flush=True,
+        )
+
     print(
         f"[asm {job_id[:8]}] testing {len(endpoints)} inventory endpoints "
         f"(auth_state={auth_state}, check_family={check_family}, exploit_depth={exploit_depth})",

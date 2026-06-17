@@ -34,9 +34,10 @@ Every implementation task must verify the current state with search/tests before
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
+| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
-| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
 
 ---
@@ -67,7 +68,8 @@ suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
-fleet-wide rate limits; and more runnable focused families beyond SQLi/XSS.
+request-accurate budgets for internally discovered standalone scans; and more runnable focused
+families beyond SQLi/XSS.
 
 ---
 
@@ -558,11 +560,13 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
   controls.
 - **More focused families:** `coverage_family` dynamic allocation is shipped for broad/SQLi/XSS.
   Add more lanes only after the scanner registry can route those modules cleanly.
+- **Rate-limit soak:** known-endpoint static shards and dynamic ASM/Full Coverage batches now reserve
+  endpoint budget through shared Redis domain buckets before execution. Keep validating this under
+  larger worker fleets and extend it to internally discovered standalone requests only once scanner
+  telemetry can expose a reliable request budget.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
   ledger, per-shard contribution facts, aggregate auth/family rollups, and runtime-versus-active-cap
   budget view.
-- **Global distributed rate limits:** required before multi-node fleets run hundreds of
-  shards against the same root domain.
 
 ---
 

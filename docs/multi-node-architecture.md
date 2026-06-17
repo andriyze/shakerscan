@@ -23,9 +23,10 @@ Every implementation task must verify the current state with search/tests before
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
+| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
-| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
@@ -227,6 +228,9 @@ Flow:
 This immediately improves throughput for batches and independent targets. If there are
 four VPSs with five workers each, the fleet can run about twenty worker jobs at once,
 subject to scan type, memory, CPU, and global rate limits.
+Known-endpoint ASM and Full Coverage work already reserves endpoint budget through
+shared Redis buckets; request-accurate standalone request budgets still depend on
+richer scanner telemetry.
 
 The worker instances do not need to coordinate directly with each other to achieve this.
 They only need a shared scheduler/queue and a shared source of truth.
@@ -366,7 +370,9 @@ Build the fleet layer:
 4. **Reliable job leases:** replace or wrap plain list pop with ack/reclaim semantics.
    Redis Streams consumer groups are the natural Redis-native option.
 5. **Distributed rate limiting:** use Redis token buckets keyed by target/root domain so
-   adding worker instances does not accidentally multiply request pressure.
+   adding worker instances does not accidentally multiply request pressure. Known-endpoint
+   ASM/Full Coverage worker batches already reserve endpoint budget this way; request-accurate
+   standalone scan budgets remain dependent on richer scanner telemetry.
 6. **Routing and affinity:** place jobs by labels such as region, egress group,
    private-network reachability, scan tier, or required tools.
 7. **Fleet operations:** support drain, disable, rolling image upgrade, version mismatch
@@ -514,8 +520,10 @@ Implementation options:
 | Redis Streams with routing fields | Better once the queue moves to Streams. Scheduler can assign or filter by labels. |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
-Rate limiting must be global, not per node. A Redis token bucket keyed by root domain or
-target should gate outbound request bursts across the whole fleet.
+Rate limiting must be global, not per node. Known-endpoint ASM and Full Coverage
+batches now use Redis token buckets keyed by root domain so local/owned workers do not
+multiply endpoint pressure. Production fleet work still needs request-accurate
+standalone budgets once scanner telemetry can report discovered requests reliably.
 
 ## 11. Security Model
 
@@ -553,7 +561,7 @@ Security requirements:
 | Evidence | Temporary local evidence is acceptable only for proof-of-concept. | S3/MinIO object storage required. |
 | Image distribution | Private registry with pinned tags. | Rolling upgrade and version compatibility checks. |
 | Queue | Shared default queue. | Leases, routing, retry policy, and idempotent shard completion. |
-| Rate limiting | Existing local behavior. | Distributed token buckets by target/root domain. |
+| Rate limiting | Known-endpoint Redis buckets for ASM/Full Coverage batches. | Request-accurate standalone budgets and fleet soak. |
 | Observability | Per-host logs. | Central logs, metrics, node audit trail, per-node scan attribution. |
 
 ## 13. First Milestones
@@ -624,7 +632,7 @@ Build multi-node in two layers:
    control plane. This proves that the current worker fleet can span hosts and gives
    immediate throughput gains for independent scans.
 2. **Next:** add node-agent lifecycle management, centralized evidence, reliable queue
-   leases, distributed rate limiting, and routing. This makes the owned fleet safe enough
+   leases, request-accurate budget telemetry, and routing. This makes the owned fleet safe enough
    for production.
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
    correct zero-trust architecture, but it is more work than needed for the first owned
@@ -799,7 +807,8 @@ TARGET BEHAVIOR
 - Move evidence to S3/MinIO-compatible object storage.
 - Replace or wrap Redis list pop with Redis Streams consumer groups or equivalent ack/reclaim
   semantics.
-- Add distributed token buckets keyed by target and root_domain.
+- Extend the shipped known-endpoint token buckets into request-accurate standalone budgets once
+  scanner telemetry can report discovered request pressure reliably.
 - Add routing labels for region, egress group, private reachability, scan tier, and tool
   requirements.
 - Record node/version/egress attribution on scan, shard, and attempt records.

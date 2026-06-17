@@ -164,23 +164,6 @@ try:
     ASM_DISPATCH_INTERVAL_SECONDS = int(os.environ.get("SHAKERSCAN_ASM_DISPATCH_INTERVAL", "60"))
 except (TypeError, ValueError):
     ASM_DISPATCH_INTERVAL_SECONDS = 60  # How often the continuous ASM dispatcher ticks
-ASM_RATE_RESERVATION_TTL_SECONDS = 3600
-ASM_RATE_RESERVE_LUA = """
-local current = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
-local requested = tonumber(ARGV[1]) or 0
-local cap = tonumber(ARGV[2]) or 0
-local ttl = tonumber(ARGV[3]) or 3600
-if requested <= 0 then return 0 end
-if cap <= 0 then return requested end
-if current >= cap then return 0 end
-local grant = requested
-if current + grant > cap then
-  grant = cap - current
-end
-redis.call('INCRBY', KEYS[1], grant)
-redis.call('EXPIRE', KEYS[1], ttl)
-return grant
-"""
 # Grace minutes added to a scan's max_duration before the stale-checker safety
 # net force-terminates it, so the scanner's own termination (which returns
 # recovered results) wins the race on slow targets.
@@ -389,18 +372,13 @@ def get_redis():
 
 
 def _asm_domain_rate_key(root_domain: str) -> str:
-    normalized = str(root_domain or "").strip().lower()
-    digest = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()[:16]
-    return f"asm:domain_rate:{digest}"
+    return asm_inventory.domain_rate_key(root_domain)
 
 
 def _asm_reserved_count(r, root_domain: str) -> int:
     if not root_domain:
         return 0
-    try:
-        return max(0, int(r.get(_asm_domain_rate_key(root_domain)) or 0))
-    except Exception:
-        return 0
+    return asm_inventory.reserved_domain_rate_count(r, root_domain)
 
 
 def _reserve_asm_domain_rate(r, root_domain: str, cap: int, amount: int) -> int:
@@ -420,15 +398,7 @@ def _reserve_asm_domain_rate(r, root_domain: str, cap: int, amount: int) -> int:
     if not root_domain or cap <= 0:
         return amount
     try:
-        granted = r.eval(
-            ASM_RATE_RESERVE_LUA,
-            1,
-            _asm_domain_rate_key(root_domain),
-            amount,
-            cap,
-            ASM_RATE_RESERVATION_TTL_SECONDS,
-        )
-        return max(0, int(granted or 0))
+        return asm_inventory.reserve_domain_rate(r, root_domain, cap, amount)
     except Exception as exc:
         print(f"[asm] domain rate reservation failed for {root_domain}: {exc}", flush=True)
         return 0
@@ -1939,6 +1909,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 tested_today = await asm_inventory.tested_recently_count(conn, target_id, hours=24)
                 domain_rate_exceeded = False
                 cap = cfg['max_requests_per_hour_per_domain']
+                used = 0
                 if cap > 0 and root_domain:
                     used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
                     reserved = _asm_reserved_count(r, root_domain)
@@ -1972,13 +1943,19 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     if daily_cap > 0:
                         dispatch_batch_size = min(dispatch_batch_size, max(0, daily_cap - tested_today))
                     if cap > 0 and root_domain:
-                        dispatch_batch_size = _reserve_asm_domain_rate(r, root_domain, cap, dispatch_batch_size)
+                        dispatch_batch_size = _reserve_asm_domain_rate(
+                            r,
+                            root_domain,
+                            max(0, cap - used),
+                            dispatch_batch_size,
+                        )
                     if dispatch_batch_size <= 0:
                         continue
                     enq = await _enqueue_asm_exploit_batch(
                         conn, r, target_id, target_url, base_opts,
                         batch_size=dispatch_batch_size, stale_days=cfg['stale_days'],
                         exploit_depth=cfg['exploit_depth'], triggered_by='dispatcher',
+                        domain_rate_reserved=dispatch_batch_size,
                     )
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
                     print(f"[asm] test batch queued for {target_url} "
@@ -8506,6 +8483,7 @@ async def _enqueue_asm_exploit_batch(
     *, batch_size: int, stale_days: int, exploit_depth: bool,
     check_family: str | None = None,
     triggered_by: str = "api",
+    domain_rate_reserved: int = 0,
 ) -> dict:
     """Create an asm_batch scan row and enqueue the exploit_batch job. Shared by
     POST /asm/test and the continuous dispatcher."""
@@ -8539,6 +8517,7 @@ async def _enqueue_asm_exploit_batch(
         "batch_size": batch_size, "stale_days": stale_days, "exploit_depth": exploit_depth,
         "campaign_id": campaign_id,
         "check_family": family,
+        "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
         "options": opts, "triggered_by": triggered_by,
         "submitted_at": utc_now_iso(),
     }))

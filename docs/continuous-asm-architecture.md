@@ -31,9 +31,10 @@ Every implementation task must verify the current state with search/tests before
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
+| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
-| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
 
 ---
@@ -582,6 +583,10 @@ Implemented as default:
   scanner execution, write parent-linked attempt rows, and let parent merge own final findings.
   `coverage_family` dynamic workers claim the same campaign inventory separately for `all`, `sqli`,
   and `xss` attempt families, so one family lane cannot prematurely satisfy another.
+- Worker execution enforces the target/root-domain endpoint cap through shared Redis token buckets
+  before known endpoint batches run. Dispatcher-reserved ASM batches carry their reservation into the
+  job payload to avoid double-counting; unreserved static shards wait, and dynamic batches can shrink
+  to the granted endpoint count while releasing the rest for a later pass.
 
 Remaining:
 
@@ -606,9 +611,10 @@ Remaining:
 
 ### Phase E — Multi-Node Readiness
 
-- Use the same token buckets and leases across fleet workers.
-- Add worker placement metadata and object-storage-backed artifacts before remote VPS workers are
-  allowed to run high-volume ASM/coverage campaigns.
+- Shared token buckets and endpoint leases are now used by local/owned worker processes for
+  known-endpoint ASM and Full Coverage execution.
+- Add worker placement metadata, reliable queue leases, and object-storage-backed artifacts before
+  remote VPS workers are allowed to run high-volume ASM/coverage campaigns.
 
 ---
 

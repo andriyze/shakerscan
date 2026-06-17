@@ -32,6 +32,27 @@ CAMPAIGN_FINDING_RETEST = "finding_retest"
 CAMPAIGN_SURFACE_RECON = "surface_recon"
 
 DEFAULT_LEASE_TTL_SECONDS = 3600
+ASM_RATE_RESERVATION_TTL_SECONDS = 3600
+ASM_RATE_RESERVE_LUA = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+local requested = tonumber(ARGV[1]) or 0
+local cap = tonumber(ARGV[2]) or 0
+local ttl = tonumber(ARGV[3]) or 3600
+local all_or_nothing = tostring(ARGV[4] or '0')
+if requested <= 0 then return 0 end
+if cap <= 0 then return 0 end
+if current >= cap then return 0 end
+if all_or_nothing == '1' and current + requested > cap then
+  return 0
+end
+local grant = requested
+if current + grant > cap then
+  grant = cap - current
+end
+redis.call('INCRBY', KEYS[1], grant)
+redis.call('EXPIRE', KEYS[1], ttl)
+return grant
+"""
 
 # HTTP methods we recognize as a leading token in a worklist entry.
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
@@ -78,6 +99,63 @@ def normalize_auth_state(value: Any) -> str:
 def normalize_check_family(value: Any) -> str:
     family = str(value or "all").strip().lower().replace("-", "_")
     return family if family and family not in {"*", "none", "null"} else "all"
+
+
+def domain_rate_key(root_domain: str) -> str:
+    normalized = str(root_domain or "").strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"asm:domain_rate:{digest}"
+
+
+def reserved_domain_rate_count(redis_client: Any, root_domain: str) -> int:
+    if not root_domain:
+        return 0
+    try:
+        return max(0, int(redis_client.get(domain_rate_key(root_domain)) or 0))
+    except Exception:
+        return 0
+
+
+def reserve_domain_rate(
+    redis_client: Any,
+    root_domain: str,
+    cap: int,
+    amount: int,
+    *,
+    ttl_seconds: int = ASM_RATE_RESERVATION_TTL_SECONDS,
+    all_or_nothing: bool = False,
+) -> int:
+    """Reserve endpoint budget in Redis for a root domain.
+
+    The caller should pass the remaining DB-adjusted hourly cap. This helper is
+    intentionally Redis-only so the API dispatcher and workers share the same
+    atomic reservation primitive.
+    """
+    try:
+        cap = max(0, int(cap or 0))
+        amount = max(0, int(amount or 0))
+        ttl_seconds = max(60, int(ttl_seconds or ASM_RATE_RESERVATION_TTL_SECONDS))
+    except (TypeError, ValueError):
+        return 0
+    if amount <= 0:
+        return 0
+    if not root_domain:
+        return amount
+    if cap <= 0:
+        return 0
+    try:
+        granted = redis_client.eval(
+            ASM_RATE_RESERVE_LUA,
+            1,
+            domain_rate_key(root_domain),
+            amount,
+            cap,
+            ttl_seconds,
+            "1" if all_or_nothing else "0",
+        )
+        return max(0, int(granted or 0))
+    except Exception:
+        return 0
 
 
 def auth_state_from_options(options: dict[str, Any] | None) -> str:
