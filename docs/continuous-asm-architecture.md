@@ -516,6 +516,8 @@ Implemented in this pass:
   not runnable, so they fail closed instead of silently running all checks.
 - `/asm/check-families` is consumed by the ASM UI for focused batch labels/options instead of
   hardcoding `sqli`/`xss`.
+- Scanner reports now emit `check_family_scope` under `scan_config`, `scan_metadata.options`, and
+  `active_checks`; the report UI shows a compact focused-scope badge such as `SQLi only`.
 - AGENTS, CLAUDE, and the scanner skill now describe Full Coverage, ASM improve/gaps/activity, and
   focused ASM batches.
 

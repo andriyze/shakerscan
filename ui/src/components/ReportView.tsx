@@ -68,6 +68,29 @@ function asRecord(value: any): Record<string, any> {
   return {}
 }
 
+function formatCheckFamilyName(value: string): string {
+  const labels: Record<string, string> = {
+    sqli: 'SQLi',
+    xss: 'XSS',
+  }
+  return labels[value] || value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function getCheckFamilyScopeLabel(scope: any): string | null {
+  const rec = asRecord(scope)
+  const families = Array.isArray(rec.families) ? rec.families.filter((v: any) => typeof v === 'string') : []
+  if (rec.mode === 'focused' && typeof rec.focused_family === 'string') {
+    return `${formatCheckFamilyName(rec.focused_family)} only`
+  }
+  if (rec.mode === 'active_mix' && families.length) {
+    return families.map(formatCheckFamilyName).join(' + ')
+  }
+  if (rec.mode === 'custom_active') {
+    return 'Custom active scope'
+  }
+  return null
+}
+
 function parseEvidenceRecord(evidence: any): Record<string, any> {
   if (!evidence) return {}
   if (typeof evidence === 'string') {
@@ -429,6 +452,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const completionCappedEntries = Object.entries(asRecord(scanCompletionStatus.capped_lists))
     .filter(([, cap]: [string, any]) => cap && typeof cap === 'object' && cap.capped)
   const scan_config = scanData.scan_config || {}
+  const activeCheckFamilyScope = active_checks.check_family_scope || scan_config.check_family_scope
+  const activeCheckFamilyScopeLabel = getCheckFamilyScopeLabel(activeCheckFamilyScope)
+    || (typeof scan_config.focused_active_family === 'string'
+      ? `${formatCheckFamilyName(scan_config.focused_active_family)} only`
+      : null)
   const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const coverage = scanData.coverage || {}
@@ -2237,9 +2265,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Active Checks Results */}
-      {(active_checks.xss || active_checks.sqli || active_checks.endpoints_tested) && (
+      {(active_checks.xss || active_checks.sqli || active_checks.endpoints_tested || activeCheckFamilyScopeLabel) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Active Security Testing</h2>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-2xl font-bold">Active Security Testing</h2>
+            {activeCheckFamilyScopeLabel && (
+              <span className="rounded-full bg-blue-900/40 px-3 py-1 text-xs font-medium text-blue-200">
+                Scope: {activeCheckFamilyScopeLabel}
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {active_checks.xss && (
               <div className="bg-gray-900 rounded-lg p-4">

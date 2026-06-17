@@ -2303,6 +2303,36 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
     return out
 
 
+def build_check_family_scope(active_checks: bool, active_xss: bool, active_sqli: bool) -> dict[str, Any]:
+    families: list[str] = []
+    if active_checks and active_xss:
+        families.append("xss")
+    if active_checks and active_sqli:
+        families.append("sqli")
+
+    focused_family = families[0] if active_checks and len(families) == 1 else None
+    if not active_checks:
+        mode = "inactive"
+    elif focused_family:
+        mode = "focused"
+    elif families:
+        mode = "active_mix"
+    else:
+        mode = "custom_active"
+
+    return {
+        "mode": mode,
+        "focused": bool(focused_family),
+        "focused_family": focused_family,
+        "families": families,
+        "source": "scanner_flags",
+        "legacy_flags": {
+            "xss": bool(active_xss),
+            "sqli": bool(active_sqli),
+        },
+    }
+
+
 async def build_report(target: str,
                        dkim_selectors: list[str] | None=None,
                        openapi_url: str | None=None,
@@ -2470,6 +2500,7 @@ async def build_report(target: str,
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
     focused_active_family = bool(active_checks and (bool(active_xss) != bool(active_sqli)))
     focused_active_family_name = "xss" if focused_active_family and active_xss else ("sqli" if focused_active_family else None)
+    check_family_scope = build_check_family_scope(active_checks, active_xss, active_sqli)
     if smart_mode and focused_active_family:
         print(f"[smart] Focused active mode enabled for {focused_active_family_name}; disabling unrelated active modules", file=sys.stderr)
         csrf_testing = False
@@ -2716,6 +2747,7 @@ async def build_report(target: str,
                     "budget_profile": scan_budget.get("budget_profile"),
                     "resolved_budget": scan_budget,
                     "focused_active_family": focused_active_family_name,
+                    "check_family_scope": check_family_scope,
                     "verified_findings_only": verified_findings_only,
                     "focus_rules": len(focus_rules),
                     "avoid_rules": len(avoid_rules),
@@ -2844,6 +2876,7 @@ async def build_report(target: str,
                     "ai_validation_enabled": pipeline_ai_enabled,
                     "ai_scan_classification_enabled": scan_ai_classification_enabled,
                     "ai_verify_min_severity": verify_min_severity,
+                    "check_family_scope": check_family_scope,
                 },
                 "checks_skipped": checks_skipped,
                 "scan_completion_status": report["scan_completion_status"],
@@ -5364,6 +5397,7 @@ async def build_report(target: str,
             "budget_profile": scan_budget.get("budget_profile"),
             "resolved_budget": scan_budget,
             "focused_active_family": focused_active_family_name,
+            "check_family_scope": check_family_scope,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
             "focus_rules": len(focus_rules),
@@ -7324,6 +7358,7 @@ async def build_report(target: str,
             "custom_sqli": [],
             "custom_xss": [],
             "filters": {"xss": run_xss, "sqli": run_sqli},
+            "check_family_scope": check_family_scope,
         }
         if synthetic_skipped_reason:
             active_block.setdefault("warnings", []).append(synthetic_skipped_reason)
@@ -9630,7 +9665,8 @@ async def build_report(target: str,
             "dalfox": [],
             "sqlmap": [],
             "custom_sqli": [],
-            "custom_xss": []
+            "custom_xss": [],
+            "check_family_scope": check_family_scope,
         }
 
     # Emit configuration/metadata findings (CSP/Headers/Cookies/TLS/DNS/CORS/etc.).
@@ -10149,6 +10185,7 @@ async def build_report(target: str,
             "ai_verify_min_severity": verify_min_severity,
             "include_partial_attack_chains": include_partial_attack_chains,
             "verified_findings_only": verified_findings_only,
+            "check_family_scope": check_family_scope,
             "focus_rules": len(focus_rules),
             "avoid_rules": len(avoid_rules),
             "auth_scenario": bool(auth_scenario),
