@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import {
   getAsmActivity,
+  getAsmCheckFamilies,
   getAsmEndpoints,
   getAsmDiff,
   getAsmGaps,
@@ -32,6 +33,7 @@ import {
   updateAsmPolicy,
   formatDate,
   type AsmActivity,
+  type AsmCheckFamily,
   type AsmConfig,
   type AsmCoverage,
   type AsmEndpoint,
@@ -338,13 +340,50 @@ const ASM_PRESETS: Array<{ key: string; label: string; description: string; conf
   },
 ]
 
-type AsmCheckFamily = 'all' | 'sqli' | 'xss'
+type AsmCheckFamilyOption = { value: string; label: string; description: string; riskLevel?: string }
 
-const ASM_CHECK_FAMILY_OPTIONS: Array<{ value: AsmCheckFamily; label: string; description: string }> = [
+const FALLBACK_ASM_CHECK_FAMILY_OPTIONS: AsmCheckFamilyOption[] = [
   { value: 'all', label: 'All checks', description: 'Use the normal ASM active mix.' },
   { value: 'sqli', label: 'SQLi only', description: 'Focus the next test batch on SQL injection.' },
   { value: 'xss', label: 'XSS only', description: 'Focus the next test batch on cross-site scripting.' },
 ]
+
+function toAsmCheckFamilyOptions(
+  families: AsmCheckFamily[] | undefined,
+  allowed: string[] | undefined,
+  defaultValue: string | undefined
+): AsmCheckFamilyOption[] {
+  const allowedNames = new Set((allowed && allowed.length ? allowed : ['all', 'sqli', 'xss']).map((v) => String(v)))
+  const byName = new Map((families || []).map((family) => [family.name, family]))
+  const options: AsmCheckFamilyOption[] = [
+    byName.get(defaultValue || 'all')
+      ? {
+          value: defaultValue || 'all',
+          label: byName.get(defaultValue || 'all')?.label || 'All checks',
+          description: byName.get(defaultValue || 'all')?.description || 'Use the normal ASM active mix.',
+        }
+      : FALLBACK_ASM_CHECK_FAMILY_OPTIONS[0],
+  ]
+
+  allowedNames.forEach((name) => {
+    if (name === (defaultValue || 'all')) return
+    if (name === 'all') return
+    const family = byName.get(name)
+    if (family && family.runnable) {
+      options.push({
+        value: family.name,
+        label: `${family.label} only`,
+        description: family.description,
+        riskLevel: family.risk_level,
+      })
+      return
+    }
+    const fallback = FALLBACK_ASM_CHECK_FAMILY_OPTIONS.find((option) => option.value === name)
+    if (fallback) options.push(fallback)
+  })
+
+  return options.length ? options : FALLBACK_ASM_CHECK_FAMILY_OPTIONS
+}
 
 function ContinuousCard({ targetId }: { targetId: string }) {
   const toast = useToast()
@@ -592,7 +631,25 @@ function CoverageAdvisorCard({
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState<'improve' | 'recon' | null>(null)
-  const [checkFamily, setCheckFamily] = useState<AsmCheckFamily>('all')
+  const [checkFamily, setCheckFamily] = useState('all')
+  const [checkFamilyOptions, setCheckFamilyOptions] = useState<AsmCheckFamilyOption[]>(FALLBACK_ASM_CHECK_FAMILY_OPTIONS)
+
+  useEffect(() => {
+    let cancelled = false
+    getAsmCheckFamilies()
+      .then((res) => {
+        if (cancelled) return
+        const options = toAsmCheckFamilyOptions(res.families, res.asm_focus_allowed, res.default)
+        setCheckFamilyOptions(options)
+        setCheckFamily((current) => (
+          options.some((option) => option.value === current) ? current : (res.default || 'all')
+        ))
+      })
+      .catch(() => {
+        if (!cancelled) setCheckFamilyOptions(FALLBACK_ASM_CHECK_FAMILY_OPTIONS)
+      })
+    return () => { cancelled = true }
+  }, [])
 
   const queueImprove = async () => {
     setBusy('improve')
@@ -693,10 +750,10 @@ function CoverageAdvisorCard({
             <span>Next batch focus</span>
             <select
               value={checkFamily}
-              onChange={(e) => setCheckFamily(e.target.value as AsmCheckFamily)}
+              onChange={(e) => setCheckFamily(e.target.value)}
               className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
             >
-              {ASM_CHECK_FAMILY_OPTIONS.map((option) => (
+              {checkFamilyOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>

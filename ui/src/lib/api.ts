@@ -348,9 +348,31 @@ export interface AsmActionResponse {
   job_id?: string
   status: string
   batch_size?: number
-  check_family?: 'all' | 'sqli' | 'xss'
+  check_family?: string
   reason?: string
   recommendation?: AsmRecommendation
+}
+
+export interface AsmCheckFamily {
+  name: string
+  phase: string
+  family: string
+  label: string
+  default_profiles: string[]
+  is_active: boolean
+  requires_auth_states: boolean
+  requires_credentials: boolean
+  risk_level: string
+  allowed_presets: string[]
+  telemetry_schema?: string | null
+  runnable: boolean
+  description: string
+}
+
+export interface AsmCheckFamiliesResponse {
+  families: AsmCheckFamily[]
+  asm_focus_allowed: string[]
+  default: string
 }
 
 export interface PrecisionPolicy {
@@ -1146,15 +1168,21 @@ export async function getAsmEndpoints(
   return res.json()
 }
 
+export async function getAsmCheckFamilies(): Promise<AsmCheckFamiliesResponse> {
+  const res = await fetch(`${API_URL}/asm/check-families`)
+  if (!res.ok) throw new Error('Failed to fetch ASM check families')
+  return res.json()
+}
+
 export async function testAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: 'all' | 'sqli' | 'xss' }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string }
 ): Promise<{
   scan_id: string
   job_id: string
   status: string
   batch_size: number
-  check_family?: 'all' | 'sqli' | 'xss'
+  check_family?: string
   inventory_total: number
   untested: number
 }> {
@@ -1188,7 +1216,7 @@ export async function reconAsmTarget(
 
 export async function improveAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: 'all' | 'sqli' | 'xss' }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string }
 ): Promise<AsmActionResponse> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
     method: 'POST',

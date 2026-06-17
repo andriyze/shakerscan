@@ -422,6 +422,8 @@ Current UI/API:
 - `/asm` now leads with a coverage advisor and one-click Improve Coverage action.
 - Policy setup is preset-first (`Safe`, `Balanced`, `Lab`) with raw knobs hidden behind Advanced.
 - New Scan exposes the parallel/coverage path without requiring users to understand every shard knob.
+- `/asm` loads focused batch labels from `/asm/check-families`, so the UI only offers registry-approved
+  runnable families while keeping the control to one compact selector.
 - Child shard and ASM implementation rows are hidden from the main Scans list by default.
 - Auto-sharding exists behind `/settings/scan-execution`; current code defaults it off unless
   configured.
@@ -512,6 +514,8 @@ Implemented in this pass:
 - `api/check_registry.py` centralizes family metadata, ASM focused-family validation, UI/API
   discoverability, and parallel family shard labels. Planned/high-risk families are registered but
   not runnable, so they fail closed instead of silently running all checks.
+- `/asm/check-families` is consumed by the ASM UI for focused batch labels/options instead of
+  hardcoding `sqli`/`xss`.
 - AGENTS, CLAUDE, and the scanner skill now describe Full Coverage, ASM improve/gaps/activity, and
   focused ASM batches.
 
