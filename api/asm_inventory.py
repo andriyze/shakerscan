@@ -407,7 +407,12 @@ async def upsert_endpoints(
 
 
 async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
-    """Per-target coverage counts for the ASM surface."""
+    """Per-target coverage counts for the ASM surface.
+
+    Top-level tested/coverage prefer the normalized attempt ledger when it has
+    facts for this target. The physical endpoint status rollup is still returned
+    separately because the allocator uses it for stale/claimable work.
+    """
     import uuid as _uuid
     tid = _uuid.UUID(str(target_id))
     row = await conn.fetchrow(
@@ -426,12 +431,34 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         """,
         tid,
     )
+    attempt_row = await conn.fetchrow(
+        """
+        WITH latest_attempt AS (
+            SELECT DISTINCT ON (te.id)
+                te.id AS endpoint_id,
+                aea.status
+            FROM target_endpoints te
+            JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
+            WHERE te.target_id = $1 AND te.test_status <> 'gone'
+            ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+        )
+        SELECT
+            count(*) AS attempted,
+            count(*) FILTER (WHERE status = 'completed') AS completed,
+            count(*) FILTER (WHERE status IN ('partial', 'timeout')) AS partial,
+            count(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
+            count(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
+            count(*) FILTER (WHERE status = 'error') AS error
+        FROM latest_attempt
+        """,
+        tid,
+    )
     total = int(row["total"] or 0)
-    tested = int(row["tested"] or 0)
+    status_tested = int(row["tested"] or 0)
     testable = total - int(row["gone"] or 0)
-    return {
+    status_summary = {
         "total": total,
-        "tested": tested,
+        "tested": status_tested,
         "untested": int(row["untested"] or 0),
         "in_progress": int(row["in_progress"] or 0),
         "stale": int(row["stale"] or 0),
@@ -439,7 +466,51 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "expired_leases": int(row["expired_leases"] or 0),
         "auth_blocked": int(row["auth_blocked"] or 0),
         "partial": int(row["partial"] or 0),
-        "coverage": round(tested / testable, 3) if testable else 0.0,
+        "coverage": round(status_tested / testable, 3) if testable else 0.0,
+        "basis": "endpoint_status",
+    }
+
+    def _attempt_int(key: str) -> int:
+        return int(attempt_row[key] or 0) if attempt_row else 0
+
+    attempted = _attempt_int("attempted")
+    attempt_completed = _attempt_int("completed")
+    attempt_partial = _attempt_int("partial")
+    attempt_auth_blocked = _attempt_int("auth_blocked")
+    attempt_rate_limited = _attempt_int("rate_limited")
+    attempt_error = _attempt_int("error")
+    attempt_untested = max(0, testable - attempted)
+    attempt_summary = {
+        "total": testable,
+        "attempted": attempted,
+        "completed": attempt_completed,
+        "tested": attempt_completed,
+        "untested": attempt_untested,
+        "partial": attempt_partial,
+        "auth_blocked": attempt_auth_blocked,
+        "rate_limited": attempt_rate_limited,
+        "error": attempt_error,
+        "coverage": round(attempt_completed / testable, 3) if testable else 0.0,
+        "basis": "latest_attempt_per_endpoint",
+    }
+    use_attempts = attempted > 0
+    return {
+        "total": total,
+        "tested": attempt_completed if use_attempts else status_summary["tested"],
+        "untested": attempt_untested if use_attempts else status_summary["untested"],
+        "in_progress": status_summary["in_progress"],
+        "stale": status_summary["stale"],
+        "gone": status_summary["gone"],
+        "expired_leases": status_summary["expired_leases"],
+        "auth_blocked": attempt_auth_blocked if use_attempts else status_summary["auth_blocked"],
+        "partial": attempt_partial if use_attempts else status_summary["partial"],
+        "rate_limited": attempt_rate_limited,
+        "error": attempt_error,
+        "attempted": attempted,
+        "coverage": attempt_summary["coverage"] if use_attempts else status_summary["coverage"],
+        "coverage_basis": "attempt_ledger" if use_attempts else "endpoint_status",
+        "status_coverage": status_summary,
+        "attempt_coverage": attempt_summary,
     }
 
 

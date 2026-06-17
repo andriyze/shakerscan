@@ -106,6 +106,97 @@ def test_normalize_worklist_respects_limit():
     assert len(a.normalize_worklist(wl, limit=10)) == 10
 
 
+class _CoverageConn:
+    def __init__(self, status_row, attempt_row):
+        self.rows = [status_row, attempt_row]
+        self.queries = []
+
+    async def fetchrow(self, query, *args):
+        self.queries.append((query, args))
+        return self.rows.pop(0)
+
+
+def test_coverage_summary_defaults_to_endpoint_status_without_attempts():
+    target_id = uuid.uuid4()
+    conn = _CoverageConn(
+        {
+            "total": 4,
+            "tested": 1,
+            "untested": 2,
+            "in_progress": 0,
+            "stale": 1,
+            "gone": 0,
+            "expired_leases": 0,
+            "auth_blocked": 0,
+            "partial": 1,
+        },
+        {
+            "attempted": 0,
+            "completed": 0,
+            "partial": 0,
+            "auth_blocked": 0,
+            "rate_limited": 0,
+            "error": 0,
+        },
+    )
+
+    summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
+
+    assert summary["coverage_basis"] == "endpoint_status"
+    assert summary["tested"] == 1
+    assert summary["coverage"] == 0.25
+    assert summary["status_coverage"]["tested"] == 1
+    assert summary["attempt_coverage"]["attempted"] == 0
+
+
+def test_coverage_summary_uses_latest_attempt_ledger_when_present():
+    target_id = uuid.uuid4()
+    conn = _CoverageConn(
+        {
+            "total": 5,
+            "tested": 1,
+            "untested": 4,
+            "in_progress": 0,
+            "stale": 0,
+            "gone": 1,
+            "expired_leases": 0,
+            "auth_blocked": 0,
+            "partial": 0,
+        },
+        {
+            "attempted": 3,
+            "completed": 2,
+            "partial": 1,
+            "auth_blocked": 0,
+            "rate_limited": 0,
+            "error": 0,
+        },
+    )
+
+    summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
+
+    assert summary["coverage_basis"] == "attempt_ledger"
+    assert summary["total"] == 5
+    assert summary["tested"] == 2
+    assert summary["untested"] == 1  # one non-gone endpoint has no attempt
+    assert summary["partial"] == 1
+    assert summary["coverage"] == 0.5  # completed / non-gone endpoints
+    assert summary["status_coverage"]["coverage"] == 0.25
+    assert summary["attempt_coverage"] == {
+        "total": 4,
+        "attempted": 3,
+        "completed": 2,
+        "tested": 2,
+        "untested": 1,
+        "partial": 1,
+        "auth_blocked": 0,
+        "rate_limited": 0,
+        "error": 0,
+        "coverage": 0.5,
+        "basis": "latest_attempt_per_endpoint",
+    }
+
+
 # ---- Allocator helpers -----------------------------------------------------
 
 class _AsyncTx:

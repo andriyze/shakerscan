@@ -7910,22 +7910,54 @@ async def list_targets_grouped(
         target_ids = [row['id'] for row in rows]
         if target_ids:
             asm_rows = await conn.fetch(
-                """SELECT target_id,
-                          COUNT(*) AS total,
-                          COUNT(*) FILTER (WHERE test_status = 'tested') AS tested
-                   FROM target_endpoints
-                   WHERE target_id = ANY($1::uuid[])
-                   GROUP BY target_id""",
+                """
+                WITH inventory AS (
+                    SELECT target_id,
+                           COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE test_status <> 'gone') AS testable,
+                           COUNT(*) FILTER (WHERE test_status = 'tested') AS status_tested
+                    FROM target_endpoints
+                    WHERE target_id = ANY($1::uuid[])
+                    GROUP BY target_id
+                ),
+                latest_attempt AS (
+                    SELECT DISTINCT ON (te.id)
+                        te.target_id,
+                        te.id AS endpoint_id,
+                        aea.status
+                    FROM target_endpoints te
+                    JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
+                    WHERE te.target_id = ANY($1::uuid[]) AND te.test_status <> 'gone'
+                    ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+                ),
+                attempts AS (
+                    SELECT target_id,
+                           COUNT(*) AS attempted,
+                           COUNT(*) FILTER (WHERE status = 'completed') AS completed
+                    FROM latest_attempt
+                    GROUP BY target_id
+                )
+                SELECT i.target_id, i.total, i.testable, i.status_tested,
+                       COALESCE(a.attempted, 0) AS attempted,
+                       COALESCE(a.completed, 0) AS attempt_completed
+                FROM inventory i
+                LEFT JOIN attempts a ON a.target_id = i.target_id
+                """,
                 target_ids,
             )
             for ar in asm_rows:
-                total = ar['total'] or 0
-                tested = ar['tested'] or 0
+                total = int(ar['total'] or 0)
+                testable = int(ar['testable'] or total)
+                attempted = int(ar['attempted'] or 0)
+                tested = int(ar['attempt_completed'] if attempted > 0 else (ar['status_tested'] or 0))
+                denominator = testable
                 asm_by_target[str(ar['target_id'])] = {
                     'total': total,
                     'tested': tested,
-                    'untested': total - tested,
-                    'coverage': round(tested / total, 4) if total else 0.0,
+                    'untested': max(0, denominator - tested),
+                    'coverage': round(tested / denominator, 4) if denominator else 0.0,
+                    'coverage_basis': 'attempt_ledger' if attempted > 0 else 'endpoint_status',
+                    'attempted': attempted,
                 }
 
     def _attach_asm(target_data):

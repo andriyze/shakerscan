@@ -931,9 +931,14 @@ function TargetView({ targetId }: { targetId: string }) {
         <Card className="p-4 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm font-medium text-gray-400">Coverage</span>
-            <span className="text-sm text-gray-300">
-              {pct(coverage.coverage)} · {coverage.tested} / {coverage.total} tested
-            </span>
+            <div className="text-right">
+              <div className="text-sm text-gray-300">
+                {pct(coverage.coverage)} · {coverage.tested} / {coverage.total} tested
+              </div>
+              <div className="text-xs text-gray-500">
+                {coverage.coverage_basis === 'attempt_ledger' ? 'From scanner attempt ledger' : 'From endpoint status'}
+              </div>
+            </div>
           </div>
           <CoverageBar coverage={coverage.coverage} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">

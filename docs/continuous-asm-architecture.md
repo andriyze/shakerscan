@@ -4,8 +4,10 @@
 replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
 records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-shot Full Coverage
 campaign linkage with merge-time attempt rows are implemented. Scanner-level smart active
-per-endpoint telemetry is now emitted and consumed by ASM/Full Coverage attempt ledgers. Dynamic
-pull-based Full Coverage allocation and attempt-ledger-driven coverage rollups remain proposed.
+per-endpoint telemetry is now emitted and consumed by ASM/Full Coverage attempt ledgers.
+`/targets/{id}/asm/coverage` now exposes both endpoint-status coverage and attempt-ledger coverage,
+using attempt facts for the top-level coverage when available. Dynamic pull-based Full Coverage
+allocation and parent-scan attempt-ledger rollups remain proposed.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -24,7 +26,7 @@ Every implementation task must verify the current state with search/tests before
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Make coverage rollups derive from attempt facts. |
+| ASM campaign/lease/attempt foundation | Shipped | Extend attempt-ledger rollups into parent scan reports. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
@@ -145,6 +147,8 @@ Implemented:
 - Full Coverage merge writes telemetry-backed `asm_endpoint_attempts` when child reports include
   `active_checks.endpoint_attempts`; legacy/no-telemetry children keep the assigned-slice attempt
   fallback. Full Coverage merge still does not promote endpoint `test_status`.
+- `/targets/{id}/asm/coverage` returns `status_coverage` and `attempt_coverage`; top-level
+  `tested`/`coverage` use the latest attempt per endpoint when attempt facts exist.
 
 Still limited:
 
@@ -152,8 +156,8 @@ Still limited:
   A first-class check registry and telemetry schemas are still needed for every family.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
-- `/targets/{id}/asm/coverage` still derives primary coverage from endpoint status; attempt-ledger
-  facts are exposed in gaps/activity and should become authoritative in the next rollup increment.
+- Parent scan reports still derive their coverage rollup from shard assignment/child JSON rather than
+  querying `asm_endpoint_attempts`.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
 - Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
@@ -348,10 +352,15 @@ error_summary
 scanner_telemetry_json
 ```
 
-Coverage percentages should derive from attempt outcomes, not scan status alone. Current API rollups
-still use endpoint status as the primary coverage source even though smart active telemetry now
-distinguishes completed, partial, skipped, and unreported endpoint attempts. Moving rollups onto the
-attempt ledger is the next correctness increment.
+Coverage percentages should derive from attempt outcomes, not scan status alone. The ASM coverage API
+now returns both:
+
+- `status_coverage`: physical endpoint status used by the allocator for stale/claimable work.
+- `attempt_coverage`: latest `asm_endpoint_attempts` status per endpoint.
+
+Top-level `tested` and `coverage` use `attempt_coverage` when attempt facts exist; otherwise they
+fall back to `status_coverage` for fresh installs and legacy inventories. Parent scan reports still
+need the same attempt-ledger rollup treatment.
 
 ---
 
@@ -501,10 +510,11 @@ Implemented:
 - Preserve scanner-proven smart active endpoint attempts when present; completed telemetry can promote
   only those endpoint IDs to `tested`, while missing/partial telemetry keeps rows stale.
 - Expose campaign and attempt-status facts in ASM activity/gaps.
+- `/targets/{id}/asm/coverage` derives top-level coverage from latest attempt outcomes when present
+  and keeps endpoint-status coverage available as a compatibility/allocator view.
 
 Remaining:
 
-- Make coverage percentages derive from attempt outcomes instead of endpoint status.
 - Extend first-class telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS.
 
 ### Phase C — Parallel Coverage Uses The Allocator

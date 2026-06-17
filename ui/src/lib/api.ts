@@ -237,6 +237,8 @@ export interface AsmCoverageRollup {
   tested: number
   untested: number
   coverage: number
+  coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
+  attempted?: number
 }
 
 export interface Target {
@@ -273,7 +275,16 @@ export interface AsmCoverage {
   in_progress: number
   stale: number
   gone: number
+  expired_leases?: number
+  auth_blocked?: number
+  partial?: number
+  rate_limited?: number
+  error?: number
+  attempted?: number
   coverage: number
+  coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
+  status_coverage?: Record<string, number | string>
+  attempt_coverage?: Record<string, number | string>
 }
 
 export interface AsmEndpoint {
