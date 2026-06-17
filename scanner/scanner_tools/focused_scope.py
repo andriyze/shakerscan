@@ -1,8 +1,8 @@
 """Centralized helpers for focused-manual-active scan scoping.
 
 ShakerScan's smart-scan mode can run in "focused" sub-mode when the caller
-provides both a `focused_active_family` (e.g. ``"xss"`` or ``"sqli"``) and a
-list of `manual_endpoints` to target. In that sub-mode many discovery,
+provides both a `focused_active_family` (e.g. ``"xss"``, ``"sqli"``, or
+``"bola"``) and a list of `manual_endpoints` to target. In that sub-mode many discovery,
 posture, and broad-vulnerability modules are intentionally skipped so the
 active scan concentrates its budget on the requested family.
 

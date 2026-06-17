@@ -31,11 +31,11 @@ Every implementation task must verify the current state with search/tests before
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
+| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
+| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
+| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS/BOLA. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -69,7 +69,7 @@ suppressed after the first shard per auth state.
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
 request-accurate budgets for internally discovered standalone scans; and more runnable focused
-families beyond SQLi/XSS.
+families beyond SQLi/XSS/BOLA.
 
 ---
 
@@ -229,8 +229,9 @@ Baseline infra ─► Discovery (katana+browser) ─► Nuclei (staged) ─► P
 - **Payloads:** 9 files in `scanner/payloads/`, but most active payloads are **hardcoded** in `active_checks.py`/`constants.py`; only JWT secrets load from file (`_load_jwt_secrets_wordlist`, `active_checks.py:3191-3207`).
 - **Checks:** `api/check_registry.py` is now the first registry contract for family metadata,
   API validation, ASM focused scheduling, and parallel family shard labels. Scanner internals still
-  have the legacy `build_report()` boolean wiring, so the remaining work is migrating module
-  execution to registry iteration and adding runnable families beyond SQLi/XSS.
+  have legacy `build_report()` wiring, so the remaining work is migrating module execution to
+  registry iteration and adding runnable families beyond SQLi/XSS/BOLA. BOLA is runnable only as an
+  explicit gated ASM/API family, not an automatic parallel family lane.
 
 ---
 
@@ -370,10 +371,12 @@ Splitting work means the **global budget must be split or shared**, or shards wi
 - Registry foundation is shipped in `api/check_registry.py`: `CHECK_REGISTRY` carries family
   metadata (`name`, `phase`, `family`, profiles, active/risk/auth requirements, telemetry schema,
   scanner option mapping, runnable/planned state), ASM validation rejects unknown or planned-only
-  families, and the parallel `family` planner derives focused SQLi/XSS lanes from the registry.
+  families, and the parallel `family` planner derives the automatic focused SQLi/XSS lanes from the
+  registry. High-risk BOLA is registry-runnable only for explicit ASM/API focused requests.
 - Scanner boundary wiring is shipped: workers pass registry-selected `asm_check_family` values as
-  `--check-family`, the scanner resolves aliases (`sql` -> `sqli`), rejects unsupported/planned
-  families fail-closed, and reports `check_family_scope.source=check_family` for focused shards.
+  `--check-family`, the scanner resolves aliases (`sql` -> `sqli`, `idor` -> `bola`), rejects
+  unsupported/planned families fail-closed, and reports `check_family_scope.source=check_family` for
+  focused shards. BOLA also requires the API-side Lab/deep plus two-auth preconditions.
 - Remaining scanner refactor: make `build_report()` iterate registry entries per phase so adding a
   runnable check is one registry entry plus module integration, not another set of scattered boolean
   parameters.
@@ -503,8 +506,9 @@ in very large budgets without changing default profile behavior.
 (default cap 150, tunable per scan), bounded by `coverage_max_shards` / `COVERAGE_MAX_SHARDS`
 (128 today). Auth-state expansion can multiply that up to the total coverage shard ceiling while
 preserving every endpoint per state. `auto`/`scope` use the generic `MAX_SHARDS` ceiling (24 today).
-`family` is intentionally fixed at 3 (broad/sqli/xss — the only capability lanes the scanner
-exposes). Concurrency is bounded by the worker fleet; excess shards queue and run as workers free up.
+`family` is intentionally fixed at 3 (broad/sqli/xss — the automatic low/medium-risk lanes). BOLA is
+available only as an explicit gated ASM/API focused family, not in default fan-out. Concurrency is
+bounded by the worker fleet; excess shards queue and run as workers free up.
 
 **Coverage depth is decoupled from breadth.** Coverage always tests *every* endpoint, but depth is
 a choice: New Scan exposes **Standard** (thorough budget, no exploit-depth — broad but sane;
@@ -559,7 +563,8 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
   retaining `coverage_allocation=static` and `COVERAGE_ALLOCATION_DEFAULT=static` as fallback
   controls.
 - **More focused families:** `coverage_family` dynamic allocation is shipped for broad/SQLi/XSS.
-  Add more lanes only after the scanner registry can route those modules cleanly.
+  BOLA is explicit ASM/API only and intentionally excluded from automatic lanes. Add more lanes only
+  after the scanner registry can route those modules cleanly and each family has its own safety gate.
 - **Rate-limit soak:** known-endpoint static shards and dynamic ASM/Full Coverage batches now reserve
   endpoint budget through shared Redis domain buckets before execution. Keep validating this under
   larger worker fleets and extend it to internally discovered standalone requests only once scanner

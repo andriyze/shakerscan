@@ -292,11 +292,11 @@ def test_asm_check_family_all_keeps_normal_active_mix():
 
 def test_asm_check_family_rejects_registered_but_unrunnable_family():
     with pytest.raises(ValueError, match="registered but not runnable"):
-        api_module._apply_asm_check_family({"scan_type": "smart"}, "bola")
+        api_module._apply_asm_check_family({"scan_type": "smart"}, "ssrf")
 
 
 def test_asm_request_validation_rejects_unknown_family_with_allowed_list():
-    with pytest.raises(ValidationError, match="allowed families: all, sqli, xss"):
+    with pytest.raises(ValidationError, match="allowed families: all, sqli, xss, bola"):
         api_module.AsmImproveRequest(check_family="nosuch")
 
 
@@ -304,12 +304,41 @@ def test_asm_check_family_registry_endpoint_lists_runnable_and_planned_families(
     result = asyncio.run(api_module.asm_check_families())
     names = {family["name"]: family for family in result["families"]}
 
-    assert result["asm_focus_allowed"] == ["all", "sqli", "xss"]
+    assert result["asm_focus_allowed"] == ["all", "sqli", "xss", "bola"]
     assert names["sqli"]["runnable"] is True
     assert names["xss"]["runnable"] is True
-    assert names["bola"]["runnable"] is False
+    assert names["bola"]["runnable"] is True
     assert names["bola"]["requires_credentials"] is True
     assert names["ssrf"]["risk_level"] == "high"
+
+
+def test_asm_bola_family_requires_lab_policy_and_two_auth_contexts():
+    with pytest.raises(api_module.HTTPException, match="Lab/deep"):
+        api_module._enforce_asm_family_preconditions(
+            "bola",
+            {"scan_type": "smart", "auth_header": "Bearer u1", "user2_header": "Bearer u2"},
+            exploit_depth=False,
+        )
+
+    with pytest.raises(api_module.HTTPException, match="primary user credentials"):
+        api_module._enforce_asm_family_preconditions(
+            "bola",
+            {"scan_type": "smart", "user2_header": "Bearer u2"},
+            exploit_depth=True,
+        )
+
+    with pytest.raises(api_module.HTTPException, match="second-user credentials"):
+        api_module._enforce_asm_family_preconditions(
+            "bola",
+            {"scan_type": "smart", "auth_header": "Bearer u1"},
+            exploit_depth=True,
+        )
+
+    api_module._enforce_asm_family_preconditions(
+        "bola",
+        {"scan_type": "smart", "auth_header": "Bearer u1", "user2_header": "Bearer u2"},
+        exploit_depth=True,
+    )
 
 
 def test_default_scan_list_hides_shards_and_asm_activity_rows():

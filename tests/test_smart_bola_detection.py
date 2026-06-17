@@ -2,10 +2,16 @@
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from scanner.scanner_tools.access_control_checks import smart_bola_test
+_SCANNER_DIR = Path(__file__).resolve().parents[1] / "scanner"
+if str(_SCANNER_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCANNER_DIR))
+
+from scanner_tools.access_control_checks import smart_bola_test
 
 
 def _fake_http_response(url: str, status_code: int, body: str) -> dict:
@@ -32,7 +38,7 @@ def test_smart_bola_skips_operational_rate_limit_endpoint(monkeypatch):
         raise AssertionError("Operational endpoint should be skipped before fetch")
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         should_not_fetch,
     )
 
@@ -64,7 +70,7 @@ def test_smart_bola_flags_unauthenticated_resource_access_once(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -81,6 +87,12 @@ def test_smart_bola_flags_unauthenticated_resource_access_once(monkeypatch):
     assert results["vulnerable"]
     assert len(unauth_findings) == 1
     assert unauth_findings[0]["evidence"]["successful_count"] >= 2
+    assert results["endpoint_attempts"]
+    attempt = results["endpoint_attempts"][0]
+    assert attempt["family"] == "bola"
+    assert attempt["custom_endpoint"] == "GET /api/users/2"
+    assert attempt["status"] == "completed"
+    assert attempt["attempted_params_count"] == attempt["completed_params_count"]
 
 
 def test_smart_bola_skips_when_id_parameter_is_ignored(monkeypatch):
@@ -96,7 +108,7 @@ def test_smart_bola_skips_when_id_parameter_is_ignored(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -132,7 +144,7 @@ def test_smart_bola_skips_ignored_id_with_volatile_response_fields(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -168,7 +180,7 @@ def test_smart_bola_cross_user_equivalent_emits_suspected_lead(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -191,6 +203,7 @@ def test_smart_bola_cross_user_equivalent_emits_suspected_lead(monkeypatch):
     assert finding["needs_verification"] is True
     assert finding["evidence"]["responses_equivalent"] is True
     assert finding["evidence"]["user_specific_signals"]
+    assert results["endpoint_attempts"][0]["family"] == "bola"
 
 
 def test_smart_bola_cross_user_chrome_only_is_not_flagged(monkeypatch):
@@ -205,7 +218,7 @@ def test_smart_bola_cross_user_chrome_only_is_not_flagged(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -234,7 +247,7 @@ def test_smart_bola_respects_max_seconds_budget(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 
@@ -262,7 +275,7 @@ def test_smart_bola_no_budget_runs_to_completion(monkeypatch):
         return _fake_http_response(url, 200, body)
 
     monkeypatch.setattr(
-        "scanner.scanner_tools.proof_of_exploit.fetch_with_capture",
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
         fake_fetch,
     )
 

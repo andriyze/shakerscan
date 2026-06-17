@@ -2307,6 +2307,7 @@ SCANNER_ACTIVE_FAMILY_FLAGS: dict[str, tuple[bool, bool]] = {
     "all": (True, True),
     "sqli": (False, True),
     "xss": (True, False),
+    "bola": (False, False),
 }
 
 SCANNER_ACTIVE_FAMILY_ALIASES: dict[str, str] = {
@@ -2316,6 +2317,45 @@ SCANNER_ACTIVE_FAMILY_ALIASES: dict[str, str] = {
     "sql_injection": "sqli",
     "cross-site-scripting": "xss",
     "cross_site_scripting": "xss",
+    "idor": "bola",
+    "object_authorization": "bola",
+    "object-authorization": "bola",
+}
+
+FOCUSED_FAMILY_RULES: dict[str, dict[str, Any]] = {
+    "sqli": {
+        "tools": {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"},
+        "cwes": {"CWE-89", "CWE-943"},
+        "title_markers": ("sql injection",),
+        "type_markers": ("sqli", "sql injection", "nosql"),
+        "remediation": [
+            "Use parameterized queries/prepared statements for database access.",
+            "Validate and type-check request parameters before using them in queries.",
+            "Run database accounts with least privilege and monitor anomalous query behavior.",
+        ],
+    },
+    "xss": {
+        "tools": {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"},
+        "cwes": {"CWE-79"},
+        "title_markers": ("xss", "cross-site scripting"),
+        "type_markers": ("xss", "cross-site scripting"),
+        "remediation": [
+            "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
+            "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
+            "Add regression tests for the confirmed XSS payload and affected parameter.",
+        ],
+    },
+    "bola": {
+        "tools": {"smart_bola", "bola_idor", "bola_check", "bola_multi_user", "bola_enumeration"},
+        "cwes": {"CWE-639"},
+        "title_markers": ("bola", "idor", "object level authorization", "object-level authorization"),
+        "type_markers": ("bola", "idor", "access control"),
+        "remediation": [
+            "Enforce object-level authorization on every resource read and write.",
+            "Compare the requesting principal against the resource owner or an explicit sharing policy.",
+            "Add multi-user regression tests for the affected resource IDs and methods.",
+        ],
+    },
 }
 
 
@@ -2335,8 +2375,9 @@ def resolve_active_check_flags(
     """Resolve the active-family contract at the scanner boundary.
 
     The API owns the full check-family registry. The scanner currently has
-    runnable active implementations for SQLi and XSS, so it fails closed for
-    every other family instead of silently widening a focused campaign.
+    runnable active implementations for SQLi, XSS, and explicit gated BOLA, so
+    it fails closed for every other family instead of silently widening a
+    focused campaign.
     """
     family = normalize_scanner_check_family(check_family)
     legacy_xss = bool(xss)
@@ -2366,6 +2407,14 @@ def build_check_family_scope(
         families.append("xss")
     if active_checks and active_sqli:
         families.append("sqli")
+    normalized_requested = normalize_scanner_check_family(requested_family)
+    if (
+        active_checks
+        and normalized_requested
+        and normalized_requested != "all"
+        and normalized_requested not in families
+    ):
+        families.append(normalized_requested)
 
     focused_family = families[0] if active_checks and len(families) == 1 else None
     if not active_checks:
@@ -2383,12 +2432,47 @@ def build_check_family_scope(
         "focused_family": focused_family,
         "families": families,
         "source": "check_family" if requested_family else "scanner_flags",
-        "requested_family": requested_family,
+        "requested_family": normalized_requested or requested_family,
         "legacy_flags": {
             "xss": bool(active_xss),
             "sqli": bool(active_sqli),
         },
     }
+
+
+def _focused_family_finding_matches(finding: dict[str, Any], family: str | None) -> bool:
+    rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
+    if not rules:
+        return False
+    tool = str(finding.get("tool") or "").lower()
+    cwe = str(finding.get("cwe") or "").upper()
+    title = str(finding.get("title") or "").lower()
+    type_name = str(finding.get("type") or "").lower()
+    return (
+        tool in rules["tools"]
+        or cwe in rules["cwes"]
+        or any(marker in title for marker in rules["title_markers"])
+        or any(marker in type_name for marker in rules["type_markers"])
+    )
+
+
+def _focused_family_remediation(family: str | None) -> list[str]:
+    rules = FOCUSED_FAMILY_RULES.get(str(family or ""))
+    if not rules:
+        return ["Review the focused family findings and add regression tests for confirmed exploit paths."]
+    return list(rules["remediation"])
+
+
+def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
+    if not isinstance(attempts, list):
+        return
+    existing = active_block.get("endpoint_attempts")
+    if not isinstance(existing, list):
+        existing = []
+    existing.extend(attempt for attempt in attempts if isinstance(attempt, dict) and attempt.get("custom_endpoint"))
+    active_block["endpoint_attempts"] = existing
+    active_block["endpoint_attempts_total"] = len(existing)
+    active_block["per_endpoint_telemetry"] = True
 
 
 async def build_report(target: str,
@@ -2557,8 +2641,13 @@ async def build_report(target: str,
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
-    focused_active_family = bool(active_checks and (bool(active_xss) != bool(active_sqli)))
-    focused_active_family_name = "xss" if focused_active_family and active_xss else ("sqli" if focused_active_family else None)
+    requested_active_family = normalize_scanner_check_family(active_check_family)
+    focused_active_family_name = None
+    if active_checks and requested_active_family and requested_active_family != "all":
+        focused_active_family_name = requested_active_family
+    elif active_checks and (bool(active_xss) != bool(active_sqli)):
+        focused_active_family_name = "xss" if active_xss else "sqli"
+    focused_active_family = bool(focused_active_family_name)
     check_family_scope = build_check_family_scope(
         active_checks,
         active_xss,
@@ -8259,10 +8348,7 @@ async def build_report(target: str,
                     max_findings_per_family=scan_budget.get("max_findings_per_family"),
                 )
                 endpoint_attempts = smart_results.get("endpoint_attempts")
-                if isinstance(endpoint_attempts, list):
-                    active_block["endpoint_attempts"] = endpoint_attempts
-                    active_block["endpoint_attempts_total"] = len(endpoint_attempts)
-                    active_block["per_endpoint_telemetry"] = True
+                _append_endpoint_attempt_telemetry(active_block, endpoint_attempts)
                 smart_budget = smart_results.get("budget") or {}
                 active_remaining_after_smart = smart_budget.get("active_remaining_seconds")
                 try:
@@ -9458,9 +9544,15 @@ async def build_report(target: str,
             )
             print(f"[scanner] Skipping DOM XSS analysis: {dom_xss_decision.reason}", file=sys.stderr)
 
-        # Smart BOLA Testing - run in smart mode to detect authorization issues
-        # Requires discovered URLs with ID patterns; user2_session enables cross-user comparison
-        bola_eligible = smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope
+        # Smart BOLA Testing - run in smart mode to detect authorization issues.
+        # Focused BOLA batches are allowed through the otherwise broad
+        # focused-scope skip gate; other focused families keep BOLA disabled.
+        # user2_session enables the multi-user comparison required by the
+        # registry/API gate for ASM BOLA campaigns.
+        bola_focused = focused_active_family_name == "bola"
+        bola_eligible = smart_mode and smart_succeeded and not public_only and (
+            bola_focused or not focused_manual_active_scope
+        )
         bola_decision = (
             should_run_active_enrichment(
                 "bola_idor",
@@ -9470,7 +9562,22 @@ async def build_report(target: str,
             if bola_eligible
             else None
         )
-        if bola_eligible and bola_decision.run:
+        if bola_focused and (not auth_session or not user2_session):
+            active_block["smart_bola"] = {
+                "vulnerable": False,
+                "findings": [],
+                "endpoints_analyzed": 0,
+                "skipped": True,
+                "reason": "multi_user_credentials_required",
+                "endpoint_attempts": [],
+            }
+            record_active_enrichment_skip(
+                active_block,
+                "bola_idor",
+                "multi_user_credentials_required",
+            )
+            print("[scanner] Skipping focused BOLA: primary and second-user credentials are required", file=sys.stderr)
+        elif bola_eligible and bola_decision.run:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis
                 bola_urls: list[str] = []
@@ -9507,6 +9614,17 @@ async def build_report(target: str,
 
                 if crawl_urls:
                     _add_bola_urls(crawl_urls)
+
+                if endpoints:
+                    endpoint_urls: list[str] = []
+                    for ep in endpoints:
+                        ep_url = ep.get("url") or ep.get("path")
+                        if ep_url:
+                            endpoint_urls.append(str(ep_url))
+                            params = ep.get("params") or ep.get("query_params") or ep.get("body_params") or []
+                            if params:
+                                bola_param_endpoints.append({"url": str(ep_url), "params": params})
+                    _add_bola_urls(endpoint_urls)
 
                 if browser_api_endpoints:
                     _add_bola_urls(browser_api_endpoints)
@@ -9579,6 +9697,7 @@ async def build_report(target: str,
                         )
 
                     active_block["smart_bola"] = bola_results
+                    _append_endpoint_attempt_telemetry(active_block, bola_results.get("endpoint_attempts"))
                     emit_progress("active_bola", 94, "BOLA/IDOR testing complete")
 
                     # Add findings to report (shared builder preserves the
@@ -9596,7 +9715,7 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["smart_bola_error"] = str(e)
                 print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and not bola_decision.run:
+        elif smart_mode and smart_succeeded and not public_only and not focused_manual_active_scope and bola_decision and not bola_decision.run:
             record_active_enrichment_skip(
                 active_block,
                 "bola_idor",
@@ -9743,13 +9862,7 @@ async def build_report(target: str,
         pass
 
     if focused_manual_active_scope:
-        family = "xss" if active_xss else "sqli"
-        allowed_tools = (
-            {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}
-            if family == "xss"
-            else {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
-        )
-        allowed_cwes = {"CWE-79"} if family == "xss" else {"CWE-89", "CWE-943"}
+        family = focused_active_family_name or ("xss" if active_xss else "sqli")
         passive_context_tools = {
             "cloud_scanner",
             "cookies_analyzer",
@@ -9772,15 +9885,7 @@ async def build_report(target: str,
         dropped_tools: dict[str, int] = {}
         for finding in report.get("findings", []) or []:
             tool = str(finding.get("tool") or "").lower()
-            cwe = str(finding.get("cwe") or "").upper()
-            title = str(finding.get("title") or "").lower()
-            type_name = str(finding.get("type") or "").lower()
-            family_match = (
-                tool in allowed_tools
-                or cwe in allowed_cwes
-                or (family == "sqli" and ("sql injection" in title or "sqli" in type_name))
-                or (family == "xss" and ("xss" in title or "cross-site scripting" in title or "xss" in type_name))
-            )
+            family_match = _focused_family_finding_matches(finding, family)
             context_match = tool in passive_context_tools
             if family_match or context_match:
                 kept_findings.append(finding)
@@ -10081,30 +10186,12 @@ async def build_report(target: str,
     await asyncio.sleep(0)  # yield to heartbeat
 
     if focused_manual_active_scope:
-        family = "xss" if active_xss else "sqli"
+        family = focused_active_family_name or ("xss" if active_xss else "sqli")
         focused_findings = report.get("findings") or []
-        focused_family_tools = (
-            {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}
-            if family == "xss"
-            else {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
-        )
-
-        def _focused_family_finding(finding: dict[str, Any]) -> bool:
-            tool = str(finding.get("tool") or "").lower()
-            cwe = str(finding.get("cwe") or "").upper()
-            title = str(finding.get("title") or "").lower()
-            type_name = str(finding.get("type") or "").lower()
-            return (
-                tool in focused_family_tools
-                or (family == "sqli" and cwe in {"CWE-89", "CWE-943"})
-                or (family == "xss" and cwe == "CWE-79")
-                or (family == "sqli" and ("sql injection" in title or "sqli" in type_name))
-                or (family == "xss" and ("xss" in title or "cross-site scripting" in title or "xss" in type_name))
-            )
 
         focused_grade_findings = [
             f for f in focused_findings
-            if isinstance(f, dict) and _focused_family_finding(f)
+            if isinstance(f, dict) and _focused_family_finding_matches(f, family)
         ]
         severity_counts_for_grade = {
             "critical": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "critical"),
@@ -10154,19 +10241,7 @@ async def build_report(target: str,
                 f"(penalty: -{min(severity_counts_for_grade['medium'] * 4, 20)})."
             )
 
-        focused_remediation = (
-            [
-                "Use parameterized queries/prepared statements for database access.",
-                "Validate and type-check request parameters before using them in queries.",
-                "Run database accounts with least privilege and monitor anomalous query behavior.",
-            ]
-            if family == "sqli"
-            else [
-                "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
-                "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
-                "Add regression tests for the confirmed XSS payload and affected parameter.",
-            ]
-        )
+        focused_remediation = _focused_family_remediation(family)
         grade_result.update({
             "score": focused_score,
             "grade": focused_grade,

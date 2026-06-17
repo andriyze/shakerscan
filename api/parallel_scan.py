@@ -179,7 +179,7 @@ ACTIVE_ENDPOINTS_CEILING = 10000
 
 # ``family`` strategy can express a broad shard plus the runnable focused active
 # families currently backed by scanner flags.
-FAMILY_FOCUSED_SPECS = check_registry.asm_focus_families()
+FAMILY_FOCUSED_SPECS = check_registry.default_parallel_focus_families()
 FAMILY_SHARD_LABELS = ("broad",) + tuple(spec.name for spec in FAMILY_FOCUSED_SPECS)
 
 

@@ -84,8 +84,10 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         requires_credentials=True,
         risk_level="high",
         allowed_presets=("lab",),
-        telemetry_schema="planned_multi_user_attempt",
-        description="Multi-user object authorization comparisons. Planned until registry-backed BOLA execution lands.",
+        telemetry_schema="active_endpoint_attempt_v1",
+        scanner_options={"sqli": False, "xss": False, "asm_check_family": "bola"},
+        runnable=True,
+        description="Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts.",
     ),
     CheckFamilySpec(
         name="auth",
@@ -198,6 +200,20 @@ def runnable_families(*, phase: str | None = None, active_only: bool | None = No
 
 def asm_focus_families() -> tuple[CheckFamilySpec, ...]:
     return tuple(spec for spec in runnable_families(phase="active", active_only=True) if spec.scanner_options)
+
+
+def default_parallel_focus_families() -> tuple[CheckFamilySpec, ...]:
+    """Families safe to include in automatic broad/sqli/xss-style fan-out.
+
+    High-risk families such as BOLA are runnable only by explicit focused ASM/API
+    request with their own preconditions; they must not appear in default
+    parallel family lanes.
+    """
+    return tuple(
+        spec
+        for spec in asm_focus_families()
+        if str(spec.risk_level or "").lower() != "high"
+    )
 
 
 def asm_focus_family_names(*, include_all: bool = True) -> tuple[str, ...]:

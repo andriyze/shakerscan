@@ -1683,6 +1683,55 @@ def synthesize_query_urls_from_param_endpoints(
     return synthesized
 
 
+def _bola_custom_endpoint(url: str, method: str = "GET") -> str | None:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return None
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    method = (method or "GET").upper()
+    return f"{method} {path}?{parsed.query}" if parsed.query else f"{method} {path}"
+
+
+def _new_bola_endpoint_attempt(url: str, *, test_id_count: int) -> dict[str, Any] | None:
+    custom_endpoint = _bola_custom_endpoint(url, "GET")
+    if not custom_endpoint:
+        return None
+    return {
+        "custom_endpoint": custom_endpoint,
+        "family": "bola",
+        "method": "GET",
+        "url": url,
+        "param_count": max(0, int(test_id_count or 0)),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_bola_endpoint_attempt(
+    attempt: dict[str, Any] | None,
+    *,
+    budget_exceeded: bool = False,
+) -> dict[str, Any] | None:
+    if not attempt:
+        return None
+    if budget_exceeded:
+        attempt["budget_exhausted"] = True
+        attempt["budget_exhausted_reason"] = "time_budget"
+    completed = int(attempt.get("completed_params_count") or 0)
+    expected = int(attempt.get("param_count") or 0)
+    if completed <= 0:
+        attempt["status"] = "partial"
+    elif budget_exceeded and expected and completed < expected:
+        attempt["status"] = "partial"
+    else:
+        attempt["status"] = "completed"
+    return attempt
+
+
 async def smart_bola_test(
     base_url: str,
     discovered_urls: list[str],
@@ -1739,6 +1788,7 @@ async def smart_bola_test(
         "synthesized_urls_tested": 0,
         "synthesized_query_urls_tested": 0,
         "budget_exceeded": False,
+        "endpoint_attempts": [],
     }
 
     def build_headers(session):
@@ -1851,6 +1901,10 @@ async def smart_bola_test(
 
         # Deduplicate test IDs
         test_ids = list(dict.fromkeys(test_ids))[:10]
+        attempt = _new_bola_endpoint_attempt(
+            info.get("example_url") or template.replace("{id}", test_ids[0] if test_ids else "1"),
+            test_id_count=len(test_ids),
+        )
 
         template_no_auth_candidates: list[dict[str, Any]] = []
         template_no_auth_statuses: set[int] = set()
@@ -1860,6 +1914,8 @@ async def smart_bola_test(
         for test_id in test_ids:
             # Replace {id} with test ID
             test_url = template.replace('{id}', test_id)
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
 
             # Rebuild headers per request so mid-loop session refresh is honoured.
             user1_headers = build_headers(user1_session)
@@ -1945,6 +2001,8 @@ async def smart_bola_test(
                         }
                     )
                     template_no_auth_fingerprints.add(_response_body_fingerprint(no_auth_body))
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
         if template_no_auth_candidates:
             sample = template_no_auth_candidates[0]
@@ -2025,6 +2083,13 @@ async def smart_bola_test(
                             "cwe": "CWE-639",
                             "owasp": "API1:2023 - Broken Object Level Authorization",
                         })
+
+        finished_attempt = _finish_bola_endpoint_attempt(
+            attempt,
+            budget_exceeded=bool(results.get("budget_exceeded")),
+        )
+        if finished_attempt:
+            results["endpoint_attempts"].append(finished_attempt)
 
     return results
 

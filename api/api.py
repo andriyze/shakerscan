@@ -939,7 +939,8 @@ def _apply_asm_check_family(options: dict[str, Any], check_family: Any) -> dict[
     """Apply a supported focused ASM family to scan options.
 
     This uses the first-class check registry, while preserving the scanner's
-    current legacy focused flags for the runnable SQLi/XSS families.
+    current legacy focused flags for SQLi/XSS and explicit check-family routing
+    for gated families such as BOLA.
     """
     opts, _family = check_registry.apply_asm_focus(options or {}, check_family)
     return opts
@@ -947,6 +948,52 @@ def _apply_asm_check_family(options: dict[str, Any], check_family: Any) -> dict[
 
 def _validate_asm_check_family_value(value: Any) -> str | None:
     return check_registry.validate_asm_focus_family(value)
+
+
+def _has_primary_auth_context(options: dict[str, Any]) -> bool:
+    opts = options or {}
+    return bool(
+        opts.get("auth_header")
+        or opts.get("auth_cookies")
+        or opts.get("auth_headers_json")
+        or opts.get("auth_scenario_json")
+        or (opts.get("login_username") and opts.get("login_password"))
+    )
+
+
+def _has_second_user_auth_context(options: dict[str, Any]) -> bool:
+    opts = options or {}
+    return bool(opts.get("user2_header") or opts.get("user2_cookies"))
+
+
+def _enforce_asm_family_preconditions(
+    family: str | None,
+    options: dict[str, Any],
+    *,
+    exploit_depth: bool,
+) -> None:
+    """Fail closed for focused families whose registry metadata needs more context."""
+    if not family:
+        return
+    spec = check_registry.get_check_family(family)
+    if not spec:
+        return
+    allowed = {str(p).lower() for p in spec.allowed_presets or ()}
+    if spec.risk_level == "high" and "lab" in allowed and not exploit_depth:
+        raise HTTPException(
+            status_code=400,
+            detail=f"check_family '{family}' requires Lab/deep policy (set exploit_depth=true)",
+        )
+    if spec.requires_credentials and not _has_primary_auth_context(options):
+        raise HTTPException(
+            status_code=400,
+            detail=f"check_family '{family}' requires primary user credentials in target scan options",
+        )
+    if spec.requires_auth_states and not _has_second_user_auth_context(options):
+        raise HTTPException(
+            status_code=400,
+            detail=f"check_family '{family}' requires second-user credentials in target scan options",
+        )
 
 
 def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_internal: bool = False) -> list[str]:
@@ -8499,6 +8546,7 @@ async def _enqueue_asm_exploit_batch(
     job_id = str(uuid.uuid4())
     opts = _apply_asm_check_family(base_opts or {}, check_family)
     family = _normalize_asm_check_family(check_family)
+    _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
     campaign_id = await asm_inventory.create_campaign(
         conn,
         target_id,
