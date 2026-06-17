@@ -4000,15 +4000,52 @@ async def process_scan_plan_job(job_data: dict):
     parent_options = dict(options)
     parent_options['parallel_strategy'] = plan.strategy
     async with db_pool.acquire() as conn:
+        campaign_id = None
+        if plan.strategy == 'coverage' and target_id:
+            custom_budget = options.get('custom_budget') if isinstance(options.get('custom_budget'), dict) else {}
+            coverage_auth_states = (
+                parallel_scan.available_auth_states(options)
+                if options.get('auth_state_shards')
+                else [asm_inventory.auth_state_from_options(options)]
+            )
+            campaign_id = await asm_inventory.create_campaign(
+                conn,
+                target_id,
+                mode=asm_inventory.CAMPAIGN_FULL_COVERAGE,
+                requested_by=str(options.get('requested_by') or options.get('triggered_by') or 'api'),
+                parent_scan_id=parent_id,
+                priority=150,
+                budget_profile=options.get('budget_profile'),
+                wide_budget={
+                    'harvested_endpoints': len(harvested) if requested_strategy == 'coverage' else 0,
+                    'shard_count': plan.shard_count,
+                    'coverage_per_shard_cap': options.get('coverage_per_shard_cap'),
+                    'coverage_max_shards': options.get('coverage_max_shards'),
+                    'active_worklist_max': custom_budget.get('active_worklist_max'),
+                },
+                deep_budget={
+                    'exploit_depth': bool(options.get('exploit_depth')),
+                    'custom_budget': custom_budget,
+                },
+                check_families=['all'],
+                auth_states=coverage_auth_states,
+                metadata_json={'parallel_strategy': plan.strategy},
+            )
+            parent_options['campaign_id'] = campaign_id
         update_result = await conn.execute("""
             UPDATE scans SET status = 'running', started_at = $1,
-                current_phase = $2, progress = 5, shard_count = $3, options = $4
-            WHERE id = $5
+                current_phase = $2, progress = 5, shard_count = $3,
+                options = $4, campaign_id = COALESCE($5, campaign_id)
+            WHERE id = $6
               AND status <> 'cancelled'
         """, now, f'sharded:{plan.strategy}', plan.shard_count,
-             json.dumps(parent_options), uuid.UUID(parent_id))
+             json.dumps(parent_options),
+             uuid.UUID(campaign_id) if campaign_id else None,
+             uuid.UUID(parent_id))
         if update_result.endswith("0"):
             print(f"[{parent_id[:8]}] parent scan cancelled before fan-out; plan job skipped", flush=True)
+            if campaign_id:
+                await asm_inventory.finish_campaign(conn, campaign_id, status='cancelled')
             r.hset(
                 f"job:{parent_job_id}",
                 mapping={'status': 'cancelled', 'progress': '100', 'current_phase': 'cancelled'},
@@ -4021,17 +4058,20 @@ async def process_scan_plan_job(job_data: dict):
             child_job_id = str(uuid.uuid4())
             await conn.execute("""
                 INSERT INTO scans (id, target_id, target_url, job_id, status, options,
-                                   scan_type, parent_scan_id, scan_role, shard_index, shard_count)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'shard', $8, $9)
+                                   scan_type, parent_scan_id, scan_role, shard_index, shard_count,
+                                   campaign_id)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'shard', $8, $9, $10)
             """, uuid.UUID(child_id),
                  uuid.UUID(target_id) if target_id else None,
                  target_url, child_job_id, json.dumps(shard.options), scan_type,
-                 uuid.UUID(parent_id), shard.index, plan.shard_count)
+                 uuid.UUID(parent_id), shard.index, plan.shard_count,
+                 uuid.UUID(campaign_id) if campaign_id else None)
             r.rpush(QUEUE_NAME, json.dumps({
                 'type': parallel_scan.SHARD_JOB_TYPE,
                 'job_id': child_job_id,
                 'scan_id': child_id,
                 'parent_scan_id': parent_id,
+                'campaign_id': campaign_id,
                 'target': target,
                 'options': shard.options,
                 'shard_label': shard.label,
@@ -4245,7 +4285,8 @@ async def process_scan_merge_job(job_data: dict):
 
     async with db_pool.acquire() as conn:
         parent = await conn.fetchrow("""
-            SELECT target_id, target_url, options, scan_type, created_at, started_at, job_id, status
+            SELECT target_id, target_url, options, scan_type, created_at, started_at,
+                   job_id, status, campaign_id
             FROM scans WHERE id = $1
         """, uuid.UUID(parent_id))
         if not parent:
@@ -4262,13 +4303,15 @@ async def process_scan_merge_job(job_data: dict):
             print(f"[merge {parent_id[:8]}] parent cancelled; merge skipped", flush=True)
             return
         children = await conn.fetch("""
-            SELECT id, status, result, score, grade, findings_count, shard_index, options
+            SELECT id, status, result, score, grade, findings_count, shard_index,
+                   options, started_at, completed_at, campaign_id
             FROM scans WHERE parent_scan_id = $1 ORDER BY shard_index
         """, uuid.UUID(parent_id))
 
     target_id = str(parent['target_id']) if parent['target_id'] else None
     target_url = parent['target_url']
     parent_job_id = parent['job_id'] or parent_id
+    campaign_id = str(parent['campaign_id']) if parent['campaign_id'] else None
 
     # Aggregate findings (union, deduped by canonical fingerprint) and pick the
     # richest completed child report as the base skeleton for the merged report.
@@ -4437,6 +4480,67 @@ async def process_scan_merge_job(job_data: dict):
             print(f"[merge {parent_id[:8]}] ASM inventory: upserted {total} endpoints from {len(children)} shards", flush=True)
         except Exception as e:
             print(f"[merge {parent_id[:8]}] ASM inventory error: {e}", flush=True)
+
+    # Campaign attempt ledger for one-shot Full Coverage. This records shard
+    # assignment outcomes without changing endpoint test_status; scanner-level
+    # per-endpoint telemetry remains the future source for authoritative clean
+    # coverage.
+    if campaign_id and target_id and strategy == 'coverage':
+        try:
+            async with db_pool.acquire() as conn:
+                for ch in children:
+                    child_options = _as_report_dict(ch['options']) or {}
+                    endpoints = child_options.get('custom_endpoints') or []
+                    if not endpoints:
+                        continue
+                    auth_state = asm_inventory.auth_state_from_options(child_options)
+                    endpoint_ids = await asm_inventory.endpoint_ids_for_worklist(
+                        conn, target_id, endpoints, auth_state=auth_state
+                    )
+                    if not endpoint_ids:
+                        continue
+                    child_status = str(ch['status'] or '')
+                    if child_status == 'completed':
+                        attempt_status = 'completed'
+                        attempted_params = None
+                        completed_params = None
+                        error_summary = None
+                    elif child_status == 'cancelled':
+                        attempt_status = 'partial'
+                        attempted_params = 0
+                        completed_params = 0
+                        error_summary = 'cancelled'
+                    else:
+                        attempt_status = 'error'
+                        attempted_params = 0
+                        completed_params = 0
+                        error_summary = child_status or 'failed'
+                    await asm_inventory.record_endpoint_attempts(
+                        conn,
+                        endpoint_ids,
+                        scan_id=str(ch['id']),
+                        parent_scan_id=parent_id,
+                        campaign_id=campaign_id,
+                        worker_id=None,
+                        auth_state=auth_state,
+                        started_at=ch['started_at'],
+                        completed_at=ch['completed_at'] or completed_at,
+                        status=attempt_status,
+                        attempted_params_count=attempted_params,
+                        completed_params_count=completed_params,
+                        error_summary=error_summary,
+                        scanner_telemetry_json={
+                            'source': 'parallel_coverage_merge',
+                            'per_endpoint_telemetry': False,
+                            'assigned_endpoints': len(endpoints),
+                            'child_status': child_status,
+                            'shard_index': ch['shard_index'],
+                        },
+                        replace_existing=True,
+                    )
+                await asm_inventory.finish_campaign(conn, campaign_id, status=parent_status)
+        except Exception as e:
+            print(f"[merge {parent_id[:8]}] coverage attempt-ledger error: {e}", flush=True)
 
     # Auto-retest severity-gated findings once, on the parent.
     if parent_status == 'completed' and target_id and union_findings:

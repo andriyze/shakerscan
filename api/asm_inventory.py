@@ -665,6 +665,7 @@ async def record_endpoint_attempts(
     finding_ids: list | None = None,
     error_summary: str | None = None,
     scanner_telemetry_json: dict[str, Any] | None = None,
+    replace_existing: bool = False,
 ) -> int:
     """Write normalized endpoint attempt rows.
 
@@ -688,6 +689,20 @@ async def record_endpoint_attempts(
     parent_id = _uuid.UUID(str(parent_scan_id)) if parent_scan_id else None
     cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
     fids = [_uuid.UUID(str(fid)) for fid in (finding_ids or [])]
+    if replace_existing and (sid or parent_id or cid):
+        await conn.execute(
+            """
+            DELETE FROM asm_endpoint_attempts
+            WHERE endpoint_id = ANY($1::uuid[])
+              AND ($2::uuid IS NULL OR scan_id = $2)
+              AND ($3::uuid IS NULL OR parent_scan_id = $3)
+              AND ($4::uuid IS NULL OR campaign_id = $4)
+            """,
+            endpoint_ids,
+            sid,
+            parent_id,
+            cid,
+        )
     started = started_at or datetime.now(timezone.utc)
     completed = completed_at or datetime.now(timezone.utc)
     telemetry = json.dumps(scanner_telemetry_json or {})
@@ -727,6 +742,49 @@ async def record_endpoint_attempts(
         records,
     )
     return len(records)
+
+
+async def endpoint_ids_for_worklist(
+    conn,
+    target_id: str,
+    worklist: Any,
+    *,
+    auth_state: str = "anonymous",
+    limit: int = 20000,
+) -> list:
+    """Resolve existing inventory row IDs for a worklist/auth identity.
+
+    Callers should upsert first. This helper intentionally does not create rows;
+    it is used when recording attempt facts against inventory rows that should
+    already exist.
+    """
+    import uuid as _uuid
+
+    rows = normalize_worklist_details(worklist, auth_state=auth_state, limit=limit)
+    if not rows:
+        return []
+    state = normalize_auth_state(auth_state)
+    fingerprints = [
+        endpoint_fingerprint(
+            parsed.method,
+            parsed.path,
+            parsed.param_shape,
+            param_location=parsed.param_location,
+            auth_state=state,
+        )
+        for parsed in rows
+    ]
+    fetched = await conn.fetch(
+        """
+        SELECT id, fingerprint
+        FROM target_endpoints
+        WHERE target_id = $1 AND fingerprint = ANY($2::text[])
+        """,
+        _uuid.UUID(str(target_id)),
+        fingerprints,
+    )
+    by_fp = {str(row["fingerprint"]): row["id"] for row in fetched}
+    return [by_fp[fp] for fp in fingerprints if fp in by_fp]
 
 
 async def mark_tested(conn, endpoint_ids: list, *, verdict: str | None = None) -> int:

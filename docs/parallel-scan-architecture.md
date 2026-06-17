@@ -32,7 +32,7 @@ Every implementation task must verify the current state with search/tests before
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
 | ASM endpoint inventory | Shipped | Add scanner-level attempted/completed telemetry in the ASM doc. |
 | ASM campaign/lease/attempt foundation | Shipped | Use attempt facts in coverage rollups once scanner telemetry exists. |
-| Campaign allocator for Full Coverage | Proposed | Convert one-shot coverage from static slices to dynamic campaign allocation. |
+| Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -48,6 +48,7 @@ Every implementation task must verify the current state with search/tests before
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows are hidden from `GET /scans` by default (`include_shards=true` to show); ASM batch/recon implementation rows are also hidden by default (`include_internal=true` to show).
 - **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
+- **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes conservative `asm_endpoint_attempts` for each shard's assigned endpoint slice. Endpoint `test_status` is not promoted from these rows until scanner-level per-endpoint telemetry exists.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
 - **Global-check de-duplication:** coverage shards still run full active endpoint checks over their assigned slice, but only the first shard per auth state runs target-global exposure/posture probes such as exposed-file discovery, auxiliary API/XXE discovery, Phase 4 API-security sweeps, and forced browsing. Later shards carry `skip_global_checks=true` and the scanner emits skipped module results, so the merge keeps one logical report without wasting every shard on identical global probes.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. Workers now launch scanner subprocesses in their own process group and poll `scan:{id}:cancel`, so active shard subprocesses are terminated instead of running to natural completion after cancellation.
@@ -542,18 +543,21 @@ Parallel scanning touches ASM in three shipped places:
 
 Current boundary:
 
-- One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`.
+- One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`, but those
+  parents now create `full_coverage` campaign records and merge writes conservative attempt rows for
+  assigned endpoint slices.
 - Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`; claims now set
   durable leases, link to `scan_campaigns`, and write `asm_endpoint_attempts`.
-- Both paths write into the same endpoint inventory, but one-shot Full Coverage does not yet claim
-  work through the campaign allocator or consume the attempt ledger.
+- Both paths write into the same endpoint inventory and attempt ledger, but one-shot Full Coverage
+  does not yet claim work dynamically through the allocator or consume attempt facts for parent
+  coverage rollups.
 
 Target boundary:
 
-- One-shot Full Coverage should become an explicit campaign over the same allocator used by
-  Continuous ASM.
-- `scan_merge` should eventually consume attempt-ledger facts rather than relying only on child scan
-  JSON.
+- One-shot Full Coverage should claim endpoint batches from the same allocator used by Continuous
+  ASM instead of precomputing static round-robin shards.
+- `scan_merge` should consume attempt-ledger facts for coverage rollups rather than relying only on
+  assigned endpoint slices and child scan JSON.
 - The parent scan report should show tested, partial, untested, auth-blocked, and rate-limited
   endpoint counts when that campaign model ships.
 

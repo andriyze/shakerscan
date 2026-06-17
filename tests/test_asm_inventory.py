@@ -182,6 +182,7 @@ class _RecordAttemptConn:
     def __init__(self, endpoint_id):
         self.endpoint_id = endpoint_id
         self.executemany_calls = []
+        self.executed = []
 
     async def fetch(self, query, *args):
         return [{
@@ -193,6 +194,10 @@ class _RecordAttemptConn:
 
     async def executemany(self, query, records):
         self.executemany_calls.append((query, list(records)))
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        return "DELETE 1"
 
 
 def test_record_endpoint_attempts_defaults_completed_param_counts():
@@ -243,6 +248,76 @@ def test_record_endpoint_attempts_allows_conservative_partial_counts():
     assert record[9] == 0
     assert record[10] == 0
     assert record[12] == "partial_timeout"
+
+
+def test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge():
+    endpoint_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    parent_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    conn = _RecordAttemptConn(endpoint_id)
+
+    asyncio.run(
+        a.record_endpoint_attempts(
+            conn,
+            [endpoint_id],
+            scan_id=str(scan_id),
+            parent_scan_id=str(parent_id),
+            campaign_id=str(campaign_id),
+            status="completed",
+            replace_existing=True,
+        )
+    )
+
+    assert conn.executed
+    query, args = conn.executed[0]
+    assert "DELETE FROM asm_endpoint_attempts" in query
+    assert args == ([endpoint_id], scan_id, parent_id, campaign_id)
+
+
+class _EndpointIdsConn:
+    def __init__(self, target_id, rows):
+        self.target_id = target_id
+        self.rows = rows
+        self.fetch_args = None
+
+    async def fetch(self, query, *args):
+        self.fetch_args = args
+        return self.rows
+
+
+def test_endpoint_ids_for_worklist_resolves_existing_inventory_rows_in_input_order():
+    target_id = uuid.uuid4()
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    first_fp = a.endpoint_fingerprint("GET", "/a", "x", auth_state="user1")
+    second_fp = a.endpoint_fingerprint(
+        "POST",
+        "/b",
+        "name",
+        param_location="form",
+        auth_state="user1",
+    )
+    conn = _EndpointIdsConn(
+        target_id,
+        [
+            {"id": second_id, "fingerprint": second_fp},
+            {"id": first_id, "fingerprint": first_fp},
+        ],
+    )
+
+    ids = asyncio.run(
+        a.endpoint_ids_for_worklist(
+            conn,
+            str(target_id),
+            ["GET /a?x=1", "POST /b form:name=alice"],
+            auth_state="user1",
+        )
+    )
+
+    assert ids == [first_id, second_id]
+    assert conn.fetch_args[0] == target_id
+    assert conn.fetch_args[1] == [first_fp, second_fp]
 
 
 # ---- Continuous dispatcher policy (Phase 3/4) -----------------------------

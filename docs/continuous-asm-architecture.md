@@ -2,9 +2,9 @@
 
 **Status:** first continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
 replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
-records, durable endpoint leases, and normalized ASM endpoint attempt rows are implemented. Dynamic
-Full Coverage allocation through this campaign allocator and scanner-level per-endpoint telemetry
-remain proposed.
+records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-shot Full Coverage
+campaign linkage with merge-time attempt rows are implemented. Dynamic pull-based Full Coverage
+allocation and scanner-level per-endpoint telemetry remain proposed.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -24,7 +24,7 @@ Every implementation task must verify the current state with search/tests before
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
 | ASM endpoint inventory | Shipped | Add scanner-level attempted/completed telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Use attempt facts in coverage rollups once scanner telemetry exists. |
-| Campaign allocator for Full Coverage | Proposed | Convert one-shot coverage from static slices to dynamic campaign allocation. |
+| Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -355,15 +355,16 @@ Current shipped behavior:
 - `scan_plan` runs discover-once recon.
 - `harvest_endpoints()` partitions the worklist into static coverage shards.
 - `scan_shard` workers run lean scans over disjoint endpoint slices.
-- `scan_merge` produces one parent report and persists the union into ASM inventory.
+- `scan_plan` creates a `full_coverage` campaign tied to the parent scan.
+- `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
+  conservative attempt rows for each coverage shard's assigned endpoint slice.
 
 Target behavior:
 
-- `scan_plan` creates a coverage campaign tied to the parent scan and upserts discovered endpoints.
 - The campaign asks the allocator for work until it hits its budget or all eligible rows are terminal.
 - Worker jobs are coverage-batch/ASM-batch equivalents; the difference is the rollup target:
   `parent_scan_id` for one-shot scans, target policy for continuous ASM.
-- `scan_merge` reads the attempt ledger for the campaign, not just child scan result JSON.
+- `scan_merge` reads attempt-ledger facts for coverage rollups, not just child scan result JSON.
 - The parent report shows tested, partial, untested, auth-blocked, and rate-limited counts so the
   grade can be trusted or clearly marked limited.
 
@@ -499,11 +500,20 @@ Remaining:
 
 ### Phase C — Parallel Coverage Uses The Allocator
 
+Implemented:
+
+- One-shot `coverage` parents create `full_coverage` campaign records with wide/deep budget metadata
+  and auth-state scope.
+- Coverage child scan rows inherit `campaign_id`.
+- `scan_merge` resolves assigned shard endpoint slices back to `target_endpoints` and writes
+  idempotent `asm_endpoint_attempts` for completed, failed, and cancelled shards.
+
+Remaining:
+
 - `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
-- Merge consumes attempt ledger and child result files.
+- Merge consumes attempt ledger facts for parent coverage rollups instead of using assigned endpoint
+  slices directly.
 - Keep current static partition path as fallback while campaign mode stabilizes.
-- Extend the shipped campaign records from ASM batches to one-shot Full Coverage parents so both
-  entry points report the same wide/deep budget, family, auth-state, and gap outcomes.
 
 ### Phase D — UX/API/AI Simplification
 
@@ -768,10 +778,10 @@ CURRENT STATE
 - scan_plan currently runs discover-once recon.
 - harvest_endpoints partitions the worklist into static coverage shards.
 - scan_shard workers run lean scans over disjoint endpoint slices.
-- scan_merge produces one parent report and persists the union into ASM inventory.
+- scan_plan creates a full_coverage campaign for coverage parents, and scan_merge persists the union
+  into ASM inventory plus conservative attempt rows for assigned endpoint slices.
 
 TARGET BEHAVIOR
-- scan_plan creates a full_coverage campaign linked to parent_scan_id.
 - Recon upserts discovered endpoints into target_endpoints with auth_state, method, path,
   param_location, param_shape, replay_spec, and priority.
 - Workers pull claim batches from the allocator until campaign budget is exhausted or all eligible
@@ -786,7 +796,7 @@ NON-GOALS
 - Do not make users configure allocator internals.
 
 MIGRATION / BACKFILL / COMPATIBILITY
-- Requires the campaign allocator and attempt ledger first.
+- The campaign allocator and attempt ledger foundation already exists.
 - Keep a fallback flag/path for static coverage until live parity tests pass.
 - Do not reinterpret old completed scan rows as attempted endpoint telemetry.
 
