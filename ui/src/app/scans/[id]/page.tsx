@@ -36,6 +36,26 @@ function countSeverities(scan: any): Record<SeverityLevel, number> {
   return counts
 }
 
+function formatPct(value: any): string {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return '0%'
+  return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`
+}
+
+function coverageNumber(value: any): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+function CoverageMetric({ label, value, accent = 'text-white' }: { label: string; value: any; accent?: string }) {
+  return (
+    <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className={`text-lg font-semibold ${accent}`}>{value}</div>
+      <div className="mt-0.5 text-xs text-gray-500">{label}</div>
+    </div>
+  )
+}
+
 function ScanVerdictCard({ scan }: { scan: any }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
@@ -85,6 +105,87 @@ function ScanVerdictCard({ scan }: { scan: any }) {
           )}
         </div>
       </div>
+    </Card>
+  )
+}
+
+function ParentCoverageRollup({ scan }: { scan: any }) {
+  if (scan?.scan_role !== 'parent') return null
+
+  const smartCoverage = scan?.result?.smart_coverage || {}
+  const endpoints = smartCoverage?.endpoints
+  if (!endpoints || typeof endpoints !== 'object') return null
+  const strategy = String(scan?.options?.parallel_strategy || scan?.options?.shard_strategy || '').toLowerCase()
+  const basisRaw = String(smartCoverage.coverage_basis || endpoints.basis || '')
+  if (strategy !== 'coverage' && !/attempt|campaign/.test(basisRaw)) return null
+
+  const discovered = coverageNumber(endpoints.discovered ?? endpoints.total)
+  const tested = coverageNumber(endpoints.tested ?? endpoints.completed)
+  const attempted = coverageNumber(endpoints.attempted)
+  const partial = coverageNumber(endpoints.partial)
+  const untested = coverageNumber(endpoints.untested)
+  const authBlocked = coverageNumber(endpoints.auth_blocked)
+  const rateLimited = coverageNumber(endpoints.rate_limited)
+  const errors = coverageNumber(endpoints.error)
+  const coverage = typeof endpoints.coverage === 'number'
+    ? endpoints.coverage
+    : discovered > 0
+      ? tested / discovered
+      : 0
+  const basis = basisRaw.replace(/_/g, ' ')
+  const assignment = smartCoverage.endpoint_assignment_rollup
+  const allocation = String(scan?.options?.coverage_allocation || '').toLowerCase()
+
+  return (
+    <Card className="p-4 mb-6">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-300">Full Coverage Rollup</h2>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Campaign endpoint coverage from merged shard attempts.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {allocation && (
+            <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">
+              {allocation} allocation
+            </span>
+          )}
+          {basis && (
+            <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">
+              {basis}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mb-3">
+        <div className="mb-1 flex items-center justify-between text-xs text-gray-500">
+          <span>{tested} tested / {discovered} discovered</span>
+          <span className="text-gray-300">{formatPct(coverage)}</span>
+        </div>
+        <div className="h-2 rounded-full bg-gray-800">
+          <div
+            className="h-2 rounded-full bg-green-500"
+            style={{ width: `${Math.max(0, Math.min(100, coverage * 100))}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <CoverageMetric label="Attempted" value={attempted || tested + partial} />
+        <CoverageMetric label="Partial" value={partial} accent={partial ? 'text-yellow-300' : 'text-gray-300'} />
+        <CoverageMetric label="Untested" value={untested} accent={untested ? 'text-blue-300' : 'text-gray-300'} />
+        <CoverageMetric label="Auth blocked" value={authBlocked} accent={authBlocked ? 'text-amber-300' : 'text-gray-300'} />
+        <CoverageMetric label="Rate limited" value={rateLimited} accent={rateLimited ? 'text-purple-300' : 'text-gray-300'} />
+        <CoverageMetric label="Errors" value={errors} accent={errors ? 'text-red-300' : 'text-gray-300'} />
+      </div>
+
+      {assignment?.basis && (
+        <p className="mt-3 text-xs text-gray-500">
+          Static assignment context retained as fallback: {String(assignment.basis).replace(/_/g, ' ')}.
+        </p>
+      )}
     </Card>
   )
 }
@@ -288,6 +389,7 @@ function ScanDetailContent() {
           </p>
         </div>
         <ParallelShardRollup scan={scan} />
+        <ParentCoverageRollup scan={scan} />
 
         <Card className="p-4">
           <div className="flex items-center justify-between mb-2">
@@ -352,6 +454,7 @@ function ScanDetailContent() {
             </div>
           </div>
           <ParallelShardRollup scan={scan} />
+          <ParentCoverageRollup scan={scan} />
           <ReportView
             scan={scan}
             isAuthenticated={true}
@@ -377,6 +480,7 @@ function ScanDetailContent() {
           <p>{scan.error_message || 'An unknown error occurred during the scan.'}</p>
         </div>
         <ParallelShardRollup scan={scan} />
+        <ParentCoverageRollup scan={scan} />
       </div>
     )
   }
@@ -394,6 +498,7 @@ function ScanDetailContent() {
       </div>
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} />}
       <ParallelShardRollup scan={scan} />
+      <ParentCoverageRollup scan={scan} />
       <ReportView
         scan={scan}
         isAuthenticated={true}

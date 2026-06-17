@@ -560,6 +560,8 @@ Implemented:
   as partial attempts.
 - `scan_merge` reads campaign attempt facts back into the parent report so `smart_coverage.endpoints`
   shows tested, partial, untested, auth-blocked, rate-limited, and error counts from the ledger.
+- Scan Detail renders those campaign endpoint facts in a compact Full Coverage Rollup card on
+  parent scans when attempt-ledger coverage is present.
 
 Implemented as default:
 
@@ -572,6 +574,8 @@ Remaining:
 
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
+- Add deeper parent UI attribution for per-shard endpoint contribution, auth-state coverage, and
+  budget consumption.
 
 ### Phase D — UX/API/AI Simplification
 
