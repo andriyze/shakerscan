@@ -3888,10 +3888,11 @@ async def process_scan_job(job_data: dict):
                         _sw = await asm_inventory.sweep_endpoint_reachability(
                             conn, target, target_id, options, max_probe=_sweep_max
                         )
-                    if _sw.get("retired") or _sw.get("unreachable"):
+                    if _sw.get("probed"):
                         print(
                             f"[{job_id[:8]}] ASM reachability sweep: probed {_sw.get('probed', 0)}, "
-                            f"unreachable {_sw.get('unreachable', 0)}, retired {_sw.get('retired', 0)} to 'gone'",
+                            f"reachable {_sw.get('reachable', 0)}, unreachable {_sw.get('unreachable', 0)}, "
+                            f"retired {_sw.get('retired', 0)} to 'gone'",
                             flush=True,
                         )
             except Exception as e:

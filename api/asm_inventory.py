@@ -537,6 +537,12 @@ async def _probe_path_status(base_url: str, path: str, auth_args: list[str], tim
         if not parts:
             return ("ERR", -1)
         code = parts[0][-3:]
+        # curl reports "000" when it never got an HTTP response (connection
+        # refused / DNS / timeout). Treat that as INCONCLUSIVE, not a real status:
+        # otherwise a transiently-down host makes decoys and candidates both "000",
+        # they'd match, and the whole inventory could be retired on one outage.
+        if code == "000":
+            return ("ERR", -1)
         size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
         return (code, size)
     except Exception:
