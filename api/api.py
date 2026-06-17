@@ -2129,6 +2129,23 @@ class ScanOptions(BaseModel):
         le=parallel_scan.COVERAGE_MAX_SHARDS,
         description="Maximum base coverage shards before auth-state expansion.",
     )
+    coverage_allocation: Optional[str] = Field(
+        default=None,
+        pattern="^(static|dynamic)$",
+        description="Full Coverage allocator mode. static preserves round-robin slices; dynamic uses campaign pull claims.",
+    )
+    coverage_dynamic_batch_size: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Endpoint batch size for dynamic Full Coverage campaign workers.",
+    )
+    coverage_dynamic_max_batches: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=parallel_scan.COVERAGE_MAX_DYNAMIC_BATCHES,
+        description="Maximum queued pull-worker batches for dynamic Full Coverage.",
+    )
     shard_concurrency: Optional[int] = Field(
         default=None,
         ge=1,

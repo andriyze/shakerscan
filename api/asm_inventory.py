@@ -358,6 +358,7 @@ async def upsert_endpoints(
     *,
     source: str = "recon",
     auth_state: str = "anonymous",
+    campaign_id: str | None = None,
     limit: int = 20000,
 ) -> int:
     """Upsert a discovered worklist into target_endpoints. New rows start
@@ -369,6 +370,7 @@ async def upsert_endpoints(
     if not rows:
         return 0
     tid = _uuid.UUID(str(target_id))
+    cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
     count = 0
     for parsed in rows:
         fp = endpoint_fingerprint(
@@ -384,8 +386,8 @@ async def upsert_endpoints(
             INSERT INTO target_endpoints
                 (target_id, method, path, param_shape, fingerprint, source,
                  auth_state, param_location, replay_spec, content_type, priority_score,
-                 first_seen_at, last_seen_at, test_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW(), 'untested')
+                 campaign_id, first_seen_at, last_seen_at, test_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), 'untested')
             ON CONFLICT (target_id, fingerprint) DO UPDATE SET
                 last_seen_at = NOW(),
                 source = EXCLUDED.source,
@@ -394,13 +396,14 @@ async def upsert_endpoints(
                 replay_spec = EXCLUDED.replay_spec,
                 content_type = EXCLUDED.content_type,
                 priority_score = EXCLUDED.priority_score,
+                campaign_id = COALESCE(EXCLUDED.campaign_id, target_endpoints.campaign_id),
                 test_status = CASE
                     WHEN target_endpoints.test_status = 'gone' THEN 'untested'
                     ELSE target_endpoints.test_status END,
                 updated_at = NOW()
             """,
             tid, parsed.method, parsed.path, parsed.param_shape, fp, source, auth_state,
-            parsed.param_location, parsed.replay_spec, parsed.content_type, prio,
+            parsed.param_location, parsed.replay_spec, parsed.content_type, prio, cid,
         )
         count += 1
     return count
@@ -773,6 +776,7 @@ async def claim_test_batch(
     lease_owner: str | None = None,
     lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     campaign_id: str | None = None,
+    campaign_only: bool = False,
 ) -> list[dict]:
     """Atomically claim the next batch of untested/stale endpoints (priority
     first) and mark them in_progress. Uses FOR UPDATE SKIP LOCKED so multiple
@@ -783,6 +787,9 @@ async def claim_test_batch(
     import uuid as _uuid
     tid = _uuid.UUID(str(target_id))
     cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
+    if campaign_only and not cid:
+        return []
+    restrict_campaign = bool(campaign_only and cid)
     owner = str(lease_owner or "asm-worker")
     lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
     async with conn.transaction():
@@ -794,11 +801,12 @@ async def claim_test_batch(
             WHERE target_id = $1
               AND (test_status IN ('untested', 'stale')
                    OR (test_status = 'tested' AND last_tested_at < NOW() - ($2 || ' days')::interval))
+              AND ($3::boolean = false OR campaign_id = $4)
             ORDER BY priority_score DESC, last_seen_at DESC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             """,
-            tid, str(stale_days),
+            tid, str(stale_days), restrict_campaign, cid,
         )
         if not first:
             return []
@@ -812,11 +820,12 @@ async def claim_test_batch(
               AND auth_state = $4
               AND (test_status IN ('untested', 'stale')
                    OR (test_status = 'tested' AND last_tested_at < NOW() - ($3 || ' days')::interval))
+              AND ($5::boolean = false OR campaign_id = $6)
             ORDER BY priority_score DESC, last_seen_at DESC
             LIMIT $2
             FOR UPDATE SKIP LOCKED
             """,
-            tid, limit, str(stale_days), auth_state,
+            tid, limit, str(stale_days), auth_state, restrict_campaign, cid,
         )
         if rows:
             await conn.execute(

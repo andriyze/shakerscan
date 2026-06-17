@@ -8,7 +8,8 @@ per-endpoint telemetry is now emitted and consumed by ASM/Full Coverage attempt 
 `/targets/{id}/asm/coverage` now exposes both endpoint-status coverage and attempt-ledger coverage,
 using attempt facts for the top-level coverage when available. Full Coverage parent reports now
 overlay campaign attempt-ledger rollups when merge-time attempt rows exist. Dynamic pull-based Full
-Coverage allocation remains proposed.
+Coverage allocation is opt-in for API/AI callers through `coverage_allocation=dynamic`; static
+round-robin allocation remains the default fallback.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -25,10 +26,10 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
-| Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
+| Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -156,10 +157,12 @@ Still limited:
 
 - Per-endpoint scanner telemetry currently covers smart active SQLi/XSS/hash-route DOM XSS attempts.
   A first-class check registry and telemetry schemas are still needed for every family.
-- One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
-  yet claim work through the ASM allocator.
-- Coverage child shards now run in zero-rediscovery mode over assigned endpoint slices: no crawl,
-  recursive, JS, JSON, OPTIONS, or Nuclei discovery is run inside children.
+- One-shot parallel `coverage` defaults to static shard slices. It feeds ASM inventory and campaign
+  attempt ledgers; API/AI callers can opt into dynamic pull allocation through
+  `coverage_allocation=dynamic`, which claims campaign-scoped inventory through the ASM allocator.
+- Coverage children now run in zero-rediscovery mode over assigned endpoint slices or dynamically
+  claimed endpoint batches: no crawl, recursive, JS, JSON, OPTIONS, or Nuclei discovery is run
+  inside children.
 - Full Coverage parent scan reports overlay `smart_coverage.endpoints` from campaign
   `asm_endpoint_attempts` when merge-time attempt facts exist; the assigned-slice rollup is retained
   as `endpoint_assignment_rollup` for context/fallback.
@@ -381,9 +384,12 @@ Parallel `coverage` should become a campaign over the same allocator.
 Current shipped behavior:
 
 - `scan_plan` runs discover-once recon.
-- `harvest_endpoints()` partitions the worklist into static coverage shards.
-- `scan_shard` workers run zero-rediscovery scans over disjoint endpoint slices.
 - `scan_plan` creates a `full_coverage` campaign tied to the parent scan.
+- Static allocation remains the default: `harvest_endpoints()` partitions the worklist into static
+  coverage shards and `scan_shard` workers run zero-rediscovery scans over disjoint endpoint slices.
+- Dynamic allocation is opt-in: `coverage_allocation=dynamic` upserts the recon harvest into
+  campaign-scoped `target_endpoints` and queues `exploit_batch` pull workers with
+  `campaign_only=true`.
 - `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
   telemetry-backed attempt rows for child reports that include endpoint telemetry. Legacy/no-telemetry
   child reports keep conservative assigned-slice partial attempt rows.
@@ -392,14 +398,15 @@ Current shipped behavior:
 
 Target behavior:
 
-- The campaign asks the allocator for work until it hits its budget or all eligible rows are terminal.
+- Dynamic allocation becomes the default after live parity; the campaign asks the allocator for work
+  until it hits its budget or all eligible rows are terminal.
 - Worker jobs are coverage-batch/ASM-batch equivalents; the difference is the rollup target:
   `parent_scan_id` for one-shot scans, target policy for continuous ASM.
 - The parent report shows tested, partial, untested, auth-blocked, and rate-limited counts so the
   grade can be trusted or clearly marked limited.
 
-Static partitioning is acceptable for the shipped path, but pull-based allocation is the end state
-because it handles uneven endpoints, retries, auth-state expansion, and large fleets better.
+Static partitioning remains the shipped default and rollback path. Pull-based allocation is the end
+state because it handles uneven endpoints, retries, auth-state expansion, and large fleets better.
 
 ---
 
@@ -541,9 +548,16 @@ Implemented:
 - `scan_merge` reads campaign attempt facts back into the parent report so `smart_coverage.endpoints`
   shows tested, partial, untested, auth-blocked, rate-limited, and error counts from the ledger.
 
+Implemented as opt-in:
+
+- `coverage_allocation=dynamic` queues campaign-scoped pull workers instead of static endpoint
+  slices.
+- Dynamic workers claim through `claim_test_batch(campaign_only=true)`, keep zero-rediscovery
+  scanner execution, write parent-linked attempt rows, and let parent merge own final findings.
+
 Remaining:
 
-- `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
+- Make dynamic allocation the default after live parity and report/UI polish.
 - Keep current static partition path as fallback while campaign mode stabilizes.
 
 ### Phase D — UX/API/AI Simplification
@@ -760,7 +774,7 @@ Confirm:
 - ASM batches claim durable leases;
 - coverage rollups use attempt facts when available;
 - missing scanner telemetry does not promote coverage;
-- dynamic Full Coverage allocation remains proposed.
+- dynamic Full Coverage allocation is opt-in and static allocation remains the default fallback.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -770,8 +784,8 @@ CURRENT STATE
 - scan_campaigns, scans.campaign_id, and asm_endpoint_attempts exist for ASM recon/test batches.
 - ASM batches claim rows with FOR UPDATE SKIP LOCKED, set durable leases, and write batch-level
   attempt rows.
-- One-shot coverage uses static shard slices and feeds inventory, but does not claim through the ASM
-  allocator.
+- One-shot coverage defaults to static shard slices and feeds inventory; opt-in dynamic coverage
+  claims campaign-scoped inventory through the ASM allocator.
 
 TARGET BEHAVIOR
 - Coverage percentages derive from attempt records, not scan row status.
@@ -819,7 +833,8 @@ MIGRATION / BACKFILL / COMPATIBILITY
 
 ROLLOUT / FALLBACK
 - Feature flag: name it if behavior changes are not strictly backward compatible.
-- Default: existing ASM batch and static Full Coverage paths keep working.
+- Default: existing ASM batch and static Full Coverage paths keep working; dynamic Full Coverage is
+  selected only when `coverage_allocation=dynamic`.
 - Fallback: endpoint-status coverage and assigned-slice partial attempts remain readable.
 - Rollback: preserve old rows/reports and avoid destructive backfills.
 - Unsafe signals: coverage increases without endpoint telemetry, leases remain stuck, or duplicate
@@ -889,7 +904,7 @@ Confirm:
 - high-risk families are not silently enabled;
 - public scan options remain backward compatible;
 - AI router and multi-node work are out of scope;
-- dynamic Full Coverage allocation remains separate.
+- dynamic Full Coverage allocation remains a separate opt-in rollout path.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -915,7 +930,7 @@ NON-GOALS
 
 DO NOT TOUCH
 - Exploit payload logic and detection heuristics.
-- Dynamic Full Coverage allocator.
+- Dynamic Full Coverage allocator default rollout.
 - Multi-node queue transport.
 - AI router behavior.
 
@@ -979,7 +994,7 @@ Return status preflight, changed files, behavior summary, safety checks, data co
 tests run, remaining risks, and follow-up tasks.
 ```
 
-### Prompt: make Full Coverage use dynamic pull-based allocation
+### Prompt: make dynamic Full Coverage allocation the default
 
 ```text
 ROLE
@@ -993,7 +1008,8 @@ Code and test edits are allowed for this prompt. If status preflight finds that 
 stale, stop and report before editing.
 
 TASK
-Convert Full Coverage from static shard slices to dynamic pull-based campaign allocation.
+Harden opt-in dynamic Full Coverage allocation, prove live parity, and make it the default while
+keeping static shard slices as the rollback path.
 
 SOURCE OF TRUTH
 Use:
@@ -1009,7 +1025,8 @@ Confirm:
 - child scan rows inherit campaign_id;
 - scan_merge writes telemetry-backed asm_endpoint_attempts;
 - legacy/no-telemetry children fall back to assigned-slice partial rows;
-- one-shot coverage still uses static shard slices;
+- one-shot coverage still defaults to static shard slices;
+- `coverage_allocation=dynamic` queues campaign-scoped allocator workers;
 - Continuous ASM already claims target_endpoints through durable leases.
 
 CURRENT STATE
@@ -1022,6 +1039,7 @@ TARGET BEHAVIOR
 - scan_merge reads campaign attempt facts and child result files.
 - parent report shows discovered, tested, partial, untested, auth-blocked, rate-limited, and error
   counts.
+- static allocation remains available as fallback through `coverage_allocation=static`.
 
 NON-GOALS
 - Do not remove static shard fallback.
@@ -1072,8 +1090,9 @@ MIGRATION / BACKFILL / COMPATIBILITY
 - Add migrations only with db/init.sql and runtime migration parity.
 
 ROLLOUT / FALLBACK
-- Feature flag: name the dynamic coverage allocation flag.
-- Default value: off until parity tests pass, unless preflight proves the static fallback can remain
+- Feature flag/API option: `coverage_allocation=dynamic`.
+- Default value before this task: static.
+- Default value after this task: dynamic only if parity tests pass and static fallback remains
   automatic.
 - Fallback path: static round-robin coverage slices.
 - Rollback behavior: existing parent reports and attempt rows remain readable.

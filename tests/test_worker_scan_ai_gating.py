@@ -3,9 +3,11 @@ Tests for scan-time AI command/env gating in worker.run_scan.
 """
 
 import asyncio
+import json
 import os
 import sys
 import types
+import uuid
 from datetime import datetime, timezone
 
 
@@ -138,12 +140,37 @@ class _FakeJobRedis:
     def __init__(self):
         self.hashes = []
         self.expired = []
+        self.values = {}
+        self.pushed = []
+        self.sets = []
+        self.deleted = []
 
     def hset(self, key, *args, mapping=None):
         self.hashes.append((key, args, dict(mapping or {})))
 
     def expire(self, key, ttl):
         self.expired.append((key, ttl))
+
+    def incr(self, key):
+        self.values[key] = int(self.values.get(key, 0)) + 1
+        return self.values[key]
+
+    def decr(self, key):
+        self.values[key] = int(self.values.get(key, 0)) - 1
+        return self.values[key]
+
+    def rpush(self, key, value):
+        self.pushed.append((key, value))
+        return len(self.pushed)
+
+    def set(self, key, value, nx=False, ex=None):
+        self.sets.append((key, value, nx, ex))
+        self.values[key] = value
+        return True
+
+    def delete(self, key):
+        self.deleted.append(key)
+        self.values.pop(key, None)
 
 
 class _FakeCancelRedis:
@@ -155,17 +182,70 @@ class _FakeCancelRedis:
 
 
 class _FakeAsmConn:
-    def __init__(self):
+    def __init__(self, *, child_status="running", parent_status="running", running_update_result="UPDATE 1"):
         self.executions = []
+        self.child_status = child_status
+        self.parent_status = parent_status
+        self.running_update_result = running_update_result
 
     async def execute(self, query, *args):
         self.executions.append((query, args))
+        if "UPDATE scans SET status='running'" in query and "asm_exploit" in query:
+            return self.running_update_result
         return "UPDATE 1"
+
+    async def fetchrow(self, query, *args):
+        if "LEFT JOIN scans parent" in query:
+            return {"status": self.child_status, "parent_status": self.parent_status}
+        return {"status": self.child_status}
 
 
 class _FakeAsmPool:
-    def __init__(self):
-        self.conn = _FakeAsmConn()
+    def __init__(self, conn=None):
+        self.conn = conn or _FakeAsmConn()
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakePlanConn:
+    def __init__(self, parent_id, target_id, campaign_id):
+        self.parent_id = parent_id
+        self.target_id = target_id
+        self.campaign_id = campaign_id
+        self.executions = []
+        self.inserted_children = []
+
+    async def fetchrow(self, query, *args):
+        if "SELECT target_id, target_url, status FROM scans" in query:
+            return {
+                "target_id": self.target_id,
+                "target_url": "https://example.test",
+                "status": "pending",
+            }
+        return None
+
+    async def fetchval(self, query, *args):
+        if "INSERT INTO scan_campaigns" in query:
+            return self.campaign_id
+        return None
+
+    async def execute(self, query, *args):
+        self.executions.append((query, args))
+        if "INSERT INTO scans" in query:
+            self.inserted_children.append(args)
+        return "UPDATE 1"
+
+
+class _FakePlanPool:
+    def __init__(self, conn):
+        self.conn = conn
 
     def acquire(self):
         return self
@@ -538,6 +618,74 @@ def test_apply_campaign_coverage_rollup_ignores_empty_attempts():
     assert merged["smart_coverage"]["endpoints"]["basis"] == "assigned_custom_endpoints"
 
 
+def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch):
+    parent_id = "55555555-5555-5555-5555-555555555555"
+    target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+    campaign_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
+    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    redis = _FakeJobRedis()
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        return {
+            "target": target,
+            "findings": [],
+            "active_checks": {
+                "active_worklist": [
+                    "GET /api/a?id=1",
+                    "GET /api/b?id=1",
+                    "GET /api/c?id=1",
+                    "GET /api/d?id=1",
+                ]
+            },
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+
+    asyncio.run(
+        worker.process_scan_plan_job(
+            {
+                "job_id": "parent-job",
+                "scan_id": parent_id,
+                "target": "https://example.test",
+                "options": {
+                    "scan_type": "smart",
+                    "parallel": True,
+                    "shard_strategy": "coverage",
+                    "coverage_allocation": "dynamic",
+                    "coverage_dynamic_batch_size": 2,
+                },
+            }
+        )
+    )
+
+    child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(child_jobs) == 2
+    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
+    for job in child_jobs:
+        assert job["parent_scan_id"] == parent_id
+        assert job["campaign_id"] == str(campaign_id)
+        assert job["target_id"] == str(target_id)
+        assert job["batch_size"] == 2
+        assert job["stale_days"] == 0
+        assert job["campaign_only"] is True
+        assert job["finish_campaign_on_complete"] is False
+        assert job["options"]["coverage_dynamic_worker"] is True
+        assert job["options"]["zero_rediscovery"] is True
+        assert "custom_endpoints" not in job["options"]
+    assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
+    assert redis.sets[0][1] == 2
+    parent_update = [
+        args for query, args in conn.executions
+        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+    ][0]
+    parent_options = json.loads(parent_update[3])
+    assert parent_options["parallel_strategy"] == "coverage"
+    assert parent_options["coverage_allocation"] == "dynamic"
+    assert parent_options["campaign_id"] == str(campaign_id)
+
+
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):
     endpoint_id = "11111111-1111-1111-1111-111111111111"
     calls = {"mark_partial": [], "record": []}
@@ -617,6 +765,257 @@ def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monke
     assert record["error_summary"] == "completed_without_endpoint_telemetry"
     assert record["scanner_telemetry_json"]["per_endpoint_telemetry"] is False
     assert record["scanner_telemetry_json"]["completed_without_endpoint_telemetry"] is True
+
+
+def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypatch):
+    endpoint_id = "11111111-1111-1111-1111-111111111111"
+    calls = {"claim": None, "run": None, "record": None, "mark_tested": None, "reconcile": None}
+    redis = _FakeJobRedis()
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        calls["claim"] = {"target_id": target_id, **kwargs}
+        return [
+            {
+                "id": endpoint_id,
+                "method": "GET",
+                "path": "/api/users",
+                "param_shape": "id",
+                "auth_state": "anonymous",
+                "param_location": "query",
+                "replay_spec": None,
+            }
+        ]
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        calls["run"] = dict(options)
+        assert options["custom_endpoints"] == ["GET /api/users?id=1"]
+        return {
+            "target": target,
+            "findings": [{"title": "Proof", "severity": "high", "tool": "test"}],
+            "result": {"score": 80, "grade": "B"},
+            "active_checks": {
+                "per_endpoint_telemetry": True,
+                "endpoint_attempts": [
+                    {
+                        "custom_endpoint": "GET /api/users?id=1",
+                        "status": "completed",
+                        "attempted_params_count": 1,
+                        "completed_params_count": 1,
+                    }
+                ],
+            },
+        }
+
+    async def fake_record_endpoint_telemetry_attempts(conn, **kwargs):
+        calls["record"] = kwargs
+        return {"written": 1, "completed_ids": [endpoint_id], "partial_ids": [], "error_ids": []}
+
+    async def fake_mark_tested(conn, endpoint_ids, *, verdict):
+        calls["mark_tested"] = {"endpoint_ids": endpoint_ids, "verdict": verdict}
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return True
+
+    async def fake_upsert_endpoints(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "save_findings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("parent merge owns findings")))
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
+    monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
+    monkeypatch.setattr(worker.asm_inventory, "upsert_endpoints", fake_upsert_endpoints)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-dynamic-coverage",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 1,
+                "stale_days": 0,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "options": {
+                    "scan_type": "smart",
+                    "coverage_dynamic_worker": True,
+                    "coverage_dynamic_campaign_only": True,
+                    "coverage_dynamic_batch_size": 1,
+                },
+            }
+        )
+    )
+
+    assert calls["claim"]["campaign_only"] is True
+    assert calls["claim"]["limit"] == 1
+    assert calls["claim"]["stale_days"] == 0
+    assert calls["run"]["zero_rediscovery"] is True
+    assert calls["run"]["focused_endpoints_only"] is True
+    assert calls["run"]["skip_global_checks"] is True
+    assert calls["run"]["custom_budget"]["nuclei_max_targets"] == 0
+    assert calls["record"]["parent_scan_id"] == "55555555-5555-5555-5555-555555555555"
+    assert calls["record"]["campaign_id"] == "44444444-4444-4444-4444-444444444444"
+    assert calls["record"]["source"] == "dynamic_full_coverage_batch"
+    assert calls["mark_tested"] == {"endpoint_ids": [endpoint_id], "verdict": "findings"}
+    assert calls["reconcile"]["parent_id"] == "55555555-5555-5555-5555-555555555555"
+    assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
+
+
+def test_dynamic_coverage_batch_parent_cancelled_before_claim_does_not_claim(monkeypatch):
+    calls = {"claim": 0, "reconcile": None}
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn(child_status="pending", parent_status="cancelled")
+
+    async def fake_claim_test_batch(*args, **kwargs):
+        calls["claim"] += 1
+        return []
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-cancelled-dynamic",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 1,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "options": {"scan_type": "smart", "coverage_dynamic_worker": True},
+            }
+        )
+    )
+
+    assert calls["claim"] == 0
+    assert any("Cancelled by parent scan" in query for query, args in conn.executions)
+    assert redis.hashes[-1][2]["status"] == "cancelled"
+    assert calls["reconcile"]["parent_id"] == "55555555-5555-5555-5555-555555555555"
+    assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
+
+
+def test_dynamic_coverage_batch_cancelled_after_claim_releases_without_running(monkeypatch):
+    endpoint_id = "11111111-1111-1111-1111-111111111111"
+    calls = {"claim": None, "run": 0, "reconcile": None}
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn(
+        child_status="pending",
+        parent_status="running",
+        running_update_result="UPDATE 0",
+    )
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        calls["claim"] = kwargs
+        return [
+            {
+                "id": endpoint_id,
+                "method": "GET",
+                "path": "/api/users",
+                "param_shape": "id",
+                "auth_state": "anonymous",
+                "param_location": "query",
+                "replay_spec": None,
+            }
+        ]
+
+    async def fake_run_scan(*args, **kwargs):
+        calls["run"] += 1
+        return {}
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-cancel-race",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 1,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "options": {"scan_type": "smart", "coverage_dynamic_worker": True},
+            }
+        )
+    )
+
+    assert calls["claim"]["campaign_only"] is True
+    assert calls["run"] == 0
+    assert any("last_attempt_status='cancelled'" in query for query, args in conn.executions)
+    assert redis.hashes[-1][2]["status"] == "cancelled"
+    assert calls["reconcile"]["parent_id"] == "55555555-5555-5555-5555-555555555555"
+    assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
+
+
+def test_dynamic_coverage_batch_missing_campaign_id_fails_without_claim(monkeypatch):
+    calls = {"claim": 0, "reconcile": None}
+    redis = _FakeJobRedis()
+    parent_id = "55555555-5555-5555-5555-555555555555"
+    redis.values[worker.parallel_scan.shards_remaining_key(parent_id)] = 1
+    conn = _FakeAsmConn(child_status="pending", parent_status="running")
+
+    async def fake_claim_test_batch(*args, **kwargs):
+        calls["claim"] += 1
+        return []
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return True
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-corrupt-dynamic",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": parent_id,
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "batch_size": 1,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "options": {"scan_type": "smart", "coverage_dynamic_worker": True},
+            }
+        )
+    )
+
+    assert calls["claim"] == 0
+    assert any("corrupt_shard_context" in query for query, args in conn.executions)
+    assert redis.hashes[-1][2]["status"] == "failed"
+    assert redis.hashes[-1][2]["current_phase"] == "corrupt_shard_context"
+    assert calls["reconcile"]["parent_id"] == parent_id
+    assert redis.values[worker.parallel_scan.shards_remaining_key(parent_id)] == 0
 
 
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):

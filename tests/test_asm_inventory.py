@@ -301,6 +301,8 @@ class _ClaimConn:
     def __init__(self, rows):
         self.rows = rows
         self.executed = []
+        self.fetchrow_calls = []
+        self.fetch_calls = []
 
     def transaction(self):
         return _AsyncTx()
@@ -310,9 +312,11 @@ class _ClaimConn:
         return "UPDATE 0" if "lease_expired" in query else f"UPDATE {len(self.rows)}"
 
     async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
         return {"auth_state": "anonymous"} if self.rows else None
 
     async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
         return self.rows
 
 
@@ -357,6 +361,43 @@ def test_claim_test_batch_sets_durable_lease_fields():
     assert update_args[1] == "worker-a:job"
     assert update_args[2] == "120"
     assert update_args[3] == campaign_id
+
+
+def test_claim_test_batch_can_scope_to_campaign_inventory():
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    conn = _ClaimConn([])
+
+    asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            campaign_id=str(campaign_id),
+            campaign_only=True,
+        )
+    )
+
+    first_query, first_args = conn.fetchrow_calls[0]
+    assert "campaign_id = $4" in first_query
+    assert first_args[2] is True
+    assert first_args[3] == campaign_id
+
+
+def test_claim_test_batch_campaign_only_without_campaign_fails_closed():
+    target_id = uuid.uuid4()
+    conn = _ClaimConn([{"id": uuid.uuid4(), "auth_state": "anonymous"}])
+
+    claimed = asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            campaign_only=True,
+        )
+    )
+
+    assert claimed == []
+    assert conn.fetchrow_calls == []
+    assert conn.fetch_calls == []
 
 
 class _RecordAttemptConn:

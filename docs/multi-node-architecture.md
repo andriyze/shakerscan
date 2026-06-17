@@ -18,10 +18,10 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
-| Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
+| Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |

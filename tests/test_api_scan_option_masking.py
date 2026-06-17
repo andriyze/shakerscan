@@ -500,6 +500,25 @@ def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
     assert payload["shards"] == "auto"
 
 
+def test_full_coverage_dynamic_allocation_options_survive_api_payload():
+    options = api_module.ScanOptions(
+        scan_type="smart",
+        parallel=True,
+        shard_strategy="coverage",
+        coverage_allocation="dynamic",
+        coverage_dynamic_batch_size=25,
+        coverage_dynamic_max_batches=40,
+    )
+
+    scan_type = api_module.normalize_dast_scan_options(options)
+    payload = api_module._build_scan_options_payload(options, scan_type)
+
+    assert payload["shard_strategy"] == "coverage"
+    assert payload["coverage_allocation"] == "dynamic"
+    assert payload["coverage_dynamic_batch_size"] == 25
+    assert payload["coverage_dynamic_max_batches"] == 40
+
+
 def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatch):
     monkeypatch.setattr(
         api_module,

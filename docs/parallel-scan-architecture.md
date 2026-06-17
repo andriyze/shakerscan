@@ -1,6 +1,6 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented for assigned endpoint slices. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
+**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented for assigned endpoint slices; dynamic pull-based Full Coverage allocation is available as an opt-in path with static slices kept as fallback. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -29,10 +29,10 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
-| Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
+| Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -48,7 +48,7 @@ Every implementation task must verify the current state with search/tests before
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows are hidden from `GET /scans` by default (`include_shards=true` to show); ASM batch/recon implementation rows are also hidden by default (`include_internal=true` to show).
 - **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
-- **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry reports keep the legacy conservative assigned-slice fallback as partial attempts. Parent reports overlay `smart_coverage.endpoints` from campaign attempt-ledger facts when they exist. Coverage merge still does not promote endpoint `test_status`.
+- **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. Static allocation remains the default and uses assigned endpoint slices; API/AI callers can opt into dynamic allocation with `coverage_allocation=dynamic`, which upserts the recon harvest into campaign-scoped inventory and queues pull workers that claim batches through the ASM allocator. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry reports keep the legacy conservative assigned-slice fallback as partial attempts. Parent reports overlay `smart_coverage.endpoints` from campaign attempt-ledger facts when they exist. Coverage merge still does not promote endpoint `test_status`.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
 - **Global-check de-duplication:** coverage shards still run full active endpoint checks over their assigned slice, but only the first shard per auth state runs target-global exposure/posture probes such as exposed-file discovery, auxiliary API/XXE discovery, Phase 4 API-security sweeps, and forced browsing. Later shards carry `skip_global_checks=true` and the scanner emits skipped module results, so the merge keeps one logical report without wasting every shard on identical global probes.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. Workers now launch scanner subprocesses in their own process group and poll `scan:{id}:cancel`, so active shard subprocesses are terminated instead of running to natural completion after cancellation.
@@ -64,9 +64,9 @@ partitions it across shards. Coverage child shards carry `zero_rediscovery=true`
 active checks over only their assigned endpoint slice. Duplicate target-global probes are still
 suppressed after the first shard per auth state.
 
-**Still deferred (Phase 2):** dynamic pull-based coverage allocation through the ASM allocator; a
+**Still deferred (Phase 2):** making dynamic pull-based coverage allocation the default; a
 first-class check registry; deeper in-scanner cooperative cancellation checkpoints between long
-active-check loops; richer UI breakdowns for shard coverage contribution.
+active-check loops; richer UI breakdowns for shard/batch coverage contribution.
 
 ---
 
@@ -112,11 +112,17 @@ Performance expectations:
   without dropping endpoint buckets; the planner uses larger endpoint slices when needed.
   The recon pass is endpoint-harvest only: active exploitation and Nuclei are disabled
   there so heavyweight work starts after shard fan-out.
+- **Dynamic Full Coverage allocation:** API and AI callers can set
+  `coverage_allocation=dynamic` with optional `coverage_dynamic_batch_size` and
+  `coverage_dynamic_max_batches`. In that mode, recon still runs once, but child jobs do
+  not receive static `custom_endpoints`; they claim campaign-scoped endpoint batches from
+  the ASM allocator at execution time. Static allocation remains the default and rollback
+  path until live parity on large targets is proven.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
 - **Zero-rediscovery child mode:** coverage children skip generic crawl/discovery/Nuclei work and
-  run active checks only over their assigned endpoint slices.
+  run active checks only over assigned endpoint slices or dynamically claimed endpoint batches.
 
 API shape for the high-budget path:
 
@@ -128,6 +134,9 @@ API shape for the high-budget path:
     "budget_profile": "exhaustive",
     "parallel": true,
     "shard_strategy": "coverage",
+    "coverage_allocation": "dynamic",
+    "coverage_dynamic_batch_size": 150,
+    "coverage_dynamic_max_batches": 256,
     "coverage_per_shard_cap": 100,
     "coverage_max_shards": 128,
     "exploit_depth": true,
@@ -158,7 +167,8 @@ Productization plan:
    target scan totals, latest-scan views, and dashboard scan counts.
 5. **Implement true scanner-stage sharding.** Implemented for `coverage` active slices:
    discover once, emit the active worklist, then run zero-rediscovery child scans over assigned
-   endpoint slices. Deferred: dynamic allocator claims and richer shard contribution UI.
+   endpoint slices or opt-in dynamic allocator claims. Deferred: default dynamic allocation and
+   richer shard/batch contribution UI.
 
 ---
 
@@ -525,6 +535,9 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 
 ### Remaining next work
 
+- **Dynamic allocation rollout:** keep `coverage_allocation=dynamic` opt-in until live parity
+  tests on Juice Shop, crAPI, and Honey show stable coverage/report behavior. Then make it the
+  default for Full Coverage while retaining static slices as fallback.
 - **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
   when a very large fleet is available.
 - **Richer UI rollups:** show per-shard endpoint contribution, auth-state coverage, and
@@ -549,23 +562,27 @@ Parallel scanning touches ASM in three shipped places:
 
 Current boundary:
 
-- One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`, but those
-  parents now create `full_coverage` campaign records. Merge writes telemetry-backed attempt rows
-  when child reports include `active_checks.endpoint_attempts`, and uses assigned-slice partial
-  attempt rows only for legacy/no-telemetry child reports. Parent endpoint coverage uses the
-  campaign attempt ledger when rows exist, with assigned-slice coverage retained as fallback context.
-  Coverage children run in zero-rediscovery mode over their assigned endpoint slices.
+- One-shot `coverage` defaults to static shard slices planned by `api/parallel_scan.py`, and those
+  parents create `full_coverage` campaign records. API/AI callers can opt into
+  `coverage_allocation=dynamic`; the plan stage then pre-creates the campaign, upserts the recon
+  harvest into campaign-scoped `target_endpoints`, and queues allocator-backed batch children.
+  Merge writes telemetry-backed attempt rows when child reports include
+  `active_checks.endpoint_attempts`, and uses assigned-slice partial attempt rows only for
+  legacy/no-telemetry static child reports. Parent endpoint coverage uses the campaign attempt
+  ledger when rows exist, with assigned-slice coverage retained as fallback context. Coverage
+  children run in zero-rediscovery mode over assigned or claimed endpoint batches.
 - Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`; claims now set
   durable leases, link to `scan_campaigns`, and write `asm_endpoint_attempts`.
-- Both paths write into the same endpoint inventory and attempt ledger, but one-shot Full Coverage
-  does not yet claim work dynamically through the allocator.
+- Both paths write into the same endpoint inventory and attempt ledger. Dynamic Full Coverage uses
+  the ASM allocator with `campaign_only=true` so workers claim only endpoints discovered for the
+  current campaign.
 
 Target boundary:
 
-- One-shot Full Coverage should claim endpoint batches from the same allocator used by Continuous
-  ASM instead of precomputing static round-robin shards.
-- `scan_merge` should preserve attempt-ledger coverage rollups as the execution model moves from
-  static shard slices to dynamic claims.
+- Dynamic Full Coverage should become the default after live parity and UI/report polish. Static
+  round-robin slices remain the fallback.
+- `scan_merge` should continue preserving attempt-ledger coverage rollups as the execution model
+  moves from opt-in dynamic claims to default dynamic claims.
 - The parent scan report should keep showing tested, partial, untested, auth-blocked, and
   rate-limited endpoint counts as the campaign model moves to dynamic claims.
 
@@ -704,7 +721,7 @@ multi-node transport, public POST /scans API shape, or AI router behavior.
 
 TASK
 Harden zero-rediscovery child execution for parallel coverage shards and preserve it while the
-allocator moves from static slices to dynamic claims.
+allocator rolls out from opt-in dynamic claims to default dynamic allocation.
 
 SOURCE OF TRUTH
 Use:
@@ -721,7 +738,7 @@ Confirm:
 - scanner skips crawl/recursive/JS/json/OPTIONS/Nuclei discovery in zero-rediscovery mode;
 - parent merge remains attempt-ledger backed;
 - single-slice fallback remains valid;
-- dynamic pull-based allocation remains proposed.
+- dynamic pull-based allocation is opt-in and static allocation remains the default fallback.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -729,14 +746,15 @@ CURRENT STATE
 - Each child receives an injected endpoint slice, passes --zero-rediscovery to the scanner, skips
   crawl/recursive/JS/json/OPTIONS/Nuclei discovery, and runs active checks over assigned endpoints.
 - Duplicate target-global probes are suppressed after the first shard per auth state.
-- Static round-robin slices remain the work allocation model until dynamic ASM allocation lands.
+- Static round-robin slices remain the default work allocation model until dynamic ASM allocation is
+  proven as the default.
 
 TARGET BEHAVIOR
 - Keep scanner child runs active-only over assigned endpoints.
-- Preserve parent merge/attempt-ledger rollups as dynamic allocation replaces static slices.
+- Preserve parent merge/attempt-ledger rollups as dynamic allocation moves from opt-in to default.
 - Add live parity tests that prove coverage children do not invoke crawl/discovery/Nuclei modules.
-- Single-slice coverage remains valid: it either runs as a zero-rediscovery standalone fallback or,
-  after dynamic allocation lands, through the same parent rollup path.
+- Single-slice coverage remains valid: it either runs as a zero-rediscovery standalone/static fallback
+  or through the same parent rollup path.
 
 NON-GOALS
 - Do not change public POST /scans API shape.

@@ -155,6 +155,12 @@ COVERAGE_MAX_SHARDS = _env_int("SHAKERSCAN_COVERAGE_MAX_SHARDS", 128)
 # before multiplying by auth state. We never silently drop endpoint buckets.
 COVERAGE_MAX_TOTAL_SHARDS = _env_int("SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS", 256)
 
+# Dynamic Full Coverage uses queued pull workers instead of preassigned static
+# endpoint slices. It shares the same broad cap family so queue fan-out stays
+# bounded by default.
+COVERAGE_DYNAMIC_BATCH_SIZE = _env_int("SHAKERSCAN_COVERAGE_DYNAMIC_BATCH_SIZE", COVERAGE_PER_SHARD_CAP)
+COVERAGE_MAX_DYNAMIC_BATCHES = _env_int("SHAKERSCAN_COVERAGE_MAX_DYNAMIC_BATCHES", COVERAGE_MAX_TOTAL_SHARDS)
+
 # Per-shard active-endpoint ceiling (mirrors SCAN_BUDGET_CEILINGS["active_max_endpoints"]
 # in scanner/constants.py). Used only to warn when capped slices grow past it.
 ACTIVE_ENDPOINTS_CEILING = 10000
@@ -668,6 +674,105 @@ def plan_coverage_shards(
         global_checks_once=True,
     )
     notes.append("coverage: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
+    return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
+
+
+def coverage_allocation_mode(parent_options: dict[str, Any]) -> str:
+    """Resolve Full Coverage allocation mode.
+
+    ``static`` keeps the shipped round-robin endpoint slices. ``dynamic`` uses
+    campaign-scoped inventory claims so child jobs pull work at execution time.
+    """
+    raw = str(parent_options.get("coverage_allocation") or "").strip().lower()
+    if not raw and parent_options.get("dynamic_coverage_allocation") is not None:
+        raw = "dynamic" if parent_options.get("dynamic_coverage_allocation") else "static"
+    if raw in {"dynamic", "pull", "allocator", "campaign"}:
+        return "dynamic"
+    return "static"
+
+
+def _coverage_dynamic_batch_size(parent_options: dict[str, Any]) -> int:
+    raw = (
+        parent_options.get("coverage_dynamic_batch_size")
+        or parent_options.get("coverage_per_shard_cap")
+        or COVERAGE_DYNAMIC_BATCH_SIZE
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = COVERAGE_DYNAMIC_BATCH_SIZE
+    return max(1, value)
+
+
+def plan_dynamic_coverage_shards(
+    parent_options: dict[str, Any],
+    endpoint_count: int,
+    *,
+    auth_state_count: int = 1,
+    notes: list[str] | None = None,
+) -> ParallelPlan:
+    """Plan pull-based Full Coverage workers over a campaign-scoped inventory.
+
+    These children do not receive static endpoint slices. Each child job claims
+    a small batch from ``target_endpoints`` when it starts, so faster workers can
+    keep pulling the next eligible batch instead of waiting behind a large static
+    shard.
+    """
+    notes = notes if notes is not None else []
+    batch_size = _coverage_dynamic_batch_size(parent_options)
+    total = max(0, int(endpoint_count or 0)) * max(1, int(auth_state_count or 1))
+    if total < 1:
+        notes.append("coverage dynamic allocation requested but no endpoints were harvested")
+        return ParallelPlan(strategy="coverage", shards=[], notes=notes)
+
+    import math
+
+    try:
+        max_batches = int(parent_options.get("coverage_dynamic_max_batches") or COVERAGE_MAX_DYNAMIC_BATCHES)
+    except (TypeError, ValueError):
+        max_batches = COVERAGE_MAX_DYNAMIC_BATCHES
+    max_batches = max(1, min(COVERAGE_MAX_DYNAMIC_BATCHES, max_batches))
+    shard_count = max(1, min(max_batches, math.ceil(total / batch_size)))
+    if shard_count * batch_size < total:
+        notes.append(
+            f"coverage dynamic allocation capped at {shard_count} batches x {batch_size}; "
+            "raise coverage_dynamic_max_batches or lower coverage_dynamic_batch_size for full fan-out"
+        )
+    notes.append(
+        f"coverage: dynamic campaign allocation with {shard_count} pull worker(s), "
+        f"batch_size={batch_size}, eligible_auth_scoped_endpoints={total}"
+    )
+
+    shards: list[ShardSpec] = []
+    for i in range(shard_count):
+        opts = _base_child_options(parent_options)
+        opts["coverage_allocation"] = "dynamic"
+        opts["coverage_dynamic_worker"] = True
+        opts["coverage_dynamic_batch_size"] = batch_size
+        opts["coverage_dynamic_campaign_only"] = True
+        opts["coverage_stale_days"] = 0
+        opts["focused_endpoints_only"] = True
+        opts["zero_rediscovery"] = True
+        opts["skip_global_checks"] = True
+        opts["no_early_stop"] = True
+        _merge_custom_budget_defaults(
+            opts,
+            {
+                "max_urls": 200,
+                "browser_max_pages": 0,
+                "browser_max_depth": 1,
+                "discovery_depth": 1,
+                "api_probe_limit": 0,
+                "param_discovery_url_limit": 0,
+                "param_discovery_max_params": 0,
+                "nuclei_max_targets": 0,
+                "active_max_endpoints": batch_size,
+                "active_max_seconds": _coverage_active_seconds(parent_options, batch_size),
+                "active_params_per_endpoint": 8,
+                "smart_bola_max_endpoints": batch_size,
+            },
+        )
+        shards.append(ShardSpec(index=i, label=f"coverage-dynamic[{i}]", options=opts))
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 

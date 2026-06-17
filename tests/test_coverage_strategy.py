@@ -371,3 +371,33 @@ def test_auth_state_noop_without_credentials():
                          scan_type="smart", strategy="family", requested_shards=3)
     assert plan.shard_count == 3  # no creds -> no expansion
     assert any("no credentials" in n for n in plan.notes)
+
+
+def test_coverage_allocation_mode_accepts_dynamic_aliases():
+    assert p.coverage_allocation_mode({"coverage_allocation": "dynamic"}) == "dynamic"
+    assert p.coverage_allocation_mode({"coverage_allocation": "pull"}) == "dynamic"
+    assert p.coverage_allocation_mode({"dynamic_coverage_allocation": True}) == "dynamic"
+    assert p.coverage_allocation_mode({"coverage_allocation": "static"}) == "static"
+
+
+def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
+    notes: list[str] = []
+    plan = p.plan_dynamic_coverage_shards(
+        {"scan_type": "smart", "coverage_dynamic_batch_size": 25},
+        endpoint_count=100,
+        auth_state_count=2,
+        notes=notes,
+    )
+
+    assert plan.strategy == "coverage"
+    assert plan.shard_count == 8
+    assert any("dynamic campaign allocation" in n for n in plan.notes)
+    for shard in plan.shards:
+        assert shard.options["coverage_dynamic_worker"] is True
+        assert shard.options["coverage_dynamic_campaign_only"] is True
+        assert shard.options["coverage_dynamic_batch_size"] == 25
+        assert shard.options["coverage_stale_days"] == 0
+        assert shard.options["zero_rediscovery"] is True
+        assert shard.options["focused_endpoints_only"] is True
+        assert "custom_endpoints" not in shard.options
+        assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
