@@ -46,7 +46,7 @@ Every implementation task must verify the current state with search/tests before
 - **Parent → plan → shard → merge orchestration** on the existing Redis queue. New job types `scan_plan` / `scan_shard` / `scan_merge` routed in `api/worker.py::process_job`. Planner in `api/parallel_scan.py`.
 - **DB:** `scans.parent_scan_id`, `scan_role`, `shard_index`, `shard_count` (+ `idx_scans_parent`), in `db/init.sql` and `run_schema_migrations()`.
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows are hidden from `GET /scans` by default (`include_shards=true` to show); ASM batch/recon implementation rows are also hidden by default (`include_internal=true` to show).
-- **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
+- **Four strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15), and `coverage_family` (advanced API/AI strategy: static endpoint buckets multiplied by broad/SQLi/XSS lanes). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All five (`auto`/`scope`/`family`/`coverage`/`coverage_family`) are accepted by `options.shard_strategy` and `/settings/scan-execution`. The New Scan UI exposes the simple **Full Coverage** path and keeps `coverage_family` out of the primary controls.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. Dynamic allocation is the default: the recon harvest is upserted into campaign-scoped inventory and child workers claim endpoint batches through the ASM allocator. API/AI callers can force legacy static slices with `coverage_allocation=static`, and operators can set `COVERAGE_ALLOCATION_DEFAULT=static` as a rollback default. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry static reports keep the legacy conservative assigned-slice fallback as partial attempts. Parent reports overlay `smart_coverage.endpoints` from campaign attempt-ledger facts when they exist. Coverage merge still does not promote endpoint `test_status`.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
@@ -66,7 +66,7 @@ suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
-hybrid `coverage x family` planning and fleet-wide rate limits.
+fleet-wide rate limits, and family-aware attempt-ledger identity before dynamic `coverage_family`.
 
 ---
 
@@ -118,6 +118,10 @@ Performance expectations:
   campaign-scoped endpoint batches from the ASM allocator at execution time. API/AI callers can
   set `coverage_allocation=static` for the legacy round-robin slice path, or tune dynamic fan-out
   with `coverage_dynamic_batch_size` and `coverage_dynamic_max_batches`.
+- **Hybrid endpoint x family depth:** API/AI callers can set `shard_strategy=coverage_family`
+  to run the same discover-once recon, then split static endpoint buckets into broad, SQLi-focused,
+  and XSS-focused lanes. This deliberately forces static slices because the current ASM attempt
+  ledger is endpoint-scoped, not endpoint+family-scoped.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
@@ -386,7 +390,7 @@ Splitting work means the **global budget must be split or shared**, or shards wi
 
 **Redis keys:** `scan:{parent}:context`, `scan:{parent}:shards:remaining`, `scan:{parent}:cap:{family}`, `scan:{parent}:score`, `scan:{parent}:stop`, `scan:{parent}:deadline`, `scan:{parent}:shard:{i}` (result), `scan:{parent}:cancel`.
 
-**API (shipped names):** `POST /scans` gains `options.parallel: bool`, `options.shards: int|"auto"`, `options.shard_strategy: "auto"|"scope"|"family"|"coverage"` (the design's "by endpoint slice" shipped as **`coverage`**; there is no `"endpoint"` value). `GET /scans/{id}` returns parent rollup (`shard_count`, `shards_completed`, aggregate progress). The Scans UI shows the parent as one row with a shard sub-progress bar.
+**API (shipped names):** `POST /scans` gains `options.parallel: bool`, `options.shards: int|"auto"`, `options.shard_strategy: "auto"|"scope"|"family"|"coverage"|"coverage_family"` (the design's "by endpoint slice" shipped as **`coverage`**; there is no `"endpoint"` value). `GET /scans/{id}` returns parent rollup (`shard_count`, `shards_completed`, aggregate progress). The Scans UI shows the parent as one row with a shard sub-progress bar.
 
 **Worker routing:** extend `process_job()` with `scan_plan` / `scan_shard` / `scan_merge` next to the existing `discovery` / `finding_retest` branches (`api/worker.py:3367`+).
 
@@ -551,8 +555,8 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 - **Dynamic allocation soak:** continue live parity tests on Juice Shop, crAPI, and Honey while
   retaining `coverage_allocation=static` and `COVERAGE_ALLOCATION_DEFAULT=static` as fallback
   controls.
-- **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
-  when a very large fleet is available.
+- **Family-aware dynamic coverage:** `coverage_family` is shipped for static endpoint buckets; add
+  endpoint+family attempt identity before using it with the dynamic allocator/campaign ledger.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
   ledger, per-shard contribution facts, aggregate auth/family rollups, and runtime-versus-active-cap
   budget view.

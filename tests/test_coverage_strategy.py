@@ -130,6 +130,60 @@ def test_coverage_single_endpoint_falls_back_to_one_shard():
     assert any("zero-rediscovery shards skip" in n for n in plan.notes)
 
 
+def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
+    eps = [f"GET /api/x{i}?id=1" for i in range(10)]
+    plan = p.plan_coverage_family_shards(
+        {"scan_type": "smart", "coverage_max_shards": 6},
+        eps,
+        per_shard_cap=5,
+    )
+
+    assert plan.strategy == "coverage_family"
+    assert plan.shard_count == 6
+    assert [s.label for s in plan.shards] == [
+        "coverage[0]:broad",
+        "coverage[0]:sqli",
+        "coverage[0]:xss",
+        "coverage[1]:broad",
+        "coverage[1]:sqli",
+        "coverage[1]:xss",
+    ]
+    lane_counts = {"broad": 0, "sqli": 0, "xss": 0}
+    endpoint_appearances = []
+    for shard in plan.shards:
+        endpoint_appearances.extend(shard.options["custom_endpoints"])
+        assert shard.options["focused_endpoints_only"] is True
+        assert shard.options["zero_rediscovery"] is True
+        assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+        if shard.label.endswith(":sqli"):
+            lane_counts["sqli"] += 1
+            assert shard.options["asm_check_family"] == "sqli"
+            assert shard.options["sqli"] is True
+            assert shard.options["xss"] is False
+        elif shard.label.endswith(":xss"):
+            lane_counts["xss"] += 1
+            assert shard.options["asm_check_family"] == "xss"
+            assert shard.options["xss"] is True
+            assert shard.options["sqli"] is False
+        else:
+            lane_counts["broad"] += 1
+            assert "asm_check_family" not in shard.options
+    assert lane_counts == {"broad": 2, "sqli": 2, "xss": 2}
+    assert sorted(set(endpoint_appearances)) == sorted(eps)
+    assert len(endpoint_appearances) == len(eps) * 3
+    assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True, True, True, True]
+    assert any("dynamic allocator disabled" in n for n in plan.notes)
+
+
+def test_coverage_family_total_shard_cap_limits_family_lanes():
+    eps = [f"GET /api/x{i}?id=1" for i in range(10)]
+    plan = p.plan_coverage_family_shards({"scan_type": "smart", "shards": 2}, eps, per_shard_cap=5)
+
+    assert plan.shard_count == 2
+    assert [s.label for s in plan.shards] == ["coverage[0]:broad", "coverage[0]:sqli"]
+    assert any("dropped xss" in n for n in plan.notes)
+
+
 # --------------------------- harvest ---------------------------
 
 def test_harvest_prefers_params_and_dedups():
@@ -304,6 +358,32 @@ def test_aggregate_coverage_tracks_auth_attempts_separately():
     assert merged["endpoints"]["auth_attempts_completed"] == 4
     assert merged["endpoints"]["auth_attempt_coverage"] == 0.667
     assert merged["auth_states_tested"] == ["anonymous", "user1"]
+
+
+def test_aggregate_coverage_tracks_family_attempts_separately():
+    merged = p.aggregate_shard_coverage(
+        "coverage_family",
+        [
+            {"status": "completed", "options": {"custom_endpoints": ["GET /a?x=1"]}, "smart_coverage": {}},
+            {
+                "status": "completed",
+                "options": {"custom_endpoints": ["GET /a?x=1"], "asm_check_family": "sqli"},
+                "smart_coverage": {},
+            },
+            {
+                "status": "failed",
+                "options": {"custom_endpoints": ["GET /a?x=1"], "asm_check_family": "xss"},
+                "smart_coverage": {},
+            },
+        ],
+    )
+
+    assert merged["endpoints"]["discovered"] == 1
+    assert merged["endpoints"]["tested"] == 1
+    assert merged["endpoints"]["coverage"] == 1.0
+    assert merged["endpoints"]["family_attempts_assigned"] == 3
+    assert merged["endpoints"]["family_attempts_completed"] == 2
+    assert merged["endpoints"]["family_attempt_coverage"] == 0.667
 
 
 def test_aggregate_coverage_uses_completed_shard_auth_state_options():

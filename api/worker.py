@@ -4081,7 +4081,7 @@ async def process_scan_plan_job(job_data: dict):
     coverage_allocation = 'static'
     harvested: list[str] = []
     precreated_campaign_id: str | None = None
-    if requested_strategy == 'coverage':
+    if requested_strategy in {'coverage', 'coverage_family'}:
         # Discover-once: run a discovery-focused recon pass (active disabled),
         # harvest the endpoint worklist, then partition it across shards so the
         # union approaches full endpoint coverage. Full discovery runs once
@@ -4116,13 +4116,23 @@ async def process_scan_plan_job(job_data: dict):
             list(options.get('custom_endpoints') or []) + harvested
         )
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon", flush=True)
-        coverage_allocation = parallel_scan.coverage_allocation_mode(options)
+        coverage_allocation = (
+            'static'
+            if requested_strategy == 'coverage_family'
+            else parallel_scan.coverage_allocation_mode(options)
+        )
+        if requested_strategy == 'coverage_family' and str(options.get('coverage_allocation') or '').lower() == 'dynamic':
+            print(
+                f"[{parent_id[:8]}] coverage_family: dynamic allocation disabled; "
+                "using static slices until attempt ledger is family-aware",
+                flush=True,
+            )
         coverage_auth_states = (
             parallel_scan.available_auth_states(options)
             if options.get('auth_state_shards')
             else [asm_inventory.auth_state_from_options(options)]
         )
-        if coverage_allocation == 'dynamic' and target_id and harvested:
+        if requested_strategy == 'coverage' and coverage_allocation == 'dynamic' and target_id and harvested:
             planned = parallel_scan.plan_dynamic_coverage_shards(
                 options,
                 len(harvested),
@@ -4165,12 +4175,15 @@ async def process_scan_plan_job(job_data: dict):
                 )
             except Exception as e:
                 print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
-        if coverage_allocation == 'dynamic' and target_id and harvested:
+        if requested_strategy == 'coverage' and coverage_allocation == 'dynamic' and target_id and harvested:
             plan = parallel_scan.plan_dynamic_coverage_shards(
                 options,
                 len(harvested),
                 auth_state_count=len(coverage_auth_states),
             )
+        elif requested_strategy == 'coverage_family':
+            coverage_allocation = 'static'
+            plan = parallel_scan.plan_coverage_family_shards(options, harvested)
         else:
             if coverage_allocation == 'dynamic':
                 print(
@@ -4218,6 +4231,8 @@ async def process_scan_plan_job(job_data: dict):
     parent_options['parallel_strategy'] = plan.strategy
     if plan.strategy == 'coverage':
         parent_options['coverage_allocation'] = coverage_allocation
+    elif plan.strategy == 'coverage_family':
+        parent_options['coverage_allocation'] = 'static'
     async with db_pool.acquire() as conn:
         campaign_id = precreated_campaign_id
         if plan.strategy == 'coverage' and target_id:

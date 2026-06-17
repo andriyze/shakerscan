@@ -662,6 +662,23 @@ def test_full_coverage_dynamic_allocation_options_survive_api_payload():
     assert payload["coverage_dynamic_max_batches"] == 40
 
 
+def test_coverage_family_strategy_survives_api_payload():
+    options = api_module.ScanOptions(
+        scan_type="smart",
+        parallel=True,
+        shard_strategy="coverage_family",
+        coverage_allocation="static",
+        coverage_max_shards=12,
+    )
+
+    scan_type = api_module.normalize_dast_scan_options(options)
+    payload = api_module._build_scan_options_payload(options, scan_type)
+
+    assert payload["shard_strategy"] == "coverage_family"
+    assert payload["coverage_allocation"] == "static"
+    assert payload["coverage_max_shards"] == 12
+
+
 def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatch):
     monkeypatch.setattr(
         api_module,

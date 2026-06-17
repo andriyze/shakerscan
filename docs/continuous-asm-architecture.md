@@ -568,6 +568,9 @@ Implemented:
   shows tested, partial, untested, auth-blocked, rate-limited, and error counts from the ledger.
 - Scan Detail renders those campaign endpoint facts in a compact Full Coverage Rollup card on
   parent scans when attempt-ledger coverage is present.
+- Advanced API/AI callers can use `shard_strategy=coverage_family` to run discover-once recon, then
+  multiply static endpoint buckets by broad/SQLi/XSS lanes. This stays off the dynamic campaign
+  allocator until `asm_endpoint_attempts` can identify endpoint+family attempts.
 
 Implemented as default:
 
@@ -580,6 +583,7 @@ Remaining:
 
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
+- Add family-aware attempt identity before `coverage_family` can use dynamic campaign allocation.
 - Parent scan detail now shows per-shard endpoint contribution, aggregate auth/family rollups, and
   runtime-versus-active-cap budget view from child result summaries. Keep extending these rollups
   only when new scanner telemetry fields are added.

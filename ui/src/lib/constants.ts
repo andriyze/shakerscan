@@ -2,7 +2,7 @@
 
 export type ScanType = 'quick' | 'standard' | 'deep' | 'full' | 'smart' | 'aggressive'
 export type BudgetProfile = 'fast' | 'balanced' | 'thorough' | 'exhaustive'
-export type ParallelStrategy = 'auto' | 'scope' | 'family' | 'coverage'
+export type ParallelStrategy = 'auto' | 'scope' | 'family' | 'coverage' | 'coverage_family'
 
 export interface ScanTypeOption {
   value: ScanType

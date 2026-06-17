@@ -738,6 +738,7 @@ function CoverageAdvisorCard({
   const coveragePct = coverage ? pct(coverage.coverage) : '—'
   const selectedFamilyOption = checkFamilyOptions.find((option) => option.value === checkFamily && !option.disabled)
   const selectedRiskLabel = formatRiskLevel(selectedFamilyOption?.riskLevel)
+  const plannedFamilyOptions = checkFamilyOptions.filter((option) => option.disabled)
 
   return (
     <Card className="p-4">
@@ -802,6 +803,18 @@ function CoverageAdvisorCard({
                 {selectedRiskLabel && (
                   <Badge className={riskBadgeClass(selectedFamilyOption.riskLevel)}>{selectedRiskLabel}</Badge>
                 )}
+              </div>
+            </div>
+          )}
+          {plannedFamilyOptions.length > 0 && (
+            <div className="rounded border border-gray-800 bg-gray-950/40 p-2">
+              <div className="mb-1 text-[11px] uppercase text-gray-500">Planned checks</div>
+              <div className="flex flex-wrap gap-1.5">
+                {plannedFamilyOptions.map((option) => (
+                  <Badge key={option.value} className={riskBadgeClass(option.riskLevel)}>
+                    {option.label}
+                  </Badge>
+                ))}
               </div>
             </div>
           )}

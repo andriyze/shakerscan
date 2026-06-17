@@ -2258,8 +2258,8 @@ class ScanOptions(BaseModel):
     shards: Optional[Any] = None                    # int or "auto" (scale to workers)
     shard_strategy: Optional[str] = Field(
         default=None,
-        pattern="^(auto|scope|family|coverage)$",
-        description="auto (default), scope (partition custom_endpoints), family (broad + deep sqli/xss), or coverage (discover-once, partition all endpoints).",
+        pattern="^(auto|scope|family|coverage|coverage_family)$",
+        description="auto (default), scope (partition custom_endpoints), family (broad + deep sqli/xss), coverage (discover-once, partition all endpoints), or coverage_family (coverage buckets x broad/sqli/xss lanes).",
     )
     exploit_depth: bool = False                      # Raise exploitation caps + no early stop on shards
     auth_state_shards: bool = False                  # Fan shards out per auth identity (anon/user1/user2)
@@ -2593,7 +2593,7 @@ class ScanExecutionSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     auto_sharding_enabled: Optional[bool] = None
-    auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family|coverage)$")
+    auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family|coverage|coverage_family)$")
     auto_sharding_max_shards: Optional[int] = Field(default=None, ge=2, le=AUTO_SHARD_MAX_SHARDS)
     auto_sharding_min_workers: Optional[int] = Field(default=None, ge=1, le=20)
 

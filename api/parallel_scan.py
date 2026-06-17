@@ -33,6 +33,11 @@ Strategies:
     then partition that full endpoint list across coverage shards. This is the
     high-budget path for testing the whole target, not just the top endpoints.
 
+  - ``coverage_family``: run the same discover-once recon, then partition the
+    endpoint list and run broad, SQLi-focused, and XSS-focused passes per
+    endpoint bucket. This spends more total budget on every endpoint when a
+    large worker fleet is available.
+
 ``auto`` resolves to ``scope`` when >=2 custom endpoints are present, else
 ``family``.
 """
@@ -91,7 +96,7 @@ PARALLEL_OPTION_KEYS = (
 # only meaningful for these; for passive types it degrades to a single shard.
 ACTIVE_SCAN_TYPES = frozenset({"full", "aggressive", "smart"})
 
-VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage"})
+VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage", "coverage_family"})
 
 # exploit-depth: drive confirmed findings to proof rather than capping early.
 EXPLOIT_DEPTH_BUDGET = {
@@ -360,6 +365,35 @@ def _coverage_active_seconds(parent_options: dict[str, Any], endpoint_count: int
     return min(ceiling, max(300, seconds_per_endpoint * max(1, endpoint_count)))
 
 
+def _coverage_child_options(parent_options: dict[str, Any], slice_eps: list[str]) -> dict[str, Any]:
+    opts = _base_child_options(parent_options)
+    opts["custom_endpoints"] = slice_eps
+    opts["focused_endpoints_only"] = True
+    opts["zero_rediscovery"] = True
+    opts["no_early_stop"] = True
+    cnt = max(1, len(slice_eps))
+    # Endpoints are injected, so skip discovery work and run the full active
+    # suite deeply over every endpoint in the assigned slice.
+    _merge_custom_budget_defaults(
+        opts,
+        {
+            "max_urls": max(200, min(1000, cnt + 50)),
+            "browser_max_pages": 0,
+            "browser_max_depth": 1,
+            "discovery_depth": 1,
+            "api_probe_limit": 0,
+            "param_discovery_url_limit": 0,
+            "param_discovery_max_params": 0,
+            "nuclei_max_targets": 0,
+            "active_max_endpoints": cnt,
+            "active_max_seconds": _coverage_active_seconds(parent_options, cnt),
+            "active_params_per_endpoint": 8,
+            "smart_bola_max_endpoints": cnt,
+        },
+    )
+    return opts
+
+
 def _apply_exploit_depth(options: dict[str, Any]) -> None:
     """Raise exploitation caps + disable early stop so confirmed findings get
     driven to proof instead of being capped at a few per family."""
@@ -613,37 +647,9 @@ def plan_coverage_shards(
     per_shard_cap = max(1, per_shard_cap)
     eps = _normalize_endpoint_list(endpoints)
 
-    def _coverage_child_options(slice_eps: list[str]) -> dict[str, Any]:
-        opts = _base_child_options(parent_options)
-        opts["custom_endpoints"] = slice_eps
-        opts["focused_endpoints_only"] = True
-        opts["zero_rediscovery"] = True
-        opts["no_early_stop"] = True
-        cnt = max(1, len(slice_eps))
-        # Endpoints are injected, so skip discovery work and run the full active
-        # suite deeply over every endpoint in the assigned slice.
-        _merge_custom_budget_defaults(
-            opts,
-            {
-                "max_urls": max(200, min(1000, cnt + 50)),
-                "browser_max_pages": 0,
-                "browser_max_depth": 1,
-                "discovery_depth": 1,
-                "api_probe_limit": 0,
-                "param_discovery_url_limit": 0,
-                "param_discovery_max_params": 0,
-                "nuclei_max_targets": 0,
-                "active_max_endpoints": cnt,
-                "active_max_seconds": _coverage_active_seconds(parent_options, cnt),
-                "active_params_per_endpoint": 8,
-                "smart_bola_max_endpoints": cnt,
-            },
-        )
-        return opts
-
     if len(eps) < 2:
         notes.append(f"coverage: only {len(eps)} endpoints to partition; single shard")
-        opts = _coverage_child_options(eps) if eps else _base_child_options(parent_options)
+        opts = _coverage_child_options(parent_options, eps) if eps else _base_child_options(parent_options)
         shards = _finalize_shards(
             [ShardSpec(0, "coverage[0]", opts)],
             parent_options,
@@ -672,7 +678,7 @@ def plan_coverage_shards(
         )
     shards: list[ShardSpec] = []
     for i, slice_eps in enumerate(buckets):
-        opts = _coverage_child_options(slice_eps)
+        opts = _coverage_child_options(parent_options, slice_eps)
         shards.append(ShardSpec(index=i, label=f"coverage[{i}]", options=opts))
     shards = _finalize_shards(
         shards,
@@ -683,6 +689,108 @@ def plan_coverage_shards(
     )
     notes.append("coverage: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
+
+
+def plan_coverage_family_shards(
+    parent_options: dict[str, Any],
+    endpoints: Any,
+    *,
+    per_shard_cap: int | None = None,
+    max_shards: int | None = None,
+    notes: list[str] | None = None,
+) -> "ParallelPlan":
+    """Partition endpoints, then multiply each bucket by broad/focused lanes.
+
+    This stays on static slices for now. The ASM attempt ledger is currently
+    endpoint-scoped, not endpoint+family-scoped, so dynamic family workers would
+    mark an endpoint terminal after only one family pass.
+    """
+    notes = notes if notes is not None else []
+    if max_shards is None:
+        try:
+            max_shards = int(parent_options.get("coverage_max_shards") or COVERAGE_MAX_SHARDS)
+        except (TypeError, ValueError):
+            max_shards = COVERAGE_MAX_SHARDS
+    max_total_shards = max(1, min(COVERAGE_MAX_TOTAL_SHARDS, int(max_shards)))
+
+    _req = parent_options.get("shards")
+    if isinstance(_req, bool):
+        _req = None
+    _req_n = None
+    if isinstance(_req, int) and _req > 0:
+        _req_n = _req
+    elif isinstance(_req, str) and _req.strip().isdigit():
+        _req_n = int(_req.strip())
+    if _req_n:
+        capped = max(1, min(max_total_shards, _req_n))
+        if capped < max_total_shards:
+            notes.append(f"coverage_family: capping total fan-out to requested {_req_n} shard(s)")
+        max_total_shards = capped
+
+    if per_shard_cap is None:
+        try:
+            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or COVERAGE_PER_SHARD_CAP)
+        except (TypeError, ValueError):
+            per_shard_cap = COVERAGE_PER_SHARD_CAP
+    per_shard_cap = max(1, int(per_shard_cap))
+    eps = _normalize_endpoint_list(endpoints)
+    if not eps:
+        notes.append("coverage_family requested but no endpoints were harvested")
+        return ParallelPlan(strategy="coverage_family", shards=[], notes=notes)
+
+    lanes: list[tuple[str, dict[str, Any]]] = [("broad", {})]
+    lanes.extend((spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    if max_total_shards < len(lanes):
+        selected_lane_count = max(1, max_total_shards)
+        dropped = [name for name, _opts in lanes[selected_lane_count:]]
+        notes.append(
+            f"coverage_family: shard cap leaves {selected_lane_count}/{len(lanes)} lane(s); "
+            f"dropped {', '.join(dropped)}"
+        )
+        lanes = lanes[:selected_lane_count]
+
+    import math
+
+    max_endpoint_buckets = max(1, max_total_shards // max(1, len(lanes)))
+    desired_buckets = max(1, math.ceil(len(eps) / per_shard_cap))
+    bucket_count = max(1, min(max_endpoint_buckets, desired_buckets))
+    buckets = _partition_round_robin(eps, bucket_count)
+    if len(eps) > len(buckets) * per_shard_cap:
+        notes.append(
+            f"coverage_family: {len(eps)} endpoints exceed {len(buckets)} bucket(s) x "
+            f"{per_shard_cap} cap; slices grow to preserve endpoint coverage"
+        )
+
+    shards: list[ShardSpec] = []
+    for bucket_index, slice_eps in enumerate(buckets):
+        for lane_name, lane_options in lanes:
+            opts = _coverage_child_options(parent_options, slice_eps)
+            if lane_options:
+                opts.update(lane_options)
+                opts["thorough_params"] = True
+                if (opts.get("budget_profile") or "balanced") in ("fast", "balanced"):
+                    opts["budget_profile"] = "thorough"
+            shards.append(
+                ShardSpec(
+                    index=len(shards),
+                    label=f"coverage[{bucket_index}]:{lane_name}",
+                    options=opts,
+                )
+            )
+
+    shards = _finalize_shards(
+        shards,
+        parent_options,
+        notes,
+        max_expanded_shards=COVERAGE_MAX_TOTAL_SHARDS,
+        global_checks_once=True,
+    )
+    notes.append(
+        "coverage_family: static endpoint buckets multiplied by broad/focused family lanes; "
+        "dynamic allocator disabled until the attempt ledger is family-aware"
+    )
+    notes.append("coverage_family: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
+    return ParallelPlan(strategy="coverage_family", shards=shards, notes=notes)
 
 
 def coverage_allocation_mode(parent_options: dict[str, Any]) -> str:
@@ -966,7 +1074,7 @@ def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str,
             return 0
 
     normalized_strategy = (strategy or "").strip().lower()
-    disjoint_strategy = normalized_strategy in {"scope", "coverage"}
+    disjoint_strategy = normalized_strategy in {"scope", "coverage", "coverage_family"}
     all_assigned: set[str] = set()
     completed_assigned: set[str] = set()
     assigned_attempts = 0
@@ -993,9 +1101,10 @@ def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str,
             "basis": "assigned_custom_endpoints",
         }
         if assigned_attempts != discovered:
-            endpoints_summary["auth_attempts_assigned"] = assigned_attempts
-            endpoints_summary["auth_attempts_completed"] = completed_attempts
-            endpoints_summary["auth_attempt_coverage"] = (
+            duplicate_prefix = "family_attempt" if normalized_strategy == "coverage_family" else "auth_attempt"
+            endpoints_summary[f"{duplicate_prefix}s_assigned"] = assigned_attempts
+            endpoints_summary[f"{duplicate_prefix}s_completed"] = completed_attempts
+            endpoints_summary[f"{duplicate_prefix}_coverage"] = (
                 round(completed_attempts / assigned_attempts, 3) if assigned_attempts else 0.0
             )
     elif covs:
