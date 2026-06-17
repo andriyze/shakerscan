@@ -10351,8 +10351,15 @@ async def get_discovery(discovery_id: str):
 # WORKER MANAGEMENT
 # ============================================================
 
+# Max worker replicas the /workers scaler will allow. Configurable so operators
+# with more CPU/RAM can run larger fleets (each worker uses ~1-2 cores, 2-4GB).
+WORKER_SCALE_MAX = max(1, int(os.environ.get("SHAKERSCAN_MAX_WORKERS") or 30))
+
+
 class WorkerScaleRequest(BaseModel):
-    count: int = Field(..., ge=1, le=20, description="Number of workers (1-20)")
+    # Hard ceiling here is a sanity bound; the effective cap is WORKER_SCALE_MAX,
+    # enforced in scale_workers so it can be raised by env without a code change.
+    count: int = Field(..., ge=1, le=200, description="Number of worker containers")
 
 
 def docker_socket_request(method: str, path: str, body: dict = None) -> tuple[int, dict | list]:
@@ -10605,7 +10612,7 @@ async def get_workers():
         return {
             "count": running,
             "workers": worker_list,
-            "max_allowed": 20
+            "max_allowed": WORKER_SCALE_MAX
         }
     except FileNotFoundError:
         return {
@@ -10628,8 +10635,8 @@ async def scale_workers(request: WorkerScaleRequest):
 
     try:
         count = request.count
-        if count < 1 or count > 20:
-            raise HTTPException(400, "Workers must be between 1 and 20")
+        if count < 1 or count > WORKER_SCALE_MAX:
+            raise HTTPException(400, f"Workers must be between 1 and {WORKER_SCALE_MAX}")
 
         # Get current workers via socket API
         filters = urllib.parse.quote('{"name":["worker"]}')
@@ -10661,25 +10668,30 @@ async def scale_workers(request: WorkerScaleRequest):
             }
 
         if count > current_count:
-            # Scale up - start stopped workers first
-            started = 0
-            for container in stopped[:count - current_count]:
-                container_id = container.get('Id')
-                start_status, _ = docker_socket_request("POST", f"/containers/{container_id}/start")
-                if start_status in [204, 304]:  # 204 = started, 304 = already running
-                    started += 1
+            # Remove non-running worker containers (stopped, crash-looping, or left
+            # over from a prior scale-down) instead of restarting them. Restarting a
+            # stopped container brings back its OUTDATED baked image, which then
+            # crashes against the bind-mounted current code (the version-skew bug).
+            # We always (re)create the shortfall from the running fleet's current
+            # image so the whole fleet stays on one code version.
+            for container in stopped:
+                cid = container.get('Id')
+                if cid:
+                    docker_socket_request("DELETE", f"/containers/{cid}?force=true")
 
-            new_count = current_count + started
+            started = 0  # stale stopped containers are recreated, never restarted
+            new_count = current_count
 
-            # If we still need more workers, create new containers
             needed = count - new_count
             if needed > 0:
-                # Get compose context from existing workers
-                project, network, image = get_compose_context(workers)
+                # Infer image/project/network from a RUNNING worker (freshest image),
+                # never a stopped/stale one.
+                ref_pool = running or workers
+                project, network, image = get_compose_context(ref_pool)
                 if project and network and image:
-                    # Find the highest worker number
+                    # Find the highest worker number (among the surviving running fleet)
                     existing_numbers = []
-                    for w in workers:
+                    for w in ref_pool:
                         names = w.get('Names', [])
                         name = names[0].lstrip('/') if names else ''
                         # Extract number from name like "shakerscan-oss-worker-3"
@@ -10697,9 +10709,9 @@ async def scale_workers(request: WorkerScaleRequest):
                     existing_env = [f"REDIS_URL={REDIS_URL}", f"DATABASE_URL={DATABASE_URL}"]
                     existing_binds = [f"{os.environ.get('HOST_RESULTS_PATH', '/tmp/scanner-results')}:/results:rw"]
 
-                    if workers:
-                        # Inspect first running worker to get full config
-                        ref_worker = workers[0]
+                    if ref_pool:
+                        # Inspect a running worker to copy its env + bind mounts.
+                        ref_worker = ref_pool[0]
                         ref_id = ref_worker.get("Id", "")
                         if ref_id:
                             inspect_status, inspect_data = docker_socket_request("GET", f"/containers/{ref_id}/json")
@@ -10779,19 +10791,22 @@ async def scale_workers(request: WorkerScaleRequest):
             }
 
         else:
-            # Scale down - stop excess workers
-            to_stop = running[count:]
-            stopped_count = 0
-            for container in to_stop:
+            # Scale down - REMOVE excess workers (not just stop them). A merely
+            # stopped worker lingers and gets restarted on the next scale-up running
+            # a stale baked image; removing forces a fresh create from the current
+            # image next time, keeping the fleet on one code version.
+            to_remove = running[count:]
+            removed_count = 0
+            for container in to_remove:
                 container_id = container.get('Id')
-                stop_status, _ = docker_socket_request("POST", f"/containers/{container_id}/stop")
-                if stop_status in [204, 304]:  # 204 = stopped, 304 = already stopped
-                    stopped_count += 1
+                rm_status, _ = docker_socket_request("DELETE", f"/containers/{container_id}?force=true")
+                if rm_status in [204, 200]:
+                    removed_count += 1
 
             return {
                 "status": "success",
                 "target_count": count,
-                "message": f"Scaled down to {count} worker(s) (stopped {stopped_count})"
+                "message": f"Scaled down to {count} worker(s) (removed {removed_count})"
             }
 
     except FileNotFoundError:
