@@ -18,7 +18,7 @@ import sys
 import time
 import urllib.parse
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from scanner_tools.common import is_in_scope_url, run
 try:
@@ -2305,75 +2305,125 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
     return out
 
 
+class ActiveCheckFamily(NamedTuple):
+    """One runnable active check family — the scanner's SINGLE SOURCE OF TRUTH.
+
+    Adding a runnable active family is one entry in ``ACTIVE_CHECK_FAMILIES`` plus
+    its dispatch/module integration, instead of separately editing a flag map, an
+    alias map, and a focused-finding rules map (the scattered "5-edit-site" wiring
+    the parallel-scan doc §8.3 calls out). The legacy ``SCANNER_ACTIVE_FAMILY_FLAGS``
+    / ``SCANNER_ACTIVE_FAMILY_ALIASES`` / ``FOCUSED_FAMILY_RULES`` views below are
+    DERIVED from this registry, so every existing call site stays unchanged.
+    """
+    name: str
+    active_xss: bool                         # legacy 2-flag mapping for the P5 xss/sqli loops
+    active_sqli: bool
+    aliases: tuple[str, ...] = ()
+    tools: frozenset[str] = frozenset()
+    cwes: frozenset[str] = frozenset()
+    title_markers: tuple[str, ...] = ()
+    type_markers: tuple[str, ...] = ()
+    remediation: tuple[str, ...] = ()
+    requires_two_auth_states: bool = False   # e.g. BOLA's multi-user comparison
+    emits_endpoint_telemetry: bool = False
+
+
+ACTIVE_CHECK_FAMILIES: dict[str, ActiveCheckFamily] = {
+    "all": ActiveCheckFamily(name="all", active_xss=True, active_sqli=True),
+    "sqli": ActiveCheckFamily(
+        name="sqli", active_xss=False, active_sqli=True,
+        aliases=("sql", "sql-injection", "sql_injection"),
+        tools=frozenset({"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}),
+        cwes=frozenset({"CWE-89", "CWE-943"}),
+        title_markers=("sql injection",),
+        type_markers=("sqli", "sql injection", "nosql"),
+        remediation=(
+            "Use parameterized queries/prepared statements for database access.",
+            "Validate and type-check request parameters before using them in queries.",
+            "Run database accounts with least privilege and monitor anomalous query behavior.",
+        ),
+        emits_endpoint_telemetry=True,
+    ),
+    "xss": ActiveCheckFamily(
+        name="xss", active_xss=True, active_sqli=False,
+        aliases=("cross-site-scripting", "cross_site_scripting"),
+        tools=frozenset({"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"}),
+        cwes=frozenset({"CWE-79"}),
+        title_markers=("xss", "cross-site scripting"),
+        type_markers=("xss", "cross-site scripting"),
+        remediation=(
+            "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
+            "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
+            "Add regression tests for the confirmed XSS payload and affected parameter.",
+        ),
+        emits_endpoint_telemetry=True,
+    ),
+    "auth": ActiveCheckFamily(
+        name="auth", active_xss=False, active_sqli=False,
+        aliases=("authentication", "access-control", "access_control"),
+        tools=frozenset({"smart_auth", "session_management", "auth_bypass", "forced_browsing"}),
+        cwes=frozenset({"CWE-306", "CWE-862", "CWE-287", "CWE-425"}),
+        title_markers=("authentication", "auth bypass", "anonymous access", "forced browsing"),
+        type_markers=("authentication", "access control", "auth"),
+        remediation=(
+            "Require authentication before returning user-specific resources.",
+            "Centralize authorization middleware so anonymous requests cannot reach protected handlers.",
+            "Add regression tests that replay the affected endpoint without credentials.",
+        ),
+        emits_endpoint_telemetry=True,
+    ),
+    "bola": ActiveCheckFamily(
+        name="bola", active_xss=False, active_sqli=False,
+        aliases=("idor", "object_authorization", "object-authorization"),
+        tools=frozenset({"smart_bola", "bola_idor", "bola_check", "bola_multi_user", "bola_enumeration"}),
+        cwes=frozenset({"CWE-639"}),
+        title_markers=("bola", "idor", "object level authorization", "object-level authorization"),
+        type_markers=("bola", "idor", "access control"),
+        remediation=(
+            "Enforce object-level authorization on every resource read and write.",
+            "Compare the requesting principal against the resource owner or an explicit sharing policy.",
+            "Add multi-user regression tests for the affected resource IDs and methods.",
+        ),
+        requires_two_auth_states=True,
+        emits_endpoint_telemetry=True,
+    ),
+}
+
+
+# --- Derived legacy views (kept byte-identical so existing call sites are unchanged) ---
 SCANNER_ACTIVE_FAMILY_FLAGS: dict[str, tuple[bool, bool]] = {
-    "all": (True, True),
-    "sqli": (False, True),
-    "xss": (True, False),
-    "auth": (False, False),
-    "bola": (False, False),
+    name: (fam.active_xss, fam.active_sqli) for name, fam in ACTIVE_CHECK_FAMILIES.items()
 }
 
 SCANNER_ACTIVE_FAMILY_ALIASES: dict[str, str] = {
     "all": "all",
-    "sql": "sqli",
-    "sql-injection": "sqli",
-    "sql_injection": "sqli",
-    "cross-site-scripting": "xss",
-    "cross_site_scripting": "xss",
-    "authentication": "auth",
-    "access-control": "auth",
-    "access_control": "auth",
-    "idor": "bola",
-    "object_authorization": "bola",
-    "object-authorization": "bola",
+    **{alias: fam.name for fam in ACTIVE_CHECK_FAMILIES.values() for alias in fam.aliases},
 }
 
 FOCUSED_FAMILY_RULES: dict[str, dict[str, Any]] = {
-    "sqli": {
-        "tools": {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"},
-        "cwes": {"CWE-89", "CWE-943"},
-        "title_markers": ("sql injection",),
-        "type_markers": ("sqli", "sql injection", "nosql"),
-        "remediation": [
-            "Use parameterized queries/prepared statements for database access.",
-            "Validate and type-check request parameters before using them in queries.",
-            "Run database accounts with least privilege and monitor anomalous query behavior.",
-        ],
-    },
-    "xss": {
-        "tools": {"smart_xss", "custom_xss", "dalfox", "dom_xss", "hash_route_dom_xss", "stored_xss"},
-        "cwes": {"CWE-79"},
-        "title_markers": ("xss", "cross-site scripting"),
-        "type_markers": ("xss", "cross-site scripting"),
-        "remediation": [
-            "Contextually encode untrusted data before rendering it in HTML, JavaScript, URLs, or attributes.",
-            "Use framework-safe templating APIs and avoid unsafe DOM sinks.",
-            "Add regression tests for the confirmed XSS payload and affected parameter.",
-        ],
-    },
-    "bola": {
-        "tools": {"smart_bola", "bola_idor", "bola_check", "bola_multi_user", "bola_enumeration"},
-        "cwes": {"CWE-639"},
-        "title_markers": ("bola", "idor", "object level authorization", "object-level authorization"),
-        "type_markers": ("bola", "idor", "access control"),
-        "remediation": [
-            "Enforce object-level authorization on every resource read and write.",
-            "Compare the requesting principal against the resource owner or an explicit sharing policy.",
-            "Add multi-user regression tests for the affected resource IDs and methods.",
-        ],
-    },
-    "auth": {
-        "tools": {"smart_auth", "session_management", "auth_bypass", "forced_browsing"},
-        "cwes": {"CWE-306", "CWE-862", "CWE-287", "CWE-425"},
-        "title_markers": ("authentication", "auth bypass", "anonymous access", "forced browsing"),
-        "type_markers": ("authentication", "access control", "auth"),
-        "remediation": [
-            "Require authentication before returning user-specific resources.",
-            "Centralize authorization middleware so anonymous requests cannot reach protected handlers.",
-            "Add regression tests that replay the affected endpoint without credentials.",
-        ],
-    },
+    fam.name: {
+        "tools": set(fam.tools),
+        "cwes": set(fam.cwes),
+        "title_markers": tuple(fam.title_markers),
+        "type_markers": tuple(fam.type_markers),
+        "remediation": list(fam.remediation),
+    }
+    for fam in ACTIVE_CHECK_FAMILIES.values()
+    if fam.tools  # "all" carries no focused-finding rules
 }
+
+
+def runnable_active_families() -> tuple[str, ...]:
+    """Active check families the scanner can actually run (single source of truth)."""
+    return tuple(ACTIVE_CHECK_FAMILIES.keys())
+
+
+def family_requires_two_auth_states(family: Any) -> bool:
+    """True if a focused family needs a second authenticated identity to run
+    (e.g. BOLA's multi-user comparison). Driven by the registry so a future family
+    that declares the precondition is gated automatically, not by ad-hoc wiring."""
+    fam = ACTIVE_CHECK_FAMILIES.get(normalize_scanner_check_family(family) or "")
+    return bool(fam and fam.requires_two_auth_states)
 
 
 def normalize_scanner_check_family(value: Any) -> str | None:
@@ -9626,7 +9676,7 @@ async def build_report(target: str,
             if bola_eligible
             else None
         )
-        if bola_focused and (not auth_session or not user2_session):
+        if bola_focused and family_requires_two_auth_states("bola") and (not auth_session or not user2_session):
             active_block["smart_bola"] = {
                 "vulnerable": False,
                 "findings": [],

@@ -128,3 +128,60 @@ def test_resolve_active_check_flags_rejects_unsupported_family():
 def test_resolve_active_check_flags_rejects_conflicting_legacy_flags():
     with pytest.raises(ValueError, match="conflicts"):
         scanner_mod.resolve_active_check_flags(check_family="sqli", xss=True)
+
+
+# --- ACTIVE_CHECK_FAMILIES registry: single source of truth (keystone) ---
+
+def test_registry_is_single_source_of_truth_for_runnable_families():
+    assert scanner_mod.runnable_active_families() == ("all", "sqli", "xss", "auth", "bola")
+    assert set(scanner_mod.ACTIVE_CHECK_FAMILIES) == {"all", "sqli", "xss", "auth", "bola"}
+
+
+def test_legacy_flag_view_is_derived_byte_identical():
+    assert scanner_mod.SCANNER_ACTIVE_FAMILY_FLAGS == {
+        "all": (True, True),
+        "sqli": (False, True),
+        "xss": (True, False),
+        "auth": (False, False),
+        "bola": (False, False),
+    }
+    # order is preserved so the "allowed families" error message is unchanged
+    assert ", ".join(scanner_mod.SCANNER_ACTIVE_FAMILY_FLAGS) == "all, sqli, xss, auth, bola"
+
+
+def test_alias_view_is_derived_byte_identical():
+    assert scanner_mod.SCANNER_ACTIVE_FAMILY_ALIASES == {
+        "all": "all",
+        "sql": "sqli",
+        "sql-injection": "sqli",
+        "sql_injection": "sqli",
+        "cross-site-scripting": "xss",
+        "cross_site_scripting": "xss",
+        "authentication": "auth",
+        "access-control": "auth",
+        "access_control": "auth",
+        "idor": "bola",
+        "object_authorization": "bola",
+        "object-authorization": "bola",
+    }
+
+
+def test_focused_rules_view_is_derived_and_excludes_all():
+    rules = scanner_mod.FOCUSED_FAMILY_RULES
+    assert set(rules) == {"sqli", "xss", "auth", "bola"}  # "all" carries no focused rules
+    # representative entries preserve their content exactly
+    assert rules["sqli"]["tools"] == {"smart_sqli", "custom_sqli", "sqlmap", "nosql_injection"}
+    assert rules["sqli"]["cwes"] == {"CWE-89", "CWE-943"}
+    assert rules["bola"]["cwes"] == {"CWE-639"}
+    assert rules["bola"]["remediation"][0].startswith("Enforce object-level authorization")
+    assert isinstance(rules["auth"]["title_markers"], tuple)
+    assert isinstance(rules["xss"]["remediation"], list)
+
+
+def test_family_requires_two_auth_states_is_registry_driven():
+    assert scanner_mod.family_requires_two_auth_states("bola") is True
+    assert scanner_mod.family_requires_two_auth_states("idor") is True  # alias resolves
+    assert scanner_mod.family_requires_two_auth_states("sqli") is False
+    assert scanner_mod.family_requires_two_auth_states("xss") is False
+    assert scanner_mod.family_requires_two_auth_states("auth") is False
+    assert scanner_mod.family_requires_two_auth_states("nope") is False
