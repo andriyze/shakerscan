@@ -41,6 +41,17 @@ def test_domain_rate_reservation_zero_remaining_cap_denies():
     assert a.reserved_domain_rate_count(redis, "example.test") == 0
 
 
+def test_domain_rate_reservation_caps_at_positive_limit():
+    # With a non-zero cap (now the default), reservations are bounded by the
+    # remaining per-domain headroom and denied once the cap is reached.
+    redis = _FakeRedis()
+
+    assert a.reserve_domain_rate(redis, "example.test", 100, 60) == 60
+    assert a.reserved_domain_rate_count(redis, "example.test") == 60
+    assert a.reserve_domain_rate(redis, "example.test", 100, 60) == 40  # clamped to headroom
+    assert a.reserve_domain_rate(redis, "example.test", 100, 1) == 0    # cap reached
+
+
 def test_normalize_path_templates_volatile_ids():
     assert a.normalize_path("/users/42") == "/users/{id}"
     assert a.normalize_path("/u/550e8400-e29b-41d4-a716-446655440000/x") == "/u/{uuid}/x"
@@ -632,6 +643,11 @@ def _utc(y=2026, mo=6, d=15, h=12, mi=0):
 def test_merge_asm_config_defaults_and_clamping():
     cfg = a.merge_asm_config(None)
     assert cfg["batch_size"] == a.DEFAULT_ASM_CONFIG["batch_size"]
+    # New targets store an empty asm_config, so the default per-root-domain rate
+    # cap must be non-zero — otherwise the dispatcher/worker skip the throttle
+    # (every gate is `if cap > 0`) and Continuous ASM can hammer a domain.
+    assert a.DEFAULT_ASM_CONFIG["max_requests_per_hour_per_domain"] > 0
+    assert a.merge_asm_config({})["max_requests_per_hour_per_domain"] > 0
     # clamps out-of-range and ignores junk, keeps valid overrides
     cfg = a.merge_asm_config({"batch_size": 99999, "stale_days": -5, "exploit_depth": 1, "bogus": "x"})
     assert cfg["batch_size"] == 1000          # clamped to max

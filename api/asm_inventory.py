@@ -12,6 +12,7 @@ async helpers take an asyncpg connection and do the DB work.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1208,6 +1209,18 @@ async def mark_partial(conn, endpoint_ids: list, *, verdict: str | None = "parti
 # Defaults are deliberately conservative: one modest batch at a time, slow
 # cadence, weekly recon. The crash lesson (concurrent shards + batch took a
 # target down) means the engine must never stack load on a target.
+
+# Default per-root-domain rate ceiling (endpoints tested per rolling hour across
+# all targets sharing a root domain). A single target does ~50/hour (batch_size
+# 50 + min_interval_minutes 60), so 1000 leaves ~20 targets'-worth of batches
+# before throttling — gentle for one target, but caps a fleet of subdomains so
+# auto-enabled Continuous ASM cannot collectively hammer a domain. Operators can
+# set ASM_DEFAULT_DOMAIN_RATE_PER_HOUR=0 to restore the old unlimited behavior.
+try:
+    _DEFAULT_DOMAIN_RATE_PER_HOUR = max(0, int(os.environ.get("ASM_DEFAULT_DOMAIN_RATE_PER_HOUR") or 1000))
+except (TypeError, ValueError):
+    _DEFAULT_DOMAIN_RATE_PER_HOUR = 1000
+
 DEFAULT_ASM_CONFIG: dict[str, Any] = {
     "batch_size": 50,                      # endpoints per exploit batch
     "stale_days": 30,                      # re-test tested endpoints older than this
@@ -1218,7 +1231,7 @@ DEFAULT_ASM_CONFIG: dict[str, Any] = {
     "window_start_hour": None,             # int 0-23 UTC, None = no hour restriction
     "window_end_hour": None,               # int 0-23 UTC (exclusive); wraps midnight if < start
     "window_days": None,                   # list[int] 0=Mon..6=Sun, None = all days
-    "max_requests_per_hour_per_domain": 0, # 0 = unlimited; per-root-domain rate cap (Phase 4)
+    "max_requests_per_hour_per_domain": _DEFAULT_DOMAIN_RATE_PER_HOUR, # per-root-domain rate cap; 0 = unlimited (set via ASM_DEFAULT_DOMAIN_RATE_PER_HOUR)
 }
 
 _INT_BOUNDS = {
