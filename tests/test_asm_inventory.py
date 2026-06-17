@@ -107,13 +107,18 @@ def test_normalize_worklist_respects_limit():
 
 
 class _CoverageConn:
-    def __init__(self, status_row, attempt_row):
-        self.rows = [status_row, attempt_row]
+    def __init__(self, status_row, attempt_rows):
+        self.rows = [status_row]
+        self.attempt_rows = attempt_rows
         self.queries = []
 
     async def fetchrow(self, query, *args):
         self.queries.append((query, args))
         return self.rows.pop(0)
+
+    async def fetch(self, query, *args):
+        self.queries.append((query, args))
+        return self.attempt_rows
 
 
 def test_coverage_summary_defaults_to_endpoint_status_without_attempts():
@@ -130,14 +135,7 @@ def test_coverage_summary_defaults_to_endpoint_status_without_attempts():
             "auth_blocked": 0,
             "partial": 1,
         },
-        {
-            "attempted": 0,
-            "completed": 0,
-            "partial": 0,
-            "auth_blocked": 0,
-            "rate_limited": 0,
-            "error": 0,
-        },
+        [],
     )
 
     summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
@@ -147,8 +145,6 @@ def test_coverage_summary_defaults_to_endpoint_status_without_attempts():
     assert summary["coverage"] == 0.25
     assert summary["status_coverage"]["tested"] == 1
     assert summary["attempt_coverage"]["attempted"] == 0
-    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[1][0]
-    assert "THEN 'partial'" in conn.queries[1][0]
 
 
 def test_coverage_summary_uses_latest_attempt_ledger_when_present():
@@ -165,14 +161,11 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
             "auth_blocked": 0,
             "partial": 0,
         },
-        {
-            "attempted": 3,
-            "completed": 2,
-            "partial": 1,
-            "auth_blocked": 0,
-            "rate_limited": 0,
-            "error": 0,
-        },
+        [
+            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True}},
+            {"status": "completed", "scanner_telemetry_json": {"per_endpoint_telemetry": True}},
+            {"status": "partial", "scanner_telemetry_json": {"per_endpoint_telemetry": False}},
+        ],
     )
 
     summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
@@ -184,8 +177,6 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     assert summary["partial"] == 1
     assert summary["coverage"] == 0.5  # completed / non-gone endpoints
     assert summary["status_coverage"]["coverage"] == 0.25
-    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[1][0]
-    assert "THEN 'partial'" in conn.queries[1][0]
     assert summary["attempt_coverage"] == {
         "total": 4,
         "attempted": 3,
@@ -201,29 +192,78 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     }
 
 
+def test_coverage_summary_treats_completed_without_endpoint_telemetry_as_partial():
+    target_id = uuid.uuid4()
+    conn = _CoverageConn(
+        {
+            "total": 1,
+            "tested": 1,
+            "untested": 0,
+            "in_progress": 0,
+            "stale": 0,
+            "gone": 0,
+            "expired_leases": 0,
+            "auth_blocked": 0,
+            "partial": 0,
+        },
+        [
+            {
+                "status": "completed",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": False},
+            }
+        ],
+    )
+
+    summary = asyncio.run(a.coverage_summary(conn, str(target_id)))
+
+    assert summary["coverage_basis"] == "attempt_ledger"
+    assert summary["tested"] == 0
+    assert summary["partial"] == 1
+    assert summary["coverage"] == 0.0
+    assert summary["attempt_coverage"]["completed"] == 0
+    assert summary["attempt_coverage"]["partial"] == 1
+    assert summary["status_coverage"]["tested"] == 1
+
+
 class _CampaignAttemptConn:
-    def __init__(self, row):
-        self.row = row
+    def __init__(self, rows):
+        self.rows = rows
         self.queries = []
 
-    async def fetchrow(self, query, *args):
+    async def fetch(self, query, *args):
         self.queries.append((query, args))
-        return self.row
+        return self.rows
 
 
 def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard():
     campaign_id = uuid.uuid4()
     conn = _CampaignAttemptConn(
-        {
-            "attempted": 4,
-            "completed": 2,
-            "partial": 1,
-            "auth_blocked": 1,
-            "rate_limited": 0,
-            "error": 0,
-            "attempted_params": 7,
-            "completed_params": 5,
-        }
+        [
+            {
+                "status": "completed",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "attempted_params_count": 3,
+                "completed_params_count": 3,
+            },
+            {
+                "status": "completed",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "attempted_params_count": 2,
+                "completed_params_count": 2,
+            },
+            {
+                "status": "completed",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": False},
+                "attempted_params_count": 1,
+                "completed_params_count": 0,
+            },
+            {
+                "status": "auth_missing",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": False},
+                "attempted_params_count": 1,
+                "completed_params_count": 0,
+            },
+        ]
     )
 
     summary = asyncio.run(a.campaign_attempt_summary(conn, str(campaign_id), expected_total=6))
@@ -245,8 +285,6 @@ def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard(
         "coverage_denominator": "assigned_auth_scoped_endpoints",
     }
     assert conn.queries[0][1] == (campaign_id,)
-    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[0][0]
-    assert "THEN 'partial'" in conn.queries[0][0]
 
 
 # ---- Allocator helpers -----------------------------------------------------

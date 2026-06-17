@@ -134,12 +134,47 @@ class _FakeSlotRedis:
         self.values.pop(key, None)
 
 
+class _FakeJobRedis:
+    def __init__(self):
+        self.hashes = []
+        self.expired = []
+
+    def hset(self, key, *args, mapping=None):
+        self.hashes.append((key, args, dict(mapping or {})))
+
+    def expire(self, key, ttl):
+        self.expired.append((key, ttl))
+
+
 class _FakeCancelRedis:
     def __init__(self, cancelled: bool):
         self.cancelled = cancelled
 
     def get(self, key):
         return b"1" if self.cancelled else None
+
+
+class _FakeAsmConn:
+    def __init__(self):
+        self.executions = []
+
+    async def execute(self, query, *args):
+        self.executions.append((query, args))
+        return "UPDATE 1"
+
+
+class _FakeAsmPool:
+    def __init__(self):
+        self.conn = _FakeAsmConn()
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
@@ -495,6 +530,87 @@ def test_apply_campaign_coverage_rollup_ignores_empty_attempts():
 
     assert worker._apply_campaign_coverage_rollup(merged, {"attempted": 0}) is False
     assert merged["smart_coverage"]["endpoints"]["basis"] == "assigned_custom_endpoints"
+
+
+def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):
+    endpoint_id = "11111111-1111-1111-1111-111111111111"
+    calls = {"mark_partial": [], "record": []}
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        return [
+            {
+                "id": endpoint_id,
+                "method": "GET",
+                "path": "/api/users",
+                "param_shape": "id",
+                "auth_state": "anonymous",
+                "param_location": "query",
+                "replay_spec": None,
+            }
+        ]
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        assert options["custom_endpoints"] == ["GET /api/users?id=1"]
+        return {
+            "target": target,
+            "findings": [],
+            "result": {"score": 95, "grade": "A"},
+            "active_checks": {},
+        }
+
+    async def fake_mark_partial(conn, endpoint_ids, *, verdict):
+        calls["mark_partial"].append({"endpoint_ids": endpoint_ids, "verdict": verdict})
+
+    async def fake_mark_tested(*args, **kwargs):
+        raise AssertionError("no-telemetry ASM batch must not mark endpoints tested")
+
+    async def fake_record_endpoint_attempts(conn, endpoint_ids, **kwargs):
+        calls["record"].append({"endpoint_ids": endpoint_ids, **kwargs})
+        return len(endpoint_ids)
+
+    async def fake_finish_campaign(*args, **kwargs):
+        return 1
+
+    async def fake_upsert_endpoints(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeJobRedis())
+    monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker.asm_inventory, "mark_partial", fake_mark_partial)
+    monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
+    monkeypatch.setattr(worker.asm_inventory, "record_endpoint_attempts", fake_record_endpoint_attempts)
+    monkeypatch.setattr(worker.asm_inventory, "finish_campaign", fake_finish_campaign)
+    monkeypatch.setattr(worker.asm_inventory, "upsert_endpoints", fake_upsert_endpoints)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-no-telemetry",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "options": {"scan_type": "smart"},
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 1,
+            }
+        )
+    )
+
+    assert calls["mark_partial"] == [
+        {"endpoint_ids": [endpoint_id], "verdict": "missing_endpoint_telemetry"}
+    ]
+    assert len(calls["record"]) == 1
+    record = calls["record"][0]
+    assert record["endpoint_ids"] == [endpoint_id]
+    assert record["status"] == "partial"
+    assert record["attempted_params_count"] == 0
+    assert record["completed_params_count"] == 0
+    assert record["error_summary"] == "completed_without_endpoint_telemetry"
+    assert record["scanner_telemetry_json"]["per_endpoint_telemetry"] is False
+    assert record["scanner_telemetry_json"]["completed_without_endpoint_telemetry"] is True
 
 
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):

@@ -406,6 +406,103 @@ async def upsert_endpoints(
     return count
 
 
+def _attempt_telemetry_true(telemetry: Any, key: str) -> bool:
+    if isinstance(telemetry, str):
+        try:
+            import json
+            telemetry = json.loads(telemetry)
+        except Exception:
+            telemetry = {}
+    if not isinstance(telemetry, dict):
+        return False
+    value = telemetry.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() == "true"
+
+
+def normalize_attempt_status_for_coverage(status: Any, telemetry: Any = None) -> str:
+    """Normalize attempt status before coverage accounting.
+
+    A batch-level "completed" status is not endpoint proof. Completed rows count
+    as tested only when scanner endpoint telemetry explicitly says the endpoint
+    was exercised.
+    """
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed" and not _attempt_telemetry_true(telemetry, "per_endpoint_telemetry"):
+        return "partial"
+    return normalized
+
+
+def attempt_coverage_from_rows(
+    rows: list[Any],
+    *,
+    total: int,
+    basis: str,
+    coverage_denominator: str | None = None,
+) -> dict[str, Any]:
+    attempted = 0
+    completed = 0
+    partial = 0
+    auth_blocked = 0
+    rate_limited = 0
+    error = 0
+    attempted_params = 0
+    completed_params = 0
+
+    def _get(row: Any, key: str, default: Any = None) -> Any:
+        try:
+            return row[key]
+        except Exception:
+            return default
+
+    for row in rows or []:
+        status = normalize_attempt_status_for_coverage(
+            _get(row, "status"),
+            _get(row, "scanner_telemetry_json"),
+        )
+        attempted += 1
+        if status == "completed":
+            completed += 1
+        elif status in {"partial", "timeout"}:
+            partial += 1
+        elif status in {"auth_missing", "auth_failed"}:
+            auth_blocked += 1
+        elif status == "rate_limited":
+            rate_limited += 1
+        elif status == "error":
+            error += 1
+        try:
+            attempted_params += int(_get(row, "attempted_params_count", 0) or 0)
+        except Exception:
+            pass
+        try:
+            completed_params += int(_get(row, "completed_params_count", 0) or 0)
+        except Exception:
+            pass
+
+    total = max(0, int(total or 0), attempted)
+    summary = {
+        "total": total,
+        "attempted": attempted,
+        "completed": completed,
+        "tested": completed,
+        "untested": max(0, total - attempted),
+        "partial": partial,
+        "auth_blocked": auth_blocked,
+        "rate_limited": rate_limited,
+        "error": error,
+        "coverage": round(completed / total, 3) if total else 0.0,
+        "basis": basis,
+    }
+    if attempted_params or completed_params:
+        summary["attempted_params"] = attempted_params
+        summary["completed_params"] = completed_params
+    if coverage_denominator:
+        summary["coverage_denominator"] = coverage_denominator
+    return summary
+
+
 async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
     """Per-target coverage counts for the ASM surface.
 
@@ -431,29 +528,19 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         """,
         tid,
     )
-    attempt_row = await conn.fetchrow(
+    attempt_rows = await conn.fetch(
         """
         WITH latest_attempt AS (
             SELECT DISTINCT ON (te.id)
                 te.id AS endpoint_id,
-                CASE
-                    WHEN aea.status = 'completed'
-                     AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
-                    THEN 'partial'
-                    ELSE aea.status
-                END AS status
+                aea.status,
+                aea.scanner_telemetry_json
             FROM target_endpoints te
             JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
             WHERE te.target_id = $1 AND te.test_status <> 'gone'
             ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
         )
-        SELECT
-            count(*) AS attempted,
-            count(*) FILTER (WHERE status = 'completed') AS completed,
-            count(*) FILTER (WHERE status IN ('partial', 'timeout')) AS partial,
-            count(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
-            count(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
-            count(*) FILTER (WHERE status = 'error') AS error
+        SELECT status, scanner_telemetry_json
         FROM latest_attempt
         """,
         tid,
@@ -475,29 +562,18 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "basis": "endpoint_status",
     }
 
-    def _attempt_int(key: str) -> int:
-        return int(attempt_row[key] or 0) if attempt_row else 0
-
-    attempted = _attempt_int("attempted")
-    attempt_completed = _attempt_int("completed")
-    attempt_partial = _attempt_int("partial")
-    attempt_auth_blocked = _attempt_int("auth_blocked")
-    attempt_rate_limited = _attempt_int("rate_limited")
-    attempt_error = _attempt_int("error")
-    attempt_untested = max(0, testable - attempted)
-    attempt_summary = {
-        "total": testable,
-        "attempted": attempted,
-        "completed": attempt_completed,
-        "tested": attempt_completed,
-        "untested": attempt_untested,
-        "partial": attempt_partial,
-        "auth_blocked": attempt_auth_blocked,
-        "rate_limited": attempt_rate_limited,
-        "error": attempt_error,
-        "coverage": round(attempt_completed / testable, 3) if testable else 0.0,
-        "basis": "latest_attempt_per_endpoint",
-    }
+    attempt_summary = attempt_coverage_from_rows(
+        list(attempt_rows or []),
+        total=testable,
+        basis="latest_attempt_per_endpoint",
+    )
+    attempted = int(attempt_summary["attempted"])
+    attempt_completed = int(attempt_summary["completed"])
+    attempt_partial = int(attempt_summary["partial"])
+    attempt_auth_blocked = int(attempt_summary["auth_blocked"])
+    attempt_rate_limited = int(attempt_summary["rate_limited"])
+    attempt_error = int(attempt_summary["error"])
+    attempt_untested = int(attempt_summary["untested"])
     use_attempts = attempted > 0
     return {
         "total": total,
@@ -535,17 +611,13 @@ async def campaign_attempt_summary(
     import uuid as _uuid
 
     cid = _uuid.UUID(str(campaign_id))
-    row = await conn.fetchrow(
+    rows = await conn.fetch(
         """
         WITH latest_attempt AS (
             SELECT DISTINCT ON (aea.endpoint_id)
                 aea.endpoint_id,
-                CASE
-                    WHEN aea.status = 'completed'
-                     AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
-                    THEN 'partial'
-                    ELSE aea.status
-                END AS status,
+                aea.status,
+                aea.scanner_telemetry_json,
                 aea.attempted_params_count,
                 aea.completed_params_count
             FROM asm_endpoint_attempts aea
@@ -553,43 +625,17 @@ async def campaign_attempt_summary(
             WHERE aea.campaign_id = $1 AND te.test_status <> 'gone'
             ORDER BY aea.endpoint_id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
         )
-        SELECT
-            count(*) AS attempted,
-            count(*) FILTER (WHERE status = 'completed') AS completed,
-            count(*) FILTER (WHERE status IN ('partial', 'timeout')) AS partial,
-            count(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
-            count(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
-            count(*) FILTER (WHERE status = 'error') AS error,
-            COALESCE(sum(attempted_params_count), 0) AS attempted_params,
-            COALESCE(sum(completed_params_count), 0) AS completed_params
+        SELECT status, scanner_telemetry_json, attempted_params_count, completed_params_count
         FROM latest_attempt
         """,
         cid,
     )
-
-    def _int(key: str) -> int:
-        return int(row[key] or 0) if row else 0
-
-    attempted = _int("attempted")
-    completed = _int("completed")
-    total = max(0, int(expected_total or 0), attempted)
-    untested = max(0, total - attempted)
-    return {
-        "total": total,
-        "attempted": attempted,
-        "completed": completed,
-        "tested": completed,
-        "untested": untested,
-        "partial": _int("partial"),
-        "auth_blocked": _int("auth_blocked"),
-        "rate_limited": _int("rate_limited"),
-        "error": _int("error"),
-        "attempted_params": _int("attempted_params"),
-        "completed_params": _int("completed_params"),
-        "coverage": round(completed / total, 3) if total else 0.0,
-        "basis": "campaign_attempt_ledger",
-        "coverage_denominator": "assigned_auth_scoped_endpoints" if expected_total is not None else "attempted_endpoints",
-    }
+    return attempt_coverage_from_rows(
+        list(rows or []),
+        total=int(expected_total or 0),
+        basis="campaign_attempt_ledger",
+        coverage_denominator="assigned_auth_scoped_endpoints" if expected_total is not None else "attempted_endpoints",
+    )
 
 
 async def create_campaign(
