@@ -371,11 +371,12 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
     assert plan["authorization_assumption"]
 
 
-def test_ai_ops_router_rejects_ambiguous_api_budget_raise():
+def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter():
+    target_id = str(uuid.uuid4())
     plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(
             prompt="Spend more budget on APIs",
-            target_id=str(uuid.uuid4()),
+            target_id=target_id,
             execute=True,
             confirm_execution=True,
             confirm_authorized=True,
@@ -384,9 +385,18 @@ def test_ai_ops_router_rejects_ambiguous_api_budget_raise():
 
     assert plan["intent"] == "increase_api_endpoint_budget"
     assert plan["dry_run"] is True
-    assert "api_endpoint_filter" in plan["missing_inputs"]
-    assert plan["planned_api_call"] is None
-    assert plan["execution_blocked_reason"] == "missing_inputs"
+    assert plan["missing_inputs"] == []
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": f"/targets/{target_id}/asm/improve",
+        "body": {"endpoint_filter": "api", "batch_size": 100, "exploit_depth": False},
+    }
+    assert plan["blast_radius"]["rate_cap_changes"] == {
+        "global_defaults_changed": False,
+        "endpoint_filter": "api",
+        "batch_size": 100,
+    }
+    assert plan["execution_blocked_reason"] == "AI_OPS_ROUTER_EXECUTE_ENABLED is not enabled"
 
 
 def test_ai_ops_router_bola_requires_auth_context_and_high_risk_confirmation():
@@ -495,6 +505,44 @@ def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
     assert result["executed"]["ui_link"] == "/scans/scan-1"
 
 
+def test_ai_ops_router_execute_api_budget_when_confirmed(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")
+    target_id = str(uuid.uuid4())
+    captured = {}
+
+    async def fake_asm_improve(tid, request):
+        captured["target_id"] = tid
+        captured["request"] = request.model_dump()
+        return {
+            "scan_id": "scan-api",
+            "job_id": "job-api",
+            "campaign_id": "campaign-api",
+            "status": "queued",
+        }
+
+    monkeypatch.setattr(api_module, "asm_improve", fake_asm_improve)
+
+    result = asyncio.run(
+        api_module.ai_ops_route(
+            api_module.AIOpsRouterRequest(
+                prompt="Spend more budget on APIs",
+                target_id=target_id,
+                execute=True,
+                confirm_execution=True,
+                confirm_authorized=True,
+            )
+        )
+    )
+
+    assert result["dry_run"] is False
+    assert captured["target_id"] == target_id
+    assert captured["request"]["endpoint_filter"] == "api"
+    assert captured["request"]["batch_size"] == 100
+    assert captured["request"]["exploit_depth"] is False
+    assert result["executed"]["scan_id"] == "scan-api"
+    assert result["executed"]["ui_link"] == "/scans/scan-api"
+
+
 def test_default_scan_list_hides_shards_and_asm_activity_rows():
     assert api_module._hidden_scan_roles_for_list() == [
         "shard",
@@ -591,7 +639,8 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     async def fake_coverage(_conn, _target_id):
         return {"total": 0, "tested": 0, "untested": 0, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0}
 
-    async def fake_claimable(_conn, _target_id, *, stale_days):
+    async def fake_claimable(_conn, _target_id, *, stale_days, endpoint_filter=None):
+        assert endpoint_filter is None
         return 0
 
     monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
@@ -625,8 +674,9 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     async def fake_coverage(_conn, _target_id):
         return {"total": 50, "tested": 10, "untested": 40, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0.2}
 
-    async def fake_claimable(_conn, _target_id, *, stale_days):
+    async def fake_claimable(_conn, _target_id, *, stale_days, endpoint_filter=None):
         assert stale_days == 14
+        assert endpoint_filter is None
         return 8
 
     monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
@@ -655,6 +705,81 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     assert queued["options"]["xss"] is False
     assert queued["options"]["asm_check_family"] == "sqli"
     assert any("asm_last_test_at" in query for query, _args in conn.executes)
+
+
+def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn(target={
+        "url": "https://example.test",
+        "scan_options": json.dumps({"scan_type": "smart"}),
+        "asm_config": json.dumps({"batch_size": 50, "stale_days": 30, "exploit_depth": False}),
+    })
+    redis_client = _RecordingAsmRedis()
+
+    async def fake_coverage(_conn, _target_id):
+        return {"total": 50, "tested": 10, "untested": 40, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0.2}
+
+    async def fake_claimable(_conn, _target_id, *, stale_days, endpoint_filter=None):
+        assert stale_days == 30
+        assert endpoint_filter == "api"
+        return 12
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
+    monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+
+    result = asyncio.run(api_module.asm_improve(
+        target_id,
+        api_module.AsmImproveRequest(batch_size=100, endpoint_filter="apis"),
+    ))
+
+    assert result["action"] == "test"
+    assert result["batch_size"] == 12
+    assert result["endpoint_filter"] == "api"
+    queued = json.loads(redis_client.rpush_calls[0][1])
+    assert queued["endpoint_filter"] == "api"
+    assert queued["options"]["asm_endpoint_filter"] == "api"
+
+
+def test_asm_improve_endpoint_filter_does_not_queue_when_no_matching_work(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn(target={
+        "url": "https://example.test",
+        "scan_options": json.dumps({"scan_type": "smart"}),
+        "asm_config": json.dumps({"batch_size": 50, "stale_days": 30, "exploit_depth": False}),
+    })
+    redis_client = _RecordingAsmRedis()
+
+    async def fake_coverage(_conn, _target_id):
+        return {"total": 50, "tested": 10, "untested": 40, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0.2}
+
+    async def fake_claimable(_conn, _target_id, *, stale_days, endpoint_filter=None):
+        assert stale_days == 30
+        assert endpoint_filter == "api"
+        return 0
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
+    monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+
+    result = asyncio.run(api_module.asm_improve(
+        target_id,
+        api_module.AsmImproveRequest(batch_size=100, endpoint_filter="api"),
+    ))
+
+    assert result["action"] == "wait"
+    assert result["status"] == "no_claimable_endpoints"
+    assert result["endpoint_filter"] == "api"
+    assert result["recommendation"]["next_action"] == "wait"
+    assert redis_client.rpush_calls == []
+    assert not any("INSERT INTO scans" in query for query, _args in conn.executes)
+
+
+def test_asm_endpoint_filter_rejects_unknown_values():
+    with pytest.raises(ValidationError, match="unsupported endpoint_filter"):
+        api_module.AsmImproveRequest(endpoint_filter="all-the-things")
 
 
 def test_asm_test_rejects_concurrent_target_work(monkeypatch):

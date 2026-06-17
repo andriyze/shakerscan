@@ -5176,6 +5176,9 @@ async def process_exploit_batch_job(job_data: dict):
         or options.get('asm_check_family')
         or 'all'
     )
+    endpoint_filter = asm_inventory.normalize_endpoint_filter(
+        job_data.get('endpoint_filter') or options.get('asm_endpoint_filter')
+    )
     finish_campaign_on_complete = bool(job_data.get('finish_campaign_on_complete', not bool(parent_id)))
     worker_id = os.environ.get('HOSTNAME') or os.environ.get('WORKER_ID') or f"worker:{job_id[:8]}"
     r = get_redis()
@@ -5276,6 +5279,7 @@ async def process_exploit_batch_job(job_data: dict):
                 campaign_id=campaign_id,
                 campaign_only=campaign_only,
                 check_family=check_family,
+                endpoint_filter=endpoint_filter,
             )
     except Exception as e:
         print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)
@@ -5357,7 +5361,8 @@ async def process_exploit_batch_job(job_data: dict):
 
     print(
         f"[asm {job_id[:8]}] testing {len(endpoints)} inventory endpoints "
-        f"(auth_state={auth_state}, check_family={check_family}, exploit_depth={exploit_depth})",
+        f"(auth_state={auth_state}, check_family={check_family}, endpoint_filter={endpoint_filter or 'all'}, "
+        f"exploit_depth={exploit_depth})",
         flush=True,
     )
 

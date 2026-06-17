@@ -1200,6 +1200,8 @@ Shipped behavior:
 - Maps "keep this target covered" to a dry-run `PUT /targets/{id}/asm/policy` plan using the safe
   Continuous ASM defaults.
 - Maps "what is still untested?" to `GET /targets/{id}/asm/gaps`.
+- Maps "spend more budget on APIs" to `POST /targets/{id}/asm/improve` with
+  `endpoint_filter=api`, a larger one-shot `batch_size`, and no target-wide default changes.
 - Maps focused SQLi/XSS/BOLA requests to `POST /targets/{id}/asm/improve` with the matching
   `check_family`; BOLA plans include `exploit_depth=true` and require primary plus second-user auth
   context before execution.
@@ -1217,8 +1219,8 @@ Safety boundaries:
 - High-risk active exploitation requires explicit high-risk confirmation.
 - The router does not expose shard/batch implementation rows.
 
-Remaining gap:
+Current limitation:
 
-- "Spend more budget on APIs" currently returns `missing_inputs=["api_endpoint_filter"]` instead of
-  raising global ASM budget. Implement this only after the allocator can filter a campaign to
-  API endpoint classes without changing target-wide defaults.
+- `endpoint_filter=api` is a conservative derived filter using path, method, body parameter
+  location, and discovery source. A future `endpoint_class` column can make this more precise, but
+  the shipped filter is safe because it narrows work instead of broadening target-wide budget.

@@ -150,10 +150,16 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "bola", "exploit_depth": true}'
+
+# Spend extra one-shot batch budget on API-like endpoints only.
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint_filter": "api", "batch_size": 100}'
 ```
 
 `check_family` currently supports `all`, `sqli`, `xss`, and gated `bola`. BOLA requires
-`exploit_depth: true`, primary auth, and second-user auth. Normal scan lists hide shard and ASM
+`exploit_depth: true`, primary auth, and second-user auth. `endpoint_filter: "api"` narrows a batch
+to API-like endpoints without changing target-wide defaults. Normal scan lists hide shard and ASM
 implementation rows by default; use `/targets/{target_id}/asm/activity` for ASM activity and
 `/scans?include_shards=true&include_internal=true` only for debugging.
 

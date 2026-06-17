@@ -390,6 +390,7 @@ export interface AsmActionResponse {
   status: string
   batch_size?: number
   check_family?: string
+  endpoint_filter?: string | null
   reason?: string
   recommendation?: AsmRecommendation
 }
@@ -1217,13 +1218,14 @@ export async function getAsmCheckFamilies(): Promise<AsmCheckFamiliesResponse> {
 
 export async function testAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string }
 ): Promise<{
   scan_id: string
   job_id: string
   status: string
   batch_size: number
   check_family?: string
+  endpoint_filter?: string | null
   inventory_total: number
   untested: number
 }> {
@@ -1257,7 +1259,7 @@ export async function reconAsmTarget(
 
 export async function improveAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string }
 ): Promise<AsmActionResponse> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
     method: 'POST',

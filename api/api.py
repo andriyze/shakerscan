@@ -950,6 +950,10 @@ def _validate_asm_check_family_value(value: Any) -> str | None:
     return check_registry.validate_asm_focus_family(value)
 
 
+def _validate_asm_endpoint_filter_value(value: Any) -> str | None:
+    return asm_inventory.normalize_endpoint_filter(value)
+
+
 def _has_primary_auth_context(options: dict[str, Any]) -> bool:
     opts = options or {}
     return bool(
@@ -8424,11 +8428,17 @@ class AsmTestRequest(BaseModel):
     stale_days: int = Field(default=30, ge=0)
     exploit_depth: bool = False
     check_family: Optional[str] = None
+    endpoint_filter: Optional[str] = None
 
     @field_validator("check_family")
     @classmethod
     def validate_check_family(cls, value):
         return _validate_asm_check_family_value(value)
+
+    @field_validator("endpoint_filter")
+    @classmethod
+    def validate_endpoint_filter(cls, value):
+        return _validate_asm_endpoint_filter_value(value)
 
 
 class AsmReconRequest(BaseModel):
@@ -8440,11 +8450,17 @@ class AsmImproveRequest(BaseModel):
     stale_days: Optional[int] = Field(default=None, ge=0)
     exploit_depth: Optional[bool] = None
     check_family: Optional[str] = None
+    endpoint_filter: Optional[str] = None
 
     @field_validator("check_family")
     @classmethod
     def validate_check_family(cls, value):
         return _validate_asm_check_family_value(value)
+
+    @field_validator("endpoint_filter")
+    @classmethod
+    def validate_endpoint_filter(cls, value):
+        return _validate_asm_endpoint_filter_value(value)
 
 
 class AsmPolicyUpdate(BaseModel):
@@ -8573,13 +8589,25 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
     elif "budget" in lowered and ("api" in lowered or "apis" in lowered or "endpoint" in lowered):
         intent = "increase_api_endpoint_budget"
         active_or_budget = True
+        active_families = ["all"]
         safety_preset = "safe"
         if not request.target_id:
             missing.append("target_id")
-        missing.append("api_endpoint_filter")
+        api_batch_size = min(200, max(100, int(asm_inventory.DEFAULT_ASM_CONFIG["batch_size"]) * 2))
+        body = {"endpoint_filter": "api", "batch_size": api_batch_size, "exploit_depth": False}
+        planned_call = _ai_ops_call(
+            "POST",
+            f"/targets/{request.target_id or '<target_id>'}/asm/improve",
+            body,
+        )
+        rate_cap_changes = {
+            "global_defaults_changed": False,
+            "endpoint_filter": "api",
+            "batch_size": api_batch_size,
+        }
         explanation = (
-            "The current ASM allocator cannot target only API endpoints through this router yet; "
-            "returning missing_inputs instead of raising global budget."
+            "Queue the next ASM improvement pass with extra batch budget scoped to API-like endpoints only; "
+            "target-wide defaults stay unchanged."
         )
     else:
         family: str | None = None
@@ -8622,7 +8650,6 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
         and not missing
         and planned_call
         and (not requires_confirmation or (execution_enabled and confirmation_ok))
-        and intent != "increase_api_endpoint_budget"
     )
     dry_run = not execution_allowed
     execution_blocked_reason = None
@@ -8633,8 +8660,6 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
             execution_blocked_reason = "AI_OPS_ROUTER_EXECUTE_ENABLED is not enabled"
         elif requires_confirmation and not confirmation_ok:
             execution_blocked_reason = "confirmation_required"
-        elif intent == "increase_api_endpoint_budget":
-            execution_blocked_reason = "api_endpoint_filter_not_supported"
         else:
             execution_blocked_reason = "unsupported_intent"
 
@@ -8747,6 +8772,7 @@ async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
     check_family: str | None = None,
+    endpoint_filter: str | None = None,
     triggered_by: str = "api",
     domain_rate_reserved: int = 0,
 ) -> dict:
@@ -8756,18 +8782,21 @@ async def _enqueue_asm_exploit_batch(
     job_id = str(uuid.uuid4())
     opts = _apply_asm_check_family(base_opts or {}, check_family)
     family = _normalize_asm_check_family(check_family)
+    endpoint_filter = _validate_asm_endpoint_filter_value(endpoint_filter)
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
+    if endpoint_filter:
+        opts["asm_endpoint_filter"] = endpoint_filter
     campaign_id = await asm_inventory.create_campaign(
         conn,
         target_id,
         mode=asm_inventory.CAMPAIGN_FOCUSED_FAMILY if family else asm_inventory.CAMPAIGN_CONTINUOUS_ASM,
         requested_by=triggered_by,
         budget_profile=opts.get("budget_profile"),
-        wide_budget={"batch_size": batch_size, "stale_days": stale_days},
+        wide_budget={"batch_size": batch_size, "stale_days": stale_days, "endpoint_filter": endpoint_filter},
         deep_budget={"exploit_depth": exploit_depth},
         check_families=[family] if family else ["all"],
         auth_states=[],
-        metadata_json={"scan_role": asm_inventory.ASM_BATCH_ROLE},
+        metadata_json={"scan_role": asm_inventory.ASM_BATCH_ROLE, "endpoint_filter": endpoint_filter},
     )
     await conn.execute(
         """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
@@ -8783,6 +8812,7 @@ async def _enqueue_asm_exploit_batch(
         "batch_size": batch_size, "stale_days": stale_days, "exploit_depth": exploit_depth,
         "campaign_id": campaign_id,
         "check_family": family,
+        "endpoint_filter": endpoint_filter,
         "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
         "options": opts, "triggered_by": triggered_by,
         "submitted_at": utc_now_iso(),
@@ -8888,12 +8918,14 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
             exploit_depth=request.exploit_depth, check_family=request.check_family,
+            endpoint_filter=request.endpoint_filter,
             triggered_by="api",
         )
     return {
         "scan_id": enq["scan_id"], "job_id": enq["job_id"], "campaign_id": enq["campaign_id"], "status": "queued",
         "batch_size": request.batch_size,
         "check_family": _normalize_asm_check_family(request.check_family) or "all",
+        "endpoint_filter": _validate_asm_endpoint_filter_value(request.endpoint_filter),
         "inventory_total": coverage["total"], "untested": coverage["untested"],
     }
 
@@ -8981,7 +9013,13 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
         stale_days = request.stale_days if request.stale_days is not None else cfg["stale_days"]
-        claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=stale_days)
+        endpoint_filter = _validate_asm_endpoint_filter_value(request.endpoint_filter)
+        claimable = await asm_inventory.claimable_count(
+            conn,
+            target_id,
+            stale_days=stale_days,
+            endpoint_filter=endpoint_filter,
+        )
         attempts = await conn.fetch(
             """
             SELECT COALESCE(last_attempt_status, 'none') AS status, COUNT(*) AS count
@@ -8993,7 +9031,22 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         attempt_counts = {str(rw["status"]): int(rw["count"] or 0) for rw in attempts}
         rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, last_attempt_counts=attempt_counts)
         if rec["next_action"] == "wait":
-            return {"action": "wait", "status": "busy", **rec}
+            return {"action": "wait", "status": "busy", "endpoint_filter": endpoint_filter, **rec}
+
+        if endpoint_filter and rec["next_action"] == "test" and claimable <= 0:
+            filtered_rec = {
+                "next_action": "wait",
+                "label": "No matching endpoints",
+                "reason": f"No {endpoint_filter}-like endpoints are currently untested or stale.",
+                "blockers": rec.get("blockers") or [],
+            }
+            return {
+                "action": "wait",
+                "status": "no_claimable_endpoints",
+                "endpoint_filter": endpoint_filter,
+                "reason": filtered_rec["reason"],
+                "recommendation": filtered_rec,
+            }
 
         base_opts = _decode_target_scan_options(target["scan_options"])
         if rec["next_action"] == "recon":
@@ -9017,6 +9070,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             conn, r, target_id, target["url"], base_opts,
             batch_size=batch_size, stale_days=stale_days,
             exploit_depth=exploit_depth, check_family=request.check_family,
+            endpoint_filter=endpoint_filter,
             triggered_by="improve",
         )
         await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", uuid.UUID(target_id))
@@ -9028,6 +9082,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "status": "queued",
         "batch_size": batch_size,
         "check_family": _normalize_asm_check_family(request.check_family) or "all",
+        "endpoint_filter": endpoint_filter,
         "reason": rec["reason"],
         "recommendation": rec,
     }
@@ -9283,6 +9338,16 @@ async def ai_ops_route(request: AIOpsRouterRequest):
             "target_id": request.target_id,
             "status": "read",
             "ui_link": f"/asm?target_id={request.target_id}",
+            "result": result,
+        }
+    elif plan["intent"] == "increase_api_endpoint_budget" and method == "POST" and request.target_id:
+        result = await asm_improve(request.target_id, AsmImproveRequest(**body))
+        executed = {
+            "scan_id": result.get("scan_id"),
+            "job_id": result.get("job_id"),
+            "campaign_id": result.get("campaign_id"),
+            "status": result.get("status"),
+            "ui_link": f"/scans/{result.get('scan_id')}" if result.get("scan_id") else f"/asm?target_id={request.target_id}",
             "result": result,
         }
     elif str(plan["intent"]).startswith("focused_asm_") and method == "POST" and request.target_id:

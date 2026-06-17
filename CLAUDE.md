@@ -530,11 +530,16 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "bola", "exploit_depth": true}'
 
+# Spend extra one-shot batch budget on API-like endpoints only
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint_filter": "api", "batch_size": 100}'
+
 # Show ASM activity instead of using the normal scans list
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-Supported `check_family` values today: `all`, `sqli`, `xss`, and gated `bola`. Omit it for the normal active mix. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
+Supported `check_family` values today: `all`, `sqli`, `xss`, and gated `bola`. Omit it for the normal active mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
 
 ### AI Operations Router
 

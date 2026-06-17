@@ -5,6 +5,8 @@ import sys
 import asyncio
 import uuid
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import asm_inventory as a  # noqa: E402
@@ -734,6 +736,42 @@ def test_claim_test_batch_can_scope_to_campaign_inventory():
     assert "completed" in first_args[3]
 
 
+def test_claim_test_batch_can_scope_to_api_endpoint_filter():
+    target_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "POST",
+            "path": "/api/orders",
+            "param_shape": "id",
+            "auth_state": "anonymous",
+            "param_location": "json",
+            "replay_spec": 'POST /api/orders json:{"id":1}',
+            "content_type": "application/json",
+            "campaign_id": None,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    claimed = asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            endpoint_filter="api",
+        )
+    )
+
+    assert claimed[0]["id"] == endpoint_id
+    first_query, _first_args = conn.fetchrow_calls[0]
+    rows_query, _rows_args = conn.fetch_calls[0]
+    assert "te.path LIKE '/api/%'" in first_query
+    assert "te.method <> 'GET'" in first_query
+    assert "te.param_location IN ('json', 'form')" in rows_query
+
+
 def test_claim_test_batch_campaign_only_without_campaign_fails_closed():
     target_id = uuid.uuid4()
     conn = _ClaimConn([{"id": uuid.uuid4(), "auth_state": "anonymous"}])
@@ -749,6 +787,33 @@ def test_claim_test_batch_campaign_only_without_campaign_fails_closed():
     assert claimed == []
     assert conn.fetchrow_calls == []
     assert conn.fetch_calls == []
+
+
+class _ClaimableCountConn:
+    def __init__(self):
+        self.calls = []
+
+    async def fetchval(self, query, *args):
+        self.calls.append((query, args))
+        return 3
+
+
+def test_claimable_count_can_scope_to_api_endpoint_filter():
+    target_id = uuid.uuid4()
+    conn = _ClaimableCountConn()
+
+    count = asyncio.run(a.claimable_count(conn, str(target_id), endpoint_filter="api"))
+
+    assert count == 3
+    query, args = conn.calls[0]
+    assert "FROM target_endpoints te" in query
+    assert "te.path LIKE '/api/%'" in query
+    assert args == (target_id, "30")
+
+
+def test_endpoint_filter_rejects_unknown_values():
+    with pytest.raises(ValueError, match="unsupported endpoint_filter"):
+        a.normalize_endpoint_filter("everything")
 
 
 class _RecordAttemptConn:

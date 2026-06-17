@@ -83,6 +83,34 @@ ATTEMPT_TERMINAL_STATUSES = (
 )
 
 
+API_ENDPOINT_FILTER_SQL = """(
+    {alias}.path = '/api'
+    OR {alias}.path LIKE '/api/%'
+    OR {alias}.path = '/rest'
+    OR {alias}.path LIKE '/rest/%'
+    OR {alias}.path LIKE '/graphql%'
+    OR {alias}.method <> 'GET'
+    OR {alias}.param_location IN ('json', 'form')
+    OR COALESCE({alias}.source, '') IN ('openapi', 'har')
+)"""
+
+
+def normalize_endpoint_filter(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in ("", "all", "none"):
+        return None
+    if raw in ("api", "apis", "api_endpoints", "api-only", "api_only"):
+        return "api"
+    raise ValueError(f"unsupported endpoint_filter '{raw}'; allowed values: api")
+
+
+def _endpoint_filter_clause(alias: str, endpoint_filter: Any) -> str:
+    normalized = normalize_endpoint_filter(endpoint_filter)
+    if normalized == "api":
+        return " AND " + API_ENDPOINT_FILTER_SQL.format(alias=alias)
+    return ""
+
+
 @dataclass(frozen=True)
 class ParsedEndpoint:
     method: str
@@ -1282,6 +1310,7 @@ async def claim_test_batch(
     campaign_id: str | None = None,
     campaign_only: bool = False,
     check_family: str | None = None,
+    endpoint_filter: str | None = None,
 ) -> list[dict]:
     """Atomically claim the next batch of untested/stale endpoints (priority
     first) and mark them in_progress. Uses FOR UPDATE SKIP LOCKED so multiple
@@ -1296,6 +1325,8 @@ async def claim_test_batch(
         return []
     restrict_campaign = bool(campaign_only and cid)
     family = normalize_check_family(check_family)
+    endpoint_filter = normalize_endpoint_filter(endpoint_filter)
+    endpoint_clause = _endpoint_filter_clause("te", endpoint_filter)
     owner = str(lease_owner or "asm-worker")
     lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
     async with conn.transaction():
@@ -1316,24 +1347,26 @@ async def claim_test_batch(
                         AND COALESCE(aea.check_family, 'all') = $3
                         AND aea.status = ANY($4::text[])
                   )
+                  {endpoint_clause}
                 ORDER BY te.priority_score DESC, te.last_seen_at DESC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """,
+                """.format(endpoint_clause=endpoint_clause),
                 tid, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
             )
         else:
             first = await conn.fetchrow(
                 """
-                SELECT auth_state
-                FROM target_endpoints
-                WHERE target_id = $1
-                  AND (test_status IN ('untested', 'stale')
-                       OR (test_status = 'tested' AND last_tested_at < NOW() - ($2 || ' days')::interval))
-                ORDER BY priority_score DESC, last_seen_at DESC
+                SELECT te.auth_state
+                FROM target_endpoints te
+                WHERE te.target_id = $1
+                  AND (te.test_status IN ('untested', 'stale')
+                       OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($2 || ' days')::interval))
+                  {endpoint_clause}
+                ORDER BY te.priority_score DESC, te.last_seen_at DESC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """,
+                """.format(endpoint_clause=endpoint_clause),
                 tid, str(stale_days),
             )
         if not first:
@@ -1357,26 +1390,28 @@ async def claim_test_batch(
                         AND COALESCE(aea.check_family, 'all') = $5
                         AND aea.status = ANY($6::text[])
                   )
+                  {endpoint_clause}
                 ORDER BY te.priority_score DESC, te.last_seen_at DESC
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
-                """,
+                """.format(endpoint_clause=endpoint_clause),
                 tid, limit, auth_state, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
             )
         else:
             rows = await conn.fetch(
                 """
-                SELECT id, method, path, param_shape, auth_state, param_location, replay_spec,
-                       content_type, campaign_id, lease_owner, lease_expires_at, attempt_count
-                FROM target_endpoints
-                WHERE target_id = $1
-                  AND auth_state = $4
-                  AND (test_status IN ('untested', 'stale')
-                       OR (test_status = 'tested' AND last_tested_at < NOW() - ($3 || ' days')::interval))
-                ORDER BY priority_score DESC, last_seen_at DESC
+                SELECT te.id, te.method, te.path, te.param_shape, te.auth_state, te.param_location, te.replay_spec,
+                       te.content_type, te.campaign_id, te.lease_owner, te.lease_expires_at, te.attempt_count
+                FROM target_endpoints te
+                WHERE te.target_id = $1
+                  AND te.auth_state = $4
+                  AND (te.test_status IN ('untested', 'stale')
+                       OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($3 || ' days')::interval))
+                  {endpoint_clause}
+                ORDER BY te.priority_score DESC, te.last_seen_at DESC
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
-                """,
+                """.format(endpoint_clause=endpoint_clause),
                 tid, limit, str(stale_days), auth_state,
             )
         if rows:
@@ -1754,18 +1789,27 @@ def decide_asm_action(
 # Async helpers for the dispatcher / new-surface feed
 # ---------------------------------------------------------------------------
 
-async def claimable_count(conn, target_id: str, *, stale_days: int = 30) -> int:
+async def claimable_count(
+    conn,
+    target_id: str,
+    *,
+    stale_days: int = 30,
+    endpoint_filter: str | None = None,
+) -> int:
     """How many endpoints the next exploit batch could claim (untested/stale/
     tested-older-than-stale). Lets the dispatcher skip targets with no work."""
     import uuid as _uuid
     tid = _uuid.UUID(str(target_id))
+    endpoint_filter = normalize_endpoint_filter(endpoint_filter)
+    endpoint_clause = _endpoint_filter_clause("te", endpoint_filter)
     n = await conn.fetchval(
         """
-        SELECT count(*) FROM target_endpoints
-        WHERE target_id = $1
-          AND (test_status IN ('untested', 'stale')
-               OR (test_status = 'tested' AND last_tested_at < NOW() - ($2 || ' days')::interval))
-        """,
+        SELECT count(*) FROM target_endpoints te
+        WHERE te.target_id = $1
+          AND (te.test_status IN ('untested', 'stale')
+               OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($2 || ' days')::interval))
+          {endpoint_clause}
+        """.format(endpoint_clause=endpoint_clause),
         tid, str(stale_days),
     )
     return int(n or 0)
