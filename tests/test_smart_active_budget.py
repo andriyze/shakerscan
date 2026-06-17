@@ -137,6 +137,41 @@ def test_smart_sqli_distinguishes_finding_cap_from_time_budget(monkeypatch):
     assert result["vulnerabilities_found"] == 1
 
 
+def test_smart_sqli_emits_endpoint_attempt_telemetry(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/search?q=test",
+                    "method": "GET",
+                    "params": ["q"],
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+        )
+    )
+
+    assert result["endpoint_attempts"] == [
+        {
+            "custom_endpoint": "GET /search?q=test",
+            "family": "sqli",
+            "method": "GET",
+            "url": "https://example.test/search?q=test",
+            "param_count": 1,
+            "attempted_params_count": 1,
+            "completed_params_count": 1,
+            "status": "completed",
+        }
+    ]
+
+
 def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("documentation endpoints should not be probed for SQLi")

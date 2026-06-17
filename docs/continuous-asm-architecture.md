@@ -3,8 +3,9 @@
 **Status:** first continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
 replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
 records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-shot Full Coverage
-campaign linkage with merge-time attempt rows are implemented. Dynamic pull-based Full Coverage
-allocation and scanner-level per-endpoint telemetry remain proposed.
+campaign linkage with merge-time attempt rows are implemented. Scanner-level smart active
+per-endpoint telemetry is now emitted and consumed by ASM/Full Coverage attempt ledgers. Dynamic
+pull-based Full Coverage allocation and attempt-ledger-driven coverage rollups remain proposed.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -22,8 +23,8 @@ Every implementation task must verify the current state with search/tests before
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
-| ASM endpoint inventory | Shipped | Add scanner-level attempted/completed telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Use attempt facts in coverage rollups once scanner telemetry exists. |
+| ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
+| ASM campaign/lease/attempt foundation | Shipped | Make coverage rollups derive from attempt facts. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
@@ -106,9 +107,12 @@ Important current behavior:
   - `attempt_count`
   - first/last seen/tested timestamps
 
-Current telemetry that does **not** exist yet:
+Current scanner telemetry:
 
-- per-endpoint/per-parameter attempted telemetry from the scanner
+- Smart active checks emit `report['active_checks']['endpoint_attempts']` with `custom_endpoint`,
+  family, status, attempted parameter count, and completed parameter count.
+- ASM batches and Full Coverage merge resolve those telemetry rows back to `target_endpoints` before
+  writing `asm_endpoint_attempts`.
 
 Related shipped tables:
 
@@ -136,16 +140,20 @@ Implemented:
 - ASM test batches set `lease_owner`, `lease_expires_at`, and increment `attempt_count` when claimed.
 - Expired endpoint leases are reaped back to `stale` with `last_attempt_status='lease_expired'`.
 - ASM batch completion writes `asm_endpoint_attempts` rows and clears endpoint lease fields.
+- ASM batches promote only telemetry-completed endpoint IDs to `tested`; partial, skipped, timed-out,
+  or missing telemetry rows are released as stale/partial for later retry.
+- Full Coverage merge writes telemetry-backed `asm_endpoint_attempts` when child reports include
+  `active_checks.endpoint_attempts`; legacy/no-telemetry children keep the assigned-slice attempt
+  fallback. Full Coverage merge still does not promote endpoint `test_status`.
 
 Still limited:
 
-- Coverage stamping is still batch-level. Without scanner-level per-endpoint attempted telemetry, a
-  successful batch can only stamp the claimed batch as tested/partial as a group.
+- Per-endpoint scanner telemetry currently covers smart active SQLi/XSS/hash-route DOM XSS attempts.
+  A first-class check registry and telemetry schemas are still needed for every family.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
 - `/targets/{id}/asm/coverage` still derives primary coverage from endpoint status; attempt-ledger
-  facts are exposed in gaps/activity and become authoritative after per-endpoint scanner telemetry
-  lands.
+  facts are exposed in gaps/activity and should become authoritative in the next rollup increment.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
 - Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
@@ -341,8 +349,9 @@ scanner_telemetry_json
 ```
 
 Coverage percentages should derive from attempt outcomes, not scan status alone. Current API rollups
-still use endpoint status as the primary coverage source until scanner telemetry can distinguish
-claimed, attempted, completed, partial, and unattempted endpoints precisely.
+still use endpoint status as the primary coverage source even though smart active telemetry now
+distinguishes completed, partial, skipped, and unreported endpoint attempts. Moving rollups onto the
+attempt ledger is the next correctness increment.
 
 ---
 
@@ -357,7 +366,8 @@ Current shipped behavior:
 - `scan_shard` workers run lean scans over disjoint endpoint slices.
 - `scan_plan` creates a `full_coverage` campaign tied to the parent scan.
 - `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
-  conservative attempt rows for each coverage shard's assigned endpoint slice.
+  telemetry-backed attempt rows for child reports that include endpoint telemetry. Legacy/no-telemetry
+  child reports keep conservative assigned-slice attempt rows.
 
 Target behavior:
 
@@ -487,16 +497,15 @@ Implemented:
   that returns expired work to `stale` without marking it clean.
 - Added `asm_endpoint_attempts` keyed by endpoint, scan, campaign, worker, auth state, status,
   started/completed time, parameter counts, finding IDs, error summary, and scanner telemetry JSON.
-- Record conservative attempt rows for `auth_missing`, partial/timeout, completed, and error ASM
-  batch outcomes.
+- Record attempt rows for `auth_missing`, partial/timeout, completed, and error ASM batch outcomes.
+- Preserve scanner-proven smart active endpoint attempts when present; completed telemetry can promote
+  only those endpoint IDs to `tested`, while missing/partial telemetry keeps rows stale.
 - Expose campaign and attempt-status facts in ASM activity/gaps.
 
 Remaining:
 
-- Make coverage percentages derive from attempt outcomes once scanner-level per-endpoint telemetry is
-  available.
-- Preserve exact attempted/completed endpoint and parameter counts from scanner telemetry instead of
-  batch-level inference.
+- Make coverage percentages derive from attempt outcomes instead of endpoint status.
+- Extend first-class telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS.
 
 ### Phase C — Parallel Coverage Uses The Allocator
 
@@ -505,8 +514,8 @@ Implemented:
 - One-shot `coverage` parents create `full_coverage` campaign records with wide/deep budget metadata
   and auth-state scope.
 - Coverage child scan rows inherit `campaign_id`.
-- `scan_merge` resolves assigned shard endpoint slices back to `target_endpoints` and writes
-  idempotent `asm_endpoint_attempts` for completed, failed, and cancelled shards.
+- `scan_merge` resolves scanner endpoint telemetry back to `target_endpoints` and writes idempotent
+  `asm_endpoint_attempts`; legacy/no-telemetry children fall back to assigned shard endpoint slices.
 
 Remaining:
 
@@ -595,8 +604,12 @@ TASK
 Implement or review exactly one architecture increment.
 
 SOURCE OF TRUTH
-These architecture docs describe intended behavior. Before changing code, verify shipped behavior in
-the repository, DB migrations, API handlers, worker code, scanner code, and tests.
+Use these docs as authoritative architecture context:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Before changing code, verify shipped behavior in the repository, DB migrations, API handlers, worker
+code, scanner code, and tests.
 
 CURRENT STATE
 Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
@@ -779,7 +792,8 @@ CURRENT STATE
 - harvest_endpoints partitions the worklist into static coverage shards.
 - scan_shard workers run lean scans over disjoint endpoint slices.
 - scan_plan creates a full_coverage campaign for coverage parents, and scan_merge persists the union
-  into ASM inventory plus conservative attempt rows for assigned endpoint slices.
+  into ASM inventory plus telemetry-backed attempt rows when child reports include endpoint
+  telemetry. Legacy/no-telemetry child reports fall back to assigned-slice attempt rows.
 
 TARGET BEHAVIOR
 - Recon upserts discovered endpoints into target_endpoints with auth_state, method, path,

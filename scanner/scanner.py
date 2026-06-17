@@ -8137,6 +8137,11 @@ async def build_report(target: str,
                     active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
                     max_findings_per_family=scan_budget.get("max_findings_per_family"),
                 )
+                endpoint_attempts = smart_results.get("endpoint_attempts")
+                if isinstance(endpoint_attempts, list):
+                    active_block["endpoint_attempts"] = endpoint_attempts
+                    active_block["endpoint_attempts_total"] = len(endpoint_attempts)
+                    active_block["per_endpoint_telemetry"] = True
                 smart_budget = smart_results.get("budget") or {}
                 active_remaining_after_smart = smart_budget.get("active_remaining_seconds")
                 try:

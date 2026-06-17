@@ -368,6 +368,93 @@ def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--budget-active-worklist-max") + 1] == "50000"
 
 
+def test_active_endpoint_attempts_from_report_filters_valid_entries():
+    attempts = worker._active_endpoint_attempts_from_report(
+        {
+            "active_checks": {
+                "endpoint_attempts": [
+                    {"custom_endpoint": "GET /a?id=1", "status": "completed"},
+                    {"status": "completed"},
+                    "not-a-dict",
+                ]
+            }
+        }
+    )
+
+    assert attempts == [{"custom_endpoint": "GET /a?id=1", "status": "completed"}]
+
+
+def test_active_endpoint_telemetry_present_for_empty_attempt_list():
+    report = {"active_checks": {"per_endpoint_telemetry": True, "endpoint_attempts": []}}
+
+    assert worker._active_endpoint_telemetry_present(report) is True
+    assert worker._active_endpoint_attempts_from_report(report) == []
+
+
+def test_ledger_status_from_endpoint_attempt_maps_time_budget_to_timeout():
+    status, summary = worker._ledger_status_from_endpoint_attempt(
+        {
+            "custom_endpoint": "GET /a?id=1",
+            "status": "partial",
+            "budget_exhausted_reason": "time_budget",
+        }
+    )
+
+    assert status == "timeout"
+    assert summary == "time_budget"
+
+
+def test_record_endpoint_telemetry_attempts_uses_per_endpoint_counts(monkeypatch):
+    calls = {}
+    endpoint_id = "11111111-1111-1111-1111-111111111111"
+
+    async def fake_endpoint_ids_for_worklist(conn, target_id, worklist, *, auth_state, limit=20000):
+        calls["resolved"] = {
+            "target_id": target_id,
+            "worklist": worklist,
+            "auth_state": auth_state,
+        }
+        return [endpoint_id]
+
+    async def fake_record_endpoint_attempts(conn, endpoint_ids, **kwargs):
+        calls["record"] = {"endpoint_ids": endpoint_ids, **kwargs}
+        return len(endpoint_ids)
+
+    monkeypatch.setattr(worker.asm_inventory, "endpoint_ids_for_worklist", fake_endpoint_ids_for_worklist)
+    monkeypatch.setattr(worker.asm_inventory, "record_endpoint_attempts", fake_record_endpoint_attempts)
+
+    result = asyncio.run(
+        worker._record_endpoint_telemetry_attempts(
+            object(),
+            target_id="target-1",
+            attempts=[
+                {
+                    "custom_endpoint": "GET /a?id=1",
+                    "status": "completed",
+                    "attempted_params_count": 1,
+                    "completed_params_count": 1,
+                }
+            ],
+            scan_id="scan-1",
+            campaign_id="campaign-1",
+            auth_state="user1",
+            source="test",
+        )
+    )
+
+    assert result["written"] == 1
+    assert result["completed_ids"] == [endpoint_id]
+    assert calls["resolved"] == {
+        "target_id": "target-1",
+        "worklist": ["GET /a?id=1"],
+        "auth_state": "user1",
+    }
+    assert calls["record"]["status"] == "completed"
+    assert calls["record"]["attempted_params_count"] == 1
+    assert calls["record"]["completed_params_count"] == 1
+    assert calls["record"]["scanner_telemetry_json"]["per_endpoint_telemetry"] is True
+
+
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):
     captured = {}
 

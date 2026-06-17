@@ -648,8 +648,12 @@ TASK
 Implement or review exactly one multi-node architecture increment.
 
 SOURCE OF TRUTH
-This architecture doc describes intended behavior. Before changing code, verify shipped behavior in
-the repository, Docker/compose files, API handlers, worker code, DB migrations, queue use, and tests.
+Use these docs as authoritative architecture context:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Before changing code, verify shipped behavior in the repository, Docker/compose files, API handlers,
+worker code, DB migrations, queue use, and tests.
 
 CURRENT STATE
 Summarize the shipped behavior relevant to this task in 5 bullets before changing code.

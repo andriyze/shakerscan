@@ -3884,6 +3884,109 @@ def _asm_scan_options_for_auth_state(options: dict[str, Any], auth_state: Any) -
     return parallel_scan._apply_auth_state(base, state)
 
 
+def _active_endpoint_attempts_from_report(report: dict | None) -> list[dict[str, Any]]:
+    active = (report or {}).get('active_checks') if isinstance(report, dict) else None
+    attempts = active.get('endpoint_attempts') if isinstance(active, dict) else None
+    if not isinstance(attempts, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if isinstance(attempt, dict) and attempt.get('custom_endpoint'):
+            out.append(attempt)
+    return out
+
+
+def _active_endpoint_telemetry_present(report: dict | None) -> bool:
+    active = (report or {}).get('active_checks') if isinstance(report, dict) else None
+    if not isinstance(active, dict):
+        return False
+    return bool(active.get('per_endpoint_telemetry')) or isinstance(active.get('endpoint_attempts'), list)
+
+
+def _ledger_status_from_endpoint_attempt(attempt: dict[str, Any]) -> tuple[str, str | None]:
+    status = str(attempt.get('status') or '').strip().lower()
+    reason = attempt.get('budget_exhausted_reason') or attempt.get('skip_reason')
+    if status == 'completed':
+        return 'completed', None
+    if reason == 'time_budget':
+        return 'timeout', 'time_budget'
+    if status == 'skipped':
+        return 'partial', str(reason or 'skipped')
+    if status in {'partial', 'started'}:
+        return 'partial', str(reason or 'partial')
+    return 'partial', str(reason or status or 'partial')
+
+
+async def _record_endpoint_telemetry_attempts(
+    conn,
+    *,
+    target_id: str,
+    attempts: list[dict[str, Any]],
+    scan_id: str | None = None,
+    parent_scan_id: str | None = None,
+    campaign_id: str | None = None,
+    worker_id: str | None = None,
+    auth_state: str = 'anonymous',
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
+    source: str,
+    replace_existing: bool = False,
+) -> dict[str, Any]:
+    """Persist scanner-proven endpoint attempts and return resolved IDs by status."""
+    completed_ids: list[Any] = []
+    partial_ids: list[Any] = []
+    error_ids: list[Any] = []
+    written = 0
+    for attempt in attempts:
+        custom_endpoint = attempt.get('custom_endpoint')
+        if not custom_endpoint:
+            continue
+        endpoint_ids = await asm_inventory.endpoint_ids_for_worklist(
+            conn,
+            target_id,
+            [custom_endpoint],
+            auth_state=auth_state,
+        )
+        if not endpoint_ids:
+            continue
+        status, error_summary = _ledger_status_from_endpoint_attempt(attempt)
+        attempted_count = int(attempt.get('attempted_params_count') or 0)
+        completed_count = int(attempt.get('completed_params_count') or 0)
+        written += await asm_inventory.record_endpoint_attempts(
+            conn,
+            endpoint_ids,
+            scan_id=scan_id,
+            parent_scan_id=parent_scan_id,
+            campaign_id=campaign_id,
+            worker_id=worker_id,
+            auth_state=auth_state,
+            started_at=started_at,
+            completed_at=completed_at,
+            status=status,
+            attempted_params_count=attempted_count,
+            completed_params_count=completed_count,
+            error_summary=error_summary,
+            scanner_telemetry_json={
+                'source': source,
+                'per_endpoint_telemetry': True,
+                'endpoint_attempt': attempt,
+            },
+            replace_existing=replace_existing,
+        )
+        if status == 'completed':
+            completed_ids.extend(endpoint_ids)
+        elif status == 'error':
+            error_ids.extend(endpoint_ids)
+        else:
+            partial_ids.extend(endpoint_ids)
+    return {
+        'written': written,
+        'completed_ids': completed_ids,
+        'partial_ids': partial_ids,
+        'error_ids': error_ids,
+    }
+
+
 async def process_scan_plan_job(job_data: dict):
     """Plan stage: decompose a parent scan into shard jobs (or fall back to a
     standalone scan when there is nothing to parallelize)."""
@@ -4482,18 +4585,83 @@ async def process_scan_merge_job(job_data: dict):
             print(f"[merge {parent_id[:8]}] ASM inventory error: {e}", flush=True)
 
     # Campaign attempt ledger for one-shot Full Coverage. This records shard
-    # assignment outcomes without changing endpoint test_status; scanner-level
-    # per-endpoint telemetry remains the future source for authoritative clean
-    # coverage.
+    # assignment outcomes without changing endpoint test_status. New scanner
+    # reports carry per-endpoint telemetry; legacy reports fall back to the
+    # conservative shard-status ledger so old scans still merge.
     if campaign_id and target_id and strategy == 'coverage':
         try:
             async with db_pool.acquire() as conn:
                 for ch in children:
+                    cres = _as_report_dict(ch['result'])
                     child_options = _as_report_dict(ch['options']) or {}
                     endpoints = child_options.get('custom_endpoints') or []
                     if not endpoints:
                         continue
                     auth_state = asm_inventory.auth_state_from_options(child_options)
+                    telemetry_present = _active_endpoint_telemetry_present(cres)
+                    attempts = _active_endpoint_attempts_from_report(cres)
+                    if telemetry_present:
+                        recorded = {'written': 0, 'completed_ids': [], 'partial_ids': [], 'error_ids': []}
+                        missing_written = 0
+                        if attempts:
+                            recorded = await _record_endpoint_telemetry_attempts(
+                                conn,
+                                target_id=target_id,
+                                attempts=attempts,
+                                scan_id=str(ch['id']),
+                                parent_scan_id=parent_id,
+                                campaign_id=campaign_id,
+                                worker_id=None,
+                                auth_state=auth_state,
+                                started_at=ch['started_at'],
+                                completed_at=ch['completed_at'] or completed_at,
+                                source='parallel_coverage_merge',
+                                replace_existing=True,
+                            )
+                        assigned_ids = await asm_inventory.endpoint_ids_for_worklist(
+                            conn, target_id, endpoints, auth_state=auth_state
+                        )
+                        accounted = {
+                            str(eid)
+                            for eid in (
+                                recorded.get('completed_ids', [])
+                                + recorded.get('partial_ids', [])
+                                + recorded.get('error_ids', [])
+                            )
+                        }
+                        missing_ids = [eid for eid in assigned_ids if str(eid) not in accounted]
+                        if missing_ids:
+                            missing_written = await asm_inventory.record_endpoint_attempts(
+                                conn,
+                                missing_ids,
+                                scan_id=str(ch['id']),
+                                parent_scan_id=parent_id,
+                                campaign_id=campaign_id,
+                                worker_id=None,
+                                auth_state=auth_state,
+                                started_at=ch['started_at'],
+                                completed_at=ch['completed_at'] or completed_at,
+                                status='partial',
+                                attempted_params_count=0,
+                                completed_params_count=0,
+                                error_summary='not_reported_by_scanner_telemetry',
+                                scanner_telemetry_json={
+                                    'source': 'parallel_coverage_merge',
+                                    'per_endpoint_telemetry': True,
+                                    'missing_from_telemetry': True,
+                                    'assigned_endpoints': len(endpoints),
+                                    'child_status': str(ch['status'] or ''),
+                                    'shard_index': ch['shard_index'],
+                                },
+                                replace_existing=True,
+                            )
+                        if not recorded['written'] and not missing_written:
+                            print(
+                                f"[merge {parent_id[:8]}] telemetry present but no endpoint attempts resolved "
+                                f"for shard {ch['shard_index']}",
+                                flush=True,
+                            )
+                        continue
                     endpoint_ids = await asm_inventory.endpoint_ids_for_worklist(
                         conn, target_id, endpoints, auth_state=auth_state
                     )
@@ -4741,7 +4909,59 @@ async def process_exploit_batch_job(job_data: dict):
         if not error:
             try:
                 async with db_pool.acquire() as conn:
-                    if partial:
+                    telemetry_present = _active_endpoint_telemetry_present(result)
+                    attempts = _active_endpoint_attempts_from_report(result)
+                    if telemetry_present:
+                        recorded = {'completed_ids': [], 'partial_ids': [], 'error_ids': []}
+                        if attempts:
+                            recorded = await _record_endpoint_telemetry_attempts(
+                                conn,
+                                target_id=target_id,
+                                attempts=attempts,
+                                scan_id=scan_id,
+                                campaign_id=campaign_id,
+                                worker_id=worker_id,
+                                auth_state=auth_state,
+                                started_at=now,
+                                completed_at=completed_at,
+                                source='asm_exploit_batch',
+                            )
+                        completed_ids = list(dict.fromkeys(recorded['completed_ids']))
+                        incomplete_ids = list(dict.fromkeys(recorded['partial_ids'] + recorded['error_ids']))
+                        accounted = {str(eid) for eid in completed_ids + incomplete_ids}
+                        missing_ids = [eid for eid in endpoint_ids if str(eid) not in accounted]
+                        if completed_ids:
+                            await asm_inventory.mark_tested(
+                                conn,
+                                completed_ids,
+                                verdict=('findings' if findings else 'clean'),
+                            )
+                        if missing_ids:
+                            incomplete_ids.extend(missing_ids)
+                            await asm_inventory.record_endpoint_attempts(
+                                conn,
+                                missing_ids,
+                                scan_id=scan_id,
+                                campaign_id=campaign_id,
+                                worker_id=worker_id,
+                                auth_state=auth_state,
+                                started_at=now,
+                                completed_at=completed_at,
+                                status='partial',
+                                attempted_params_count=0,
+                                completed_params_count=0,
+                                error_summary='not_reported_by_scanner_telemetry',
+                                scanner_telemetry_json={
+                                    "claimed_endpoints": len(endpoint_ids),
+                                    "per_endpoint_telemetry": True,
+                                    "missing_from_telemetry": True,
+                                },
+                            )
+                        incomplete_ids = list(dict.fromkeys(incomplete_ids))
+                        if incomplete_ids:
+                            verdict = 'partial_findings' if findings else ('partial_timeout' if meta.get('timed_out') else 'partial')
+                            await asm_inventory.mark_partial(conn, incomplete_ids, verdict=verdict)
+                    elif partial:
                         verdict = 'partial_findings' if findings else ('partial_timeout' if meta.get('timed_out') else 'partial')
                         await asm_inventory.mark_partial(conn, endpoint_ids, verdict=verdict)
                         await asm_inventory.record_endpoint_attempts(

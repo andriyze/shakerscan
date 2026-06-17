@@ -79,6 +79,160 @@ def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
     print(f"[progress] phase={phase} pct={pct} message={safe_message}", file=sys.stderr, flush=True)
 
 
+def _coerce_telemetry_params(raw: Any) -> list[str]:
+    if isinstance(raw, dict):
+        return [str(k) for k in raw.keys() if k]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(v) for v in raw if v]
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    return []
+
+
+def _active_endpoint_worklist_entry(
+    endpoint: dict[str, Any],
+    *,
+    url_override: str | None = None,
+    method_override: str | None = None,
+    params_override: list[str] | None = None,
+    body_params_override: list[str] | None = None,
+) -> str | None:
+    """Serialize one tested endpoint using the same custom-endpoint shape as
+    scanner reports and ASM inventory. This keeps per-endpoint telemetry
+    resolvable back to target_endpoints rows without importing scanner.py."""
+    raw = url_override or endpoint.get("url") or endpoint.get("path")
+    if not raw or not isinstance(raw, str):
+        return None
+    method = str(method_override or endpoint.get("method") or "GET").upper()
+    try:
+        parsed = urllib.parse.urlparse(raw if "://" in raw else "http://x" + (raw if raw.startswith("/") else "/" + raw))
+    except Exception:
+        return None
+    path = parsed.path or "/"
+    params = params_override if params_override is not None else _coerce_telemetry_params(
+        endpoint.get("params") or endpoint.get("query_params")
+    )
+    body = body_params_override if body_params_override is not None else _coerce_telemetry_params(
+        endpoint.get("body_params")
+    )
+    if parsed.query:
+        return f"{method} {path}?{parsed.query}"
+    if params:
+        return f"{method} {path}?" + "&".join(f"{p}=1" for p in params)
+    if body and method in ("POST", "PUT", "PATCH"):
+        content_type = str(endpoint.get("content_type") or "").lower()
+        body_template = endpoint.get("body_template")
+        if "json" in content_type:
+            if isinstance(body_template, dict) and body_template:
+                return f"{method} {path} json:" + json.dumps(body_template, separators=(",", ":"))
+            return f"{method} {path} json:" + json.dumps({b: 1 for b in body}, separators=(",", ":"))
+        return f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
+    return f"{method} {path}"
+
+
+def _new_endpoint_attempt(
+    endpoint: dict[str, Any],
+    family: str,
+    *,
+    url_override: str | None = None,
+    method_override: str | None = None,
+    params: list[str] | None = None,
+    body_params: list[str] | None = None,
+) -> dict[str, Any] | None:
+    worklist_entry = _active_endpoint_worklist_entry(
+        endpoint,
+        url_override=url_override,
+        method_override=method_override,
+        params_override=params,
+        body_params_override=body_params,
+    )
+    if not worklist_entry:
+        return None
+    method = str(method_override or endpoint.get("method") or "GET").upper()
+    param_count = len(params if params is not None else (body_params if body_params is not None else []))
+    return {
+        "custom_endpoint": worklist_entry,
+        "family": family,
+        "method": method,
+        "url": url_override or endpoint.get("url") or endpoint.get("path"),
+        "param_count": max(0, int(param_count)),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_endpoint_attempt(
+    attempt: dict[str, Any] | None,
+    *,
+    budget_exhausted: bool = False,
+    budget_exhausted_reason: str | None = None,
+    skipped_reason: str | None = None,
+) -> dict[str, Any] | None:
+    if not attempt:
+        return None
+    expected = int(attempt.get("param_count") or 0)
+    completed = int(attempt.get("completed_params_count") or 0)
+    if skipped_reason:
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = skipped_reason
+    elif completed <= 0:
+        attempt["status"] = "partial"
+    elif budget_exhausted and expected and completed < expected:
+        attempt["status"] = "partial"
+    else:
+        attempt["status"] = "completed"
+    if budget_exhausted:
+        attempt["budget_exhausted"] = True
+        attempt["budget_exhausted_reason"] = budget_exhausted_reason
+    return attempt
+
+
+def _merge_endpoint_attempt_telemetry(*attempt_groups: Any) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in attempt_groups:
+        for attempt in group or []:
+            if not isinstance(attempt, dict):
+                continue
+            key = attempt.get("custom_endpoint")
+            if not key:
+                continue
+            item = merged.setdefault(
+                str(key),
+                {
+                    "custom_endpoint": str(key),
+                    "method": attempt.get("method"),
+                    "url": attempt.get("url"),
+                    "families": [],
+                    "attempted_params_count": 0,
+                    "completed_params_count": 0,
+                    "status": "completed",
+                    "family_attempts": {},
+                },
+            )
+            family = str(attempt.get("family") or "unknown")
+            if family not in item["families"]:
+                item["families"].append(family)
+            status = str(attempt.get("status") or "partial")
+            item["attempted_params_count"] += int(attempt.get("attempted_params_count") or 0)
+            item["completed_params_count"] += int(attempt.get("completed_params_count") or 0)
+            item["family_attempts"][family] = {
+                "status": status,
+                "attempted_params_count": int(attempt.get("attempted_params_count") or 0),
+                "completed_params_count": int(attempt.get("completed_params_count") or 0),
+                "param_count": int(attempt.get("param_count") or 0),
+                "budget_exhausted": bool(attempt.get("budget_exhausted")),
+                "budget_exhausted_reason": attempt.get("budget_exhausted_reason"),
+                "skip_reason": attempt.get("skip_reason"),
+            }
+            if status != "completed" and item["status"] == "completed":
+                item["status"] = status
+            if attempt.get("budget_exhausted"):
+                item["budget_exhausted"] = True
+                item["budget_exhausted_reason"] = attempt.get("budget_exhausted_reason")
+    return sorted(merged.values(), key=lambda x: x["custom_endpoint"])
+
+
 def _is_sqli_documentation_endpoint(url: str) -> bool:
     parsed = urllib.parse.urlparse(url or "")
     path = parsed.path.rstrip("/").lower() or "/"
@@ -5715,6 +5869,7 @@ async def smart_sqli_test(
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
         "budget_exhausted_reason": None,
+        "endpoint_attempts": [],
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -5798,6 +5953,13 @@ async def smart_sqli_test(
         if not params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "sqli",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
         _emit_sqli_progress(f"testing GET endpoint {endpoint_url}")
@@ -5817,6 +5979,8 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_sqli_progress(f"testing GET param {param}")
             # Get baseline
             parsed = urllib.parse.urlparse(endpoint_url)
@@ -5839,6 +6003,8 @@ async def smart_sqli_test(
 
             baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
             baseline_elapsed = time.time() - baseline_start
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if baseline_rc != 0:
                 continue
@@ -5907,6 +6073,14 @@ async def smart_sqli_test(
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed SQLi per param is enough
 
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
     # Test POST endpoints
     for endpoint in post_endpoints[:max_endpoints]:
         if _budget_exhausted():
@@ -5919,6 +6093,13 @@ async def smart_sqli_test(
         if not body_params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "sqli",
+            url_override=endpoint_url,
+            method_override=method,
+            body_params=list(body_params),
+        )
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
         _emit_sqli_progress(f"testing {method} endpoint {endpoint_url}")
@@ -5927,6 +6108,9 @@ async def smart_sqli_test(
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
         is_array_body = isinstance(base_body, list)
         if is_array_body and "json" not in content_type.lower():
+            finished = _finish_endpoint_attempt(attempt, skipped_reason="unsupported_array_body_content_type")
+            if finished:
+                results["endpoint_attempts"].append(finished)
             continue
 
         # Detect DBMS via POST/PUT/PATCH if not known yet
@@ -5953,6 +6137,8 @@ async def smart_sqli_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_sqli_progress(f"testing {method} param {param}")
             # Distinctive canary embedded in the baseline so we can detect
             # whether this body parameter is reflected into the response.
@@ -5988,6 +6174,8 @@ async def smart_sqli_test(
 
             baseline_out, _, baseline_rc = await run(baseline_cmd, timeout=12)
             baseline_elapsed = time.time() - baseline_start
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if baseline_rc != 0:
                 continue
@@ -6080,6 +6268,14 @@ async def smart_sqli_test(
                     results["vulnerabilities_found"] += 1
                     print(f"[sqli] {method} SQLi FOUND in {endpoint_url} param={param}", file=sys.stderr)
                     break  # One confirmed SQLi per param is enough
+
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     _emit_sqli_progress("SQLi probes complete", force=True)
     return results
@@ -6670,6 +6866,7 @@ async def smart_xss_test(
         "post_endpoints_tested": 0,
         "budget_exhausted": False,
         "budget_exhausted_reason": None,
+        "endpoint_attempts": [],
     }
     deadline = time.monotonic() + max_seconds if max_seconds and max_seconds > 0 else None
     budget_logged = False
@@ -6767,6 +6964,13 @@ async def smart_xss_test(
         if not params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "xss",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
         results["get_endpoints_tested"] += 1
         _emit_xss_progress(f"testing GET endpoint {endpoint_url}")
@@ -6775,6 +6979,8 @@ async def smart_xss_test(
             if _budget_exhausted():
                 break
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_xss_progress(f"testing GET param {param}")
             # Send canary to detect reflection
             canary = f"xss{random.randint(10000, 99999)}test"
@@ -6792,6 +6998,8 @@ async def smart_xss_test(
                 "curl", "-sS", "-L", "-k", "--max-time", "10",
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
             ] + auth_args + [test_url], timeout=12)
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if rc != 0 or not out:
                 continue
@@ -6905,6 +7113,14 @@ async def smart_xss_test(
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
 
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
     # Test POST/PUT/PATCH endpoints with body params
     for endpoint in post_endpoints[:max_endpoints]:
         if _budget_exhausted():
@@ -6923,6 +7139,13 @@ async def smart_xss_test(
         if not body_params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "xss",
+            url_override=endpoint_url,
+            method_override=method,
+            body_params=list(body_params),
+        )
         results["endpoints_tested"] += 1
         results["post_endpoints_tested"] += 1
         _emit_xss_progress(f"testing {method} endpoint {endpoint_url}")
@@ -6930,6 +7153,9 @@ async def smart_xss_test(
         base_body = _build_body_template(endpoint)
         is_array_body = isinstance(base_body, list)
         if is_array_body and "json" not in content_type.lower():
+            finished = _finish_endpoint_attempt(attempt, skipped_reason="unsupported_array_body_content_type")
+            if finished:
+                results["endpoint_attempts"].append(finished)
             continue
 
         auth_post_args = _filter_curl_headers(auth_args, {"content-type"})
@@ -6940,6 +7166,8 @@ async def smart_xss_test(
             if "multipart/form-data" in content_type.lower() and _is_file_param(param):
                 continue
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
             _emit_xss_progress(f"testing {method} param {param}")
 
             canary = f"xss{random.randint(10000, 99999)}test"
@@ -6951,6 +7179,8 @@ async def smart_xss_test(
                 "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
                 "-X", method,
             ] + auth_post_args + header_args + body_args + [endpoint_url], timeout=12)
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
 
             if rc != 0 or not out:
                 continue
@@ -7030,6 +7260,14 @@ async def smart_xss_test(
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
 
+        finished = _finish_endpoint_attempt(
+            attempt,
+            budget_exhausted=bool(results.get("budget_exhausted")),
+            budget_exhausted_reason=results.get("budget_exhausted_reason"),
+        )
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
     # Note: Hash route DOM XSS is tested separately via hash_route_dom_xss_test()
     # which is called unconditionally in smart scans (not gated by run_xss flag)
 
@@ -7065,6 +7303,7 @@ async def hash_route_dom_xss_test(
         "endpoints_tested": 0,
         "params_tested": 0,
         "vulnerabilities_found": 0,
+        "endpoint_attempts": [],
     }
 
     # Filter to hash route endpoints only
@@ -7113,10 +7352,19 @@ async def hash_route_dom_xss_test(
         if not params:
             continue
 
+        attempt = _new_endpoint_attempt(
+            endpoint,
+            "dom_xss",
+            url_override=endpoint_url,
+            method_override="GET",
+            params=list(params),
+        )
         results["endpoints_tested"] += 1
 
         for param in params[:max_params_per_endpoint]:
             results["params_tested"] += 1
+            if attempt is not None:
+                attempt["attempted_params_count"] += 1
 
             for payload, technique, description in DOM_XSS_PAYLOADS:
                 # Build test URL with payload in fragment parameter
@@ -7158,6 +7406,12 @@ async def hash_route_dom_xss_test(
                 except Exception:
                     # Browser proof failed, continue with other payloads
                     pass
+            if attempt is not None:
+                attempt["completed_params_count"] += 1
+
+        finished = _finish_endpoint_attempt(attempt)
+        if finished:
+            results["endpoint_attempts"].append(finished)
 
     return results
 
@@ -7646,6 +7900,11 @@ async def run_smart_active_tests(
     xss_findings = xss_results.get("findings", [])
     hash_route_findings = hash_route_results.get("findings", [])
     all_findings = sqli_findings + xss_findings + hash_route_findings
+    endpoint_attempts = _merge_endpoint_attempt_telemetry(
+        sqli_results.get("endpoint_attempts"),
+        xss_results.get("endpoint_attempts"),
+        hash_route_results.get("endpoint_attempts"),
+    )
     active_elapsed_seconds = time.monotonic() - active_started
     active_remaining_seconds = _remaining_active_seconds()
     _emit_scan_progress("active", 94, "smart active tests complete")
@@ -7662,6 +7921,7 @@ async def run_smart_active_tests(
             "params_tested": sqli_results.get("params_tested", 0),
             "budget_exhausted": sqli_results.get("budget_exhausted", False),
             "budget_exhausted_reason": sqli_results.get("budget_exhausted_reason"),
+            "endpoint_attempts": sqli_results.get("endpoint_attempts", []),
         },
         "xss": {
             "findings": xss_findings + hash_route_findings,  # Include hash route DOM XSS in XSS results
@@ -7673,8 +7933,10 @@ async def run_smart_active_tests(
             "post_endpoints_tested": xss_results.get("post_endpoints_tested", 0),
             "budget_exhausted": xss_results.get("budget_exhausted", False),
             "budget_exhausted_reason": xss_results.get("budget_exhausted_reason"),
+            "endpoint_attempts": (xss_results.get("endpoint_attempts", []) or []) + (hash_route_results.get("endpoint_attempts", []) or []),
         },
         "hash_route_dom_xss": hash_route_results,  # Separate tracking for hash route DOM XSS
+        "endpoint_attempts": endpoint_attempts,
         "dbms_detected": sqli_results.get("dbms_detected"),
         "budget": {
             "active_max_seconds": active_max_seconds,
