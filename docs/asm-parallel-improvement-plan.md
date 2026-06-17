@@ -3,7 +3,8 @@
 **Status:** living plan from a live validation run (Juice Shop / crAPI / honey.shakerscan.com,
 2026-06-17). Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
-planner bug), and P3 (observability) are **fixed & committed**; P4, A2, and the P1 follow-up remain.
+planner bug), P3 (observability), and P4 (re-classified as a stale-API skew + a misread, not a
+submit bug) are **fixed & committed**; A2 and the P1 follow-up (code-version handshake) remain.
 
 ## How this was found
 Ran Full Coverage scans against the three targets and inspected logs, the DB (scans,
@@ -61,12 +62,30 @@ not match the shipped design.
   static_slices=…)` (`api/worker.py:4493`); (2) both slot-wait requeue paths log **once on the
   first wait, then every 15th cycle** instead of every retry (`worker.py:4575`, `:5232`).
 
-### P4 — `parallel:true` dropped → standalone  🟡 MEDIUM
-- **Evidence:** crAPI was submitted with `parallel:true, shard_strategy:coverage` (same payload as
-  Juice Shop/Honey, empty saved options) but stored `parallel:None` and ran standalone.
-- **Root cause:** unconfirmed — possibly a race across rapid submits, or a submit-path
-  normalization that drops explicit `parallel` under some condition. Needs reproduction.
-- **Fix:** reproduce with a single submit; ensure explicit `parallel:true` always forces a parent.
+### P4 — "`parallel:true` dropped → standalone"  ✅ NOT A BUG — stale-API skew + a misread
+- **Original evidence:** crAPI appeared to be submitted with `parallel:true` but "stored
+  `parallel:None` and ran standalone."
+- **Re-investigation (corrected):**
+  - **The submit logic is correct.** Clean single-submit repros on current code:
+    `parallel:true`+`shard_strategy:family` → `scan_role=parent, options.parallel=true,
+    shard_strategy=family`; omitted `parallel` → `scan_role=standalone, options.parallel=false`.
+    `_apply_auto_sharding_policy` (`api/api.py:871`) **always** sets an explicit `parallel` key,
+    and explicit intent (via Pydantic `model_fields_set`) wins. Coverage scans are additionally
+    rescued by `force_parent` (`worker.py:4373`).
+  - **The "`parallel:None`" was a diagnostic artifact** — the GET scan-detail response had **no
+    top-level `parallel` field** (it lives in `options.parallel`), so `response.get('parallel')`
+    returned `None` on a genuine parent. `scan_role` was already present and said `parent`.
+  - **The one real standalone anomaly** (`58758cf3`, a full ScanOptions dump with **no
+    `parallel`/`shards`/`shard_strategy` keys at all**) was created by an **API container running
+    stale, pre-"always-set-parallel" code** before a restart — the same skew family as P1/P2, on
+    the single API container (the single-file-mount staleness gotcha). Every post-restart submit
+    carries the key.
+- **Resolution / hardening (done):**
+  - Regression tests lock the contract — explicit `parallel:true`→parent, omitted→explicit
+    `parallel:false` key, never unset (`tests/test_api_helpers.py`).
+  - GET `/scans/{id}` now returns a top-level `parallel` boolean mirroring `options.parallel` /
+    `scan_role==parent`, so the submit and detail responses are consistent and the misread can't
+    recur (`api/api.py:7732`).
 
 ---
 
@@ -106,6 +125,8 @@ not match the shipped design.
    dynamic coverage runs correctly on a uniform new-code fleet (verified on `c901c31b`).
 3. **P3** (observability + slot-spam) — ✅ fixed: decisive fan-out allocation line + throttled
    slot-wait logging, so a future skew is visible immediately.
-4. **Remaining:** **P4** (reproduce `parallel:true`→standalone drop), **P1 follow-up** (scale-aware
-   `rebuild/restart` recreates API-scaled workers + a worker code-version handshake so a skewed
-   worker refuses jobs), and **A2** (inventory GC for `gone`/unreachable rows).
+4. **P4** (`parallel:true`→standalone) — ✅ resolved: stale-API skew + a misread, not a submit bug;
+   contract locked by tests and GET detail now surfaces `parallel`.
+5. **Remaining:** **P1 follow-up** (scale-aware `rebuild/restart` recreates API-scaled workers + a
+   code-version handshake so a skewed worker/API refuses jobs instead of silently running old code
+   — this is the common root of P2 and P4), and **A2** (inventory GC for `gone`/unreachable rows).

@@ -377,3 +377,65 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
+
+
+# --- Auto-sharding policy: explicit `parallel` intent must survive (P4) ---
+#
+# P4 ("parallel:true dropped -> standalone") turned out to be a stale-API skew
+# symptom, not a submit-logic bug. These lock in the contract so a regression or
+# a future skew is caught: explicit parallel=true ALWAYS becomes a parent, and
+# the resolved options_payload ALWAYS carries an explicit `parallel` key (never
+# left unset, which is what made the original mis-diagnosis possible).
+
+
+def _resolve_sharding(monkeypatch, *, worker_count=4, auto_enabled=False, **opt_kwargs):
+    """Run _build_scan_options_payload + _apply_auto_sharding_policy like submit_scan."""
+    monkeypatch.setattr(
+        api_module, "_running_scan_worker_count_best_effort", lambda: worker_count
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_load_effective_scan_execution_settings",
+        lambda: {"auto_sharding_enabled": auto_enabled, "auto_sharding_min_workers": 2},
+    )
+    scan_type = opt_kwargs.get("scan_type", "smart")
+    options = api_module.ScanOptions(**opt_kwargs)
+    payload = api_module._build_scan_options_payload(options, scan_type)
+    enabled, _count = api_module._apply_auto_sharding_policy(options, payload, scan_type)
+    return enabled, payload
+
+
+def test_explicit_parallel_true_forces_parent(monkeypatch):
+    enabled, payload = _resolve_sharding(
+        monkeypatch, scan_type="smart", parallel=True, shard_strategy="family"
+    )
+    assert enabled is True
+    assert payload["parallel"] is True
+    assert payload["shard_strategy"] == "family"
+
+
+def test_explicit_parallel_true_defaults_shards_and_strategy(monkeypatch):
+    # parallel=true with no shards/strategy still becomes a parent (auto).
+    enabled, payload = _resolve_sharding(monkeypatch, scan_type="smart", parallel=True)
+    assert enabled is True
+    assert payload["parallel"] is True
+    assert payload.get("shards") == "auto"
+    assert payload["shard_strategy"] == "auto"
+
+
+def test_explicit_parallel_false_stays_standalone(monkeypatch):
+    enabled, payload = _resolve_sharding(
+        monkeypatch, scan_type="smart", parallel=False, auto_enabled=True
+    )
+    assert enabled is False
+    # Key is always set explicitly, never left unset.
+    assert payload["parallel"] is False
+
+
+def test_omitted_parallel_with_auto_sharding_off_sets_false_key(monkeypatch):
+    # parallel omitted entirely + global auto-sharding disabled -> standalone,
+    # but the resolved payload still carries an explicit parallel=False key.
+    enabled, payload = _resolve_sharding(monkeypatch, scan_type="standard", auto_enabled=False)
+    assert enabled is False
+    assert "parallel" in payload
+    assert payload["parallel"] is False

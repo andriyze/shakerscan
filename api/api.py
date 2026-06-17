@@ -7729,6 +7729,14 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
 
+    # Surface a top-level `parallel` boolean (mirrors options.parallel and the
+    # submit response, which already returns parallel:true for a parent). Without
+    # this, GET detail omitted `parallel`, so clients reading `parallel` saw None
+    # on a genuine parent and mis-read it as standalone. scan_role is the source
+    # of truth; this is the convenience mirror that keeps the two responses consistent.
+    _opts = result.get('options') if isinstance(result.get('options'), dict) else {}
+    result['parallel'] = result.get('scan_role') == 'parent' or bool(_opts.get('parallel'))
+
     # Parent of a parallel scan: attach a live rollup of its shards so the UI
     # can show per-shard progress under the single parent row.
     if result.get('scan_role') == 'parent':
