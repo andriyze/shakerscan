@@ -358,11 +358,28 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
   -H "Content-Type: application/json" \
   -d '{"batch_size": 100, "check_family": "xss"}'
 
+# High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "bola", "exploit_depth": true}'
+
 # View recent ASM recon/test jobs without cluttering the normal scans list
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `sqli` and `xss`; omit it or use `all` for the normal ASM mix. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `all`, `sqli`, `xss`, and gated `bola`; omit it or use `all` for the normal ASM mix. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+
+### AI Operations Router
+
+For natural-language agent requests, prefer the dry-run router first. It returns the planned API call, safety preset, missing inputs, blast radius, and confirmation requirements without queueing active work by default.
+
+```bash
+curl -X POST http://localhost:8080/ai/ops/route \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Run full coverage on this target", "target": "https://example.com"}'
+```
+
+Active or budget-increasing intents return `dry_run: true` unless `execute`, `confirm_execution`, and `confirm_authorized` are true and the server has `AI_OPS_ROUTER_EXECUTE_ENABLED=true`. High-risk BOLA also requires `confirm_high_risk` plus auth context hints.
 
 ### Subdomain Discovery
 

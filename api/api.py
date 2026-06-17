@@ -8453,6 +8453,216 @@ class AsmPolicyUpdate(BaseModel):
     config: Optional[dict] = None
 
 
+class AIOpsRouterRequest(BaseModel):
+    """Natural-language DAST/ASM intent planner for AI agents.
+
+    Execution is intentionally conservative: active or state-changing intents
+    dry-run by default and require both request confirmation and the
+    AI_OPS_ROUTER_EXECUTE_ENABLED feature flag before this API queues work.
+    """
+
+    prompt: Optional[str] = None
+    utterance: Optional[str] = None
+    target: Optional[str] = None
+    target_id: Optional[str] = None
+    execute: bool = False
+    confirm_execution: bool = False
+    confirm_authorized: bool = False
+    confirm_high_risk: bool = False
+    auth_context: dict[str, Any] = Field(default_factory=dict)
+
+
+def _ai_ops_execute_enabled() -> bool:
+    return str(os.environ.get("AI_OPS_ROUTER_EXECUTE_ENABLED") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _ai_ops_prompt_text(request: AIOpsRouterRequest) -> str:
+    return str(request.prompt or request.utterance or "").strip()
+
+
+def _ai_ops_has_auth_context(request: AIOpsRouterRequest, key: str) -> bool:
+    ctx = request.auth_context if isinstance(request.auth_context, dict) else {}
+    aliases = {
+        "primary": ("primary", "has_primary", "has_primary_auth", "has_primary_auth_context"),
+        "second_user": ("second_user", "user2", "has_second_user", "has_second_user_auth", "has_second_user_auth_context"),
+    }
+    return any(bool(ctx.get(alias)) for alias in aliases.get(key, (key,)))
+
+
+def _ai_ops_call(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    call: dict[str, Any] = {"method": method, "path": path}
+    if body is not None:
+        call["body"] = body
+    return call
+
+
+def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
+    text = _ai_ops_prompt_text(request)
+    lowered = text.lower()
+    missing: list[str] = []
+    non_goals = [
+        "no implicit Lab/deep upgrade",
+        "no hidden shard or ASM implementation rows",
+        "no active work without explicit authorization",
+    ]
+    authorization_assumption = (
+        "The requester confirms they own or are authorized to test the target before execution."
+    )
+    intent = "unknown"
+    planned_call: dict[str, Any] | None = None
+    safety_preset = "safe"
+    active_or_budget = False
+    high_risk_families: list[str] = []
+    active_families: list[str] = []
+    rate_cap_changes: dict[str, Any] = {}
+    explanation = "I could not map the request to a supported DAST/ASM operation."
+
+    if not text:
+        missing.append("prompt")
+    elif "full coverage" in lowered or ("coverage" in lowered and "scan" in lowered) or "scan all endpoint" in lowered:
+        intent = "run_full_coverage"
+        active_or_budget = True
+        active_families = ["all"]
+        safety_preset = "balanced"
+        if not request.target:
+            missing.append("target")
+        planned_call = _ai_ops_call(
+            "POST",
+            "/scans",
+            {
+                "target": request.target or "<target>",
+                "options": {
+                    "scan_type": "smart",
+                    "budget_profile": "thorough",
+                    "parallel": True,
+                    "shard_strategy": "coverage",
+                    "exploit_depth": False,
+                },
+            },
+        )
+        explanation = "Plan a one-shot Full Coverage scan with discover-once dynamic fan-out."
+    elif ("keep" in lowered and "covered" in lowered) or "enable asm" in lowered or "continuous asm" in lowered:
+        intent = "enable_continuous_asm"
+        active_or_budget = True
+        safety_preset = "safe"
+        if not request.target_id:
+            missing.append("target_id")
+        body = {
+            "enabled": True,
+            "config": {
+                "batch_size": asm_inventory.DEFAULT_ASM_CONFIG["batch_size"],
+                "stale_days": asm_inventory.DEFAULT_ASM_CONFIG["stale_days"],
+                "recon_interval_hours": asm_inventory.DEFAULT_ASM_CONFIG["recon_interval_hours"],
+                "exploit_depth": False,
+            },
+        }
+        planned_call = _ai_ops_call("PUT", f"/targets/{request.target_id or '<target_id>'}/asm/policy", body)
+        explanation = "Enable safe Continuous ASM defaults for the target."
+    elif "untested" in lowered or "gaps" in lowered or "not tested" in lowered or "still needs" in lowered:
+        intent = "explain_asm_gaps"
+        safety_preset = "read_only"
+        if not request.target_id:
+            missing.append("target_id")
+        planned_call = _ai_ops_call("GET", f"/targets/{request.target_id or '<target_id>'}/asm/gaps")
+        explanation = "Read the ASM coverage gap summary without queueing work."
+    elif "budget" in lowered and ("api" in lowered or "apis" in lowered or "endpoint" in lowered):
+        intent = "increase_api_endpoint_budget"
+        active_or_budget = True
+        safety_preset = "safe"
+        if not request.target_id:
+            missing.append("target_id")
+        missing.append("api_endpoint_filter")
+        explanation = (
+            "The current ASM allocator cannot target only API endpoints through this router yet; "
+            "returning missing_inputs instead of raising global budget."
+        )
+    else:
+        family: str | None = None
+        if "bola" in lowered or "idor" in lowered or "object authorization" in lowered:
+            family = "bola"
+        elif "sqli" in lowered or "sql injection" in lowered:
+            family = "sqli"
+        elif "xss" in lowered or "cross-site scripting" in lowered:
+            family = "xss"
+        if family:
+            intent = f"focused_asm_{family}"
+            active_or_budget = True
+            active_families = [family]
+            if not request.target_id:
+                missing.append("target_id")
+            body: dict[str, Any] = {"check_family": family}
+            if family == "bola":
+                high_risk_families = ["bola"]
+                body["exploit_depth"] = True
+                safety_preset = "lab"
+                if not _ai_ops_has_auth_context(request, "primary"):
+                    missing.append("primary_auth_context")
+                if not _ai_ops_has_auth_context(request, "second_user"):
+                    missing.append("second_user_auth_context")
+            else:
+                safety_preset = "balanced"
+            planned_call = _ai_ops_call("POST", f"/targets/{request.target_id or '<target_id>'}/asm/improve", body)
+            explanation = f"Queue a focused ASM endpoint batch for {family} only."
+
+    requires_confirmation = bool(active_or_budget or high_risk_families)
+    execution_enabled = _ai_ops_execute_enabled()
+    confirmation_ok = (
+        request.execute
+        and (not requires_confirmation or request.confirm_execution)
+        and (not active_or_budget or request.confirm_authorized)
+        and (not high_risk_families or request.confirm_high_risk)
+    )
+    execution_allowed = bool(
+        request.execute
+        and not missing
+        and planned_call
+        and (not requires_confirmation or (execution_enabled and confirmation_ok))
+        and intent != "increase_api_endpoint_budget"
+    )
+    dry_run = not execution_allowed
+    execution_blocked_reason = None
+    if request.execute and dry_run:
+        if missing:
+            execution_blocked_reason = "missing_inputs"
+        elif requires_confirmation and not execution_enabled:
+            execution_blocked_reason = "AI_OPS_ROUTER_EXECUTE_ENABLED is not enabled"
+        elif requires_confirmation and not confirmation_ok:
+            execution_blocked_reason = "confirmation_required"
+        elif intent == "increase_api_endpoint_budget":
+            execution_blocked_reason = "api_endpoint_filter_not_supported"
+        else:
+            execution_blocked_reason = "unsupported_intent"
+
+    return {
+        "intent": intent,
+        "dry_run": dry_run,
+        "execute_requested": bool(request.execute),
+        "execution_allowed": execution_allowed,
+        "execution_blocked_reason": execution_blocked_reason,
+        "requires_confirmation": requires_confirmation,
+        "safety_preset": safety_preset,
+        "missing_inputs": list(dict.fromkeys(missing)),
+        "planned_api_call": planned_call,
+        "planned_api_calls": [planned_call] if planned_call else [],
+        "explanation": explanation,
+        "authorization_assumption": authorization_assumption if active_or_budget else None,
+        "blast_radius": {
+            "target": request.target,
+            "target_id": request.target_id,
+            "active_families": active_families,
+            "high_risk_families": high_risk_families,
+            "auth_states": ["configured target credentials"] if active_or_budget else [],
+            "rate_cap_changes": rate_cap_changes,
+        },
+        "non_goals": non_goals,
+    }
+
+
 def _decode_target_scan_options(raw) -> dict:
     decoded = _decode_json_value(raw) or {}
     return decoded if isinstance(decoded, dict) else {}
@@ -9024,6 +9234,73 @@ async def asm_activity(
         item["attempt_status_counts"] = attempt_counts.get(cid, {}) if cid else {}
         activity.append(item)
     return {"activity": activity}
+
+
+@app.post("/ai/ops/route")
+async def ai_ops_route(request: AIOpsRouterRequest):
+    """Map natural-language DAST/ASM operations to safe API calls.
+
+    This is a deterministic router for agents, not a free-form LLM executor.
+    Active/state-changing actions dry-run unless the caller explicitly requests
+    execution, provides the required confirmations, and the server enables
+    AI_OPS_ROUTER_EXECUTE_ENABLED.
+    """
+    plan = _build_ai_ops_router_plan(request)
+    if plan["dry_run"]:
+        return plan
+
+    call = plan.get("planned_api_call") or {}
+    method = call.get("method")
+    path = str(call.get("path") or "")
+    body = call.get("body") if isinstance(call.get("body"), dict) else {}
+    executed: dict[str, Any]
+
+    if plan["intent"] == "run_full_coverage" and method == "POST" and path == "/scans":
+        result = await submit_scan(
+            ScanRequest(
+                target=body["target"],
+                options=ScanOptions(**(body.get("options") or {})),
+            )
+        )
+        executed = {
+            "scan_id": result.get("scan_id"),
+            "job_id": result.get("job_id"),
+            "status": result.get("status"),
+            "ui_link": f"/scans/{result.get('scan_id')}" if result.get("scan_id") else None,
+            "result": result,
+        }
+    elif plan["intent"] == "enable_continuous_asm" and method == "PUT" and request.target_id:
+        result = await asm_set_policy(request.target_id, AsmPolicyUpdate(**body))
+        executed = {
+            "target_id": request.target_id,
+            "status": "updated",
+            "ui_link": f"/asm?target_id={request.target_id}",
+            "result": result,
+        }
+    elif plan["intent"] == "explain_asm_gaps" and method == "GET" and request.target_id:
+        result = await asm_gaps(request.target_id)
+        executed = {
+            "target_id": request.target_id,
+            "status": "read",
+            "ui_link": f"/asm?target_id={request.target_id}",
+            "result": result,
+        }
+    elif str(plan["intent"]).startswith("focused_asm_") and method == "POST" and request.target_id:
+        result = await asm_improve(request.target_id, AsmImproveRequest(**body))
+        executed = {
+            "scan_id": result.get("scan_id"),
+            "job_id": result.get("job_id"),
+            "campaign_id": result.get("campaign_id"),
+            "status": result.get("status"),
+            "ui_link": f"/scans/{result.get('scan_id')}" if result.get("scan_id") else f"/asm?target_id={request.target_id}",
+            "result": result,
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported planned API call")
+
+    plan["dry_run"] = False
+    plan["executed"] = executed
+    return plan
 
 
 # ============================================================

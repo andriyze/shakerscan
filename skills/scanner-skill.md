@@ -145,11 +145,25 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "xss"}'
+
+# High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target.
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "bola", "exploit_depth": true}'
 ```
 
-`check_family` currently supports `all`, `sqli`, and `xss`. Normal scan lists hide shard and ASM
+`check_family` currently supports `all`, `sqli`, `xss`, and gated `bola`. BOLA requires
+`exploit_depth: true`, primary auth, and second-user auth. Normal scan lists hide shard and ASM
 implementation rows by default; use `/targets/{target_id}/asm/activity` for ASM activity and
 `/scans?include_shards=true&include_internal=true` only for debugging.
+
+For natural-language requests, prefer the dry-run router before composing active calls manually:
+
+```bash
+curl -X POST http://localhost:8080/ai/ops/route \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Run full coverage on this target", "target": "https://example.com"}'
+```
 
 After queueing a scan or ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless
 the user explicitly asks you to poll.

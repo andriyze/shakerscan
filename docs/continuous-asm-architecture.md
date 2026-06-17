@@ -610,6 +610,8 @@ Remaining:
 - Add UI presets and hide raw knobs by default. **Implemented.**
 - Update AGENTS/skills guidance so AI agents use presets instead of hand-crafted budgets.
   **Implemented.**
+- Add a deterministic AI operations router for safe DAST/ASM intent-to-API planning with dry-run
+  defaults and gated execution. **Implemented.**
 - Hide ASM batch/recon implementation rows from the default Scans list once ASM activity is available.
   **Implemented.**
 - Add a compact Settings view for safe automation defaults: auto-sharding, default ASM policy, and
@@ -1182,154 +1184,41 @@ Return status preflight, changed files, behavior summary, safety checks, data co
 tests run, remaining risks, and follow-up tasks.
 ```
 
-### Prompt: AI intent router for DAST/ASM operations
+### AI Intent Router
+
+Implemented endpoint:
 
 ```text
-ROLE
-You are implementing ShakerScan's AI command router for safe DAST and ASM operations.
-
-MODE
-IMPLEMENT
-
-EDIT PERMISSION
-Code and test edits are allowed for this prompt. Do not queue live scans during implementation tests
-unless an explicit test fixture is used.
-
-TASK
-Map natural-language security operations requests to safe API calls and explain the action.
-
-SOURCE OF TRUTH
-Use:
-- docs/parallel-scan-architecture.md
-- docs/continuous-asm-architecture.md
-- docs/multi-node-architecture.md
-Verify shipped API routes, scan execution settings, ASM routes, AI settings, UI command surfaces, and
-tests before editing.
-
-STATUS PREFLIGHT
-Confirm:
-- POST /scans supports parallel coverage;
-- /targets/{id}/asm/gaps exists;
-- /targets/{id}/asm/improve and /asm/test exist;
-- BOLA-focused campaigns are shipped behind Lab/deep plus primary/second-user credentials;
-- high-risk active scans require explicit authorization;
-- no existing router path auto-upgrades Safe/Balanced to Lab.
-
-CURRENT STATE
-- Verify the current shipped API routes before editing.
-- Current shipped APIs include POST /scans and the ASM endpoints listed in the User-Facing Model.
-- BOLA-focused campaigns are shipped through the check registry and require Lab/deep plus
-  primary/second-user credentials.
-
-TARGET BEHAVIOR
-- "Run full coverage on this target" -> POST /scans with parallel=true, shard_strategy=coverage, and
-  a safe default preset.
-- "Keep this target covered" -> PUT /targets/{id}/asm/policy with enabled=true and Safe preset unless
-  user explicitly asks for more.
-- "What is still untested?" -> GET /targets/{id}/asm/gaps and summarize untested, partial,
-  auth-blocked, and rate-limited states.
-- "Spend more budget on APIs" -> adjust the next campaign budget for API endpoints only; do not
-  globally raise defaults.
-- "Only retest SQLi/XSS tonight" -> focused_family campaign with allowed window and matching family
-  only.
-- "Only retest BOLA tonight" -> queue focused BOLA only after Lab/deep intent and multi-user
-  credentials are present; otherwise ask for the missing inputs.
-
-NON-GOALS
-- Do not expose shard/batch implementation rows unless debugging is requested.
-- Do not let natural-language requests bypass active-scan authorization boundaries.
-- Do not implement the check registry, BOLA campaign support, or multi-node fleet behavior.
-
-DO NOT TOUCH
-- Scanner vulnerability detection logic.
-- ASM allocator internals.
-- Multi-node transport.
-- Public scan API shape beyond router-generated request bodies.
-
-SAFETY INVARIANTS
-- Active or budget-increasing actions default to dry_run=true.
-- Ambiguous language never upgrades Safe/Balanced to Lab.
-- High-risk active exploitation requires explicit confirmation and authorization.
-- Missing target, credentials, or auth-state inputs produce missing_inputs, not execution.
-
-AUTHORIZATION / BLAST RADIUS
-- Include authorization_assumption in every active response.
-- Report affected target, auth states, active families, rate-cap changes, and high-risk families.
-- Require confirmation unless policy explicitly says auto-execute is allowed.
-
-AI ROUTER EXECUTION POLICY
-For active or budget-increasing actions:
-- default to dry_run=true;
-- return the planned API call;
-- explain safety preset and non-goals;
-- require confirmation unless policy says auto-execute is allowed;
-- never upgrade Safe/Balanced to Lab from ambiguous language.
-
-DATA CONTRACTS
-Define or verify router request/response JSON, planned API call body, UI-facing explanation fields,
-audit/log fields, and any Redis/API side effects. For each changed contract, state producer,
-consumer, compatibility, old/null behavior, and idempotency key.
-
-MIGRATION / BACKFILL / COMPATIBILITY
-- No schema migration should be needed for intent mapping alone.
-- Preserve existing API request shapes unless a separate API task changes them.
-
-ROLLOUT / FALLBACK
-- Feature flag: name any router-autonomy flag.
-- Default: dry-run responses for active/budget-increasing actions.
-- Fallback: return planned API call without execution.
-- Rollback: disable execute path while preserving explain/dry-run.
-- Unsafe signals: active scan queued from ambiguous input, Lab preset selected without explicit user
-  request, or missing_inputs ignored.
-
-FAILURE-MODE MATRIX
-Cover duplicate user request delivery, stale target id, missing credentials, rate budget exhaustion,
-API route rejection, parent cancellation after queued execution, and missing scanner telemetry in
-downstream reports. For each: expected behavior and required tests.
-
-OBSERVABILITY / UI / REPORT BEHAVIOR
-- Return the planned API call, safety preset, confirmation requirement, and non-goals before
-  execution when the action is active/high impact.
-- After queueing work, return the scan/campaign id and UI link.
-
-ACCEPTANCE CRITERIA
-- Active or budget-increasing intents return dry_run=true unless explicit execution is requested and
-  policy allows it.
-- Planned API calls preserve Safe/Balanced defaults and never infer Lab/deep from ambiguous language.
-- Missing target, credentials, or auth-state inputs are returned in missing_inputs.
-- Executed actions return the queued scan/campaign id and UI link.
-
-TESTS REQUIRED
-- Router unit tests for dry-run defaults, confirmation requirements, and missing_inputs.
-- API-shape tests for planned POST /scans and ASM calls.
-- Safety tests proving ambiguous language cannot select Lab/deep or bypass confirmation.
-- UI/API tests for returned explanation and blast_radius fields where applicable.
-
-OUTPUT FORMAT
-Return JSON:
-{
-  "intent": "run_full_coverage",
-  "dry_run": true,
-  "api_call": {
-    "method": "POST",
-    "path": "/scans",
-    "body": {}
-  },
-  "safety_preset": "Safe",
-  "requires_confirmation": true,
-  "authorization_assumption": "user owns or is authorized to test this target",
-  "blast_radius": {
-    "active_checks": true,
-    "auth_states": ["anonymous"],
-    "rate_caps_changed": false,
-    "high_risk_families": []
-  },
-  "will_do": [],
-  "will_not_do": [],
-  "missing_inputs": [],
-  "explanation": ""
-}
-
-TEST COMMANDS
-Report exact commands run and any expected commands not run with reasons.
+POST /ai/ops/route
 ```
+
+Shipped behavior:
+
+- Maps "run full coverage" to a dry-run `POST /scans` plan with `parallel=true`,
+  `shard_strategy=coverage`, `scan_type=smart`, `budget_profile=thorough`, and
+  `exploit_depth=false`.
+- Maps "keep this target covered" to a dry-run `PUT /targets/{id}/asm/policy` plan using the safe
+  Continuous ASM defaults.
+- Maps "what is still untested?" to `GET /targets/{id}/asm/gaps`.
+- Maps focused SQLi/XSS/BOLA requests to `POST /targets/{id}/asm/improve` with the matching
+  `check_family`; BOLA plans include `exploit_depth=true` and require primary plus second-user auth
+  context before execution.
+- Returns `dry_run=true` by default for active, state-changing, or budget-increasing intents.
+  Execution requires `execute=true`, explicit confirmations, and
+  `AI_OPS_ROUTER_EXECUTE_ENABLED=true`.
+- Returns `planned_api_call`, `planned_api_calls`, `safety_preset`,
+  `authorization_assumption`, `blast_radius`, `non_goals`, `missing_inputs`, and an execution result
+  with `scan_id`/`campaign_id`/`ui_link` when execution is allowed.
+
+Safety boundaries:
+
+- Ambiguous language never upgrades Safe/Balanced to Lab.
+- Missing target, credentials, or auth-state inputs produce `missing_inputs`, not execution.
+- High-risk active exploitation requires explicit high-risk confirmation.
+- The router does not expose shard/batch implementation rows.
+
+Remaining gap:
+
+- "Spend more budget on APIs" currently returns `missing_inputs=["api_endpoint_filter"]` instead of
+  raising global ASM budget. Implement this only after the allocator can filter a campaign to
+  API endpoint classes without changing target-wide defaults.

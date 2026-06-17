@@ -341,6 +341,160 @@ def test_asm_bola_family_requires_lab_policy_and_two_auth_contexts():
     )
 
 
+def test_ai_ops_router_full_coverage_is_dry_run_by_default():
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Run full coverage on this target",
+            target="https://example.test",
+        )
+    )
+
+    assert plan["intent"] == "run_full_coverage"
+    assert plan["dry_run"] is True
+    assert plan["requires_confirmation"] is True
+    assert plan["missing_inputs"] == []
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": "/scans",
+        "body": {
+            "target": "https://example.test",
+            "options": {
+                "scan_type": "smart",
+                "budget_profile": "thorough",
+                "parallel": True,
+                "shard_strategy": "coverage",
+                "exploit_depth": False,
+            },
+        },
+    }
+    assert plan["blast_radius"]["active_families"] == ["all"]
+    assert plan["authorization_assumption"]
+
+
+def test_ai_ops_router_rejects_ambiguous_api_budget_raise():
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Spend more budget on APIs",
+            target_id=str(uuid.uuid4()),
+            execute=True,
+            confirm_execution=True,
+            confirm_authorized=True,
+        )
+    )
+
+    assert plan["intent"] == "increase_api_endpoint_budget"
+    assert plan["dry_run"] is True
+    assert "api_endpoint_filter" in plan["missing_inputs"]
+    assert plan["planned_api_call"] is None
+    assert plan["execution_blocked_reason"] == "missing_inputs"
+
+
+def test_ai_ops_router_bola_requires_auth_context_and_high_risk_confirmation():
+    target_id = str(uuid.uuid4())
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Only retest BOLA tonight",
+            target_id=target_id,
+        )
+    )
+
+    assert plan["intent"] == "focused_asm_bola"
+    assert plan["dry_run"] is True
+    assert plan["safety_preset"] == "lab"
+    assert plan["blast_radius"]["high_risk_families"] == ["bola"]
+    assert plan["missing_inputs"] == ["primary_auth_context", "second_user_auth_context"]
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": f"/targets/{target_id}/asm/improve",
+        "body": {"check_family": "bola", "exploit_depth": True},
+    }
+
+
+def test_ai_ops_router_sqli_focus_does_not_upgrade_to_lab():
+    target_id = str(uuid.uuid4())
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Only retest SQL injection tonight",
+            target_id=target_id,
+        )
+    )
+
+    assert plan["intent"] == "focused_asm_sqli"
+    assert plan["safety_preset"] == "balanced"
+    assert plan["blast_radius"]["high_risk_families"] == []
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": f"/targets/{target_id}/asm/improve",
+        "body": {"check_family": "sqli"},
+    }
+
+
+def test_ai_ops_router_bola_execute_requires_high_risk_confirmation(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Only retest BOLA tonight",
+            target_id=str(uuid.uuid4()),
+            auth_context={"has_primary_auth": True, "has_second_user_auth": True},
+            execute=True,
+            confirm_execution=True,
+            confirm_authorized=True,
+        )
+    )
+
+    assert plan["dry_run"] is True
+    assert plan["missing_inputs"] == []
+    assert plan["execution_blocked_reason"] == "confirmation_required"
+
+
+def test_ai_ops_router_execute_requires_feature_flag(monkeypatch):
+    monkeypatch.delenv("AI_OPS_ROUTER_EXECUTE_ENABLED", raising=False)
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Run full coverage",
+            target="https://example.test",
+            execute=True,
+            confirm_execution=True,
+            confirm_authorized=True,
+        )
+    )
+
+    assert plan["dry_run"] is True
+    assert plan["execution_blocked_reason"] == "AI_OPS_ROUTER_EXECUTE_ENABLED is not enabled"
+
+
+def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
+    monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")
+    captured = {}
+
+    async def fake_submit_scan(request):
+        captured["target"] = request.target
+        captured["options"] = request.options.model_dump()
+        return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
+
+    result = asyncio.run(
+        api_module.ai_ops_route(
+            api_module.AIOpsRouterRequest(
+                prompt="Run full coverage on this target",
+                target="https://example.test",
+                execute=True,
+                confirm_execution=True,
+                confirm_authorized=True,
+            )
+        )
+    )
+
+    assert result["dry_run"] is False
+    assert captured["target"] == "https://example.test"
+    assert captured["options"]["parallel"] is True
+    assert captured["options"]["shard_strategy"] == "coverage"
+    assert captured["options"]["exploit_depth"] is False
+    assert result["executed"]["scan_id"] == "scan-1"
+    assert result["executed"]["ui_link"] == "/scans/scan-1"
+
+
 def test_default_scan_list_hides_shards_and_asm_activity_rows():
     assert api_module._hidden_scan_roles_for_list() == [
         "shard",

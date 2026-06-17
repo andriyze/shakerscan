@@ -525,11 +525,29 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "sqli"}'
 
+# High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "bola", "exploit_depth": true}'
+
 # Show ASM activity instead of using the normal scans list
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-Supported `check_family` values today: `all`, `sqli`, `xss`. Omit it for the normal active mix. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
+Supported `check_family` values today: `all`, `sqli`, `xss`, and gated `bola`. Omit it for the normal active mix. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
+
+### AI Operations Router
+
+For natural-language requests, prefer the dry-run router before composing active calls manually:
+
+```bash
+curl -X POST http://localhost:8080/ai/ops/route \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Run full coverage on this target", "target": "https://example.com"}'
+```
+
+Active or budget-increasing intents dry-run unless explicit execution confirmations are present and
+`AI_OPS_ROUTER_EXECUTE_ENABLED=true` is set.
 
 ### Custom Dictionaries (wordlists & payloads)
 
