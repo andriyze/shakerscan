@@ -626,8 +626,8 @@ def _normalize_auto_shard_count(value: Any, default: int = 4) -> int:
 def _default_scan_execution_settings() -> dict[str, Any]:
     return {
         "auto_sharding_enabled": _is_truthy(
-            os.environ.get("AUTO_SHARDING_ENABLED", "false"),
-            default=False,
+            os.environ.get("AUTO_SHARDING_ENABLED", "true"),
+            default=True,
         ),
         "auto_sharding_strategy": _normalize_parallel_strategy(
             os.environ.get("AUTO_SHARDING_STRATEGY", "auto"),

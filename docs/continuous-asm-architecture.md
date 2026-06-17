@@ -425,8 +425,8 @@ Current UI/API:
 - `/asm` loads focused batch labels from `/asm/check-families`, so the UI only offers registry-approved
   runnable families while keeping the control to one compact selector.
 - Child shard and ASM implementation rows are hidden from the main Scans list by default.
-- Auto-sharding exists behind `/settings/scan-execution`; current code defaults it off unless
-  configured.
+- Auto-sharding exists behind `/settings/scan-execution`; fresh installs default it on for
+  eligible scans, while explicit `Normal`/`parallel:false` still forces standalone execution.
 - Continuous ASM exists per target; current code defaults it off until a policy enables it.
 
 Recommended UI:

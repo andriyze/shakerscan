@@ -72,10 +72,11 @@ active-check loops; richer UI breakdowns for shard/batch coverage contribution.
 
 ## Product behavior
 
-Parallel scanning is both a user-selectable execution mode and an optional global
-automation policy. Standalone scans remain the default unless the
-`Auto-shard eligible scans` setting is enabled or a request explicitly sends
-`parallel:true`.
+Parallel scanning is both a user-selectable execution mode and a global automation policy.
+Fresh installs enable `Auto-shard eligible scans` by default, but the policy still only fans
+out eligible scans when enough workers are running. Standalone scans remain available through
+the New Scan `Normal` choice, an explicit `parallel:false` API request, or by turning the
+setting off.
 
 User-facing rules:
 

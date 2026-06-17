@@ -62,7 +62,7 @@ export default function ScanExecutionSettingsPanel() {
         <div>
           <h2 className="text-sm font-medium text-white">Scan Execution</h2>
           <p className="mt-1 text-sm text-gray-400">
-            Auto-shard eligible scans across workers. Quick and passive scans stay single-worker unless endpoints are provided.
+            Auto-shard eligible scans across workers when enough workers are running. Explicit Normal scans still stay single-worker.
           </p>
         </div>
         <Button
