@@ -455,6 +455,48 @@ def test_record_endpoint_telemetry_attempts_uses_per_endpoint_counts(monkeypatch
     assert calls["record"]["scanner_telemetry_json"]["per_endpoint_telemetry"] is True
 
 
+def test_apply_campaign_coverage_rollup_preserves_assignment_context():
+    merged = {
+        "smart_coverage": {
+            "endpoints": {
+                "discovered": 3,
+                "tested": 2,
+                "coverage": 0.667,
+                "basis": "assigned_custom_endpoints",
+            },
+            "aggregated_from_shards": 2,
+        }
+    }
+    campaign = {
+        "total": 3,
+        "attempted": 3,
+        "completed": 1,
+        "tested": 1,
+        "untested": 0,
+        "partial": 2,
+        "auth_blocked": 0,
+        "rate_limited": 0,
+        "error": 0,
+        "coverage": 0.333,
+        "basis": "campaign_attempt_ledger",
+    }
+
+    assert worker._apply_campaign_coverage_rollup(merged, campaign) is True
+
+    smart = merged["smart_coverage"]
+    assert smart["coverage_basis"] == "attempt_ledger"
+    assert smart["endpoints"] == campaign
+    assert smart["endpoint_assignment_rollup"]["basis"] == "assigned_custom_endpoints"
+    assert smart["aggregated_from_shards"] == 2
+
+
+def test_apply_campaign_coverage_rollup_ignores_empty_attempts():
+    merged = {"smart_coverage": {"endpoints": {"basis": "assigned_custom_endpoints"}}}
+
+    assert worker._apply_campaign_coverage_rollup(merged, {"attempted": 0}) is False
+    assert merged["smart_coverage"]["endpoints"]["basis"] == "assigned_custom_endpoints"
+
+
 def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):
     captured = {}
 

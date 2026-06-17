@@ -519,6 +519,79 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
     }
 
 
+async def campaign_attempt_summary(
+    conn,
+    campaign_id: str,
+    *,
+    expected_total: int | None = None,
+) -> dict[str, Any]:
+    """Coverage counts for one scan campaign from normalized attempt facts.
+
+    Full Coverage parent reports use this after merge-time attempt rows are
+    written. ``expected_total`` is the planner's assigned auth-scoped endpoint
+    count, which preserves unattempted slots in the denominator if a worker
+    never produced a ledger row.
+    """
+    import uuid as _uuid
+
+    cid = _uuid.UUID(str(campaign_id))
+    row = await conn.fetchrow(
+        """
+        WITH latest_attempt AS (
+            SELECT DISTINCT ON (aea.endpoint_id)
+                aea.endpoint_id,
+                CASE
+                    WHEN aea.status = 'completed'
+                     AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
+                    THEN 'partial'
+                    ELSE aea.status
+                END AS status,
+                aea.attempted_params_count,
+                aea.completed_params_count
+            FROM asm_endpoint_attempts aea
+            JOIN target_endpoints te ON te.id = aea.endpoint_id
+            WHERE aea.campaign_id = $1 AND te.test_status <> 'gone'
+            ORDER BY aea.endpoint_id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+        )
+        SELECT
+            count(*) AS attempted,
+            count(*) FILTER (WHERE status = 'completed') AS completed,
+            count(*) FILTER (WHERE status IN ('partial', 'timeout')) AS partial,
+            count(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
+            count(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
+            count(*) FILTER (WHERE status = 'error') AS error,
+            COALESCE(sum(attempted_params_count), 0) AS attempted_params,
+            COALESCE(sum(completed_params_count), 0) AS completed_params
+        FROM latest_attempt
+        """,
+        cid,
+    )
+
+    def _int(key: str) -> int:
+        return int(row[key] or 0) if row else 0
+
+    attempted = _int("attempted")
+    completed = _int("completed")
+    total = max(0, int(expected_total or 0), attempted)
+    untested = max(0, total - attempted)
+    return {
+        "total": total,
+        "attempted": attempted,
+        "completed": completed,
+        "tested": completed,
+        "untested": untested,
+        "partial": _int("partial"),
+        "auth_blocked": _int("auth_blocked"),
+        "rate_limited": _int("rate_limited"),
+        "error": _int("error"),
+        "attempted_params": _int("attempted_params"),
+        "completed_params": _int("completed_params"),
+        "coverage": round(completed / total, 3) if total else 0.0,
+        "basis": "campaign_attempt_ledger",
+        "coverage_denominator": "assigned_auth_scoped_endpoints" if expected_total is not None else "attempted_endpoints",
+    }
+
+
 async def create_campaign(
     conn,
     target_id: str,

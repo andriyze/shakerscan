@@ -3917,6 +3917,20 @@ def _ledger_status_from_endpoint_attempt(attempt: dict[str, Any]) -> tuple[str, 
     return 'partial', str(reason or status or 'partial')
 
 
+def _apply_campaign_coverage_rollup(merged: dict[str, Any], campaign_coverage: dict[str, Any]) -> bool:
+    """Overlay parent smart coverage with campaign attempt-ledger facts."""
+    if not isinstance(campaign_coverage, dict) or int(campaign_coverage.get('attempted') or 0) <= 0:
+        return False
+    agg_cov = dict(merged.get('smart_coverage') or {})
+    assignment_rollup = agg_cov.get('endpoints')
+    if assignment_rollup:
+        agg_cov['endpoint_assignment_rollup'] = assignment_rollup
+    agg_cov['endpoints'] = campaign_coverage
+    agg_cov['coverage_basis'] = 'attempt_ledger'
+    merged['smart_coverage'] = agg_cov
+    return True
+
+
 async def _record_endpoint_telemetry_attempts(
     conn,
     *,
@@ -4592,12 +4606,16 @@ async def process_scan_merge_job(job_data: dict):
     if campaign_id and target_id and strategy == 'coverage':
         try:
             async with db_pool.acquire() as conn:
+                expected_attempts = 0
                 for ch in children:
                     cres = _as_report_dict(ch['result'])
                     child_options = _as_report_dict(ch['options']) or {}
                     endpoints = child_options.get('custom_endpoints') or []
+                    if not isinstance(endpoints, list):
+                        endpoints = []
                     if not endpoints:
                         continue
+                    expected_attempts += len(endpoints)
                     auth_state = asm_inventory.auth_state_from_options(child_options)
                     telemetry_present = _active_endpoint_telemetry_present(cres)
                     attempts = _active_endpoint_attempts_from_report(cres)
@@ -4709,6 +4727,17 @@ async def process_scan_merge_job(job_data: dict):
                         replace_existing=True,
                     )
                 await asm_inventory.finish_campaign(conn, campaign_id, status=parent_status)
+                campaign_coverage = await asm_inventory.campaign_attempt_summary(
+                    conn,
+                    campaign_id,
+                    expected_total=expected_attempts,
+                )
+                if _apply_campaign_coverage_rollup(merged, campaign_coverage):
+                    filepath = save_result_file(merged, parent_job_id)
+                    await conn.execute(
+                        "UPDATE scans SET result = $1 WHERE id = $2",
+                        json.dumps(merged), uuid.UUID(parent_id),
+                    )
         except Exception as e:
             print(f"[merge {parent_id[:8]}] coverage attempt-ledger error: {e}", flush=True)
 

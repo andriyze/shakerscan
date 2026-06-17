@@ -6,8 +6,9 @@ records, durable endpoint leases, normalized ASM endpoint attempt rows, and one-
 campaign linkage with merge-time attempt rows are implemented. Scanner-level smart active
 per-endpoint telemetry is now emitted and consumed by ASM/Full Coverage attempt ledgers.
 `/targets/{id}/asm/coverage` now exposes both endpoint-status coverage and attempt-ledger coverage,
-using attempt facts for the top-level coverage when available. Dynamic pull-based Full Coverage
-allocation and parent-scan attempt-ledger rollups remain proposed.
+using attempt facts for the top-level coverage when available. Full Coverage parent reports now
+overlay campaign attempt-ledger rollups when merge-time attempt rows exist. Dynamic pull-based Full
+Coverage allocation remains proposed.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -26,7 +27,7 @@ Every implementation task must verify the current state with search/tests before
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Extend attempt-ledger rollups into parent scan reports. |
+| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
@@ -157,8 +158,9 @@ Still limited:
   A first-class check registry and telemetry schemas are still needed for every family.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
-- Parent scan reports still derive their coverage rollup from shard assignment/child JSON rather than
-  querying `asm_endpoint_attempts`.
+- Full Coverage parent scan reports overlay `smart_coverage.endpoints` from campaign
+  `asm_endpoint_attempts` when merge-time attempt facts exist; the assigned-slice rollup is retained
+  as `endpoint_assignment_rollup` for context/fallback.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
 - Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
@@ -360,8 +362,8 @@ now returns both:
 - `attempt_coverage`: latest `asm_endpoint_attempts` status per endpoint.
 
 Top-level `tested` and `coverage` use `attempt_coverage` when attempt facts exist; otherwise they
-fall back to `status_coverage` for fresh installs and legacy inventories. Parent scan reports still
-need the same attempt-ledger rollup treatment.
+fall back to `status_coverage` for fresh installs and legacy inventories. Full Coverage parent scan
+reports now use the same attempt-ledger treatment for campaign rows written during merge.
 
 Operational note: coverage can decrease after this change if earlier status-based coverage marked
 endpoints tested but the latest attempt facts are partial, timed out, auth-blocked, or missing
@@ -383,13 +385,14 @@ Current shipped behavior:
 - `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
   telemetry-backed attempt rows for child reports that include endpoint telemetry. Legacy/no-telemetry
   child reports keep conservative assigned-slice partial attempt rows.
+- `scan_merge` overlays the parent report's endpoint coverage from campaign attempt-ledger facts
+  when those facts exist; assigned endpoint coverage remains as contextual fallback.
 
 Target behavior:
 
 - The campaign asks the allocator for work until it hits its budget or all eligible rows are terminal.
 - Worker jobs are coverage-batch/ASM-batch equivalents; the difference is the rollup target:
   `parent_scan_id` for one-shot scans, target policy for continuous ASM.
-- `scan_merge` reads attempt-ledger facts for coverage rollups, not just child scan result JSON.
 - The parent report shows tested, partial, untested, auth-blocked, and rate-limited counts so the
   grade can be trusted or clearly marked limited.
 
@@ -533,12 +536,12 @@ Implemented:
 - `scan_merge` resolves scanner endpoint telemetry back to `target_endpoints` and writes idempotent
   `asm_endpoint_attempts`; legacy/no-telemetry children fall back to assigned shard endpoint slices
   as partial attempts.
+- `scan_merge` reads campaign attempt facts back into the parent report so `smart_coverage.endpoints`
+  shows tested, partial, untested, auth-blocked, rate-limited, and error counts from the ledger.
 
 Remaining:
 
 - `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
-- Merge consumes attempt ledger facts for parent coverage rollups instead of using assigned endpoint
-  slices directly.
 - Keep current static partition path as fallback while campaign mode stabilizes.
 
 ### Phase D — UX/API/AI Simplification

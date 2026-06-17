@@ -201,6 +201,54 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     }
 
 
+class _CampaignAttemptConn:
+    def __init__(self, row):
+        self.row = row
+        self.queries = []
+
+    async def fetchrow(self, query, *args):
+        self.queries.append((query, args))
+        return self.row
+
+
+def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard():
+    campaign_id = uuid.uuid4()
+    conn = _CampaignAttemptConn(
+        {
+            "attempted": 4,
+            "completed": 2,
+            "partial": 1,
+            "auth_blocked": 1,
+            "rate_limited": 0,
+            "error": 0,
+            "attempted_params": 7,
+            "completed_params": 5,
+        }
+    )
+
+    summary = asyncio.run(a.campaign_attempt_summary(conn, str(campaign_id), expected_total=6))
+
+    assert summary == {
+        "total": 6,
+        "attempted": 4,
+        "completed": 2,
+        "tested": 2,
+        "untested": 2,
+        "partial": 1,
+        "auth_blocked": 1,
+        "rate_limited": 0,
+        "error": 0,
+        "attempted_params": 7,
+        "completed_params": 5,
+        "coverage": 0.333,
+        "basis": "campaign_attempt_ledger",
+        "coverage_denominator": "assigned_auth_scoped_endpoints",
+    }
+    assert conn.queries[0][1] == (campaign_id,)
+    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[0][0]
+    assert "THEN 'partial'" in conn.queries[0][0]
+
+
 # ---- Allocator helpers -----------------------------------------------------
 
 class _AsyncTx:
