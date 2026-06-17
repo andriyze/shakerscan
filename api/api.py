@@ -702,6 +702,21 @@ def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict
     }
 
 
+def _default_asm_enabled_for_new_web_target(discovery_source: str = "manual") -> bool:
+    """Default Continuous ASM only for web targets the product should track.
+
+    The targets table also stores model artifacts and other non-web subjects, so
+    callers should opt those out explicitly instead of relying on a table-wide
+    default.
+    """
+    if str(discovery_source or "").strip().lower() in {"model-intake", "model_intake"}:
+        return False
+    return _is_truthy(
+        os.environ.get("DEFAULT_ASM_ENABLED", os.environ.get("ASM_DEFAULT_ENABLED", "true")),
+        default=True,
+    )
+
+
 def _scan_option_was_explicit(options: Any, field: str) -> bool:
     return field in getattr(options, "model_fields_set", set())
 
@@ -7375,10 +7390,11 @@ async def submit_scan(request: ScanRequest):
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain)
-                VALUES ($1, $2, $3)
+                INSERT INTO targets (url, name, root_domain, asm_enabled)
+                VALUES ($1, $2, $3, $4)
                 RETURNING id
-            """, normalized_target, request.name, extract_root_domain(normalized_target))
+            """, normalized_target, request.name, extract_root_domain(normalized_target),
+                 _default_asm_enabled_for_new_web_target("manual"))
 
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
@@ -8086,11 +8102,12 @@ async def create_target(request: TargetCreate):
     async with db_pool.acquire() as conn:
         try:
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id
             """, normalized_target, request.name, root_domain, is_root,
-                 json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)))
+                 json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                 _default_asm_enabled_for_new_web_target("manual"))
 
             response = {
                 'id': str(target_id),
@@ -10056,10 +10073,11 @@ async def create_manual_finding(request: ManualFindingCreate):
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, discovery_source)
-                VALUES ($1, $2, $3, 'manual')
+                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled)
+                VALUES ($1, $2, $3, 'manual', $4)
                 RETURNING id
-            """, normalized_target, parsed.hostname, parsed.hostname)
+            """, normalized_target, parsed.hostname, parsed.hostname,
+                 _default_asm_enabled_for_new_web_target("manual"))
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(
@@ -11258,10 +11276,11 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, discovery_source)
-                VALUES ($1, $2, $3, 'ai_session')
+                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled)
+                VALUES ($1, $2, $3, 'ai_session', $4)
                 RETURNING id
-            """, normalized_target, parsed.hostname, parsed.hostname)
+            """, normalized_target, parsed.hostname, parsed.hostname,
+                 _default_asm_enabled_for_new_web_target("ai_session"))
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(

@@ -473,6 +473,21 @@ def test_auto_sharding_env_can_disable_default(monkeypatch):
     assert settings["auto_sharding_enabled"] is False
 
 
+def test_default_asm_enabled_for_new_web_targets(monkeypatch):
+    monkeypatch.delenv("DEFAULT_ASM_ENABLED", raising=False)
+    monkeypatch.delenv("ASM_DEFAULT_ENABLED", raising=False)
+
+    assert api_module._default_asm_enabled_for_new_web_target("manual") is True
+    assert api_module._default_asm_enabled_for_new_web_target("ai_session") is True
+
+
+def test_default_asm_enabled_can_be_disabled_and_skips_model_intake(monkeypatch):
+    monkeypatch.setenv("DEFAULT_ASM_ENABLED", "false")
+
+    assert api_module._default_asm_enabled_for_new_web_target("manual") is False
+    assert api_module._default_asm_enabled_for_new_web_target("model-intake") is False
+
+
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)

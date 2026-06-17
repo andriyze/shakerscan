@@ -428,7 +428,9 @@ Current UI/API:
 - Child shard and ASM implementation rows are hidden from the main Scans list by default.
 - Auto-sharding exists behind `/settings/scan-execution`; fresh installs default it on for
   eligible scans, while explicit `Normal`/`parallel:false` still forces standalone execution.
-- Continuous ASM exists per target; current code defaults it off until a policy enables it.
+- Continuous ASM exists per target. New explicit web targets default it on with the conservative
+  safe policy; existing targets, model-intake artifact targets, and bulk discovery rows are not
+  silently flipped.
 
 Recommended UI:
 
@@ -586,7 +588,8 @@ Remaining:
 - Hide ASM batch/recon implementation rows from the default Scans list once ASM activity is available.
   **Implemented.**
 - Add a compact Settings view for safe automation defaults: auto-sharding, default ASM policy, and
-  active-depth confirmation boundaries.
+  active-depth confirmation boundaries. **Partially implemented:** auto-sharding defaults on, and
+  new explicit web targets default Continuous ASM on with the conservative safe policy.
 
 ### Phase E — Multi-Node Readiness
 
