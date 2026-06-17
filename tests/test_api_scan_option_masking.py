@@ -952,6 +952,38 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
     assert result["settings"]["default_continuous_asm"]["active_depth_confirmation_required"] is True
 
 
+def test_update_automation_settings_merges_partial_asm_config(monkeypatch):
+    redis_client = _AutomationSettingsRedis()
+    redis_client.hset(
+        api_module.AUTOMATION_SETTINGS_KEY,
+        mapping={
+            "default_asm_config": json.dumps({
+                "batch_size": 40,
+                "stale_days": 60,
+                "window_start_hour": 2,
+                "window_end_hour": 6,
+                "window_days": [1, 3],
+                "max_requests_per_hour_per_domain": 333,
+            }),
+        },
+    )
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    result = asyncio.run(api_module.update_automation_settings(
+        api_module.AutomationSettingsUpdate(default_asm_config={"batch_size": 100})
+    ))
+
+    stored = json.loads(redis_client.store[api_module.AUTOMATION_SETTINGS_KEY]["default_asm_config"])
+    assert stored["batch_size"] == 100
+    assert stored["stale_days"] == 60
+    assert stored["window_start_hour"] == 2
+    assert stored["window_end_hour"] == 6
+    assert stored["window_days"] == [1, 3]
+    assert stored["max_requests_per_hour_per_domain"] == 333
+    assert result["settings"]["default_continuous_asm"]["config"]["batch_size"] == 100
+    assert result["settings"]["default_continuous_asm"]["config"]["window_days"] == [1, 3]
+
+
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)

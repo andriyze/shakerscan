@@ -806,6 +806,14 @@ def _safe_default_asm_config(config: Any = None) -> dict[str, Any]:
     return cfg
 
 
+def _merge_safe_default_asm_config(base: Any, update: Any) -> dict[str, Any]:
+    """Apply a partial automation default update without resetting unrelated knobs."""
+    merged = dict(_safe_default_asm_config(base))
+    if isinstance(update, dict):
+        merged.update(update)
+    return _safe_default_asm_config(merged)
+
+
 def _load_effective_automation_settings() -> dict[str, Any]:
     settings: dict[str, Any] = {
         "default_asm_enabled": _default_asm_enabled_setting(),
@@ -4913,6 +4921,8 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
 
+    current_automation = _load_effective_automation_settings()
+
     scan_updates = _scan_execution_update_mapping(request)
     if scan_updates:
         r.hset(SCAN_SETTINGS_KEY, mapping=scan_updates)
@@ -4922,7 +4932,10 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
         automation_updates["default_asm_enabled"] = "true" if request.default_asm_enabled else "false"
     if request.default_asm_config is not None:
         automation_updates["default_asm_config"] = json.dumps(
-            _safe_default_asm_config(request.default_asm_config)
+            _merge_safe_default_asm_config(
+                current_automation.get("default_asm_config"),
+                request.default_asm_config,
+            )
         )
     if automation_updates:
         r.hset(AUTOMATION_SETTINGS_KEY, mapping=automation_updates)
