@@ -11,6 +11,7 @@ async helpers take an asyncpg connection and do the DB work.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -443,6 +444,107 @@ def normalize_worklist_details(
 # ---------------------------------------------------------------------------
 # Async DB helpers (asyncpg connection passed in)
 # ---------------------------------------------------------------------------
+
+def _probe_auth_curl_args(options: dict[str, Any] | None) -> list[str]:
+    """Build curl auth args from scan options so reachability probes use the same
+    credentials the scan itself would (otherwise auth-gated endpoints look 404)."""
+    args: list[str] = []
+    o = options or {}
+    h = o.get("auth_header")
+    if h:
+        hs = str(h)
+        args += ["-H", hs if hs.lower().startswith("authorization") else f"Authorization: {hs}"]
+    c = o.get("auth_cookies")
+    if c:
+        args += ["-b", str(c)]
+    hj = o.get("auth_headers_json")
+    if hj:
+        try:
+            import json as _json
+            d = _json.loads(hj) if isinstance(hj, str) else hj
+            for k, v in (d or {}).items():
+                args += ["-H", f"{k}: {v}"]
+        except Exception:
+            pass
+    return args
+
+
+async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], timeout: int) -> bool:
+    """True if `path` exists (any HTTP status other than 404). Uses a safe GET
+    (never a write method), so it cannot mutate the target. Transient errors and
+    timeouts return True so real endpoints are never dropped on a flaky probe."""
+    url = base_url.rstrip("/") + (path if path.startswith("/") else "/" + path)
+    cmd = [
+        "curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+        "--max-time", str(max(2, timeout - 1)),
+        "-X", "GET", "-H", "User-Agent: Mozilla/5.0 (ShakerScan ASM reachability)",
+    ] + auth_args + [url]
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 2)
+        code = (out or b"").decode("ascii", "replace").strip()[-3:]
+        return code != "404"
+    except Exception:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return True
+
+
+async def filter_reachable_worklist(
+    base_url: str,
+    worklist: Any,
+    options: dict[str, Any] | None = None,
+    *,
+    max_probe: int = 2000,
+    concurrency: int = 24,
+    timeout: int = 5,
+) -> list[str]:
+    """Drop endpoints whose PATH returns 404 so OpenAPI-spec- and OPTIONS-derived
+    phantom endpoints (declared but not actually served) don't pollute the
+    inventory, inflate coverage denominators, or spam the new-surface feed.
+
+    Probes each unique path once with a safe GET and keeps it on any non-404
+    status (incl. 401/403/405 — auth-gated or method-restricted but real). Set
+    ASM_VALIDATE_REACHABILITY=0 to disable; skipped (keep all) above max_probe
+    unique paths to bound cost on very large worklists."""
+    entries = [e for e in (worklist or []) if isinstance(e, str) and e.strip()]
+    if not entries or not base_url:
+        return entries
+    if str(os.environ.get("ASM_VALIDATE_REACHABILITY", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return entries
+
+    by_path: dict[str, list[str]] = {}
+    for e in entries:
+        parsed = parse_worklist_entry(e)
+        key = parsed[1] if parsed else "__unparsed__"
+        by_path.setdefault(key, []).append(e)
+
+    probe_paths = [p for p in by_path if p != "__unparsed__"]
+    if len(probe_paths) > max_probe:
+        return entries  # too many to probe within budget; don't block, keep all
+
+    auth_args = _probe_auth_curl_args(options)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    reachable: dict[str, bool] = {}
+
+    async def _one(path: str) -> None:
+        async with sem:
+            reachable[path] = await _probe_path_exists(base_url, path, auth_args, timeout)
+
+    await asyncio.gather(*(_one(p) for p in probe_paths))
+
+    kept: list[str] = []
+    for path, group in by_path.items():
+        if path == "__unparsed__" or reachable.get(path, True):
+            kept.extend(group)
+    return kept
+
 
 async def upsert_endpoints(
     conn,

@@ -3861,6 +3861,9 @@ async def process_scan_job(job_data: dict):
             try:
                 worklist = (result.get('active_checks') or {}).get('active_worklist')
                 if worklist:
+                    # Drop spec/OPTIONS-derived phantom (404) endpoints before recording.
+                    worklist = await asm_inventory.filter_reachable_worklist(target, worklist, options)
+                if worklist:
                     async with db_pool.acquire() as conn:
                         auth_state = asm_inventory.auth_state_from_options(options)
                         n = await asm_inventory.upsert_endpoints(
@@ -4257,10 +4260,16 @@ async def process_scan_plan_job(job_data: dict):
         except (TypeError, ValueError):
             harvest_limit = parallel_scan.COVERAGE_WORKLIST_MAX
         harvested = parallel_scan.harvest_endpoints(recon_result, max_endpoints=harvest_limit)
+        # Drop spec/OPTIONS-derived phantom endpoints (declared but 404) before they
+        # feed the shard plan and the ASM inventory. Filter recon-discovered only;
+        # user-supplied custom_endpoints are always kept.
+        _raw_harvested = len(harvested)
+        harvested = await asm_inventory.filter_reachable_worklist(target, harvested, options)
         harvested = parallel_scan._normalize_endpoint_list(
             list(options.get('custom_endpoints') or []) + harvested
         )
-        print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon", flush=True)
+        print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon "
+              f"({_raw_harvested} pre-reachability-filter)", flush=True)
         coverage_allocation = parallel_scan.coverage_allocation_mode(options)
         coverage_auth_states = (
             parallel_scan.available_auth_states(options)

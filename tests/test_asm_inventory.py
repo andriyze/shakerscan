@@ -52,6 +52,45 @@ def test_domain_rate_reservation_caps_at_positive_limit():
     assert a.reserve_domain_rate(redis, "example.test", 100, 1) == 0    # cap reached
 
 
+def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
+    # Phantom OpenAPI/OPTIONS-declared paths (404) are dropped across every method;
+    # a real path is kept. Probe is per-path, so all methods of a 404 path go.
+    async def fake_probe(base_url, path, auth_args, timeout):
+        return not path.startswith("/api/ai-redteam")
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+    worklist = [
+        "GET /rest/products/1?id=2",
+        "GET /api/ai-redteam/user_consent",
+        'POST /api/ai-redteam/user_consent json:{"a":1}',
+        "PUT /api/ai-redteam/tools.list",
+    ]
+    kept = asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {}))
+    assert kept == ["GET /rest/products/1?id=2"]
+
+
+def test_filter_reachable_worklist_keeps_non_404(monkeypatch):
+    # 401/403/405 mean the path exists -> keep (probe returns True for non-404).
+    async def fake_probe(base_url, path, auth_args, timeout):
+        return True
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+    worklist = ["GET /a", "POST /b form:x=1", "DELETE /c"]
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
+
+
+def test_filter_reachable_worklist_disabled_skips_probing(monkeypatch):
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "0")
+    calls = {"n": 0}
+    async def fake_probe(*_a, **_k):
+        calls["n"] += 1
+        return False
+    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+    worklist = ["GET /api/ai-redteam/x"]
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
+    assert calls["n"] == 0
+
+
 def test_normalize_path_templates_volatile_ids():
     assert a.normalize_path("/users/42") == "/users/{id}"
     assert a.normalize_path("/u/550e8400-e29b-41d4-a716-446655440000/x") == "/u/{uuid}/x"
