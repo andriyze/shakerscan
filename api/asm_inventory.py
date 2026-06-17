@@ -445,6 +445,52 @@ def normalize_worklist_details(
 # Async DB helpers (asyncpg connection passed in)
 # ---------------------------------------------------------------------------
 
+# Soft-404 / unknown-route signature detection. Many apps never return a literal
+# 404 for an unknown path: SPAs serve a 200 index shell (catch-all route), and
+# API frameworks return 500/401/403/405 for unmatched routes under a prefix.
+# A literal-404 filter is useless against those (observed: 0 of 1137 Juice Shop
+# phantoms dropped vs 912 of 1095 honey phantoms). We learn each path-prefix's
+# "not found" response signature (status + body size) by probing decoys, then
+# drop candidates that match it. Bias is conservative: any inconclusive probe
+# keeps the endpoint.
+try:
+    _SOFT404_SIZE_TOL_BYTES = max(0, int(os.environ.get("ASM_SOFT404_SIZE_TOL_BYTES") or 256))
+except (TypeError, ValueError):
+    _SOFT404_SIZE_TOL_BYTES = 256
+_SOFT404_SIZE_TOL_FRAC = 0.08
+_SOFT404_MAX_PREFIXES = 16
+# Two decoys per prefix capture both the direct-unknown and nested-unknown
+# signatures (some servers differ by depth). Tokens are fixed + implausible so
+# the behaviour is deterministic (important for tests/replay).
+_SOFT404_DECOY_TOKENS = ("zz9-shakerscan-probe-404a7", "zz9-shakerscan-probe-404a7/qx8w2")
+
+
+def _soft404_enabled() -> bool:
+    return str(os.environ.get("ASM_SOFT404_DETECT", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _path_prefix(path: str) -> str:
+    """The namespace a soft-404 signature is keyed on: the first path segment for
+    nested paths, or ``/`` for root-level paths so they share one decoy probe.
+    ``/api/v3/users`` -> ``/api`` ; ``/login`` or ``/`` -> ``/``."""
+    p = (path or "").split("?", 1)[0].strip("/")
+    if "/" not in p:
+        return "/"
+    return "/" + p.split("/", 1)[0]
+
+
+def _soft404_matches(probe: tuple[str, int], signature: tuple[str, int]) -> bool:
+    """True if a probe response matches a learned not-found signature: same HTTP
+    status AND body size within tolerance. Status must match first so a real
+    endpoint that merely shares a size with the decoy is never dropped."""
+    if probe[0] != signature[0] or probe[0] in ("ERR", ""):
+        return False
+    if probe[1] < 0 or signature[1] < 0:
+        return True  # status matched and size is unknown -> treat as match
+    tol = max(_SOFT404_SIZE_TOL_BYTES, int(signature[1] * _SOFT404_SIZE_TOL_FRAC))
+    return abs(probe[1] - signature[1]) <= tol
+
+
 def _probe_auth_curl_args(options: dict[str, Any] | None) -> list[str]:
     """Build curl auth args from scan options so reachability probes use the same
     credentials the scan itself would (otherwise auth-gated endpoints look 404)."""
@@ -469,13 +515,15 @@ def _probe_auth_curl_args(options: dict[str, Any] | None) -> list[str]:
     return args
 
 
-async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], timeout: int) -> bool:
-    """True if `path` exists (any HTTP status other than 404). Uses a safe GET
-    (never a write method), so it cannot mutate the target. Transient errors and
-    timeouts return True so real endpoints are never dropped on a flaky probe."""
+async def _probe_path_status(base_url: str, path: str, auth_args: list[str], timeout: int) -> tuple[str, int]:
+    """Safe GET probe returning ``(http_code, body_size)``. Uses GET only (never a
+    write method) so it cannot mutate the target. Returns ``("ERR", -1)`` on any
+    transient error/timeout so callers keep the endpoint when the probe is
+    inconclusive — reachability filtering must never drop a real endpoint on a
+    flaky probe."""
     url = base_url.rstrip("/") + (path if path.startswith("/") else "/" + path)
     cmd = [
-        "curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+        "curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
         "--max-time", str(max(2, timeout - 1)),
         "-X", "GET", "-H", "User-Agent: Mozilla/5.0 (ShakerScan ASM reachability)",
     ] + auth_args + [url]
@@ -485,15 +533,26 @@ async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], tim
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 2)
-        code = (out or b"").decode("ascii", "replace").strip()[-3:]
-        return code != "404"
+        parts = (out or b"").decode("ascii", "replace").strip().split()
+        if not parts:
+            return ("ERR", -1)
+        code = parts[0][-3:]
+        size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
+        return (code, size)
     except Exception:
         if proc is not None:
             try:
                 proc.kill()
             except Exception:
                 pass
-        return True
+        return ("ERR", -1)
+
+
+async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], timeout: int) -> bool:
+    """True if `path` exists (any status other than a literal 404). Back-compat
+    wrapper over :func:`_probe_path_status`; inconclusive probes keep the path."""
+    code, _size = await _probe_path_status(base_url, path, auth_args, timeout)
+    return code != "404"
 
 
 async def filter_reachable_worklist(
@@ -505,14 +564,18 @@ async def filter_reachable_worklist(
     concurrency: int = 24,
     timeout: int = 5,
 ) -> list[str]:
-    """Drop endpoints whose PATH returns 404 so OpenAPI-spec- and OPTIONS-derived
-    phantom endpoints (declared but not actually served) don't pollute the
-    inventory, inflate coverage denominators, or spam the new-surface feed.
+    """Drop phantom endpoints (declared by OpenAPI/OPTIONS/synthetic generation
+    but not actually served) so they don't pollute the inventory, inflate
+    coverage denominators, or spam the new-surface feed.
 
-    Probes each unique path once with a safe GET and keeps it on any non-404
-    status (incl. 401/403/405 — auth-gated or method-restricted but real). Set
-    ASM_VALIDATE_REACHABILITY=0 to disable; skipped (keep all) above max_probe
-    unique paths to bound cost on very large worklists."""
+    Probes each unique path once with a safe GET and drops it when the response
+    is a literal 404 OR matches its prefix's learned *soft-404* signature (status
+    + body size) — handling apps that answer unknown routes with 500/401/200-SPA
+    instead of 404. Non-matching statuses (incl. real 401/403/405) are kept.
+
+    Set ``ASM_VALIDATE_REACHABILITY=0`` to disable entirely, or
+    ``ASM_SOFT404_DETECT=0`` to keep only the literal-404 behaviour. Skipped
+    (keep all) above ``max_probe`` unique paths to bound cost."""
     entries = [e for e in (worklist or []) if isinstance(e, str) and e.strip()]
     if not entries or not base_url:
         return entries
@@ -531,18 +594,46 @@ async def filter_reachable_worklist(
 
     auth_args = _probe_auth_curl_args(options)
     sem = asyncio.Semaphore(max(1, concurrency))
-    reachable: dict[str, bool] = {}
+    status: dict[str, tuple[str, int]] = {}
 
-    async def _one(path: str) -> None:
+    async def _probe(path: str) -> None:
         async with sem:
-            reachable[path] = await _probe_path_exists(base_url, path, auth_args, timeout)
+            status[path] = await _probe_path_status(base_url, path, auth_args, timeout)
 
-    await asyncio.gather(*(_one(p) for p in probe_paths))
+    # Learn the not-found signature for each path prefix by probing decoys.
+    soft404 = _soft404_enabled()
+    not_found: dict[str, list[tuple[str, int]]] = {}
+    prefixes = sorted({_path_prefix(p) for p in probe_paths})[:_SOFT404_MAX_PREFIXES]
+
+    async def _learn(prefix: str) -> None:
+        sigs: list[tuple[str, int]] = []
+        for token in _SOFT404_DECOY_TOKENS:
+            async with sem:
+                sig = await _probe_path_status(base_url, prefix.rstrip("/") + "/" + token, auth_args, timeout)
+            if sig[0] not in ("ERR", ""):
+                sigs.append(sig)
+        not_found[prefix] = sigs
+
+    learn_tasks = [_learn(p) for p in prefixes] if soft404 else []
+    await asyncio.gather(*(_probe(p) for p in probe_paths), *learn_tasks)
 
     kept: list[str] = []
+    dropped = 0
     for path, group in by_path.items():
-        if path == "__unparsed__" or reachable.get(path, True):
+        if path == "__unparsed__":
             kept.extend(group)
+            continue
+        st = status.get(path, ("ERR", -1))
+        if st[0] in ("ERR", ""):
+            kept.extend(group)  # inconclusive probe -> keep
+            continue
+        if st[0] == "404":
+            dropped += 1
+            continue
+        if soft404 and any(_soft404_matches(st, sig) for sig in not_found.get(_path_prefix(path), [])):
+            dropped += 1
+            continue
+        kept.extend(group)
     return kept
 
 

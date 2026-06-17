@@ -130,3 +130,85 @@ not match the shipped design.
 5. **Remaining:** **P1 follow-up** (scale-aware `rebuild/restart` recreates API-scaled workers + a
    code-version handshake so a skewed worker/API refuses jobs instead of silently running old code
    — this is the common root of P2 and P4), and **A2** (inventory GC for `gone`/unreachable rows).
+
+---
+
+## Round 2 — second live data run (2026-06-17)
+
+Ran three parallel scans concurrently on a uniform 10-worker fleet — Juice Shop coverage
+(`454f786e`), honey coverage (`e2dbf9a3`), crAPI family (`2158c971`) — plus Continuous ASM on
+crAPI. **All completed with zero shard failures.**
+
+### What is now validated working
+- **Dynamic Full Coverage** fans out real pull-workers (`allocation=dynamic`); honey 2, Juice Shop 8.
+- **Merge / dedup**: parent reports correctly collapse shard findings (family 55→19, Juice 32→5,
+  honey 27→17); no shard findings lost, no duplicates.
+- **Campaign linkage** now happens (Juice Shop **2079** campaign-linked rows, honey 183) — the
+  earlier "0 linked" was the P1/P2 skew, resolved on uniform code.
+- **Family fan-out** correctly caps at 3 (broad/sqli/xss), logged `allocation=static, static_slices=3`.
+- **ASM dispatcher** correctly defers (`action=wait`) while a target has active scans, then
+  dispatches a test batch (`action=test`) once clear — good concurrency control.
+
+### A3 — Soft-404 / unknown-route phantom endpoints  ✅ FIXED
+- **Evidence:** A1's literal-404 filter is **defeated by apps that don't 404 unknown routes.**
+  Measured per-target reachability-filter drop rate (`harvested N (M pre-reachability-filter)`):
+
+  | Target | Unknown-route response | A1 (drop-404) result |
+  |--------|------------------------|----------------------|
+  | honey | clean **404** (9 b) | **1095 → 183** (83% phantoms dropped) ✓ |
+  | crAPI | **404** at root, **401/405** under auth prefixes | partial |
+  | Juice Shop | **500** (~3060 b) for `/api`,`/rest`; **200** 75 KB SPA index catch-all; never 404 | **1137 → 1137** (0 dropped) ✗ |
+
+  Consequence on Juice Shop: the dynamic coverage scan tested ~1071 endpoints to a **94% coverage**
+  grade — but most were **phantom** (soft-404), so the budget was wasted and the coverage metric
+  was meaningless. (1261 endpoint test-attempts were recorded that run, the bulk on phantoms.)
+- **Root cause:** `filter_reachable_worklist` only dropped a literal `404`. SPAs serve a 200 index
+  shell for unknown routes; API frameworks return 500/401/403/405 under a prefix. Neither is 404.
+- **Fix (done):** learn each path-prefix's *soft-404 signature* (HTTP status + body size) by probing
+  implausible **decoy** paths, then drop a candidate when its response is a literal 404 **or** matches
+  its prefix's decoy signature (status equal + size within tolerance). This is a *differential* check,
+  so per-prefix variation is handled automatically (crAPI 404-at-root vs 401-under-`/identity`). Bias
+  stays conservative: any inconclusive probe keeps the endpoint; a status that differs from the decoy
+  (a real 401 where unknown→500) is kept. `api/asm_inventory.py` (`_probe_path_status`,
+  `_path_prefix`, `_soft404_matches`, rewritten `filter_reachable_worklist`); env knobs
+  `ASM_SOFT404_DETECT=0` (revert to literal-404), `ASM_SOFT404_SIZE_TOL_BYTES`.
+  **Validated live on Juice Shop**: an 8-entry real+phantom worklist kept the 3 real endpoints + 1
+  auth-gated 401 path and dropped both 500-phantoms and both SPA-200 catch-alls; on a full recon
+  worklist the harvest went **1138 → 480 (658 / 58% phantoms dropped)**, versus A1's 1137 → 1137
+  (0 dropped) on the same target.
+
+### A2 — Inventory bloat / GC  🔴 STILL OPEN (now the top ASM item)
+- **Evidence:** rows / distinct-paths — Juice Shop **9391 / 2339**, honey **5394 / 852**,
+  crAPI **2351 / 307**. Most Juice Shop "paths" are synthetic permutations (4475 versioned,
+  1677 `/api/{Resource}s/…`) that A1 could not drop (they soft-404). There is **no HTTP-status
+  reachability column** — `last_attempt_status` holds the *lease lifecycle* (`leased`/`completed`),
+  not the response code — so nothing records whether a tested endpoint was actually reachable.
+- **Fix (next):** (1) persist a reachability signal (`last_http_status` + `reachable`) recorded at
+  probe/test time; (2) a GC pass that re-probes existing rows with the A3 soft-404 logic and
+  deletes/`gone`-marks phantoms (A3 prevents *new* phantoms on soft-404 apps but does not clean the
+  ~17 k pre-existing rows); (3) exclude unreachable rows from coverage denominators and the
+  new-surface diff so coverage % becomes meaningful again.
+
+### A4 — Cap synthetic endpoint permutation  🟡 MEDIUM
+- **Evidence:** 4475 versioned + 1677 resource-permuted Juice Shop paths, the bulk phantom.
+- **Fix:** gate synthetic/version-permutation generation behind A3 reachability and/or cap the
+  permutation breadth so generation can't dominate the worklist before filtering.
+
+### P5 — Dynamic-coverage batch granularity  🟢 LOW
+- **Evidence:** dynamic shard durations spread 228–1319 s (~6×) on Juice Shop; with
+  `batch_size=150` the final claimed batch runs long while earlier workers idle.
+- **Fix:** taper the claimed batch size as the worklist drains (smaller terminal batches) so the
+  long-tail batch can't dominate wall-clock. Minor — the pull model already balances the bulk.
+
+### P6 — API-scaled worker logs are invisible  🟢 LOW (observability)
+- **Evidence:** plan jobs for the new scans ran on API-scaled workers 6–10, whose logs are **not**
+  captured by `docker compose logs worker` (only the compose replicas) — the fan-out lines were
+  invisible until querying each container directly.
+- **Fix:** a `scanner.sh logs` mode that aggregates *all* `shakerscan-worker-*` containers, not just
+  compose-managed ones.
+
+### Round 2 order
+1. **A2** (reachability persistence + GC) — now the highest-value ASM item; cleans the ~17 k
+   pre-existing phantom rows A3 can't retroactively remove and makes coverage % meaningful.
+2. **A4** (cap synthetic permutation) — stop generating the phantoms at the source.
+3. **P5 / P6** (batch taper, all-worker logs) and the **P1 follow-up** (code-version handshake).

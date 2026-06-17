@@ -53,12 +53,14 @@ def test_domain_rate_reservation_caps_at_positive_limit():
 
 
 def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
-    # Phantom OpenAPI/OPTIONS-declared paths (404) are dropped across every method;
-    # a real path is kept. Probe is per-path, so all methods of a 404 path go.
-    async def fake_probe(base_url, path, auth_args, timeout):
-        return not path.startswith("/api/ai-redteam")
+    # Clean-404 server (honey-style): phantom paths (and decoys) -> 404, dropped
+    # across every method; a real path is kept. Probe is per-path.
+    async def fake_status(base_url, path, auth_args, timeout):
+        if path.startswith("/api/ai-redteam") or "shakerscan-probe" in path:
+            return ("404", 9)
+        return ("200", 512)
     monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
-    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
     worklist = [
         "GET /rest/products/1?id=2",
         "GET /api/ai-redteam/user_consent",
@@ -70,11 +72,13 @@ def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
 
 
 def test_filter_reachable_worklist_keeps_non_404(monkeypatch):
-    # 401/403/405 mean the path exists -> keep (probe returns True for non-404).
-    async def fake_probe(base_url, path, auth_args, timeout):
-        return True
+    # Real 200 endpoints (distinct from the decoy 404 signature) are kept.
+    async def fake_status(base_url, path, auth_args, timeout):
+        if "shakerscan-probe" in path:
+            return ("404", 9)
+        return ("200", 700)
     monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
-    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
     worklist = ["GET /a", "POST /b form:x=1", "DELETE /c"]
     assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
 
@@ -82,13 +86,78 @@ def test_filter_reachable_worklist_keeps_non_404(monkeypatch):
 def test_filter_reachable_worklist_disabled_skips_probing(monkeypatch):
     monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "0")
     calls = {"n": 0}
-    async def fake_probe(*_a, **_k):
+    async def fake_status(*_a, **_k):
         calls["n"] += 1
-        return False
-    monkeypatch.setattr(a, "_probe_path_exists", fake_probe)
+        return ("404", 9)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
     worklist = ["GET /api/ai-redteam/x"]
     assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
     assert calls["n"] == 0
+
+
+def test_filter_reachable_worklist_drops_soft404_500(monkeypatch):
+    # App returns 500 (~3060b) for unknown /api routes, NEVER 404 (Juice Shop
+    # style). A literal-404 filter would keep them; soft-404 signature matching
+    # drops them while keeping the real endpoint (distinct status/size).
+    async def fake_status(base_url, path, auth_args, timeout):
+        if path == "/api/Products":
+            return ("200", 13212)
+        return ("500", 3060)  # unknown /api routes incl. decoys
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.delenv("ASM_SOFT404_DETECT", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /api/Products", "GET /api/v3/auth", "GET /api/Addresss/login"]
+    kept = asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {}))
+    assert kept == ["GET /api/Products"]
+
+
+def test_filter_reachable_worklist_drops_spa_200_catchall(monkeypatch):
+    # SPA serves a 200 index shell for unknown routes (incl. client routes like
+    # /login); real API endpoints have distinct sizes. Drop the shell, keep the API.
+    async def fake_status(base_url, path, auth_args, timeout):
+        if path == "/rest/products/search":
+            return ("200", 631)
+        return ("200", 75055)  # SPA index shell for unknown routes incl. decoys
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.delenv("ASM_SOFT404_DETECT", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /rest/products/search", "GET /login", "GET /made/up/route"]
+    kept = asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {}))
+    assert kept == ["GET /rest/products/search"]
+
+
+def test_filter_reachable_worklist_soft404_detect_off_keeps_soft404s(monkeypatch):
+    # With soft-404 detection off, only literal 404s are dropped; 500-for-unknown
+    # phantoms are kept (back-compat with the original literal-404 behaviour).
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("500", 3060)
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.setenv("ASM_SOFT404_DETECT", "0")
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /api/v3/auth", "GET /api/Products"]
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
+
+
+def test_filter_reachable_worklist_keeps_on_probe_error(monkeypatch):
+    # Inconclusive probes (transient error/timeout) never drop a real endpoint.
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("ERR", -1)
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /a", "GET /b"]
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
+
+
+def test_path_prefix_and_soft404_matches():
+    assert a._path_prefix("/api/v3/users") == "/api"
+    assert a._path_prefix("/login") == "/"
+    assert a._path_prefix("/") == "/"
+    assert a._path_prefix("/rest/products?q=1") == "/rest"
+    # status must match, size within tolerance
+    assert a._soft404_matches(("500", 3060), ("500", 3047)) is True
+    assert a._soft404_matches(("200", 13212), ("500", 3060)) is False  # status differs
+    assert a._soft404_matches(("200", 631), ("200", 75055)) is False   # size differs
+    assert a._soft404_matches(("ERR", -1), ("500", 3060)) is False     # inconclusive
 
 
 def test_normalize_path_templates_volatile_ids():
