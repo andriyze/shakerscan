@@ -30,8 +30,9 @@ Every implementation task must verify the current state with search/tests before
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
-| ASM endpoint inventory | Shipped | Add attempt ledger and durable leases in the ASM doc. |
-| Campaign allocator | Proposed | Implement allocator before unifying one-shot coverage and Continuous ASM. |
+| ASM endpoint inventory | Shipped | Add scanner-level attempted/completed telemetry in the ASM doc. |
+| ASM campaign/lease/attempt foundation | Shipped | Use attempt facts in coverage rollups once scanner telemetry exists. |
+| Campaign allocator for Full Coverage | Proposed | Convert one-shot coverage from static slices to dynamic campaign allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -542,9 +543,10 @@ Parallel scanning touches ASM in three shipped places:
 Current boundary:
 
 - One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`.
-- Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`.
-- Both paths write into the same endpoint inventory, but they do not yet use the same campaign
-  allocator or attempt ledger.
+- Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`; claims now set
+  durable leases, link to `scan_campaigns`, and write `asm_endpoint_attempts`.
+- Both paths write into the same endpoint inventory, but one-shot Full Coverage does not yet claim
+  work through the campaign allocator or consume the attempt ledger.
 
 Target boundary:
 

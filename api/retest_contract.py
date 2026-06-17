@@ -751,6 +751,45 @@ async def run_schema_migrations(pool) -> None:
                 ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL
             """)
 
+            # Shared campaign records for one-shot Full Coverage and Continuous ASM.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_campaigns (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    root_domain TEXT,
+                    requested_by TEXT NOT NULL DEFAULT 'api',
+                    mode TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    budget_profile TEXT,
+                    wide_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    deep_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    check_families JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    auth_states JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    allowed_windows JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    daily_cap INTEGER,
+                    rate_caps JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    policy_id UUID,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_campaigns_target_status
+                ON scan_campaigns(target_id, status, created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_campaigns_parent
+                ON scan_campaigns(parent_scan_id) WHERE parent_scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL
+            """)
+
             # Continuous ASM: persistent per-target endpoint inventory (docs §16).
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS target_endpoints (
@@ -771,6 +810,11 @@ async def run_schema_migrations(pool) -> None:
                     last_attempt_status TEXT,
                     last_verdict TEXT,
                     last_finding_id UUID,
+                    credential_ref TEXT,
+                    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                    lease_owner TEXT,
+                    lease_expires_at TIMESTAMPTZ,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
                     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     last_tested_at TIMESTAMPTZ,
@@ -783,7 +827,12 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS param_location TEXT NOT NULL DEFAULT 'query',
                 ADD COLUMN IF NOT EXISTS replay_spec TEXT,
                 ADD COLUMN IF NOT EXISTS content_type TEXT,
-                ADD COLUMN IF NOT EXISTS last_attempt_status TEXT
+                ADD COLUMN IF NOT EXISTS last_attempt_status TEXT,
+                ADD COLUMN IF NOT EXISTS credential_ref TEXT,
+                ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS lease_owner TEXT,
+                ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0
             """)
             async with conn.transaction():
                 await _backfill_target_endpoint_fingerprints(conn)
@@ -798,6 +847,47 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_target_endpoints_auth_status
                 ON target_endpoints(target_id, auth_state, test_status, priority_score DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoints_lease
+                ON target_endpoints(lease_expires_at) WHERE test_status = 'in_progress'
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_target_endpoints_campaign
+                ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS asm_endpoint_attempts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    endpoint_id UUID NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,
+                    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+                    worker_id TEXT,
+                    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    status TEXT NOT NULL,
+                    attempted_params_count INTEGER NOT NULL DEFAULT 0,
+                    completed_params_count INTEGER NOT NULL DEFAULT 0,
+                    finding_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+                    error_summary TEXT,
+                    scanner_telemetry_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_endpoint
+                ON asm_endpoint_attempts(endpoint_id, started_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_scan
+                ON asm_endpoint_attempts(scan_id) WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_campaign
+                ON asm_endpoint_attempts(campaign_id, status)
             """)
             await conn.execute("""
                 CREATE OR REPLACE VIEW latest_scans AS

@@ -351,6 +351,38 @@ CREATE INDEX idx_scans_job_id ON scans(job_id);
 CREATE INDEX idx_scans_parent ON scans(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
 
 -- ============================================================
+-- SCAN CAMPAIGNS - Durable budget/allocator records for Full Coverage + ASM
+-- ============================================================
+CREATE TABLE scan_campaigns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    root_domain TEXT,
+    requested_by TEXT NOT NULL DEFAULT 'api',
+    mode TEXT NOT NULL,                      -- full_coverage|continuous_asm|focused_family|finding_retest|surface_recon
+    priority INTEGER NOT NULL DEFAULT 100,
+    budget_profile TEXT,
+    wide_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+    deep_budget JSONB NOT NULL DEFAULT '{}'::jsonb,
+    check_families JSONB NOT NULL DEFAULT '[]'::jsonb,
+    auth_states JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allowed_windows JSONB NOT NULL DEFAULT '{}'::jsonb,
+    daily_cap INTEGER,
+    rate_caps JSONB NOT NULL DEFAULT '{}'::jsonb,
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    policy_id UUID,
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_scan_campaigns_target_status ON scan_campaigns(target_id, status, created_at DESC);
+CREATE INDEX idx_scan_campaigns_parent ON scan_campaigns(parent_scan_id) WHERE parent_scan_id IS NOT NULL;
+
+ALTER TABLE scans
+ADD COLUMN campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL;
+
+-- ============================================================
 -- TARGET ENDPOINTS - Continuous ASM attack-surface inventory (docs §16)
 -- Recon upserts discovered endpoints; exploitation drains untested/stale ones.
 -- ============================================================
@@ -372,6 +404,11 @@ CREATE TABLE target_endpoints (
     last_attempt_status TEXT,                  -- leased|completed|partial|auth_missing|failed
     last_verdict TEXT,
     last_finding_id UUID,
+    credential_ref TEXT,
+    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_tested_at TIMESTAMPTZ,
@@ -381,6 +418,31 @@ CREATE TABLE target_endpoints (
 CREATE UNIQUE INDEX idx_target_endpoints_fp ON target_endpoints(target_id, fingerprint);
 CREATE INDEX idx_target_endpoints_status ON target_endpoints(target_id, test_status, priority_score DESC);
 CREATE INDEX idx_target_endpoints_auth_status ON target_endpoints(target_id, auth_state, test_status, priority_score DESC);
+CREATE INDEX idx_target_endpoints_lease ON target_endpoints(lease_expires_at) WHERE test_status = 'in_progress';
+CREATE INDEX idx_target_endpoints_campaign ON target_endpoints(campaign_id) WHERE campaign_id IS NOT NULL;
+
+CREATE TABLE asm_endpoint_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    endpoint_id UUID NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,
+    scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
+    worker_id TEXT,
+    auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    status TEXT NOT NULL,                      -- completed|partial|timeout|auth_missing|rate_limited|error
+    attempted_params_count INTEGER NOT NULL DEFAULT 0,
+    completed_params_count INTEGER NOT NULL DEFAULT 0,
+    finding_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+    error_summary TEXT,
+    scanner_telemetry_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_asm_endpoint_attempts_endpoint ON asm_endpoint_attempts(endpoint_id, started_at DESC);
+CREATE INDEX idx_asm_endpoint_attempts_scan ON asm_endpoint_attempts(scan_id) WHERE scan_id IS NOT NULL;
+CREATE INDEX idx_asm_endpoint_attempts_campaign ON asm_endpoint_attempts(campaign_id, status);
 
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;

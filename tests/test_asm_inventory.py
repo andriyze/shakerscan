@@ -2,6 +2,8 @@
 
 import os
 import sys
+import asyncio
+import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
@@ -102,6 +104,145 @@ def test_normalize_worklist_dedupes_by_fingerprint():
 def test_normalize_worklist_respects_limit():
     wl = [f"GET /e{i}?x=1" for i in range(100)]
     assert len(a.normalize_worklist(wl, limit=10)) == 10
+
+
+# ---- Allocator helpers -----------------------------------------------------
+
+class _AsyncTx:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ClaimConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+
+    def transaction(self):
+        return _AsyncTx()
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        return "UPDATE 0" if "lease_expired" in query else f"UPDATE {len(self.rows)}"
+
+    async def fetchrow(self, query, *args):
+        return {"auth_state": "anonymous"} if self.rows else None
+
+    async def fetch(self, query, *args):
+        return self.rows
+
+
+def test_claim_test_batch_sets_durable_lease_fields():
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "GET",
+            "path": "/api/orders",
+            "param_shape": "id",
+            "auth_state": "anonymous",
+            "param_location": "query",
+            "replay_spec": "GET /api/orders?id=1",
+            "content_type": None,
+            "campaign_id": None,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    claimed = asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            limit=10,
+            stale_days=7,
+            lease_owner="worker-a:job",
+            lease_ttl_seconds=120,
+            campaign_id=str(campaign_id),
+        )
+    )
+
+    assert claimed[0]["id"] == endpoint_id
+    update_query, update_args = conn.executed[-1]
+    assert "lease_owner = $2" in update_query
+    assert "lease_expires_at = NOW() + ($3 || ' seconds')::interval" in update_query
+    assert "attempt_count = COALESCE(attempt_count, 0) + 1" in update_query
+    assert update_args[1] == "worker-a:job"
+    assert update_args[2] == "120"
+    assert update_args[3] == campaign_id
+
+
+class _RecordAttemptConn:
+    def __init__(self, endpoint_id):
+        self.endpoint_id = endpoint_id
+        self.executemany_calls = []
+
+    async def fetch(self, query, *args):
+        return [{
+            "id": self.endpoint_id,
+            "param_shape": "id,sort",
+            "auth_state": "user1",
+            "campaign_id": None,
+        }]
+
+    async def executemany(self, query, records):
+        self.executemany_calls.append((query, list(records)))
+
+
+def test_record_endpoint_attempts_defaults_completed_param_counts():
+    endpoint_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+    conn = _RecordAttemptConn(endpoint_id)
+
+    written = asyncio.run(
+        a.record_endpoint_attempts(
+            conn,
+            [endpoint_id],
+            scan_id=str(scan_id),
+            worker_id="worker-a",
+            status="completed",
+            scanner_telemetry_json={"batch_completed": True},
+        )
+    )
+
+    assert written == 1
+    query, records = conn.executemany_calls[0]
+    assert "INSERT INTO asm_endpoint_attempts" in query
+    record = records[0]
+    assert record[0] == endpoint_id
+    assert record[1] == scan_id
+    assert record[5] == "user1"
+    assert record[8] == "completed"
+    assert record[9] == 2
+    assert record[10] == 2
+
+
+def test_record_endpoint_attempts_allows_conservative_partial_counts():
+    endpoint_id = uuid.uuid4()
+    conn = _RecordAttemptConn(endpoint_id)
+
+    asyncio.run(
+        a.record_endpoint_attempts(
+            conn,
+            [endpoint_id],
+            status="timeout",
+            attempted_params_count=0,
+            completed_params_count=0,
+            error_summary="partial_timeout",
+        )
+    )
+
+    record = conn.executemany_calls[0][1][0]
+    assert record[8] == "timeout"
+    assert record[9] == 0
+    assert record[10] == 0
+    assert record[12] == "partial_timeout"
 
 
 # ---- Continuous dispatcher policy (Phase 3/4) -----------------------------

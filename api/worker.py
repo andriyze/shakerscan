@@ -3549,6 +3549,7 @@ async def process_scan_job(job_data: dict):
     scan_id = job_data.get('scan_id')
     target = job_data.get('target')
     options = job_data.get('options', {})
+    campaign_id = job_data.get('campaign_id')
 
     print(f"[{job_id[:8]}] Starting scan: {target}", flush=True)
     print(f"[{job_id[:8]}] Options keys: {list(options.keys())}", flush=True)
@@ -3681,6 +3682,7 @@ async def process_scan_job(job_data: dict):
                         current_phase = 'failed'
                     WHERE id = $4
                 """, error, completed_at, duration, uuid.UUID(scan_id))
+                await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
             else:
                 await conn.execute("""
                     UPDATE scans SET
@@ -3695,6 +3697,7 @@ async def process_scan_job(job_data: dict):
                     WHERE id = $7
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, uuid.UUID(scan_id))
+                await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                 if ai_target_id:
                     await conn.execute("""
                         UPDATE ai_targets SET
@@ -4468,9 +4471,11 @@ async def process_exploit_batch_job(job_data: dict):
     target_id = job_data.get('target_id')
     target = job_data.get('target')
     options = job_data.get('options', {}) or {}
+    campaign_id = job_data.get('campaign_id')
     batch_size = int(job_data.get('batch_size') or 100)
     stale_days = int(job_data.get('stale_days') or 30)
     exploit_depth = bool(job_data.get('exploit_depth'))
+    worker_id = os.environ.get('HOSTNAME') or os.environ.get('WORKER_ID') or f"worker:{job_id[:8]}"
     r = get_redis()
     now = utc_now()
 
@@ -4478,7 +4483,14 @@ async def process_exploit_batch_job(job_data: dict):
     claimed: list[dict] = []
     try:
         async with db_pool.acquire() as conn:
-            claimed = await asm_inventory.claim_test_batch(conn, target_id, limit=batch_size, stale_days=stale_days)
+            claimed = await asm_inventory.claim_test_batch(
+                conn,
+                target_id,
+                limit=batch_size,
+                stale_days=stale_days,
+                lease_owner=f"{worker_id}:{job_id}",
+                campaign_id=campaign_id,
+            )
     except Exception as e:
         print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)
 
@@ -4488,6 +4500,7 @@ async def process_exploit_batch_job(job_data: dict):
                 "UPDATE scans SET status='completed', current_phase='no_untested_endpoints', progress=100, completed_at=$1, findings_count=0 WHERE id=$2",
                 utc_now(), uuid.UUID(scan_id),
             )
+            await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
         r.hset(f"job:{job_id}", mapping={'status': 'completed', 'current_phase': 'no_untested_endpoints', 'progress': '100'})
         r.expire(f"job:{job_id}", 86400)
         print(f"[asm {job_id[:8]}] no untested/stale endpoints to test", flush=True)
@@ -4527,6 +4540,25 @@ async def process_exploit_batch_job(job_data: dict):
         try:
             async with db_pool.acquire() as conn:
                 await asm_inventory.mark_partial(conn, endpoint_ids, verdict='auth_missing')
+                await asm_inventory.record_endpoint_attempts(
+                    conn,
+                    endpoint_ids,
+                    scan_id=scan_id,
+                    campaign_id=campaign_id,
+                    worker_id=worker_id,
+                    auth_state=auth_state,
+                    started_at=now,
+                    completed_at=completed_at,
+                    status='auth_missing',
+                    attempted_params_count=0,
+                    completed_params_count=0,
+                    error_summary=f"auth_state={auth_state} credentials unavailable",
+                    scanner_telemetry_json={
+                        "claimed_endpoints": len(endpoint_ids),
+                        "per_endpoint_telemetry": False,
+                    },
+                )
+                await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                 await conn.execute(
                     """UPDATE scans SET status='completed', result=$1, score=NULL, grade=NULL,
                            findings_count=0, completed_at=$2, duration_seconds=0,
@@ -4608,13 +4640,76 @@ async def process_exploit_batch_job(job_data: dict):
                     if partial:
                         verdict = 'partial_findings' if findings else ('partial_timeout' if meta.get('timed_out') else 'partial')
                         await asm_inventory.mark_partial(conn, endpoint_ids, verdict=verdict)
+                        await asm_inventory.record_endpoint_attempts(
+                            conn,
+                            endpoint_ids,
+                            scan_id=scan_id,
+                            campaign_id=campaign_id,
+                            worker_id=worker_id,
+                            auth_state=auth_state,
+                            started_at=now,
+                            completed_at=completed_at,
+                            status='timeout' if meta.get('timed_out') else 'partial',
+                            attempted_params_count=0,
+                            completed_params_count=0,
+                            error_summary=verdict,
+                            scanner_telemetry_json={
+                                "claimed_endpoints": len(endpoint_ids),
+                                "findings_count": len(findings),
+                                "per_endpoint_telemetry": False,
+                                "partial": True,
+                                "timed_out": bool(meta.get('timed_out')),
+                            },
+                        )
                     else:
                         await asm_inventory.mark_tested(conn, endpoint_ids, verdict=('findings' if findings else 'clean'))
+                        await asm_inventory.record_endpoint_attempts(
+                            conn,
+                            endpoint_ids,
+                            scan_id=scan_id,
+                            campaign_id=campaign_id,
+                            worker_id=worker_id,
+                            auth_state=auth_state,
+                            started_at=now,
+                            completed_at=completed_at,
+                            status='completed',
+                            scanner_telemetry_json={
+                                "claimed_endpoints": len(endpoint_ids),
+                                "findings_count": len(findings),
+                                "per_endpoint_telemetry": False,
+                                "batch_completed": True,
+                            },
+                        )
+                    await asm_inventory.finish_campaign(conn, campaign_id, status='completed')
                     wl = (result.get('active_checks') or {}).get('active_worklist')
                     if wl:  # keep inventory fresh with anything new this run surfaced
                         await asm_inventory.upsert_endpoints(conn, target_id, wl, source='asm', auth_state=auth_state)
             except Exception as e:
                 print(f"[asm {job_id[:8]}] inventory stamp error: {e}", flush=True)
+        else:
+            try:
+                async with db_pool.acquire() as conn:
+                    await asm_inventory.record_endpoint_attempts(
+                        conn,
+                        endpoint_ids,
+                        scan_id=scan_id,
+                        campaign_id=campaign_id,
+                        worker_id=worker_id,
+                        auth_state=auth_state,
+                        started_at=now,
+                        completed_at=completed_at,
+                        status='error',
+                        attempted_params_count=0,
+                        completed_params_count=0,
+                        error_summary=str(error)[:1000],
+                        scanner_telemetry_json={
+                            "claimed_endpoints": len(endpoint_ids),
+                            "per_endpoint_telemetry": False,
+                        },
+                    )
+                    await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
+            except Exception as e:
+                print(f"[asm {job_id[:8]}] attempt-ledger error stamp failed: {e}", flush=True)
         terminal_phase = 'failed' if error else ('partial' if partial else 'completed')
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -4643,7 +4738,10 @@ async def process_exploit_batch_job(job_data: dict):
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE target_endpoints SET test_status='untested', last_attempt_status='failed', updated_at=NOW() WHERE id = ANY($1::uuid[]) AND test_status='in_progress'",
+                    """UPDATE target_endpoints
+                       SET test_status='untested', last_attempt_status='failed',
+                           lease_owner=NULL, lease_expires_at=NULL, updated_at=NOW()
+                       WHERE id = ANY($1::uuid[]) AND test_status='in_progress'""",
                     endpoint_ids,
                 )
         except Exception:

@@ -256,6 +256,7 @@ class _AsmActionConn:
         }
         self.attempts = attempts or []
         self.executes = []
+        self.campaign_id = uuid.uuid4()
 
     async def fetchrow(self, query, *args):
         if "SELECT url, scan_options, asm_config" in query:
@@ -271,6 +272,8 @@ class _AsmActionConn:
     async def fetchval(self, query, *args):
         if "COUNT(*) FROM scans" in query:
             return self.active
+        if "INSERT INTO scan_campaigns" in query:
+            return self.campaign_id
         return 0
 
     async def fetch(self, query, *args):
@@ -303,9 +306,11 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
 
     assert result["action"] == "recon"
     assert result["status"] == "queued"
+    assert result["campaign_id"] == str(conn.campaign_id)
     queued = json.loads(redis_client.rpush_calls[0][1])
     assert queued["asm_recon"] is True
     assert queued["triggered_by"] == "improve"
+    assert queued["campaign_id"] == str(conn.campaign_id)
     assert "custom_budget" in queued["options"]
     assert any("INSERT INTO scans" in query for query, _args in conn.executes)
     assert any("asm_last_recon_at" in query for query, _args in conn.executes)
@@ -338,6 +343,7 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     ))
 
     assert result["action"] == "test"
+    assert result["campaign_id"] == str(conn.campaign_id)
     assert result["batch_size"] == 8
     assert result["check_family"] == "sqli"
     queued = json.loads(redis_client.rpush_calls[0][1])
@@ -346,6 +352,7 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     assert queued["stale_days"] == 14
     assert queued["exploit_depth"] is True
     assert queued["check_family"] == "sqli"
+    assert queued["campaign_id"] == str(conn.campaign_id)
     assert queued["options"]["auth_header"] == "Bearer token"
     assert queued["options"]["sqli"] is True
     assert queued["options"]["xss"] is False

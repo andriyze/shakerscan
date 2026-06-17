@@ -1,8 +1,10 @@
 # Continuous ASM Architecture — Current State and Target Design
 
 **Status:** first continuous ASM loop is shipped; correctness hardening for auth-aware inventory,
-replay fidelity, partial-timeout coverage semantics, and dispatcher rate reservation is implemented.
-The larger campaign allocator and attempt-ledger design is still proposed.
+replay fidelity, partial-timeout coverage semantics, dispatcher rate reservation, ASM campaign
+records, durable endpoint leases, and normalized ASM endpoint attempt rows are implemented. Dynamic
+Full Coverage allocation through this campaign allocator and scanner-level per-endpoint telemetry
+remain proposed.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -20,8 +22,9 @@ Every implementation task must verify the current state with search/tests before
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
-| ASM endpoint inventory | Shipped | Add attempt ledger and durable leases. |
-| Campaign allocator | Proposed | Implement allocator before unifying one-shot coverage and Continuous ASM. |
+| ASM endpoint inventory | Shipped | Add scanner-level attempted/completed telemetry. |
+| ASM campaign/lease/attempt foundation | Shipped | Use attempt facts in coverage rollups once scanner telemetry exists. |
+| Campaign allocator for Full Coverage | Proposed | Convert one-shot coverage from static slices to dynamic campaign allocation. |
 | First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -96,17 +99,24 @@ Important current behavior:
   - `test_status`
   - `last_attempt_status`
   - `last_verdict`
+  - `credential_ref`
+  - `campaign_id`
+  - `lease_owner`
+  - `lease_expires_at`
+  - `attempt_count`
   - first/last seen/tested timestamps
 
-Current fields that do **not** exist yet:
+Current telemetry that does **not** exist yet:
 
-- `credential_ref`
-- `campaign_id`
-- `lease_owner`
-- `lease_expires_at`
-- `attempt_count`
-- a normalized `asm_endpoint_attempts` table
 - per-endpoint/per-parameter attempted telemetry from the scanner
+
+Related shipped tables:
+
+- `scan_campaigns` stores durable campaign records for ASM recon/test batches and future Full
+  Coverage campaigns.
+- `asm_endpoint_attempts` records per-endpoint attempt facts keyed by endpoint, scan, campaign,
+  worker, auth state, status, start/end times, param counts, finding IDs, error summary, and scanner
+  telemetry JSON.
 
 ### Current Correctness Guarantees
 
@@ -122,14 +132,20 @@ Implemented:
 - Timeout-recovered partial ASM results are marked partial/stale instead of clean tested.
 - Dispatcher reserves per-root-domain budget in Redis before queueing batches, so concurrent targets
   under one root do not all enqueue full batches in the same tick.
+- ASM recon/test jobs create `scan_campaigns` rows; scan rows link back through `scans.campaign_id`.
+- ASM test batches set `lease_owner`, `lease_expires_at`, and increment `attempt_count` when claimed.
+- Expired endpoint leases are reaped back to `stale` with `last_attempt_status='lease_expired'`.
+- ASM batch completion writes `asm_endpoint_attempts` rows and clears endpoint lease fields.
 
 Still limited:
 
-- A batch is claimed by status and auth state, but there is no durable lease expiry field yet.
 - Coverage stamping is still batch-level. Without scanner-level per-endpoint attempted telemetry, a
   successful batch can only stamp the claimed batch as tested/partial as a group.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
+- `/targets/{id}/asm/coverage` still derives primary coverage from endpoint status; attempt-ledger
+  facts are exposed in gaps/activity and become authoritative after per-endpoint scanner telemetry
+  lands.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
 - Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
@@ -251,16 +267,21 @@ The current implementation stores this identity as a generated `fingerprint` plu
 That is acceptable while the table remains compact. A future schema can expose the identity fields
 directly if query/reporting needs justify it.
 
-Recommended additional fields beyond the current table:
+Additional fields now shipped in the current table:
 
 ```text
 credential_ref              -- reference to current credential, not raw secret
-param_shape_hash            -- explicit stable hash of parameter names / JSON paths
-source_set                  -- crawl, HAR, JS, OpenAPI, manual, Gungnir, previous scan
 campaign_id                 -- optional one-shot coverage campaign that discovered/claimed it
 lease_owner
 lease_expires_at
 attempt_count
+```
+
+Recommended future logical/reporting fields beyond the current table:
+
+```text
+param_shape_hash            -- explicit stable hash of parameter names / JSON paths
+source_set                  -- crawl, HAR, JS, OpenAPI, manual, Gungnir, previous scan
 last_attempt_at
 last_successful_test_at
 coverage_status             -- untested | leased | tested | partial | stale | gone | blocked
@@ -283,13 +304,13 @@ Target flow:
    allowed windows, and priority.
 2. Reserve rate/budget tokens before enqueue using Redis or DB-backed buckets:
    `root_domain`, `target_id`, `auth_state`, and optional global/fleet buckets.
-3. Claim endpoint rows with `FOR UPDATE SKIP LOCKED`, set `lease_owner`, `lease_expires_at`, and
-   `coverage_status='leased'`.
+3. Claim endpoint rows with `FOR UPDATE SKIP LOCKED`, set `lease_owner`, `lease_expires_at`,
+   increment `attempt_count`, and move the current physical `test_status` to `in_progress`.
 4. Queue a worker job that carries claimed endpoint IDs and replay specs.
 5. On success, stamp only endpoints the scanner reports as attempted/completed.
 6. On timeout/partial, mark attempted endpoints as `partial` and release unattempted rows for retry.
-7. On worker crash, a lease reaper returns expired `leased` rows to `untested` or increments
-   `attempt_count` with backoff.
+7. On worker crash, a lease reaper returns expired `in_progress` rows to `stale` without marking
+   them clean; later passes can add backoff based on `attempt_count`.
 
 This solves the high-risk cases:
 
@@ -299,7 +320,7 @@ This solves the high-risk cases:
 
 ### Attempt Ledger
 
-Add `asm_endpoint_attempts` or equivalent normalized attempt storage:
+`asm_endpoint_attempts` is the shipped normalized attempt storage:
 
 ```text
 id
@@ -319,7 +340,9 @@ error_summary
 scanner_telemetry_json
 ```
 
-Coverage percentages should derive from attempt outcomes, not scan status alone.
+Coverage percentages should derive from attempt outcomes, not scan status alone. Current API rollups
+still use endpoint status as the primary coverage source until scanner telemetry can distinguish
+claimed, attempted, completed, partial, and unattempted endpoints precisely.
 
 ---
 
@@ -455,18 +478,32 @@ Remaining:
 
 ### Phase B — Attempt Ledger + Durable Leases
 
-- Add `asm_endpoint_attempts` keyed by endpoint, job, campaign, worker, status, started/completed
-  time, tested parameter counts, and finding IDs.
-- Add `lease_owner`, `lease_expires_at`, and a lease reaper.
-- Make coverage percentages derive from attempt outcomes.
+Implemented:
+
+- Added `scan_campaigns` for ASM recon/test batches, with `scans.campaign_id` linking implementation
+  scan rows back to durable campaign records.
+- Added endpoint lease fields: `lease_owner`, `lease_expires_at`, `attempt_count`, and a lease reaper
+  that returns expired work to `stale` without marking it clean.
+- Added `asm_endpoint_attempts` keyed by endpoint, scan, campaign, worker, auth state, status,
+  started/completed time, parameter counts, finding IDs, error summary, and scanner telemetry JSON.
+- Record conservative attempt rows for `auth_missing`, partial/timeout, completed, and error ASM
+  batch outcomes.
+- Expose campaign and attempt-status facts in ASM activity/gaps.
+
+Remaining:
+
+- Make coverage percentages derive from attempt outcomes once scanner-level per-endpoint telemetry is
+  available.
+- Preserve exact attempted/completed endpoint and parameter counts from scanner telemetry instead of
+  batch-level inference.
 
 ### Phase C — Parallel Coverage Uses The Allocator
 
 - `coverage` campaigns claim batches dynamically instead of static round-robin partitions.
 - Merge consumes attempt ledger and child result files.
 - Keep current static partition path as fallback while campaign mode stabilizes.
-- Add campaign records so both one-shot parent scans and continuous ASM batches can report the same
-  wide/deep budget, family, auth-state, and gap outcomes.
+- Extend the shipped campaign records from ASM batches to one-shot Full Coverage parents so both
+  entry points report the same wide/deep budget, family, auth-state, and gap outcomes.
 
 ### Phase D — UX/API/AI Simplification
 
@@ -605,7 +642,7 @@ change.
   anonymously.
 - Focused family campaigns must not run unrelated high-risk checks.
 
-### Prompt: implement the campaign allocator and attempt ledger
+### Prompt: harden the campaign allocator and attempt ledger rollups
 
 ```text
 ROLE
@@ -613,30 +650,27 @@ You are a senior backend engineer implementing ShakerScan's campaign allocator a
 ledger.
 
 TASK
-Implement durable endpoint leases, normalized attempt records, and campaign-backed Full Coverage/ASM
-work allocation.
+Make the shipped campaign/lease/attempt foundation authoritative for coverage rollups and ready for
+dynamic Full Coverage allocation.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
 - target_endpoints exists and includes auth_state, param_location, replay_spec, priority_score,
-  test_status, last_attempt_status, and last_verdict.
-- Missing fields include campaign_id, lease_owner, lease_expires_at, attempt_count, and a normalized
-  asm_endpoint_attempts table.
-- ASM batches currently claim rows with FOR UPDATE SKIP LOCKED and stamp inventory at batch level.
+  test_status, last_attempt_status, last_verdict, campaign_id, lease_owner, lease_expires_at, and
+  attempt_count.
+- scan_campaigns, scans.campaign_id, and asm_endpoint_attempts exist for ASM recon/test batches.
+- ASM batches claim rows with FOR UPDATE SKIP LOCKED, set durable leases, and write batch-level
+  attempt rows.
 - One-shot coverage uses static shard slices and feeds inventory, but does not claim through the ASM
   allocator.
 
 TARGET BEHAVIOR
-- Add campaign records for full_coverage, continuous_asm, focused_family, finding_retest, and
-  surface_recon.
-- Add durable endpoint leases: lease_owner, lease_expires_at, attempt_count, and a lease reaper.
-- Add asm_endpoint_attempts with endpoint_id, scan_id, parent_scan_id, campaign_id, worker_id,
-  auth_state, started_at, completed_at, status, attempted_params_count, completed_params_count,
-  finding_ids, error_summary, and scanner_telemetry_json.
 - Coverage percentages derive from attempt records, not scan row status.
 - On timeout, mark only attempted endpoints partial and release unattempted endpoints.
 - On missing credentials, mark matching auth-state rows auth_missing/auth_failed, never tested
   anonymously.
+- Full Coverage can create `full_coverage` campaigns and write attempt facts under the parent scan.
+- Scanner telemetry distinguishes claimed, attempted, completed, partial, and unattempted endpoints.
 
 NON-GOALS
 - Do not rewrite the whole scanner.
@@ -644,10 +678,9 @@ NON-GOALS
 - Do not remove the existing static coverage path until campaign allocation is stable.
 
 MIGRATION / BACKFILL / COMPATIBILITY
-- Add schema in db/init.sql and runtime migrations together.
-- Backfill existing target_endpoints with null campaign/lease fields and zero attempt_count.
 - Do not infer historical endpoint attempts from completed scan rows unless telemetry exists.
 - Keep existing ASM batch path as fallback during rollout.
+- If new scanner telemetry schema is needed, add it in db/init.sql and runtime migrations together.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - GET /targets/{id}/asm/gaps explains untested, partial, auth-blocked, rate-limited, and leased

@@ -23,6 +23,16 @@ EXPLOIT_BATCH_JOB_TYPE = "exploit_batch"
 ASM_BATCH_ROLE = "asm_batch"
 ASM_RECON_ROLE = "asm_recon"
 
+# Campaign modes. They are intentionally broader than the current dispatcher
+# path so one-shot Full Coverage can move onto the same allocator later.
+CAMPAIGN_FULL_COVERAGE = "full_coverage"
+CAMPAIGN_CONTINUOUS_ASM = "continuous_asm"
+CAMPAIGN_FOCUSED_FAMILY = "focused_family"
+CAMPAIGN_FINDING_RETEST = "finding_retest"
+CAMPAIGN_SURFACE_RECON = "surface_recon"
+
+DEFAULT_LEASE_TTL_SECONDS = 3600
+
 # HTTP methods we recognize as a leading token in a worklist entry.
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
@@ -408,7 +418,10 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
             count(*) FILTER (WHERE test_status = 'untested') AS untested,
             count(*) FILTER (WHERE test_status = 'in_progress') AS in_progress,
             count(*) FILTER (WHERE test_status = 'stale') AS stale,
-            count(*) FILTER (WHERE test_status = 'gone') AS gone
+            count(*) FILTER (WHERE test_status = 'gone') AS gone,
+            count(*) FILTER (WHERE test_status = 'in_progress' AND lease_expires_at < NOW()) AS expired_leases,
+            count(*) FILTER (WHERE last_attempt_status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
+            count(*) FILTER (WHERE last_attempt_status IN ('partial', 'partial_timeout', 'partial_findings', 'lease_expired')) AS partial
         FROM target_endpoints WHERE target_id = $1
         """,
         tid,
@@ -423,19 +436,162 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "in_progress": int(row["in_progress"] or 0),
         "stale": int(row["stale"] or 0),
         "gone": int(row["gone"] or 0),
+        "expired_leases": int(row["expired_leases"] or 0),
+        "auth_blocked": int(row["auth_blocked"] or 0),
+        "partial": int(row["partial"] or 0),
         "coverage": round(tested / testable, 3) if testable else 0.0,
     }
 
 
-async def claim_test_batch(conn, target_id: str, *, limit: int = 100, stale_days: int = 30) -> list[dict]:
+async def create_campaign(
+    conn,
+    target_id: str,
+    *,
+    mode: str,
+    requested_by: str = "api",
+    parent_scan_id: str | None = None,
+    priority: int = 100,
+    budget_profile: str | None = None,
+    wide_budget: dict[str, Any] | None = None,
+    deep_budget: dict[str, Any] | None = None,
+    check_families: list[str] | None = None,
+    auth_states: list[str] | None = None,
+    allowed_windows: dict[str, Any] | None = None,
+    daily_cap: int | None = None,
+    rate_caps: dict[str, Any] | None = None,
+    status: str = "active",
+    metadata_json: dict[str, Any] | None = None,
+) -> str:
+    """Create a durable budget/campaign record for ASM or future coverage work."""
+    import json
+    import uuid as _uuid
+
+    tid = _uuid.UUID(str(target_id))
+    parent_id = _uuid.UUID(str(parent_scan_id)) if parent_scan_id else None
+    root_domain = await conn.fetchval("SELECT root_domain FROM targets WHERE id = $1", tid)
+    campaign_id = await conn.fetchval(
+        """
+        INSERT INTO scan_campaigns (
+            target_id, root_domain, requested_by, mode, priority, budget_profile,
+            wide_budget, deep_budget, check_families, auth_states, allowed_windows,
+            daily_cap, rate_caps, parent_scan_id, status, metadata_json
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
+            $12, $13::jsonb, $14, $15, $16::jsonb
+        )
+        RETURNING id
+        """,
+        tid,
+        root_domain,
+        requested_by or "api",
+        mode,
+        int(priority),
+        budget_profile,
+        json.dumps(wide_budget or {}),
+        json.dumps(deep_budget or {}),
+        json.dumps(check_families or []),
+        json.dumps(auth_states or []),
+        json.dumps(allowed_windows or {}),
+        daily_cap,
+        json.dumps(rate_caps or {}),
+        parent_id,
+        status,
+        json.dumps(metadata_json or {}),
+    )
+    return str(campaign_id)
+
+
+async def finish_campaign(conn, campaign_id: str | None, *, status: str = "completed") -> int:
+    """Mark a campaign terminal. Missing campaign_id is a no-op for compatibility."""
+    if not campaign_id:
+        return 0
+    import uuid as _uuid
+
+    result = await conn.execute(
+        """
+        UPDATE scan_campaigns
+        SET status = $2, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+        WHERE id = $1
+        """,
+        _uuid.UUID(str(campaign_id)),
+        status,
+    )
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def reap_expired_leases(conn, target_id: str | None = None) -> int:
+    """Release expired endpoint leases without marking them clean.
+
+    Expired leased rows become ``stale`` so they are claimable again, while the
+    last attempt status explains why coverage is still incomplete.
+    """
+    import uuid as _uuid
+
+    if target_id:
+        result = await conn.execute(
+            """
+            UPDATE target_endpoints
+            SET test_status = 'stale',
+                last_attempt_status = 'lease_expired',
+                last_verdict = 'lease_expired',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = NOW()
+            WHERE target_id = $1
+              AND test_status = 'in_progress'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < NOW()
+            """,
+            _uuid.UUID(str(target_id)),
+        )
+    else:
+        result = await conn.execute(
+            """
+            UPDATE target_endpoints
+            SET test_status = 'stale',
+                last_attempt_status = 'lease_expired',
+                last_verdict = 'lease_expired',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = NOW()
+            WHERE test_status = 'in_progress'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < NOW()
+            """
+        )
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def claim_test_batch(
+    conn,
+    target_id: str,
+    *,
+    limit: int = 100,
+    stale_days: int = 30,
+    lease_owner: str | None = None,
+    lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+    campaign_id: str | None = None,
+) -> list[dict]:
     """Atomically claim the next batch of untested/stale endpoints (priority
     first) and mark them in_progress. Uses FOR UPDATE SKIP LOCKED so multiple
-    exploit workers steal disjoint work safely. A batch is intentionally scoped
-    to one auth_state because one scanner invocation can only use one credential
-    identity correctly."""
+    exploit workers steal disjoint work safely. A durable lease owner/expiry
+    lets crashed workers return to the claimable pool. A batch is intentionally
+    scoped to one auth_state because one scanner invocation can only use one
+    credential identity correctly."""
     import uuid as _uuid
     tid = _uuid.UUID(str(target_id))
+    cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
+    owner = str(lease_owner or "asm-worker")
+    lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
     async with conn.transaction():
+        await reap_expired_leases(conn, target_id)
         first = await conn.fetchrow(
             """
             SELECT auth_state
@@ -454,7 +610,8 @@ async def claim_test_batch(conn, target_id: str, *, limit: int = 100, stale_days
         auth_state = normalize_auth_state(first["auth_state"])
         rows = await conn.fetch(
             """
-            SELECT id, method, path, param_shape, auth_state, param_location, replay_spec, content_type
+            SELECT id, method, path, param_shape, auth_state, param_location, replay_spec,
+                   content_type, campaign_id, lease_owner, lease_expires_at, attempt_count
             FROM target_endpoints
             WHERE target_id = $1
               AND auth_state = $4
@@ -470,12 +627,106 @@ async def claim_test_batch(conn, target_id: str, *, limit: int = 100, stale_days
             await conn.execute(
                 """
                 UPDATE target_endpoints
-                SET test_status = 'in_progress', last_attempt_status = 'leased', updated_at = NOW()
+                SET test_status = 'in_progress',
+                    last_attempt_status = 'leased',
+                    lease_owner = $2,
+                    lease_expires_at = NOW() + ($3 || ' seconds')::interval,
+                    attempt_count = COALESCE(attempt_count, 0) + 1,
+                    campaign_id = COALESCE($4, campaign_id),
+                    updated_at = NOW()
                 WHERE id = ANY($1::uuid[])
                 """,
                 [r["id"] for r in rows],
+                owner,
+                str(lease_seconds),
+                cid,
             )
     return [dict(r) for r in rows]
+
+
+def _param_count(param_shape: Any) -> int:
+    return len([p for p in str(param_shape or "").split(",") if p])
+
+
+async def record_endpoint_attempts(
+    conn,
+    endpoint_ids: list,
+    *,
+    scan_id: str | None = None,
+    parent_scan_id: str | None = None,
+    campaign_id: str | None = None,
+    worker_id: str | None = None,
+    auth_state: str | None = None,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
+    status: str,
+    attempted_params_count: int | None = None,
+    completed_params_count: int | None = None,
+    finding_ids: list | None = None,
+    error_summary: str | None = None,
+    scanner_telemetry_json: dict[str, Any] | None = None,
+) -> int:
+    """Write normalized endpoint attempt rows.
+
+    Until scanner-level per-endpoint telemetry exists, callers should set
+    conservative counts for partial/timeout states. Completed ASM batches can
+    record the param count because the scanner received exactly the claimed
+    custom endpoints.
+    """
+    if not endpoint_ids:
+        return 0
+    import json
+    import uuid as _uuid
+
+    rows = await conn.fetch(
+        "SELECT id, param_shape, auth_state, campaign_id FROM target_endpoints WHERE id = ANY($1::uuid[])",
+        endpoint_ids,
+    )
+    if not rows:
+        return 0
+    sid = _uuid.UUID(str(scan_id)) if scan_id else None
+    parent_id = _uuid.UUID(str(parent_scan_id)) if parent_scan_id else None
+    cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
+    fids = [_uuid.UUID(str(fid)) for fid in (finding_ids or [])]
+    started = started_at or datetime.now(timezone.utc)
+    completed = completed_at or datetime.now(timezone.utc)
+    telemetry = json.dumps(scanner_telemetry_json or {})
+    records = []
+    for row in rows:
+        param_total = _param_count(row["param_shape"])
+        attempted = param_total if attempted_params_count is None else max(0, int(attempted_params_count))
+        completed_params = attempted if completed_params_count is None else max(0, int(completed_params_count))
+        records.append((
+            row["id"],
+            sid,
+            parent_id,
+            cid or row["campaign_id"],
+            worker_id,
+            normalize_auth_state(auth_state or row["auth_state"]),
+            started,
+            completed,
+            status,
+            attempted,
+            completed_params,
+            fids,
+            error_summary,
+            telemetry,
+        ))
+    await conn.executemany(
+        """
+        INSERT INTO asm_endpoint_attempts (
+            endpoint_id, scan_id, parent_scan_id, campaign_id, worker_id, auth_state,
+            started_at, completed_at, status, attempted_params_count,
+            completed_params_count, finding_ids, error_summary, scanner_telemetry_json
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10,
+            $11, $12::uuid[], $13, $14::jsonb
+        )
+        """,
+        records,
+    )
+    return len(records)
 
 
 async def mark_tested(conn, endpoint_ids: list, *, verdict: str | None = None) -> int:
@@ -488,6 +739,8 @@ async def mark_tested(conn, endpoint_ids: list, *, verdict: str | None = None) -
         SET test_status = 'tested', last_tested_at = NOW(),
             last_verdict = COALESCE($2, last_verdict),
             last_attempt_status = 'completed',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
             updated_at = NOW()
         WHERE id = ANY($1::uuid[])
         """,
@@ -509,6 +762,8 @@ async def mark_partial(conn, endpoint_ids: list, *, verdict: str | None = "parti
         SET test_status = 'stale',
             last_verdict = COALESCE($2, last_verdict),
             last_attempt_status = COALESCE($2, 'partial'),
+            lease_owner = NULL,
+            lease_expires_at = NULL,
             updated_at = NOW()
         WHERE id = ANY($1::uuid[])
         """,

@@ -8295,24 +8295,37 @@ async def _enqueue_asm_exploit_batch(
     job_id = str(uuid.uuid4())
     opts = _apply_asm_check_family(base_opts or {}, check_family)
     family = _normalize_asm_check_family(check_family)
+    campaign_id = await asm_inventory.create_campaign(
+        conn,
+        target_id,
+        mode=asm_inventory.CAMPAIGN_FOCUSED_FAMILY if family else asm_inventory.CAMPAIGN_CONTINUOUS_ASM,
+        requested_by=triggered_by,
+        budget_profile=opts.get("budget_profile"),
+        wide_budget={"batch_size": batch_size, "stale_days": stale_days},
+        deep_budget={"exploit_depth": exploit_depth},
+        check_families=[family] if family else ["all"],
+        auth_states=[],
+        metadata_json={"scan_role": asm_inventory.ASM_BATCH_ROLE},
+    )
     await conn.execute(
-        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
-           VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)""",
+        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
+           VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8)""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
         json.dumps(opts), (opts.get("scan_type") or "smart"),
-        asm_inventory.ASM_BATCH_ROLE,
+        asm_inventory.ASM_BATCH_ROLE, uuid.UUID(campaign_id),
     )
     r.rpush(QUEUE_NAME, json.dumps({
         "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
         "job_id": job_id, "scan_id": scan_id,
         "target_id": target_id, "target": target_url,
         "batch_size": batch_size, "stale_days": stale_days, "exploit_depth": exploit_depth,
+        "campaign_id": campaign_id,
         "check_family": family,
         "options": opts, "triggered_by": triggered_by,
         "submitted_at": utc_now_iso(),
     }))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
-    return {"scan_id": scan_id, "job_id": job_id}
+    return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
 
 
 async def _enqueue_asm_recon(
@@ -8329,19 +8342,30 @@ async def _enqueue_asm_recon(
     opts["custom_budget"] = cb
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
+    campaign_id = await asm_inventory.create_campaign(
+        conn,
+        target_id,
+        mode=asm_inventory.CAMPAIGN_SURFACE_RECON,
+        requested_by=triggered_by,
+        budget_profile=opts.get("budget_profile"),
+        wide_budget=cb,
+        check_families=["recon"],
+        metadata_json={"scan_role": asm_inventory.ASM_RECON_ROLE},
+    )
     await conn.execute(
-        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role)
-           VALUES ($1, $2, $3, $4, 'pending', $5, 'smart', $6)""",
+        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
+           VALUES ($1, $2, $3, $4, 'pending', $5, 'smart', $6, $7)""",
         uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(opts), asm_inventory.ASM_RECON_ROLE,
+        json.dumps(opts), asm_inventory.ASM_RECON_ROLE, uuid.UUID(campaign_id),
     )
     r.rpush(QUEUE_NAME, json.dumps({
         "job_id": job_id, "scan_id": scan_id, "target": target_url,
         "options": opts, "triggered_by": triggered_by, "asm_recon": True,
+        "campaign_id": campaign_id,
         "submitted_at": utc_now_iso(),
     }))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
-    return {"scan_id": scan_id, "job_id": job_id}
+    return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
 
 
 @app.get("/targets/{target_id}/asm/endpoints")
@@ -8404,7 +8428,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             triggered_by="api",
         )
     return {
-        "scan_id": enq["scan_id"], "job_id": enq["job_id"], "status": "queued",
+        "scan_id": enq["scan_id"], "job_id": enq["job_id"], "campaign_id": enq["campaign_id"], "status": "queued",
         "batch_size": request.batch_size,
         "check_family": _normalize_asm_check_family(request.check_family) or "all",
         "inventory_total": coverage["total"], "untested": coverage["untested"],
@@ -8431,6 +8455,7 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         "action": "recon",
         "scan_id": enq["scan_id"],
         "job_id": enq["job_id"],
+        "campaign_id": enq["campaign_id"],
         "status": "queued",
         "reason": "Queued discovery refresh for the persistent ASM inventory",
     }
@@ -8475,6 +8500,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "action": "recon",
                 "scan_id": enq["scan_id"],
                 "job_id": enq["job_id"],
+                "campaign_id": enq["campaign_id"],
                 "status": "queued",
                 "reason": rec["reason"],
                 "recommendation": rec,
@@ -8495,6 +8521,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "action": "test",
         "scan_id": enq["scan_id"],
         "job_id": enq["job_id"],
+        "campaign_id": enq["campaign_id"],
         "status": "queued",
         "batch_size": batch_size,
         "check_family": _normalize_asm_check_family(request.check_family) or "all",
@@ -8610,13 +8637,26 @@ async def asm_gaps(target_id: str):
         samples = await conn.fetch(
             """
             SELECT id, method, path, param_shape, param_location, auth_state, priority_score,
-                   test_status, last_attempt_status, last_verdict, last_seen_at, last_tested_at
+                   test_status, last_attempt_status, last_verdict, lease_owner,
+                   lease_expires_at, attempt_count, last_seen_at, last_tested_at
             FROM target_endpoints
             WHERE target_id = $1
               AND (test_status IN ('untested', 'stale', 'in_progress')
                    OR last_attempt_status IN ('auth_missing', 'partial', 'partial_timeout', 'partial_findings'))
             ORDER BY priority_score DESC, last_seen_at DESC
             LIMIT 25
+            """,
+            uuid.UUID(target_id),
+        )
+        ledger_rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM asm_endpoint_attempts
+            WHERE endpoint_id IN (
+                SELECT id FROM target_endpoints WHERE target_id = $1
+            )
+            GROUP BY status
+            ORDER BY count DESC
             """,
             uuid.UUID(target_id),
         )
@@ -8640,6 +8680,7 @@ async def asm_gaps(target_id: str):
         "by_auth_state": by_auth,
         "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},
         "last_attempt_status": attempt_counts,
+        "attempt_ledger_status": {str(r["status"]): int(r["count"] or 0) for r in ledger_rows},
         "sample_gaps": [row_to_dict(r) for r in samples],
     }
 
@@ -8655,17 +8696,41 @@ async def asm_activity(
             raise HTTPException(status_code=404, detail="Target not found")
         rows = await conn.fetch(
             """
-            SELECT id, job_id, scan_role, scan_type, status, current_phase, progress,
-                   findings_count, score, grade, error_message,
-                   created_at, started_at, completed_at, duration_seconds
-            FROM scans
-            WHERE target_id = $1 AND scan_role IN ($2, $3)
-            ORDER BY created_at DESC
+            SELECT s.id, s.job_id, s.scan_role, s.scan_type, s.status, s.current_phase, s.progress,
+                   s.findings_count, s.score, s.grade, s.error_message,
+                   s.created_at, s.started_at, s.completed_at, s.duration_seconds,
+                   s.campaign_id, c.mode AS campaign_mode, c.requested_by AS campaign_requested_by,
+                   c.status AS campaign_status, c.check_families AS campaign_check_families
+            FROM scans s
+            LEFT JOIN scan_campaigns c ON c.id = s.campaign_id
+            WHERE s.target_id = $1 AND s.scan_role IN ($2, $3)
+            ORDER BY s.created_at DESC
             LIMIT $4
             """,
             uuid.UUID(target_id), asm_inventory.ASM_BATCH_ROLE, asm_inventory.ASM_RECON_ROLE, limit,
         )
-    return {"activity": [row_to_dict(r) for r in rows]}
+        campaign_ids = [r["campaign_id"] for r in rows if r["campaign_id"]]
+        attempt_counts: dict[str, dict[str, int]] = {}
+        if campaign_ids:
+            attempts = await conn.fetch(
+                """
+                SELECT campaign_id, status, COUNT(*) AS count
+                FROM asm_endpoint_attempts
+                WHERE campaign_id = ANY($1::uuid[])
+                GROUP BY campaign_id, status
+                """,
+                campaign_ids,
+            )
+            for attempt in attempts:
+                cid = str(attempt["campaign_id"])
+                attempt_counts.setdefault(cid, {})[str(attempt["status"])] = int(attempt["count"] or 0)
+    activity = []
+    for row in rows:
+        item = row_to_dict(row)
+        cid = str(row["campaign_id"]) if row["campaign_id"] else None
+        item["attempt_status_counts"] = attempt_counts.get(cid, {}) if cid else {}
+        activity.append(item)
+    return {"activity": activity}
 
 
 # ============================================================
