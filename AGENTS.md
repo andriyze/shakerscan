@@ -412,6 +412,20 @@ curl http://localhost:8080/queue/stats
 curl -X DELETE http://localhost:8080/queue/clear
 ```
 
+### Automation Settings
+
+```bash
+# Compact safe automation defaults: auto-sharding + default Continuous ASM policy
+curl http://localhost:8080/settings/automation
+
+curl -X PUT http://localhost:8080/settings/automation \
+  -H "Content-Type: application/json" \
+  -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
+       "default_asm_config": {"batch_size": 50, "stale_days": 30}}'
+```
+
+`/settings/automation` is the preferred compact surface for UI/API/AI agents. It keeps global `exploit_depth` locked off; Lab/deep ASM still requires explicit per-target or per-action intent.
+
 ### Worker Management
 
 Control the number of scanner workers to handle parallel scans:

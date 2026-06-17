@@ -173,6 +173,7 @@ except (TypeError, ValueError):
     STALE_DURATION_GRACE_MINUTES = 5.0
 AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 SCAN_SETTINGS_KEY = os.environ.get("SCAN_SETTINGS_KEY", "settings:scan")
+AUTOMATION_SETTINGS_KEY = os.environ.get("AUTOMATION_SETTINGS_KEY", "settings:automation")
 LOCAL_ENV_FILE = Path(os.environ.get("LOCAL_ENV_FILE", "/workspace/.env"))
 logger = logging.getLogger(__name__)
 
@@ -790,6 +791,44 @@ def _load_effective_scan_execution_settings() -> dict[str, Any]:
     return settings
 
 
+def _default_asm_enabled_setting() -> bool:
+    return _is_truthy(
+        os.environ.get("DEFAULT_ASM_ENABLED", os.environ.get("ASM_DEFAULT_ENABLED", "true")),
+        default=True,
+    )
+
+
+def _safe_default_asm_config(config: Any = None) -> dict[str, Any]:
+    cfg = asm_inventory.merge_asm_config(config or {})
+    # Global automation defaults must stay safe. Lab/deep active depth is still
+    # explicit per target/action, not a broad default.
+    cfg["exploit_depth"] = False
+    return cfg
+
+
+def _load_effective_automation_settings() -> dict[str, Any]:
+    settings: dict[str, Any] = {
+        "default_asm_enabled": _default_asm_enabled_setting(),
+        "default_asm_config": _safe_default_asm_config({}),
+    }
+    try:
+        r = get_redis()
+        overrides = r.hgetall(AUTOMATION_SETTINGS_KEY) or {}
+    except Exception:
+        overrides = {}
+
+    if "default_asm_enabled" in overrides:
+        settings["default_asm_enabled"] = _is_truthy(
+            overrides.get("default_asm_enabled"),
+            default=settings["default_asm_enabled"],
+        )
+    if "default_asm_config" in overrides:
+        settings["default_asm_config"] = _safe_default_asm_config(
+            _decode_json_value(overrides.get("default_asm_config"))
+        )
+    return settings
+
+
 def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict[str, Any]:
     worker_count = _running_scan_worker_count_best_effort()
     return {
@@ -811,6 +850,30 @@ def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict
     }
 
 
+def _sanitize_automation_settings_response(
+    automation: dict[str, Any] | None = None,
+    scan_execution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    automation = automation or _load_effective_automation_settings()
+    scan_execution = scan_execution or _load_effective_scan_execution_settings()
+    default_asm_config = _safe_default_asm_config(automation.get("default_asm_config"))
+    return {
+        "scan_execution": _sanitize_scan_execution_settings_response(scan_execution),
+        "default_continuous_asm": {
+            "enabled_for_new_web_targets": bool(automation.get("default_asm_enabled")),
+            "config": default_asm_config,
+            "active_depth_confirmation_required": True,
+            "high_risk_families_require_explicit_request": True,
+            "applies_to": "new web targets",
+        },
+        "safety_boundaries": {
+            "global_exploit_depth": False,
+            "lab_depth_requires_explicit_action": True,
+            "planned_high_risk_families_fail_closed": True,
+        },
+    }
+
+
 def _default_asm_enabled_for_new_web_target(discovery_source: str = "manual") -> bool:
     """Default Continuous ASM only for web targets the product should track.
 
@@ -820,10 +883,13 @@ def _default_asm_enabled_for_new_web_target(discovery_source: str = "manual") ->
     """
     if str(discovery_source or "").strip().lower() in {"model-intake", "model_intake"}:
         return False
-    return _is_truthy(
-        os.environ.get("DEFAULT_ASM_ENABLED", os.environ.get("ASM_DEFAULT_ENABLED", "true")),
-        default=True,
-    )
+    return bool(_load_effective_automation_settings().get("default_asm_enabled"))
+
+
+def _default_asm_config_for_new_web_target(discovery_source: str = "manual") -> dict[str, Any]:
+    if str(discovery_source or "").strip().lower() in {"model-intake", "model_intake"}:
+        return {}
+    return _safe_default_asm_config(_load_effective_automation_settings().get("default_asm_config"))
 
 
 def _scan_option_was_explicit(options: Any, field: str) -> bool:
@@ -2624,6 +2690,11 @@ class ScanExecutionSettingsUpdate(BaseModel):
     auto_sharding_strategy: Optional[str] = Field(default=None, pattern="^(auto|scope|family|coverage|coverage_family)$")
     auto_sharding_max_shards: Optional[int] = Field(default=None, ge=2, le=AUTO_SHARD_MAX_SHARDS)
     auto_sharding_min_workers: Optional[int] = Field(default=None, ge=1, le=20)
+
+
+class AutomationSettingsUpdate(ScanExecutionSettingsUpdate):
+    default_asm_enabled: Optional[bool] = None
+    default_asm_config: Optional[dict[str, Any]] = None
 
 
 class AISettingsProbeRequest(BaseModel):
@@ -4787,14 +4858,7 @@ async def get_scan_execution_settings():
     return _sanitize_scan_execution_settings_response(settings)
 
 
-@app.put("/settings/scan-execution")
-async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
-    """Update runtime scan execution settings."""
-    try:
-        r = get_redis()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
-
+def _scan_execution_update_mapping(request: ScanExecutionSettingsUpdate) -> dict[str, str]:
     updates: dict[str, str] = {}
     if request.auto_sharding_enabled is not None:
         updates["auto_sharding_enabled"] = "true" if request.auto_sharding_enabled else "false"
@@ -4809,7 +4873,18 @@ async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
         )
     if request.auto_sharding_min_workers is not None:
         updates["auto_sharding_min_workers"] = str(max(1, int(request.auto_sharding_min_workers)))
+    return updates
 
+
+@app.put("/settings/scan-execution")
+async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
+    """Update runtime scan execution settings."""
+    try:
+        r = get_redis()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
+
+    updates = _scan_execution_update_mapping(request)
     if updates:
         r.hset(SCAN_SETTINGS_KEY, mapping=updates)
 
@@ -4817,6 +4892,44 @@ async def update_scan_execution_settings(request: ScanExecutionSettingsUpdate):
     return {
         "status": "updated",
         "settings": _sanitize_scan_execution_settings_response(settings),
+    }
+
+
+@app.get("/settings/automation")
+async def get_automation_settings():
+    """Get compact safe automation defaults for Settings, API, and AI agents."""
+    return _sanitize_automation_settings_response()
+
+
+@app.put("/settings/automation")
+async def update_automation_settings(request: AutomationSettingsUpdate):
+    """Update compact safe automation defaults.
+
+    This intentionally allows only safe default ASM policy. Lab/deep active depth
+    remains an explicit per-target or per-operation decision.
+    """
+    try:
+        r = get_redis()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}")
+
+    scan_updates = _scan_execution_update_mapping(request)
+    if scan_updates:
+        r.hset(SCAN_SETTINGS_KEY, mapping=scan_updates)
+
+    automation_updates: dict[str, str] = {}
+    if request.default_asm_enabled is not None:
+        automation_updates["default_asm_enabled"] = "true" if request.default_asm_enabled else "false"
+    if request.default_asm_config is not None:
+        automation_updates["default_asm_config"] = json.dumps(
+            _safe_default_asm_config(request.default_asm_config)
+        )
+    if automation_updates:
+        r.hset(AUTOMATION_SETTINGS_KEY, mapping=automation_updates)
+
+    return {
+        "status": "updated",
+        "settings": _sanitize_automation_settings_response(),
     }
 
 
@@ -7557,11 +7670,12 @@ async def submit_scan(request: ScanRequest):
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, asm_enabled)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target),
-                 _default_asm_enabled_for_new_web_target("manual"))
+                 _default_asm_enabled_for_new_web_target("manual"),
+                 json.dumps(_default_asm_config_for_new_web_target("manual")))
 
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
@@ -8278,12 +8392,13 @@ async def create_target(request: TargetCreate):
     async with db_pool.acquire() as conn:
         try:
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
-                 _default_asm_enabled_for_new_web_target("manual"))
+                 _default_asm_enabled_for_new_web_target("manual"),
+                 json.dumps(_default_asm_config_for_new_web_target("manual")))
 
             response = {
                 'id': str(target_id),
@@ -10630,11 +10745,12 @@ async def create_manual_finding(request: ManualFindingCreate):
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled)
-                VALUES ($1, $2, $3, 'manual', $4)
+                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, 'manual', $4, $5)
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
-                 _default_asm_enabled_for_new_web_target("manual"))
+                 _default_asm_enabled_for_new_web_target("manual"),
+                 json.dumps(_default_asm_config_for_new_web_target("manual")))
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(
@@ -11861,11 +11977,12 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled)
-                VALUES ($1, $2, $3, 'ai_session', $4)
+                INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, 'ai_session', $4, $5)
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
-                 _default_asm_enabled_for_new_web_target("ai_session"))
+                 _default_asm_enabled_for_new_web_target("ai_session"),
+                 json.dumps(_default_asm_config_for_new_web_target("ai_session")))
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(

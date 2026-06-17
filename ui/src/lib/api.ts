@@ -613,6 +613,40 @@ export interface ScanExecutionSettingsUpdate {
   auto_sharding_min_workers?: number
 }
 
+export interface AsmAutomationConfig {
+  batch_size: number
+  stale_days: number
+  min_interval_minutes: number
+  daily_endpoint_cap: number
+  recon_interval_hours: number
+  exploit_depth: boolean
+  window_start_hour: number | null
+  window_end_hour: number | null
+  window_days: number[] | null
+  max_requests_per_hour_per_domain: number
+}
+
+export interface AutomationSettings {
+  scan_execution: ScanExecutionSettings
+  default_continuous_asm: {
+    enabled_for_new_web_targets: boolean
+    config: AsmAutomationConfig
+    active_depth_confirmation_required: boolean
+    high_risk_families_require_explicit_request: boolean
+    applies_to: string
+  }
+  safety_boundaries: {
+    global_exploit_depth: boolean
+    lab_depth_requires_explicit_action: boolean
+    planned_high_risk_families_fail_closed: boolean
+  }
+}
+
+export interface AutomationSettingsUpdate extends ScanExecutionSettingsUpdate {
+  default_asm_enabled?: boolean
+  default_asm_config?: Partial<AsmAutomationConfig>
+}
+
 export interface AIProbeResponse {
   status: 'ok' | 'failed'
   scope: 'scan' | 'verify'
@@ -1600,6 +1634,29 @@ export async function updateScanExecutionSettings(data: ScanExecutionSettingsUpd
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to update scan execution settings'))
+  }
+  return res.json()
+}
+
+export async function getAutomationSettings(): Promise<AutomationSettings> {
+  const res = await fetch(`${API_URL}/settings/automation`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to fetch automation settings'))
+  }
+  return res.json()
+}
+
+export async function updateAutomationSettings(data: AutomationSettingsUpdate): Promise<{
+  status: string
+  settings: AutomationSettings
+}> {
+  const res = await fetch(`${API_URL}/settings/automation`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to update automation settings'))
   }
   return res.json()
 }

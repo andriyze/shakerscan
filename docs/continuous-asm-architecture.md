@@ -431,11 +431,12 @@ Current UI/API:
   that are not runnable yet are shown as disabled `planned` options with their risk tier instead of
   disappearing from the selector.
 - Child shard and ASM implementation rows are hidden from the main Scans list by default.
-- Auto-sharding exists behind `/settings/scan-execution`; fresh installs default it on for
-  eligible scans, while explicit `Normal`/`parallel:false` still forces standalone execution.
+- Auto-sharding exists behind `/settings/automation` and the compatibility
+  `/settings/scan-execution` endpoint; fresh installs default it on for eligible scans, while
+  explicit `Normal`/`parallel:false` still forces standalone execution.
 - Continuous ASM exists per target. New explicit web targets default it on with the conservative
-  safe policy; existing targets, model-intake artifact targets, and bulk discovery rows are not
-  silently flipped.
+  safe policy from `/settings/automation`; existing targets, model-intake artifact targets, and
+  bulk discovery rows are not silently flipped.
 
 Recommended UI:
 
@@ -615,8 +616,10 @@ Remaining:
 - Hide ASM batch/recon implementation rows from the default Scans list once ASM activity is available.
   **Implemented.**
 - Add a compact Settings view for safe automation defaults: auto-sharding, default ASM policy, and
-  active-depth confirmation boundaries. **Partially implemented:** auto-sharding defaults on, and
-  new explicit web targets default Continuous ASM on with the conservative safe policy.
+  active-depth confirmation boundaries. **Implemented:** `/settings/automation` exposes the combined
+  API for UI/API/AI callers; the Settings page shows a compact Automation Defaults card with
+  auto-sharding, default Continuous ASM for new web targets, safe ASM presets, and read-only
+  Lab/deep confirmation boundaries.
 
 ### Phase E — Multi-Node Readiness
 

@@ -875,6 +875,7 @@ def test_auto_sharding_env_can_disable_default(monkeypatch):
 def test_default_asm_enabled_for_new_web_targets(monkeypatch):
     monkeypatch.delenv("DEFAULT_ASM_ENABLED", raising=False)
     monkeypatch.delenv("ASM_DEFAULT_ENABLED", raising=False)
+    monkeypatch.setattr(api_module, "get_redis", lambda: (_ for _ in ()).throw(RuntimeError("redis down")))
 
     assert api_module._default_asm_enabled_for_new_web_target("manual") is True
     assert api_module._default_asm_enabled_for_new_web_target("ai_session") is True
@@ -882,9 +883,73 @@ def test_default_asm_enabled_for_new_web_targets(monkeypatch):
 
 def test_default_asm_enabled_can_be_disabled_and_skips_model_intake(monkeypatch):
     monkeypatch.setenv("DEFAULT_ASM_ENABLED", "false")
+    monkeypatch.setattr(api_module, "get_redis", lambda: (_ for _ in ()).throw(RuntimeError("redis down")))
 
     assert api_module._default_asm_enabled_for_new_web_target("manual") is False
     assert api_module._default_asm_enabled_for_new_web_target("model-intake") is False
+
+
+class _AutomationSettingsRedis:
+    def __init__(self):
+        self.store = {}
+
+    def hgetall(self, key):
+        return dict(self.store.get(key, {}))
+
+    def hset(self, key, mapping=None, **kwargs):
+        data = dict(mapping or {})
+        data.update(kwargs)
+        self.store.setdefault(key, {}).update(data)
+        return len(data)
+
+
+def test_automation_settings_runtime_override_controls_new_target_asm_defaults(monkeypatch):
+    redis_client = _AutomationSettingsRedis()
+    redis_client.hset(
+        api_module.AUTOMATION_SETTINGS_KEY,
+        mapping={
+            "default_asm_enabled": "false",
+            "default_asm_config": json.dumps({"batch_size": 123, "exploit_depth": True}),
+        },
+    )
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    cfg = api_module._default_asm_config_for_new_web_target("manual")
+
+    assert api_module._default_asm_enabled_for_new_web_target("manual") is False
+    assert cfg["batch_size"] == 123
+    assert cfg["exploit_depth"] is False
+    assert api_module._default_asm_config_for_new_web_target("model-intake") == {}
+
+
+def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatch):
+    redis_client = _AutomationSettingsRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 5)
+
+    result = asyncio.run(api_module.update_automation_settings(
+        api_module.AutomationSettingsUpdate(
+            auto_sharding_enabled=False,
+            auto_sharding_strategy="coverage",
+            default_asm_enabled=False,
+            default_asm_config={"batch_size": 120, "stale_days": 14, "exploit_depth": True},
+        )
+    ))
+
+    scan_store = redis_client.store[api_module.SCAN_SETTINGS_KEY]
+    automation_store = redis_client.store[api_module.AUTOMATION_SETTINGS_KEY]
+    stored_asm_config = json.loads(automation_store["default_asm_config"])
+    assert scan_store["auto_sharding_enabled"] == "false"
+    assert scan_store["auto_sharding_strategy"] == "coverage"
+    assert automation_store["default_asm_enabled"] == "false"
+    assert stored_asm_config["batch_size"] == 120
+    assert stored_asm_config["stale_days"] == 14
+    assert stored_asm_config["exploit_depth"] is False
+    assert result["settings"]["scan_execution"]["auto_sharding_enabled"] is False
+    assert result["settings"]["scan_execution"]["auto_sharding_strategy"] == "coverage"
+    assert result["settings"]["default_continuous_asm"]["enabled_for_new_web_targets"] is False
+    assert result["settings"]["default_continuous_asm"]["config"]["exploit_depth"] is False
+    assert result["settings"]["default_continuous_asm"]["active_depth_confirmation_required"] is True
 
 
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):

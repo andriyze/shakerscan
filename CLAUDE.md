@@ -193,6 +193,18 @@ curl http://localhost:8080/queue/stats       # Queue status
 curl -X DELETE http://localhost:8080/queue/clear   # Emergency: clear pending jobs
 ```
 
+### Automation Settings
+
+```bash
+curl http://localhost:8080/settings/automation
+curl -X PUT http://localhost:8080/settings/automation \
+  -H "Content-Type: application/json" \
+  -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
+       "default_asm_config": {"batch_size": 50, "stale_days": 30}}'
+```
+
+Use `/settings/automation` as the compact UI/API/AI surface for safe defaults. Global `exploit_depth` stays locked off; Lab/deep ASM requires explicit per-target or per-action intent.
+
 ### Worker Management
 
 Control parallel-scan capacity. Worker limits: 1-20. Each worker uses ~1-2 CPU cores and 2-4GB RAM during scans.

@@ -94,9 +94,11 @@ User-facing rules:
 - **Scan Detail:** parent scans show a shard rollup. Child shard rows are implementation
   details and are hidden from the main Scans list unless the API caller explicitly asks
   for `include_shards=true`.
-- **Automatic enablement:** off by default for compatibility. When enabled, it applies
-  only to scans that can produce at least two useful shards: Smart/Full/Aggressive
-  active scans, or any DAST scan with at least two explicit `custom_endpoints`.
+- **Automatic enablement:** on by default for fresh installs, bounded by worker availability
+  and scan eligibility. Users can turn it off from Settings or force standalone execution
+  with New Scan `Normal` / API `parallel:false`. It applies only to scans that can produce
+  at least two useful shards: Smart/Full/Aggressive active scans, or any DAST scan with
+  at least two explicit `custom_endpoints`.
 
 Performance expectations:
 

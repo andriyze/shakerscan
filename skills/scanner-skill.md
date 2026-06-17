@@ -163,6 +163,20 @@ to API-like endpoints without changing target-wide defaults. Normal scan lists h
 implementation rows by default; use `/targets/{target_id}/asm/activity` for ASM activity and
 `/scans?include_shards=true&include_internal=true` only for debugging.
 
+Use `/settings/automation` for compact safe defaults instead of hand-editing many scan knobs:
+
+```bash
+curl http://localhost:8080/settings/automation
+
+curl -X PUT http://localhost:8080/settings/automation \
+  -H "Content-Type: application/json" \
+  -d '{"auto_sharding_enabled": true, "default_asm_enabled": true,
+       "default_asm_config": {"batch_size": 50, "stale_days": 30}}'
+```
+
+The automation defaults keep global `exploit_depth` off. Lab/deep ASM remains explicit per target or
+per action.
+
 For natural-language requests, prefer the dry-run router before composing active calls manually:
 
 ```bash
