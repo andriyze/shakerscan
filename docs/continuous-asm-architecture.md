@@ -580,8 +580,8 @@ Remaining:
 
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
-- Add deeper parent UI attribution for per-shard endpoint contribution, auth-state coverage, and
-  budget consumption.
+- Add aggregate parent UI attribution for auth-state coverage and budget consumption. Per-shard
+  endpoint contribution is now shown from child result summaries.
 
 ### Phase D — UX/API/AI Simplification
 

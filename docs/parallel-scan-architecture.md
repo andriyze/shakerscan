@@ -53,7 +53,7 @@ Every implementation task must verify the current state with search/tests before
 - **Global-check de-duplication:** coverage shards still run full active endpoint checks over their assigned slice, but only the first shard per auth state runs target-global exposure/posture probes such as exposed-file discovery, auxiliary API/XXE discovery, Phase 4 API-security sweeps, and forced browsing. Later shards carry `skip_global_checks=true` and the scanner emits skipped module results, so the merge keeps one logical report without wasting every shard on identical global probes.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. Workers now launch scanner subprocesses in their own process group and poll `scan:{id}:cancel`, so active shard subprocesses are terminated instead of running to natural completion after cancellation.
 - **Target stats safety:** shard rows are excluded from target `total_scans`, `latest_scans`, and dashboard scan counts; only standalone scans and parallel parents count as logical scans.
-- **UI controls:** Settings exposes one `Auto-shard eligible scans` toggle. New Scan exposes `Auto`, `Normal`, and `Parallel`; shard count/strategy/endpoint input are tucked behind `Parallel tuning` only when Parallel is forced. Scans rerun actions stay one item per scan type and rely on the global auto policy. Scan Detail shows parent shard rollup and a compact Full Coverage campaign endpoint rollup when attempt-ledger facts exist.
+- **UI controls:** Settings exposes one `Auto-shard eligible scans` toggle. New Scan exposes `Auto`, `Normal`, and `Parallel`; shard count/strategy/endpoint input are tucked behind `Parallel tuning` only when Parallel is forced. Scans rerun actions stay one item per scan type and rely on the global auto policy. Scan Detail shows parent shard rollup, compact per-shard contribution facts (endpoint attempts/assignment, family, auth, active budget, telemetry statuses), and a compact Full Coverage campaign endpoint rollup when attempt-ledger facts exist.
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
 - **Tests:** `tests/test_parallel_scan.py`, `tests/test_coverage_strategy.py`, `tests/test_worker_scan_ai_gating.py`, `tests/test_active_checks.py`, `tests/test_custom_dictionaries.py`, scan budget coverage in `tests/test_scan_budget_profiles.py`, and auto-sharding policy coverage in `tests/test_api_scan_option_masking.py`. Verified live on Juice Shop after rebuilding images: auto scope run completed and merged 4/4 shards into one parent in 195s (2 deduped findings); family run completed 3/3 shards and merged duplicate findings under the parent.
 
@@ -66,7 +66,8 @@ suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
-richer UI breakdowns for per-shard/batch contribution and budget spend.
+aggregate auth-state coverage and budget-spend rollups beyond the current per-shard contribution
+facts.
 
 ---
 
@@ -421,7 +422,8 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 - Family-based and nuclei-category sharding (§6.2/6.4).
 - Check registry refactor (§8.3).
 - More granular cooperative cancel checkpoints inside scanner active-check loops (see Risks).
-- UI: parent progress with per-shard breakdown; coverage shows shard contribution.
+- UI: parent progress with per-shard contribution is shipped; continue aggregate auth-state coverage
+  and budget-spend rollups.
 
 ---
 
@@ -553,7 +555,7 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 - **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
   when a very large fleet is available.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
-  ledger; still add per-shard endpoint contribution, auth-state coverage, and aggregate budget
+  ledger plus per-shard contribution facts; still add aggregate auth-state coverage and budget
   consumption.
 - **Global distributed rate limits:** required before multi-node fleets run hundreds of
   shards against the same root domain.

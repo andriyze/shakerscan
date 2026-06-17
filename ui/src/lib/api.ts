@@ -95,7 +95,33 @@ export interface Scan {
     running: number
     pending: number
     terminal: number
+    average_progress?: number
   }
+  shards?: Array<{
+    id: string
+    scan_role?: string | null
+    shard_index?: number | null
+    status: string
+    score?: number | null
+    grade?: string | null
+    findings_count?: number | null
+    current_phase?: string | null
+    progress?: number | null
+    duration_seconds?: number | null
+    contribution?: {
+      assigned_endpoints?: number
+      attempted_endpoints?: number
+      attempt_statuses?: Record<string, number>
+      active_worklist_total?: number
+      active_endpoints_selected?: number
+      active_endpoint_budget?: number
+      active_max_seconds?: number
+      budget_profile?: string
+      check_family?: string
+      auth_state?: string
+      per_endpoint_telemetry?: boolean
+    }
+  }>
 }
 
 export interface ModelIntakeScanRequest {

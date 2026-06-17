@@ -47,6 +47,25 @@ function coverageNumber(value: any): number {
   return Number.isFinite(n) ? n : 0
 }
 
+function formatShardFamily(value: any): string {
+  const raw = String(value || 'all').toLowerCase()
+  if (!raw || raw === 'all') return 'All families'
+  if (raw === 'sqli') return 'SQLi'
+  if (raw === 'xss') return 'XSS'
+  return raw.replace(/_/g, ' ').toUpperCase()
+}
+
+function formatAttemptStatuses(statuses: any): string | null {
+  if (!statuses || typeof statuses !== 'object') return null
+  const entries = Object.entries(statuses)
+    .map(([status, value]) => [status, Number(value)] as const)
+    .filter(([, value]) => Number.isFinite(value) && value > 0)
+  if (!entries.length) return null
+  return entries
+    .map(([status, value]) => `${value} ${status.replace(/_/g, ' ')}`)
+    .join(' · ')
+}
+
 function CoverageMetric({ label, value, accent = 'text-white' }: { label: string; value: any; accent?: string }) {
   return (
     <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
@@ -247,29 +266,82 @@ function ParallelShardRollup({ scan }: { scan: any }) {
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {scan.shards.map((shard: any) => (
-          <Link
-            href={`/scans/${shard.id}`}
-            key={shard.id}
-            className="block rounded border border-gray-800 bg-gray-900/60 p-3 hover:border-gray-700"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-sm text-white">Shard {Number(shard.shard_index ?? 0) + 1}</span>
-              <span className="text-xs uppercase text-gray-400">{shard.status}</span>
-            </div>
-            <div className="mt-2 h-1.5 rounded bg-gray-800">
-              <div
-                className="h-1.5 rounded bg-blue-500"
-                style={{ width: `${Math.max(0, Math.min(100, Number(shard.progress || 0)))}%` }}
-              />
-            </div>
-            <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-              <span>{shard.current_phase || 'queued'}</span>
-              <span>{shard.findings_count || 0} findings</span>
-            </div>
-          </Link>
+          <ShardCard shard={shard} key={shard.id} />
         ))}
       </div>
     </Card>
+  )
+}
+
+function ShardCard({ shard }: { shard: any }) {
+  const contribution = shard?.contribution || {}
+  const assigned = coverageNumber(contribution.assigned_endpoints)
+  const attempted = coverageNumber(contribution.attempted_endpoints)
+  const selected = coverageNumber(contribution.active_endpoints_selected)
+  const worklistTotal = coverageNumber(contribution.active_worklist_total)
+  const endpointBudget = coverageNumber(contribution.active_endpoint_budget)
+  const activeSeconds = coverageNumber(contribution.active_max_seconds)
+  const statusSummary = formatAttemptStatuses(contribution.attempt_statuses)
+  const duration = shard.duration_seconds ? formatDuration(shard.duration_seconds) : null
+  const endpointSummary = assigned || attempted
+    ? `${attempted || selected || 0}${assigned ? ` / ${assigned}` : ''}`
+    : selected || worklistTotal
+      ? `${selected}${worklistTotal ? ` / ${worklistTotal}` : ''}`
+      : null
+
+  return (
+    <Link
+      href={`/scans/${shard.id}`}
+      className="block rounded border border-gray-800 bg-gray-900/60 p-3 hover:border-gray-700"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm text-white">Shard {Number(shard.shard_index ?? 0) + 1}</span>
+        <span className="text-xs uppercase text-gray-400">{shard.status}</span>
+      </div>
+      <div className="mt-2 h-1.5 rounded bg-gray-800">
+        <div
+          className="h-1.5 rounded bg-blue-500"
+          style={{ width: `${Math.max(0, Math.min(100, Number(shard.progress || 0)))}%` }}
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+        <span>{shard.current_phase || 'queued'}</span>
+        <span>{shard.findings_count || 0} findings</span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        {endpointSummary && (
+          <div className="rounded bg-gray-950/60 px-2 py-1">
+            <div className="text-gray-500">Endpoints</div>
+            <div className="text-gray-200">{endpointSummary}</div>
+          </div>
+        )}
+        <div className="rounded bg-gray-950/60 px-2 py-1">
+          <div className="text-gray-500">Family</div>
+          <div className="text-gray-200">{formatShardFamily(contribution.check_family)}</div>
+        </div>
+        {contribution.auth_state && (
+          <div className="rounded bg-gray-950/60 px-2 py-1">
+            <div className="text-gray-500">Auth</div>
+            <div className="truncate text-gray-200">{String(contribution.auth_state).replace(/_/g, ' ')}</div>
+          </div>
+        )}
+        {(endpointBudget || activeSeconds) && (
+          <div className="rounded bg-gray-950/60 px-2 py-1">
+            <div className="text-gray-500">Active budget</div>
+            <div className="text-gray-200">
+              {endpointBudget ? `${endpointBudget} ep` : 'auto'}
+              {activeSeconds ? ` · ${formatDuration(activeSeconds)}` : ''}
+            </div>
+          </div>
+        )}
+      </div>
+      {statusSummary && (
+        <p className="mt-2 text-xs text-gray-500">{statusSummary}</p>
+      )}
+      {duration && (
+        <p className="mt-1 text-xs text-gray-600">Duration {duration}</p>
+      )}
+    </Link>
   )
 }
 

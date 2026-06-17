@@ -223,12 +223,68 @@ def row_to_dict(row) -> dict:
     return d
 
 
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parallel_shard_contribution(shard: dict[str, Any]) -> dict[str, Any]:
+    """Summarize child shard work without returning the full child report."""
+    report = _decode_json_value(shard.get('result'))
+    options = _decode_json_value(shard.get('options')) or {}
+    if not isinstance(report, dict):
+        report = {}
+    if not isinstance(options, dict):
+        options = {}
+    active = report.get('active_checks') if isinstance(report.get('active_checks'), dict) else {}
+    custom_endpoints = options.get('custom_endpoints') if isinstance(options.get('custom_endpoints'), list) else []
+    attempts = active.get('endpoint_attempts') if isinstance(active.get('endpoint_attempts'), list) else []
+    attempt_statuses: dict[str, int] = {}
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        status = str(attempt.get('status') or 'unknown').strip().lower() or 'unknown'
+        attempt_statuses[status] = attempt_statuses.get(status, 0) + 1
+    scope = active.get('check_family_scope') if isinstance(active.get('check_family_scope'), dict) else {}
+    requested_family = (
+        scope.get('requested_family')
+        or scope.get('focused_family')
+        or options.get('asm_check_family')
+        or options.get('check_family')
+    )
+    budget = options.get('custom_budget') if isinstance(options.get('custom_budget'), dict) else {}
+    contribution = {
+        'assigned_endpoints': len(custom_endpoints),
+        'attempted_endpoints': len(attempts) if attempts else _int_or_none(active.get('endpoint_attempts_total')),
+        'attempt_statuses': attempt_statuses,
+        'active_worklist_total': _int_or_none(active.get('active_worklist_total')),
+        'active_endpoints_selected': _int_or_none(active.get('active_endpoints_selected')),
+        'active_endpoint_budget': _int_or_none(active.get('active_endpoint_budget') or budget.get('active_max_endpoints')),
+        'active_max_seconds': _int_or_none(budget.get('active_max_seconds')),
+        'budget_profile': options.get('budget_profile'),
+        'check_family': requested_family or 'all',
+        'auth_state': asm_inventory.auth_state_from_options(options),
+        'per_endpoint_telemetry': bool(active.get('per_endpoint_telemetry')) or bool(attempts),
+    }
+    return {key: value for key, value in contribution.items() if value not in (None, {}, [])}
+
+
+def _public_parallel_shard(row: dict[str, Any]) -> dict[str, Any]:
+    shard = dict(row)
+    shard['contribution'] = _parallel_shard_contribution(shard)
+    shard.pop('result', None)
+    shard.pop('options', None)
+    return shard
+
+
 def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str, Any]]) -> None:
     """Attach shard rollup and derive live parent progress from child progress."""
     terminal = {'completed', 'failed', 'cancelled'}
     progress_values = [int(s.get('progress') or 0) for s in shards]
     average_progress = int(round(sum(progress_values) / len(progress_values))) if progress_values else 0
-    result['shards'] = shards
+    result['shards'] = [_public_parallel_shard(shard) for shard in shards]
     result['shard_rollup'] = {
         'total': len(shards),
         'completed': sum(1 for s in shards if s.get('status') == 'completed'),
@@ -7619,7 +7675,8 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         async with db_pool.acquire() as conn:
             shard_rows = await conn.fetch("""
                 SELECT id, scan_role, shard_index, status, score, grade,
-                       findings_count, current_phase, progress
+                       findings_count, current_phase, progress, duration_seconds,
+                       result, options
                 FROM scans
                 WHERE parent_scan_id = $1
                 ORDER BY shard_index

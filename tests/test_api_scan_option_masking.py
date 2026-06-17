@@ -95,6 +95,55 @@ def test_parallel_parent_rollup_derives_progress_from_shards():
     }
 
 
+def test_parallel_parent_rollup_adds_shard_contribution_summary():
+    result = {"status": "completed", "progress": 100}
+    shards = [
+        {
+            "status": "completed",
+            "progress": 100,
+            "result": {
+                "active_checks": {
+                    "active_worklist_total": 20,
+                    "active_endpoints_selected": 2,
+                    "active_endpoint_budget": 2,
+                    "per_endpoint_telemetry": True,
+                    "check_family_scope": {
+                        "requested_family": "sqli",
+                        "focused_family": "sqli",
+                    },
+                    "endpoint_attempts": [
+                        {"custom_endpoint": "GET /a?id=1", "status": "completed"},
+                        {"custom_endpoint": "GET /b?id=1", "status": "partial"},
+                    ],
+                },
+            },
+            "options": {
+                "custom_endpoints": ["GET /a?id=1", "GET /b?id=1"],
+                "asm_check_family": "sqli",
+                "custom_budget": {"active_max_seconds": 120, "active_max_endpoints": 2},
+            },
+        }
+    ]
+
+    api_module._attach_parallel_shard_rollup(result, shards)
+
+    shard = result["shards"][0]
+    assert "result" not in shard
+    assert "options" not in shard
+    assert shard["contribution"] == {
+        "assigned_endpoints": 2,
+        "attempted_endpoints": 2,
+        "attempt_statuses": {"completed": 1, "partial": 1},
+        "active_worklist_total": 20,
+        "active_endpoints_selected": 2,
+        "active_endpoint_budget": 2,
+        "active_max_seconds": 120,
+        "check_family": "sqli",
+        "auth_state": "anonymous",
+        "per_endpoint_telemetry": True,
+    }
+
+
 def test_parallel_parent_rollup_keeps_unfinished_parent_below_complete():
     result = {"status": "running", "progress": 5}
     shards = [{"status": "completed", "progress": 100}]
