@@ -10733,8 +10733,21 @@ async def scale_workers(request: WorkerScaleRequest):
             needed = count - new_count
             if needed > 0:
                 # Infer image/project/network from a RUNNING worker (freshest image),
-                # never a stopped/stale one.
-                ref_pool = running or workers
+                # never a stopped/stale one. If nothing is running we have no trusted
+                # current-image reference to clone from -- cloning a stopped/stale
+                # worker would reintroduce the version-skew bug -- so refuse and let
+                # the compose stack (which always uses the current image) start them.
+                ref_pool = running
+                if not ref_pool:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "No running worker to clone the current image from. "
+                            "Start the stack first (./scanner.sh start, or "
+                            "docker compose up -d --scale worker=N) so new workers "
+                            "use the current code instead of a stale baked image."
+                        ),
+                    )
                 project, network, image = get_compose_context(ref_pool)
                 if project and network and image:
                     # Find the highest worker number (among the surviving running fleet)

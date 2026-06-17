@@ -581,15 +581,43 @@ async def _learn_not_found_signatures(
     return not_found
 
 
-def _is_unreachable(probe: tuple[str, int], not_found_for_prefix: list[tuple[str, int]]) -> bool | None:
-    """Classify a probe response: True = phantom (literal 404 or soft-404 match),
-    False = reachable, None = inconclusive (probe error). Callers must treat None
-    as 'keep / leave unchanged' so a flaky probe never drops a real endpoint."""
+def _reachability_verdict(probe: tuple[str, int], not_found_for_prefix: list[tuple[str, int]]) -> str:
+    """Classify a GET probe into a method-aware verdict:
+
+    - ``hard_404``    — a literal 404: the path is not routed, so it does not exist
+      for ANY method (a real method-specific endpoint answers GET with 405, not 404).
+      Safe to drop/retire every method of the path.
+    - ``soft_404``    — matches the app's learned not-found signature (500/SPA-200/etc).
+      This is GET-SPECIFIC evidence: a real POST/PUT/PATCH/DELETE endpoint may return
+      the app's generic page to a GET. Only the GET entry should be dropped/retired;
+      non-GET methods are kept.
+    - ``reachable``   — a distinct, non-not-found response. Keep all methods.
+    - ``inconclusive``— probe error (incl. connection-fail "000"). Leave everything as-is.
+    """
     if probe[0] in ("ERR", ""):
-        return None
+        return "inconclusive"
     if probe[0] == "404":
-        return True
-    return any(_soft404_matches(probe, sig) for sig in not_found_for_prefix)
+        return "hard_404"
+    if any(_soft404_matches(probe, sig) for sig in not_found_for_prefix):
+        return "soft_404"
+    return "reachable"
+
+
+def _is_unreachable(probe: tuple[str, int], not_found_for_prefix: list[tuple[str, int]]) -> bool | None:
+    """Back-compat scalar view of :func:`_reachability_verdict`: True = phantom
+    (hard or soft 404), False = reachable, None = inconclusive."""
+    verdict = _reachability_verdict(probe, not_found_for_prefix)
+    if verdict == "inconclusive":
+        return None
+    return verdict in ("hard_404", "soft_404")
+
+
+def _entry_is_get(entry: str) -> bool:
+    """True if a worklist entry is a GET (the only method we can safely probe).
+    Unparseable entries default to GET so soft-404 filtering still applies."""
+    parsed = parse_worklist_entry(entry)
+    method = (parsed[0] if parsed else "GET") or "GET"
+    return method.upper() == "GET"
 
 
 async def filter_reachable_worklist(
@@ -650,10 +678,15 @@ async def filter_reachable_worklist(
         if path == "__unparsed__":
             kept.extend(group)
             continue
-        unreach = _is_unreachable(status.get(path, ("ERR", -1)), not_found.get(_path_prefix(path), []))
-        if unreach:  # True only; None (inconclusive) and False both keep
+        verdict = _reachability_verdict(status.get(path, ("ERR", -1)), not_found.get(_path_prefix(path), []))
+        if verdict == "hard_404":
+            continue  # path not routed -> drop every method
+        if verdict == "soft_404":
+            # GET-specific evidence: drop only GET entries, keep POST/PUT/etc so a
+            # real non-GET endpoint isn't removed because GET hit the app's error page.
+            kept.extend(e for e in group if not _entry_is_get(e))
             continue
-        kept.extend(group)
+        kept.extend(group)  # reachable or inconclusive -> keep all
     return kept
 
 
@@ -720,15 +753,58 @@ async def sweep_endpoint_reachability(
         asyncio.gather(*(_probe(p) for p in paths)),
     )
 
-    reachable: list[tuple[str, int | None]] = []
-    unreachable: list[tuple[str, int | None]] = []
+    # A GET probe is method-aware (see _reachability_verdict): a literal 404 means
+    # the path is not routed (drop every method); a soft-404 is GET-specific (only
+    # the GET row is affected, so a real POST/PUT endpoint survives).
+    reachable: list[tuple[str, int | None]] = []   # path alive -> reset streak, all methods
+    hard: list[tuple[str, int | None]] = []        # not routed -> bump/retire all methods
+    soft: list[tuple[str, int | None]] = []        # GET-only not-found -> bump/retire GET rows
     for path in paths:
         st = status.get(path, ("ERR", -1))
-        verdict = _is_unreachable(st, not_found.get(_path_prefix(path), []))
-        if verdict is None:
-            continue  # inconclusive -> leave row untouched
+        verdict = _reachability_verdict(st, not_found.get(_path_prefix(path), []))
+        if verdict == "inconclusive":
+            continue  # leave rows untouched
         code = int(st[0]) if st[0].isdigit() else None
-        (unreachable if verdict else reachable).append((path, code))
+        if verdict == "reachable":
+            reachable.append((path, code))
+        elif verdict == "hard_404":
+            hard.append((path, code))
+        else:
+            soft.append((path, code))
+
+    async def _bump(paths_codes: list[tuple[str, int | None]], get_only: bool) -> None:
+        if not paths_codes:
+            return
+        method_clause = "AND te.method = 'GET'" if get_only else ""
+        await conn.execute(
+            f"""
+            UPDATE target_endpoints te
+            SET unreachable_streak = te.unreachable_streak + 1, last_http_status = v.code,
+                last_reachability_at = NOW(), updated_at = NOW()
+            FROM unnest($2::text[], $3::int[]) AS v(path, code)
+            WHERE te.target_id = $1 AND te.path = v.path AND te.test_status <> 'gone' {method_clause}
+            """,
+            tid, [p for p, _ in paths_codes], [c for _, c in paths_codes],
+        )
+
+    async def _retire(u_paths: list[str], get_only: bool) -> int:
+        if not u_paths:
+            return 0
+        method_clause = "AND method = 'GET'" if get_only else ""
+        return int(await conn.fetchval(
+            f"""
+            WITH retired AS (
+                UPDATE target_endpoints
+                SET test_status = 'gone', last_attempt_status = 'unreachable', updated_at = NOW()
+                WHERE target_id = $1 AND path = ANY($2::text[])
+                  AND test_status NOT IN ('gone', 'in_progress')
+                  AND unreachable_streak >= $3 {method_clause}
+                RETURNING 1
+            )
+            SELECT count(*) FROM retired
+            """,
+            tid, u_paths, retire_threshold,
+        ) or 0)
 
     if reachable:
         await conn.execute(
@@ -741,39 +817,17 @@ async def sweep_endpoint_reachability(
             """,
             tid, [p for p, _ in reachable], [c for _, c in reachable],
         )
-
-    retired = 0
-    if unreachable:
-        u_paths = [p for p, _ in unreachable]
-        await conn.execute(
-            """
-            UPDATE target_endpoints te
-            SET unreachable_streak = te.unreachable_streak + 1, last_http_status = v.code,
-                last_reachability_at = NOW(), updated_at = NOW()
-            FROM unnest($2::text[], $3::int[]) AS v(path, code)
-            WHERE te.target_id = $1 AND te.path = v.path AND te.test_status <> 'gone'
-            """,
-            tid, u_paths, [c for _, c in unreachable],
-        )
-        retired = await conn.fetchval(
-            """
-            WITH retired AS (
-                UPDATE target_endpoints
-                SET test_status = 'gone', last_attempt_status = 'unreachable', updated_at = NOW()
-                WHERE target_id = $1 AND path = ANY($2::text[])
-                  AND test_status NOT IN ('gone', 'in_progress')
-                  AND unreachable_streak >= $3
-                RETURNING 1
-            )
-            SELECT count(*) FROM retired
-            """,
-            tid, u_paths, retire_threshold,
-        ) or 0
+    await _bump(hard, get_only=False)
+    await _bump(soft, get_only=True)
+    retired = await _retire([p for p, _ in hard], get_only=False) + \
+        await _retire([p for p, _ in soft], get_only=True)
 
     return {
         "probed": len(paths),
         "reachable": len(reachable),
-        "unreachable": len(unreachable),
+        "unreachable": len(hard) + len(soft),
+        "hard_404": len(hard),
+        "soft_404": len(soft),
         "retired": int(retired),
         "threshold": retire_threshold,
     }

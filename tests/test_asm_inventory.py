@@ -53,8 +53,11 @@ def test_domain_rate_reservation_caps_at_positive_limit():
 
 
 def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
-    # Clean-404 server (honey-style): phantom paths (and decoys) -> 404, dropped
-    # across every method; a real path is kept. Probe is per-path.
+    # Clean-404 server (honey-style): phantom paths (and decoys) -> a LITERAL 404,
+    # which means the path is not routed at all, so every method is dropped (a real
+    # method-specific endpoint answers GET with 405, not 404 -> kept). A real path is
+    # kept. Contrast test_filter_soft404_keeps_non_get_methods, where a soft-404 GET
+    # only drops the GET entry and preserves real POST/PUT on the same path.
     async def fake_status(base_url, path, auth_args, timeout):
         if path.startswith("/api/ai-redteam") or "shakerscan-probe" in path:
             return ("404", 9)
@@ -171,14 +174,49 @@ def test_is_unreachable_classification():
     assert a._is_unreachable(("ERR", -1), [("404", 9)]) is None
 
 
+def test_reachability_verdict_method_aware():
+    assert a._reachability_verdict(("404", 9), []) == "hard_404"
+    assert a._reachability_verdict(("500", 3060), [("500", 3055)]) == "soft_404"
+    assert a._reachability_verdict(("200", 631), [("500", 3060)]) == "reachable"
+    assert a._reachability_verdict(("ERR", -1), [("404", 9)]) == "inconclusive"
+    # 405 = method not allowed = the path EXISTS -> reachable, never dropped
+    assert a._reachability_verdict(("405", 144), [("404", 9)]) == "reachable"
+
+
+def test_filter_soft404_keeps_non_get_methods(monkeypatch):
+    # On a soft-404 app (500-for-unknown), a path whose GET hits the error page
+    # must still keep its real POST/PUT entries (GET evidence is method-specific).
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("500", 3060)  # path + decoys all return the app error page
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.delenv("ASM_SOFT404_DETECT", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /api/login", 'POST /api/login json:{"u":1}', "PUT /api/login"]
+    kept = asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {}))
+    assert "GET /api/login" not in kept          # GET dropped (soft-404)
+    assert 'POST /api/login json:{"u":1}' in kept  # non-GET kept
+    assert "PUT /api/login" in kept
+
+
+def test_filter_hard404_drops_all_methods(monkeypatch):
+    # A literal 404 means the path is not routed -> drop every method (a real
+    # method-specific endpoint answers GET with 405, which is kept, not dropped).
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("404", 9)
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = ["GET /ghost", "POST /ghost form:x=1", "DELETE /ghost"]
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == []
+
+
 class _SweepConn:
     """Minimal asyncpg-conn stand-in for sweep_endpoint_reachability: returns the
     inventory paths from fetch(), records execute()s, and reports a retired count
-    from fetchval() equal to the unreachable-path array it is handed."""
+    from each fetchval() equal to the path array it is handed."""
     def __init__(self, paths):
         self._paths = paths
         self.executes = []
-        self.fetchval_args = None
+        self.fetchvals = []  # list of (query, args)
 
     async def fetch(self, query, *args):
         return [{"path": p} for p in self._paths]
@@ -188,9 +226,13 @@ class _SweepConn:
         return "UPDATE 1"
 
     async def fetchval(self, query, *args):
-        self.fetchval_args = args
-        # args = (tid, unreachable_paths, threshold); simulate all hitting threshold
+        self.fetchvals.append((query, args))
+        # args = (tid, paths, threshold); simulate all hitting threshold
         return len(args[1]) if len(args) > 1 and args[1] is not None else 0
+
+    @property
+    def fetchval_args(self):  # back-compat: the last retire call's args
+        return self.fetchvals[-1][1] if self.fetchvals else None
 
 
 _TID = "11111111-1111-1111-1111-111111111111"
@@ -242,6 +284,34 @@ def test_sweep_disabled_via_env(monkeypatch):
     conn = _SweepConn(["/a"])
     res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}))
     assert res.get("disabled") is True and res["probed"] == 0
+
+
+def test_sweep_soft404_retires_get_rows_only(monkeypatch):
+    # Soft-404 paths: only the GET method rows may be retired (a real POST/PUT on
+    # the same path must survive). The retire SQL must restrict to method='GET'.
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("500", 3060)
+    monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/api/a", "/api/b"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
+    assert res["soft_404"] == 2 and res["hard_404"] == 0
+    soft_retire = [q for q, _ in conn.fetchvals if "method = 'GET'" in q]
+    assert soft_retire, "soft-404 retire must restrict to GET rows"
+
+
+def test_sweep_hard404_retires_all_methods(monkeypatch):
+    # Literal-404 paths: the path is not routed, so all methods are retired.
+    # The retire SQL must NOT restrict to a single method.
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("404", 9)
+    monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/x", "/y"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
+    assert res["hard_404"] == 2 and res["soft_404"] == 0
+    all_method_retire = [q for q, _ in conn.fetchvals if "method = 'GET'" not in q]
+    assert all_method_retire, "hard-404 retire must cover all methods"
 
 
 def test_normalize_path_templates_volatile_ids():
