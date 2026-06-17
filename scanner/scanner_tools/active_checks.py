@@ -5829,6 +5829,31 @@ async def _detect_dbms_post(
     return {"detected": None}
 
 
+_ACTIVE_HIGH_VALUE_KEYWORDS = (
+    "login", "signin", "sign-in", "auth", "session", "password", "passwd",
+    "email", "search", "query", "filter", "account", "admin", "token",
+    "register", "signup", "user", "order", "coupon", "product", "payment",
+)
+
+
+def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
+    """Rank endpoints so real, high-value injection points (login/search, request
+    bodies) lead the active-test budget instead of synthetic GET permutations
+    (e.g. ``/api/<Model>s/<action>``) that otherwise consume it first."""
+    path = str(ep.get("url") or "").lower()
+    method = str(ep.get("method") or "GET").upper()
+    body = ep.get("body_params") or []
+    params = ep.get("params") or ep.get("query_params") or []
+    keyword_hits = sum(1 for k in _ACTIVE_HIGH_VALUE_KEYWORDS if k in path)
+    has_body = 1 if (method in ("POST", "PUT", "PATCH") and body) else 0
+    return (keyword_hits, has_body, len(body) + len(params))
+
+
+def _prioritize_active_endpoints(endpoints: list) -> list:
+    """Stable value-sort of active-test endpoints, highest priority first."""
+    return sorted(endpoints, key=_active_endpoint_priority, reverse=True)
+
+
 async def smart_sqli_test(
     url: str,
     endpoints: list[dict],
@@ -5942,9 +5967,23 @@ async def smart_sqli_test(
         and not _is_sqli_documentation_noise_endpoint(e)
     ]
 
+    # Value-sort so real, high-value injection points lead. Otherwise a flood of
+    # GET endpoints (incl. synthetic /api/<Model>s/<action> permutations) consumes
+    # the whole budget before real endpoints like POST /rest/user/login are reached.
+    get_endpoints = _prioritize_active_endpoints(get_endpoints)
+    post_endpoints = _prioritize_active_endpoints(post_endpoints)
+    # Reserve part of the time budget for POST-body endpoints (the high-value
+    # injection surface) so the GET phase cannot starve them.
+    _get_phase_deadline = None
+    if deadline is not None and post_endpoints and get_endpoints:
+        _get_phase_deadline = time.monotonic() + max(1.0, (deadline - time.monotonic()) * 0.6)
+
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:
         if _budget_exhausted():
+            break
+        if _get_phase_deadline is not None and time.monotonic() >= _get_phase_deadline:
+            print("[sqli] GET phase time reserve hit; reserving budget for POST-body endpoints", file=sys.stderr)
             break
         endpoint_url = endpoint.get("url", "")
         params = endpoint.get("params", []) or endpoint.get("query_params", [])
@@ -6947,6 +6986,10 @@ async def smart_xss_test(
         if e.get("method", "GET").upper() in ("POST", "PUT", "PATCH")
         and _method_allowed(e, e.get("method", "GET").upper())
     ]
+
+    # Value-sort so real, high-value endpoints lead instead of synthetic permutations.
+    get_endpoints = _prioritize_active_endpoints(get_endpoints)
+    post_endpoints = _prioritize_active_endpoints(post_endpoints)
 
     # Test GET endpoints
     for endpoint in get_endpoints[:max_endpoints]:

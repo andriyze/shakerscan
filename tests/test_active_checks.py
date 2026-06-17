@@ -352,5 +352,23 @@ class TestJsonXxePrecision:
         assert result["findings"][0]["payload_reflected"] is False
 
 
+def test_active_endpoint_prioritization_leads_with_real_injection_points():
+    # Synthetic GET permutations must not outrank the real POST login body, so the
+    # active budget reaches genuine injection points (Juice Shop SQLi regression).
+    real_login = {"method": "POST", "url": "http://t/rest/user/login",
+                  "body_params": ["email", "password"]}
+    real_search = {"method": "GET", "url": "http://t/rest/products/search", "params": ["q"]}
+    phantom1 = {"method": "GET", "url": "http://t/api/Addresss/items",
+                "params": ["id", "uid", "token", "limit", "offset", "page"]}
+    phantom2 = {"method": "GET", "url": "http://t/api/Cards/items", "params": ["id", "limit", "offset", "page"]}
+    ordered = active_checks._prioritize_active_endpoints([phantom1, phantom2, real_login, real_search])
+    # the real login (login+user keywords + request body) ranks first
+    assert ordered[0]["url"].endswith("/rest/user/login")
+    # both real high-value endpoints rank ahead of the synthetic phantoms
+    real_idx = [i for i, e in enumerate(ordered) if "/rest/" in e["url"]]
+    phantom_idx = [i for i, e in enumerate(ordered) if "/api/" in e["url"]]
+    assert max(real_idx) < min(phantom_idx)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
