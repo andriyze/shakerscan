@@ -8,6 +8,24 @@ from many machines.
 **Related designs:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [continuous-asm-architecture.md](continuous-asm-architecture.md).
 
+## Shared capability status matrix (agent quick read)
+
+This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
+one compact starting point before they choose an implementation increment. The docs describe intended
+architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
+Every implementation task must verify the current state with search/tests before editing.
+
+| Capability | Status | Next implementation prompt |
+|---|---|---|
+| Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
+| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
+| ASM endpoint inventory | Shipped | Add attempt ledger and durable leases in the ASM doc. |
+| Campaign allocator | Proposed | Implement allocator before unifying one-shot coverage and Continuous ASM. |
+| First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
+| Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
+
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
 and merge jobs?" This document answers: "How can those worker jobs run on more than one
 host?"
@@ -182,7 +200,7 @@ worker-count changes.
 |---|---|---|
 | Job queue | Scan jobs are pushed to Redis and consumed by workers. | A worker on another VPS can participate if it can reach the same queue. |
 | Finding writes | Findings are deduped with a database uniqueness constraint and conflict-safe inserts. | Concurrent workers can scan the same target without inventing a distributed lock. |
-| Parallel scan plan | The related design adds parent, shard, and merge jobs on the queue. | Once implemented, shard jobs are naturally host-agnostic. |
+| Parallel scan plan | Parent, shard, and merge jobs are implemented on the queue. | Shard jobs are naturally host-agnostic when remote workers can safely reach the shared queue and state. |
 | Worker scaling | `POST /workers` controls replicas on the local Docker host. | This does not scale remote worker instances. Multi-node needs per-node lifecycle control. |
 | Evidence | `./results` is a local bind mount. | Artifacts written on worker VPS B are not automatically visible to the control plane. This must be centralized. |
 | Queue reliability | A plain Redis list with blocking pop is effectively at-most-once after a worker receives a job. | A multi-node fleet needs leases, ack, and reclaim before it is safe for unattended production use. |
@@ -609,3 +627,191 @@ Build multi-node in two layers:
 3. **Later:** add the HTTPS broker for untrusted or customer-hosted nodes. That is the
    correct zero-trust architecture, but it is more work than needed for the first owned
    multi-VPS fleet.
+
+---
+
+## AI Agent Task Appendix
+
+Use this appendix when asking an AI coding/review agent to implement or audit multi-node work. Fleet
+work has a high blast radius, so prompts must separate proof-of-concept overlay work from
+production-ready queue, evidence, routing, and security work.
+
+### Required prompt contract
+
+Every prompt should contain:
+
+```text
+ROLE
+You are a distributed systems engineer hardening ShakerScan multi-node execution.
+
+TASK
+Implement or review exactly one multi-node architecture increment.
+
+SOURCE OF TRUTH
+This architecture doc describes intended behavior. Before changing code, verify shipped behavior in
+the repository, Docker/compose files, API handlers, worker code, DB migrations, queue use, and tests.
+
+CURRENT STATE
+Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
+
+TARGET BEHAVIOR
+Describe the desired behavior in observable terms.
+
+NON-GOALS
+List what must not be changed in this task.
+
+SAFETY INVARIANTS
+Preserve the invariants listed below.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+State whether schema/data changes are required, how existing installs are upgraded, and what fallback
+exists for standalone mode.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+State what API responses, fleet views, scan detail pages, logs, reports, artifact links, and node
+audit fields should show after the change.
+
+FILES / COMPONENTS TO INSPECT
+List expected files, but verify with search before editing.
+
+IMPLEMENTATION PLAN
+Return a short plan first. Then implement.
+
+ACCEPTANCE CRITERIA
+Provide API behavior, DB state, queue behavior, UI/report behavior, node lifecycle behavior, and
+failure behavior.
+
+TESTS REQUIRED
+Add or update unit, DB/integration, worker/API, queue, object-storage, and UI tests where applicable.
+
+OUTPUT FORMAT
+Return changed files, behavior summary, safety checks, tests run, and remaining risks.
+```
+
+Hard rule: exactly one architecture increment per implementation task. Do not combine WireGuard
+join flow, node registry, object storage, Redis Streams migration, routing, rate limiting, and HTTPS
+broker work in one change.
+
+### Safety invariants for fleet work
+
+- Standalone mode remains the default and must keep working.
+- Worker nodes should never require public Redis/Postgres exposure.
+- Adding nodes must not multiply target request pressure beyond global rate caps.
+- Queue completion must be idempotent under duplicate delivery or retry.
+- Reports must not reference artifacts stranded on worker-local filesystems.
+- Draining a node stops new work but lets current work finish or return leases.
+- Node/version/egress attribution is recorded for scans, shards, and attempts when fleet mode is
+  active.
+- Untrusted/customer-hosted workers use a broker model later; do not give them direct DB/Redis access.
+
+### Prompt: production-ready multi-node queue, evidence, and rate-limit layer
+
+```text
+ROLE
+You are a distributed systems engineer hardening ShakerScan multi-node execution.
+
+TASK
+Implement production-owned-fleet primitives for multi-node workers.
+
+CURRENT STATE
+- Verify the current shipped behavior before editing.
+- Parallel parent/plan/shard/merge is shipped and queue-backed.
+- Phase 1 fleet mode is proposed: owned worker VPSs over ShakerScan-managed WireGuard.
+- Workers can share Redis/Postgres over the overlay in controlled environments, but this is not
+  production-ready because evidence is local/incomplete, queue pop is at-most-once, scaling remote
+  nodes is manual, and routing assumes homogeneous workers.
+
+TARGET BEHAVIOR
+- Add node registry with node_id, hostname, overlay IP, egress IP, region, version, labels,
+  capabilities, capacity, active_worker_count, desired_worker_count, heartbeat, and drain state.
+- Add node-agent pull loop for desired state.
+- Move evidence to S3/MinIO-compatible object storage.
+- Replace or wrap Redis list pop with Redis Streams consumer groups or equivalent ack/reclaim
+  semantics.
+- Add distributed token buckets keyed by target and root_domain.
+- Add routing labels for region, egress group, private reachability, scan tier, and tool
+  requirements.
+- Record node/version/egress attribution on scan, shard, and attempt records.
+
+NON-GOALS
+- Do not expose Redis/Postgres publicly.
+- Do not build a worker mesh.
+- Do not implement the HTTPS broker in this task unless explicitly requested.
+- Do not change parallel scan planning semantics.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Add node/evidence/attribution schema in db/init.sql and runtime migrations together.
+- Existing standalone installs should start with one implicit local node or no fleet node requirement.
+- Existing local result files remain readable; new fleet artifacts use object storage.
+- Keep Redis list mode available as a local/dev fallback until Streams parity tests pass.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- Fleet view shows node health, capacity, desired/current worker count, version, egress IP, drain
+  state, and recent jobs.
+- Scan detail shows shard/node attribution when available.
+- Artifact links work from the control-plane UI regardless of which node produced them.
+- Logs expose lease claim, ack, reclaim, drain, and rate-limit decisions.
+
+ACCEPTANCE CRITERIA
+- A worker crash leaves jobs reclaimable.
+- Artifacts from any node are visible from the control-plane UI.
+- Draining a node stops new work but lets current jobs finish or return leases.
+- Jobs can be routed by label.
+- Node attribution appears in scan/shard/attempt records.
+- Adding workers does not exceed distributed target/root-domain rate caps.
+
+TESTS REQUIRED
+- Redis Streams or equivalent ack/reclaim tests.
+- Object storage upload/download tests.
+- Token bucket concurrency tests across simulated nodes.
+- Node drain, heartbeat expiry, and version mismatch tests.
+- UI/API tests for fleet view and artifact access.
+```
+
+### Prompt: two-VPS WireGuard proof
+
+```text
+ROLE
+You are implementing the first owned-fleet proof for ShakerScan.
+
+TASK
+Implement the smallest safe two-VPS WireGuard join flow.
+
+CURRENT STATE
+- Verify current install/start/remote-mode behavior before editing.
+- Standalone mode is the default.
+- The desired product workflow is fleet init -> join token -> fleet join, but the flags are proposed.
+
+TARGET BEHAVIOR
+- Control plane can initialize a WireGuard overlay for owned workers.
+- Control plane can create a short-lived worker join token.
+- Worker can join with one command after ShakerScan install.
+- Worker runs worker-only processes and appears in a node list with heartbeat/capacity.
+- Worker can consume one normal scan job from the control-plane queue over the overlay.
+
+NON-GOALS
+- Do not advertise this as production-ready.
+- Do not build cloud provisioning.
+- Do not implement the HTTPS broker.
+- Do not expose Redis/Postgres publicly.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Standalone installs remain unchanged unless fleet init/join is invoked.
+- Existing local workers continue to run without node-agent.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- Status output prints local and fleet URLs/config state.
+- Node list shows heartbeat and worker capacity.
+- Any missing production hardening is labeled as a known gap.
+
+ACCEPTANCE CRITERIA
+- Control plane and one worker VPS connect over ShakerScan-managed WireGuard.
+- Redis/Postgres are reachable only over the overlay.
+- A scan submitted on the control plane can run on the worker and write results centrally.
+- Failure to join leaves the standalone install usable.
+
+TESTS REQUIRED
+- CLI/config tests for init/token/join.
+- API tests for node registration and heartbeat.
+- Smoke test with one remote worker consuming a queued scan.
+```

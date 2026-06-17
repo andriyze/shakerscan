@@ -19,6 +19,26 @@
 
 ---
 
+## Shared capability status matrix (agent quick read)
+
+This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
+one compact starting point before they choose an implementation increment. The docs describe intended
+architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
+Every implementation task must verify the current state with search/tests before editing.
+
+| Capability | Status | Next implementation prompt |
+|---|---|---|
+| Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
+| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
+| ASM endpoint inventory | Shipped | Add attempt ledger and durable leases in the ASM doc. |
+| Campaign allocator | Proposed | Implement allocator before unifying one-shot coverage and Continuous ASM. |
+| First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
+| Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
+
+---
+
 ## Implementation status (2026-06-16)
 
 **Shipped & verified end-to-end:**
@@ -537,3 +557,132 @@ Target boundary:
 
 Do not add detailed ASM roadmap material back here. Update
 [continuous-asm-architecture.md](continuous-asm-architecture.md) instead.
+
+---
+
+## 17. AI Agent Task Appendix
+
+Use this appendix when asking an AI coding/review agent to implement or audit a parallel-scan
+increment. The goal is to make one bounded change without confusing shipped behavior, proposed
+architecture, and future fleet work.
+
+### Required prompt contract
+
+Every prompt should contain:
+
+```text
+ROLE
+You are a senior backend/security architecture agent working on ShakerScan DAST.
+
+TASK
+Implement or review exactly one architecture increment.
+
+SOURCE OF TRUTH
+These architecture docs describe intended behavior. Before changing code, verify shipped behavior in
+the repository, DB migrations, API handlers, worker code, scanner code, and tests.
+
+CURRENT STATE
+Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
+
+TARGET BEHAVIOR
+Describe the desired behavior in observable terms.
+
+NON-GOALS
+List what must not be changed in this task.
+
+SAFETY INVARIANTS
+Preserve the invariants listed below.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+State whether schema/data changes are required, how existing rows are handled, and what rollback or
+fallback behavior exists.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+State what API responses, scan detail pages, logs, reports, and hidden implementation rows should
+show after the change.
+
+FILES / COMPONENTS TO INSPECT
+List expected files, but verify with search before editing.
+
+IMPLEMENTATION PLAN
+Return a short plan first. Then implement.
+
+ACCEPTANCE CRITERIA
+Provide API behavior, DB state, queue behavior, UI/report behavior, and failure behavior.
+
+TESTS REQUIRED
+Add or update unit, DB/integration, worker/API, and UI tests where applicable.
+
+OUTPUT FORMAT
+Return changed files, behavior summary, safety checks, tests run, and remaining risks.
+```
+
+Hard rule: exactly one architecture increment per implementation task. Do not combine scanner-stage
+refactors, campaign allocation, check registry, multi-node, and UI redesign in the same change.
+
+### Safety invariants for parallel work
+
+- No endpoint is marked tested unless scanner telemetry proves it was attempted/completed.
+- Partial timeout preserves findings but does not mark unattempted endpoints clean.
+- Root-domain and target rate tokens are reserved before queueing high-volume active work.
+- Shard rows stay hidden from normal user-facing scan lists.
+- Parent/merge logic is idempotent under retries and duplicate shard completion.
+- Parent cancellation blocks/short-circuits merge and terminates active child work.
+- Active exploitation remains bounded unless an explicit Lab/deep policy is selected.
+- Attack-chain and AI correlation run once after merge, not independently inside shards.
+
+### Prompt: implement true zero-rediscovery child execution
+
+```text
+ROLE
+You are a senior DAST engine engineer refactoring ShakerScan scanner stages.
+
+TASK
+Implement true zero-rediscovery child execution for parallel coverage shards.
+
+CURRENT STATE
+- Verify the current shipped behavior before editing.
+- Coverage mode is shipped as discover-once recon plus lean child scans.
+- Each child still runs a normal scan over its injected endpoint slice with reduced crawl/nuclei
+  budget.
+- Duplicate target-global probes are suppressed after the first shard per auth state.
+- True no-rediscovery child execution and build_report recon carve-out remain deferred.
+
+TARGET BEHAVIOR
+- Extract run_recon_stage(target, options) -> ScanContext.
+- Extract run_shard_stage(ctx, slice_spec, sub_budget) -> ShardResult.
+- Extract merge_reports(ctx, shard_results) -> Report.
+- scan_plan runs recon once and persists crawl URLs, endpoint/param worklist, tech stack, nuclei
+  signals, auth recipe, and DBMS hints.
+- scan_shard accepts injected context and endpoint IDs/slices and runs active checks without
+  rediscovering or reauthing from scratch except when auth refresh is required.
+- Single-worker scans still work by running recon + one full-slice shard + merge.
+
+NON-GOALS
+- Do not change public POST /scans API shape.
+- Do not remove current coverage mode until parity tests pass.
+- Do not implement the campaign allocator in this task.
+- Do not run attack-chain or AI correlation inside shards; run it once after merge.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Prefer serialized scan context in existing result/artifact storage if possible.
+- If a schema change is required, update db/init.sql and runtime migrations together.
+- Keep the current coverage path as fallback when context is missing or corrupt.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- Shard logs clearly show active-stage-only execution.
+- Parent report remains one logical scan and shows any partial/fallback state.
+- The Scans list still hides child shards by default.
+
+ACCEPTANCE CRITERIA
+- Coverage children skip discovery entirely when context is available.
+- Parent report remains identical or more complete than previous coverage mode.
+- If context is missing/corrupt, shard fails safely and parent reports partial/failure accurately.
+- Parent cancellation still blocks merge and terminates child subprocesses.
+
+TESTS REQUIRED
+- Unit tests for ScanContext serialization/deserialization.
+- Worker tests for scan_plan -> scan_shard -> scan_merge.
+- Regression tests proving attack-chain correlation runs once on merged findings.
+- Cancellation tests for queued/running shards.
+```

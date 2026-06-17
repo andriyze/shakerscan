@@ -9,6 +9,26 @@ The larger campaign allocator and attempt-ledger design is still proposed.
 
 ---
 
+## Shared capability status matrix (agent quick read)
+
+This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
+one compact starting point before they choose an implementation increment. The docs describe intended
+architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
+Every implementation task must verify the current state with search/tests before editing.
+
+| Capability | Status | Next implementation prompt |
+|---|---|---|
+| Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
+| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
+| ASM endpoint inventory | Shipped | Add attempt ledger and durable leases. |
+| Campaign allocator | Proposed | Implement allocator before unifying one-shot coverage and Continuous ASM. |
+| First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
+| Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
+| Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
+| HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
+
+---
+
 ## Purpose
 
 ShakerScan should evolve from "a scan is a one-shot job" into "a target has a living attack
@@ -34,7 +54,7 @@ Shipped pieces:
 
 - `target_endpoints` persists discovered endpoint worklists from standalone scans, coverage recon,
   parallel scan merge, and ASM batches.
-- Current APIs:
+- Current shipped APIs (verify route handlers before editing):
   - `GET /targets/{id}/asm/endpoints`
   - `GET /targets/{id}/asm/coverage`
   - `GET /targets/{id}/asm/diff`
@@ -359,7 +379,7 @@ Recommended UI:
 - **Scan detail:** parent rows show campaign coverage: endpoints discovered, tested, partial,
   untested, auth states, and shard/batch progress.
 
-Current API:
+Current shipped API (verify route handlers before editing):
 
 ```text
 POST /scans
@@ -375,13 +395,17 @@ GET  /targets/{id}/asm/policy
 PUT  /targets/{id}/asm/policy
 ```
 
-AI skills should map natural requests to these APIs:
+AI skills should map natural requests to these APIs, while respecting current capability status:
 
 - "Run full coverage on this target" -> one-shot coverage scan with safe defaults.
 - "Keep this target covered" -> enable Continuous ASM with a safe preset and report the policy.
 - "What is still untested?" -> gaps response with auth/rate/timeout reasons.
 - "Spend more budget on APIs" -> raise endpoint/test budget for the next campaign, not global defaults.
-- "Only retest SQLi/XSS/BOLA tonight" -> focused family campaign over known inventory.
+- "Only retest SQLi/XSS tonight" -> focused family campaign over known inventory using currently
+  supported families.
+- "Only retest BOLA tonight" -> proposed until the check registry and multi-user BOLA campaign
+  support are implemented; ask for credentials and return a proposed plan rather than silently
+  running unrelated active checks.
 - "What changed since yesterday?" -> new-surface diff plus current untested gap summary.
 
 ---
@@ -504,3 +528,294 @@ Live smoke tests before declaring the target architecture production-ready:
 - crAPI: authenticated user1/user2 coverage keeps auth states separate and exercises BOLA/IDOR paths.
 - Honey/demo app: continuous ASM recon -> inventory -> improve coverage -> new-surface diff loop works.
 - Slow endpoint fixture: timeout produces partial coverage, not false-clean coverage.
+
+---
+
+## AI Agent Task Appendix
+
+Use this appendix when asking an AI coding/review agent to implement or audit ASM, campaign, or
+check-family work. The goal is to keep complex automation safe and incremental.
+
+### Required prompt contract
+
+Every prompt should contain:
+
+```text
+ROLE
+You are a senior backend/security architecture agent working on ShakerScan DAST.
+
+TASK
+Implement or review exactly one architecture increment.
+
+SOURCE OF TRUTH
+These architecture docs describe intended behavior. Before changing code, verify shipped behavior in
+the repository, DB migrations, API handlers, worker code, scanner code, and tests.
+
+CURRENT STATE
+Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
+
+TARGET BEHAVIOR
+Describe the desired behavior in observable terms.
+
+NON-GOALS
+List what must not be changed in this task.
+
+SAFETY INVARIANTS
+Preserve the invariants listed below.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+State whether schema/data changes are required, how existing rows are handled, and what rollback or
+fallback behavior exists.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+State what API responses, ASM pages, scan detail pages, logs, reports, and hidden implementation rows
+should show after the change.
+
+FILES / COMPONENTS TO INSPECT
+List expected files, but verify with search before editing.
+
+IMPLEMENTATION PLAN
+Return a short plan first. Then implement.
+
+ACCEPTANCE CRITERIA
+Provide API behavior, DB state, queue behavior, UI/report behavior, and failure behavior.
+
+TESTS REQUIRED
+Add or update unit, DB/integration, worker/API, and UI tests where applicable.
+
+OUTPUT FORMAT
+Return changed files, behavior summary, safety checks, tests run, and remaining risks.
+```
+
+Hard rule: exactly one architecture increment per implementation task. Do not combine attempt
+ledger, dynamic coverage allocation, check registry, AI router, and multi-node fleet work in the same
+change.
+
+### Safety invariants for ASM work
+
+- No endpoint is marked `tested` unless scanner telemetry proves it was attempted/completed.
+- Partial timeout preserves findings but does not mark unattempted endpoints clean.
+- Root-domain and target rate tokens are reserved before queueing active work.
+- Endpoint identity includes auth state and parameter location/shape.
+- Replay specs preserve query vs. form vs. JSON vs. multipart semantics.
+- Shard/batch rows stay hidden from normal user-facing scan lists.
+- Parent/merge logic is idempotent under retries.
+- Active exploitation remains bounded unless an explicit Lab/deep policy is selected.
+- Missing credentials mark matching auth-state rows auth_missing/auth_failed, never tested
+  anonymously.
+- Focused family campaigns must not run unrelated high-risk checks.
+
+### Prompt: implement the campaign allocator and attempt ledger
+
+```text
+ROLE
+You are a senior backend engineer implementing ShakerScan's campaign allocator and ASM attempt
+ledger.
+
+TASK
+Implement durable endpoint leases, normalized attempt records, and campaign-backed Full Coverage/ASM
+work allocation.
+
+CURRENT STATE
+- Verify the current shipped behavior before editing.
+- target_endpoints exists and includes auth_state, param_location, replay_spec, priority_score,
+  test_status, last_attempt_status, and last_verdict.
+- Missing fields include campaign_id, lease_owner, lease_expires_at, attempt_count, and a normalized
+  asm_endpoint_attempts table.
+- ASM batches currently claim rows with FOR UPDATE SKIP LOCKED and stamp inventory at batch level.
+- One-shot coverage uses static shard slices and feeds inventory, but does not claim through the ASM
+  allocator.
+
+TARGET BEHAVIOR
+- Add campaign records for full_coverage, continuous_asm, focused_family, finding_retest, and
+  surface_recon.
+- Add durable endpoint leases: lease_owner, lease_expires_at, attempt_count, and a lease reaper.
+- Add asm_endpoint_attempts with endpoint_id, scan_id, parent_scan_id, campaign_id, worker_id,
+  auth_state, started_at, completed_at, status, attempted_params_count, completed_params_count,
+  finding_ids, error_summary, and scanner_telemetry_json.
+- Coverage percentages derive from attempt records, not scan row status.
+- On timeout, mark only attempted endpoints partial and release unattempted endpoints.
+- On missing credentials, mark matching auth-state rows auth_missing/auth_failed, never tested
+  anonymously.
+
+NON-GOALS
+- Do not rewrite the whole scanner.
+- Do not expose allocator internals as UI knobs.
+- Do not remove the existing static coverage path until campaign allocation is stable.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Add schema in db/init.sql and runtime migrations together.
+- Backfill existing target_endpoints with null campaign/lease fields and zero attempt_count.
+- Do not infer historical endpoint attempts from completed scan rows unless telemetry exists.
+- Keep existing ASM batch path as fallback during rollout.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- GET /targets/{id}/asm/gaps explains untested, partial, auth-blocked, rate-limited, and leased
+  states.
+- ASM activity shows campaign/batch status without exposing internal scan rows in the default Scans
+  list.
+- Parent scan reports show tested, partial, untested, auth-blocked, and rate-limited counts.
+
+ACCEPTANCE CRITERIA
+- Concurrent workers claim disjoint endpoint leases.
+- Expired leases return to claimable state.
+- Partial timeout does not create false-clean coverage.
+- POST /scans parallel coverage can create a campaign and report tested/partial/untested counts.
+
+TESTS REQUIRED
+- DB tests for lease acquisition, expiry, and reclaim.
+- API tests for gaps and coverage rollups.
+- Worker tests for success, timeout, auth_missing, and retry.
+- Regression tests for replay_spec preservation.
+```
+
+### Prompt: add a first-class check registry
+
+```text
+ROLE
+You are a senior DAST platform engineer modularizing ShakerScan active/passive checks.
+
+TASK
+Replace scattered boolean check wiring with a first-class CHECK_REGISTRY.
+
+CURRENT STATE
+- Verify the current shipped behavior before editing.
+- Focused ASM batches currently support sqli and xss through current scanner flags.
+- A registry for recon/passive, nuclei, sqli, xss, bola, auth, ssrf/lfi/rce, and business_logic does
+  not exist yet.
+
+TARGET BEHAVIOR
+Create a registry model with name, phase, family, fn, default_profiles, is_active,
+requires_auth_states, requires_credentials, risk_level, allowed_presets, and telemetry_schema.
+
+Use the registry so:
+- scan types select families declaratively;
+- focused_family campaigns schedule exactly one family;
+- parallel plan stage can assign families to shards;
+- API rejects unknown or disallowed families;
+- high-risk families require explicit Lab/deep policy.
+
+NON-GOALS
+- Do not change vulnerability detection logic in this task.
+- Do not silently enable ssrf/lfi/rce/business_logic.
+- Do not expose raw internal registry structure in the default UI.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Avoid schema changes unless telemetry storage requires them.
+- Keep existing sqli/xss flags compatible until all call sites use the registry.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- API errors name the rejected family and allowed families.
+- UI may display friendly family names and risk tiers, but keeps advanced knobs collapsed.
+- Scan reports show the family scope used for focused campaigns.
+
+ACCEPTANCE CRITERIA
+- Adding a new check family requires one registry entry plus module integration.
+- POST /targets/{id}/asm/test?check_family=sqli only enables SQLi.
+- xss and sqli existing behavior remains compatible.
+- Unknown families return a clear API error.
+
+TESTS REQUIRED
+- Registry unit tests.
+- API tests for allowed, unknown, and disallowed families.
+- Focused campaign tests proving unrelated scanner flags remain off.
+```
+
+### Prompt: make Full Coverage use dynamic pull-based allocation
+
+```text
+ROLE
+You are a backend engineer unifying one-shot Full Coverage and Continuous ASM execution.
+
+TASK
+Convert parallel coverage from static round-robin shard partitions to dynamic campaign allocation.
+
+CURRENT STATE
+- Verify the current shipped behavior before editing.
+- scan_plan currently runs discover-once recon.
+- harvest_endpoints partitions the worklist into static coverage shards.
+- scan_shard workers run lean scans over disjoint endpoint slices.
+- scan_merge produces one parent report and persists the union into ASM inventory.
+
+TARGET BEHAVIOR
+- scan_plan creates a full_coverage campaign linked to parent_scan_id.
+- Recon upserts discovered endpoints into target_endpoints with auth_state, method, path,
+  param_location, param_shape, replay_spec, and priority.
+- Workers pull claim batches from the allocator until campaign budget is exhausted or all eligible
+  rows are terminal.
+- scan_merge reads attempt ledger facts and child result files.
+- Parent report shows discovered, tested, partial, untested, auth-blocked, and rate-limited endpoint
+  counts.
+
+NON-GOALS
+- Do not remove static shard fallback yet.
+- Do not mark unattempted endpoints covered.
+- Do not make users configure allocator internals.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- Requires the campaign allocator and attempt ledger first.
+- Keep a fallback flag/path for static coverage until live parity tests pass.
+- Do not reinterpret old completed scan rows as attempted endpoint telemetry.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- Scan Detail shows campaign coverage rollup, not raw allocator internals.
+- Logs show claims, releases, retries, and budget exhaustion.
+- Gaps endpoint and parent report agree on tested/partial/untested counts.
+
+ACCEPTANCE CRITERIA
+- Large targets do not suffer static shard stragglers.
+- Retried/expired leases are reclaimed.
+- Coverage parent report is based on attempt outcomes.
+- Static coverage remains available behind a fallback flag.
+
+TESTS REQUIRED
+- Campaign allocator tests with uneven endpoint durations.
+- Retry and lease-expiry tests.
+- Parent report rollup tests.
+- Slow endpoint fixture: timeout yields partial, not false-clean.
+```
+
+### Prompt: AI intent router for DAST/ASM operations
+
+```text
+ROLE
+You are implementing ShakerScan's AI command router for safe DAST and ASM operations.
+
+TASK
+Map natural-language security operations requests to safe API calls and explain the action.
+
+CURRENT STATE
+- Verify the current shipped API routes before editing.
+- Current shipped APIs include POST /scans and the ASM endpoints listed in the User-Facing Model.
+- BOLA-focused campaigns are proposed until the check registry and multi-user campaign support exist.
+
+TARGET BEHAVIOR
+- "Run full coverage on this target" -> POST /scans with parallel=true, shard_strategy=coverage, and
+  a safe default preset.
+- "Keep this target covered" -> PUT /targets/{id}/asm/policy with enabled=true and Safe preset unless
+  user explicitly asks for more.
+- "What is still untested?" -> GET /targets/{id}/asm/gaps and summarize untested, partial,
+  auth-blocked, and rate-limited states.
+- "Spend more budget on APIs" -> adjust the next campaign budget for API endpoints only; do not
+  globally raise defaults.
+- "Only retest SQLi/XSS tonight" -> focused_family campaign with allowed window and matching family
+  only.
+- "Only retest BOLA tonight" -> ask for multi-user credentials and explain that BOLA family support is
+  proposed until the registry lands.
+
+NON-GOALS
+- Do not expose shard/batch implementation rows unless debugging is requested.
+- Do not let natural-language requests bypass active-scan authorization boundaries.
+
+MIGRATION / BACKFILL / COMPATIBILITY
+- No schema migration should be needed for intent mapping alone.
+- Preserve existing API request shapes unless a separate API task changes them.
+
+OBSERVABILITY / UI / REPORT BEHAVIOR
+- Return the planned API call, safety preset, confirmation requirement, and non-goals before
+  execution when the action is active/high impact.
+- After queueing work, return the scan/campaign id and UI link.
+
+OUTPUT FORMAT
+Return JSON with intent, api_call, safety_preset, requires_confirmation, explanation, and non_goals.
+```
