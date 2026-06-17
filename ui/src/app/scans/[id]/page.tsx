@@ -66,6 +66,14 @@ function formatAttemptStatuses(statuses: any): string | null {
     .join(' · ')
 }
 
+function formatRollupKeys(values: any, formatter: (value: string) => string = (value) => value): string {
+  if (!values || typeof values !== 'object') return 'None'
+  const keys = Object.keys(values).filter(Boolean)
+  if (!keys.length) return 'None'
+  const visible = keys.slice(0, 3).map(formatter).join(', ')
+  return keys.length > 3 ? `${visible} +${keys.length - 3}` : visible
+}
+
 function CoverageMetric({ label, value, accent = 'text-white' }: { label: string; value: any; accent?: string }) {
   return (
     <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
@@ -264,12 +272,63 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           </span>
         )}
       </div>
+      <ShardContributionRollup rollup={rollup} />
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {scan.shards.map((shard: any) => (
           <ShardCard shard={shard} key={shard.id} />
         ))}
       </div>
     </Card>
+  )
+}
+
+function ShardContributionRollup({ rollup }: { rollup: any }) {
+  const contribution = rollup?.contribution
+  if (!contribution || typeof contribution !== 'object') return null
+
+  const assigned = coverageNumber(contribution.assigned_endpoints)
+  const attempted = coverageNumber(contribution.attempted_endpoints)
+  const selected = coverageNumber(contribution.active_endpoints_selected)
+  const activeBudget = coverageNumber(contribution.active_max_seconds)
+  const duration = coverageNumber(contribution.duration_seconds)
+  const telemetry = coverageNumber(contribution.telemetry_shards)
+  const contributing = coverageNumber(contribution.shards_with_contribution)
+  const statusSummary = formatAttemptStatuses(contribution.attempt_statuses)
+
+  return (
+    <div className="mb-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="text-gray-500">Endpoint work</div>
+        <div className="mt-1 text-gray-200">
+          {attempted || selected || 0}{assigned ? ` / ${assigned} assigned` : ''}
+        </div>
+        {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
+      </div>
+      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="text-gray-500">Runtime / active cap</div>
+        <div className="mt-1 text-gray-200">
+          {duration ? formatDuration(duration) : '0s'}
+          {activeBudget ? ` / ${formatDuration(activeBudget)}` : ''}
+        </div>
+        {typeof contribution.active_budget_utilization === 'number' && (
+          <div className="mt-1 text-gray-500">{formatPct(contribution.active_budget_utilization)} of cap</div>
+        )}
+      </div>
+      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="text-gray-500">Families</div>
+        <div className="mt-1 text-gray-200">
+          {formatRollupKeys(contribution.by_check_family, formatShardFamily)}
+        </div>
+        {telemetry ? <div className="mt-1 text-gray-500">{telemetry} shard telemetry</div> : null}
+      </div>
+      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="text-gray-500">Auth states</div>
+        <div className="mt-1 text-gray-200">
+          {formatRollupKeys(contribution.by_auth_state, (value) => value.replace(/_/g, ' '))}
+        </div>
+        {contributing ? <div className="mt-1 text-gray-500">{contributing} contributing shards</div> : null}
+      </div>
+    </div>
   )
 }
 

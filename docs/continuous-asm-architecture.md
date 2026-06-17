@@ -580,8 +580,9 @@ Remaining:
 
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
-- Add aggregate parent UI attribution for auth-state coverage and budget consumption. Per-shard
-  endpoint contribution is now shown from child result summaries.
+- Parent scan detail now shows per-shard endpoint contribution, aggregate auth/family rollups, and
+  runtime-versus-active-cap budget view from child result summaries. Keep extending these rollups
+  only when new scanner telemetry fields are added.
 
 ### Phase D — UX/API/AI Simplification
 

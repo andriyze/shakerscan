@@ -96,6 +96,21 @@ export interface Scan {
     pending: number
     terminal: number
     average_progress?: number
+    contribution?: {
+      assigned_endpoints?: number
+      attempted_endpoints?: number
+      active_worklist_total?: number
+      active_endpoints_selected?: number
+      active_endpoint_budget?: number
+      active_max_seconds?: number
+      duration_seconds?: number
+      active_budget_utilization?: number
+      attempt_statuses?: Record<string, number>
+      by_auth_state?: Record<string, Record<string, number>>
+      by_check_family?: Record<string, Record<string, number>>
+      shards_with_contribution?: number
+      telemetry_shards?: number
+    }
   }
   shards?: Array<{
     id: string

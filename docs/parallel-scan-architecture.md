@@ -66,8 +66,7 @@ suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
-aggregate auth-state coverage and budget-spend rollups beyond the current per-shard contribution
-facts.
+hybrid `coverage x family` planning and fleet-wide rate limits.
 
 ---
 
@@ -422,8 +421,8 @@ Do this **incrementally**: first carve `run_recon_stage` out (it already roughly
 - Family-based and nuclei-category sharding (§6.2/6.4).
 - Check registry refactor (§8.3).
 - More granular cooperative cancel checkpoints inside scanner active-check loops (see Risks).
-- UI: parent progress with per-shard contribution is shipped; continue aggregate auth-state coverage
-  and budget-spend rollups.
+- UI: parent progress, per-shard contribution, aggregate auth/family rollups, and runtime-versus-active-cap
+  budget view are shipped.
 
 ---
 
@@ -555,8 +554,8 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 - **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
   when a very large fleet is available.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
-  ledger plus per-shard contribution facts; still add aggregate auth-state coverage and budget
-  consumption.
+  ledger, per-shard contribution facts, aggregate auth/family rollups, and runtime-versus-active-cap
+  budget view.
 - **Global distributed rate limits:** required before multi-node fleets run hundreds of
   shards against the same root domain.
 

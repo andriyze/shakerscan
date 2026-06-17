@@ -101,6 +101,7 @@ def test_parallel_parent_rollup_adds_shard_contribution_summary():
         {
             "status": "completed",
             "progress": 100,
+            "duration_seconds": 60,
             "result": {
                 "active_checks": {
                     "active_worklist_total": 20,
@@ -141,6 +142,45 @@ def test_parallel_parent_rollup_adds_shard_contribution_summary():
         "check_family": "sqli",
         "auth_state": "anonymous",
         "per_endpoint_telemetry": True,
+    }
+    assert result["shard_rollup"]["contribution"] == {
+        "assigned_endpoints": 2,
+        "attempted_endpoints": 2,
+        "active_worklist_total": 20,
+        "active_endpoints_selected": 2,
+        "active_endpoint_budget": 2,
+        "active_max_seconds": 120,
+        "duration_seconds": 60,
+        "attempt_statuses": {"completed": 1, "partial": 1},
+        "by_auth_state": {
+            "anonymous": {
+                "shards": 1,
+                "assigned_endpoints": 2,
+                "attempted_endpoints": 2,
+                "active_worklist_total": 20,
+                "active_endpoints_selected": 2,
+                "active_endpoint_budget": 2,
+                "active_max_seconds": 120,
+                "duration_seconds": 60,
+                "telemetry_shards": 1,
+            },
+        },
+        "by_check_family": {
+            "sqli": {
+                "shards": 1,
+                "assigned_endpoints": 2,
+                "attempted_endpoints": 2,
+                "active_worklist_total": 20,
+                "active_endpoints_selected": 2,
+                "active_endpoint_budget": 2,
+                "active_max_seconds": 120,
+                "duration_seconds": 60,
+                "telemetry_shards": 1,
+            },
+        },
+        "shards_with_contribution": 1,
+        "telemetry_shards": 1,
+        "active_budget_utilization": 0.5,
     }
 
 

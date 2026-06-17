@@ -279,12 +279,92 @@ def _public_parallel_shard(row: dict[str, Any]) -> dict[str, Any]:
     return shard
 
 
+def _add_rollup_bucket_value(bucket: dict[str, Any], key: str, value: int) -> None:
+    if value:
+        bucket[key] = int(bucket.get(key) or 0) + int(value)
+
+
+def _parallel_shard_contribution_rollup(shards: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate per-shard contribution facts for parent scan detail."""
+    totals: dict[str, Any] = {}
+    by_auth_state: dict[str, dict[str, Any]] = {}
+    by_check_family: dict[str, dict[str, Any]] = {}
+    attempt_statuses: dict[str, int] = {}
+    numeric_fields = (
+        'assigned_endpoints',
+        'attempted_endpoints',
+        'active_worklist_total',
+        'active_endpoints_selected',
+        'active_endpoint_budget',
+        'active_max_seconds',
+    )
+    shards_with_contribution = 0
+    telemetry_shards = 0
+
+    for shard in shards:
+        contribution = shard.get('contribution') if isinstance(shard.get('contribution'), dict) else {}
+        duration_seconds = _int_or_none(shard.get('duration_seconds')) or 0
+        shard_has_fact = bool(duration_seconds)
+        for field in numeric_fields:
+            value = _int_or_none(contribution.get(field)) or 0
+            if value:
+                totals[field] = int(totals.get(field) or 0) + value
+                shard_has_fact = True
+
+        statuses = contribution.get('attempt_statuses') if isinstance(contribution.get('attempt_statuses'), dict) else {}
+        for status, raw_count in statuses.items():
+            count = _int_or_none(raw_count) or 0
+            if count <= 0:
+                continue
+            key = str(status or 'unknown')
+            attempt_statuses[key] = attempt_statuses.get(key, 0) + count
+            shard_has_fact = True
+
+        if contribution.get('per_endpoint_telemetry'):
+            telemetry_shards += 1
+            shard_has_fact = True
+        if duration_seconds:
+            totals['duration_seconds'] = int(totals.get('duration_seconds') or 0) + duration_seconds
+
+        if not shard_has_fact:
+            continue
+        shards_with_contribution += 1
+        auth_state = str(contribution.get('auth_state') or 'unknown')
+        family = str(contribution.get('check_family') or 'all')
+        for bucket_map, bucket_key in ((by_auth_state, auth_state), (by_check_family, family)):
+            bucket = bucket_map.setdefault(bucket_key, {'shards': 0})
+            bucket['shards'] += 1
+            for field in numeric_fields:
+                _add_rollup_bucket_value(bucket, field, _int_or_none(contribution.get(field)) or 0)
+            _add_rollup_bucket_value(bucket, 'duration_seconds', duration_seconds)
+            if contribution.get('per_endpoint_telemetry'):
+                bucket['telemetry_shards'] = int(bucket.get('telemetry_shards') or 0) + 1
+
+    if not shards_with_contribution:
+        return None
+    if attempt_statuses:
+        totals['attempt_statuses'] = attempt_statuses
+    if by_auth_state:
+        totals['by_auth_state'] = by_auth_state
+    if by_check_family:
+        totals['by_check_family'] = by_check_family
+    totals['shards_with_contribution'] = shards_with_contribution
+    if telemetry_shards:
+        totals['telemetry_shards'] = telemetry_shards
+    active_seconds = int(totals.get('active_max_seconds') or 0)
+    duration = int(totals.get('duration_seconds') or 0)
+    if active_seconds > 0 and duration > 0:
+        totals['active_budget_utilization'] = round(min(1.0, duration / active_seconds), 3)
+    return totals
+
+
 def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str, Any]]) -> None:
     """Attach shard rollup and derive live parent progress from child progress."""
     terminal = {'completed', 'failed', 'cancelled'}
     progress_values = [int(s.get('progress') or 0) for s in shards]
     average_progress = int(round(sum(progress_values) / len(progress_values))) if progress_values else 0
-    result['shards'] = [_public_parallel_shard(shard) for shard in shards]
+    public_shards = [_public_parallel_shard(shard) for shard in shards]
+    result['shards'] = public_shards
     result['shard_rollup'] = {
         'total': len(shards),
         'completed': sum(1 for s in shards if s.get('status') == 'completed'),
@@ -294,6 +374,9 @@ def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str,
         'terminal': sum(1 for s in shards if s.get('status') in terminal),
         'average_progress': average_progress,
     }
+    contribution_rollup = _parallel_shard_contribution_rollup(public_shards)
+    if contribution_rollup:
+        result['shard_rollup']['contribution'] = contribution_rollup
     if shards and result.get('status') in {'pending', 'running'}:
         current = int(result.get('progress') or 0)
         # Keep unfinished parents below 100; the merge job owns completion.
