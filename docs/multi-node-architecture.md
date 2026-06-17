@@ -21,7 +21,7 @@ Every implementation task must verify the current state with search/tests before
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
-| Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
+| Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | First-class check registry | Foundation shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
