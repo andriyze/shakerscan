@@ -645,6 +645,12 @@ Every prompt should contain:
 ROLE
 You are a distributed systems engineer hardening ShakerScan multi-node execution.
 
+MODE
+Choose exactly one: IMPLEMENT | REVIEW | PLAN | TEST_ONLY | DOCS_ONLY.
+
+EDIT PERMISSION
+State whether code edits are allowed. If MODE is REVIEW or PLAN, do not modify files.
+
 TASK
 Implement or review exactly one multi-node architecture increment.
 
@@ -655,6 +661,13 @@ Use these docs as authoritative architecture context:
 - docs/multi-node-architecture.md
 Before changing code, verify shipped behavior in the repository, Docker/compose files, API handlers,
 worker code, DB migrations, queue use, and tests.
+If repository behavior contradicts these docs, stop and report the discrepancy before editing.
+
+STATUS PREFLIGHT
+Return a 6-row table before implementation:
+| Claim from docs | Code checked | Tests checked | Result | Action |
+If a doc says "shipped", verify it with code and tests. Do not implement proposed behavior as if it
+were already shipped.
 
 CURRENT STATE
 Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
@@ -665,12 +678,35 @@ Describe the desired behavior in observable terms.
 NON-GOALS
 List what must not be changed in this task.
 
+DO NOT TOUCH
+List specific components, files, APIs, UI surfaces, or features out of scope.
+
 SAFETY INVARIANTS
 Preserve the invariants listed below.
+
+AUTHORIZATION / BLAST RADIUS
+State target authorization assumptions, allowed preset (Safe/Balanced/Lab), credentials and auth
+states affected, high-risk families included/excluded, rate limits/daily caps affected, and whether
+confirmation is required before queueing active work.
+
+DATA CONTRACTS
+For DB rows, API JSON, Redis job payloads, scanner telemetry, report rollups, object/evidence
+records, node records, and UI-facing fields changed or verified, state producer, consumer, backward
+compatibility, old-row/null behavior, and the idempotency key or uniqueness rule.
 
 MIGRATION / BACKFILL / COMPATIBILITY
 State whether schema/data changes are required, how existing installs are upgraded, and what fallback
 exists for standalone mode.
+
+ROLLOUT / FALLBACK
+State feature flag name, default value, fallback path, rollback behavior, old scan/report readability,
+and log/metric signals that indicate unsafe behavior.
+
+FAILURE-MODE MATRIX
+Explicitly cover worker crash mid-job, duplicate job delivery, parent cancellation, timeout after
+partial work, missing credentials, rate budget exhaustion, missing scanner telemetry,
+corrupt/missing shard context, and object-store/evidence failure. For each: expected behavior and
+whether a test is required.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 State what API responses, fleet views, scan detail pages, logs, reports, artifact links, and node
@@ -689,8 +725,13 @@ failure behavior.
 TESTS REQUIRED
 Add or update unit, DB/integration, worker/API, queue, object-storage, and UI tests where applicable.
 
+TEST COMMANDS
+Before final response, report commands run and commands not run with reasons. Include minimum expected
+unit, DB/integration, worker/API, queue/object-storage, UI, and live-smoke coverage for the task.
+
 OUTPUT FORMAT
-Return changed files, behavior summary, safety checks, tests run, and remaining risks.
+Return: status preflight; changed files; behavior summary; safety checks; data contracts changed;
+tests run; remaining risks; follow-up tasks.
 ```
 
 Hard rule: exactly one architecture increment per implementation task. Do not combine WireGuard
@@ -715,8 +756,32 @@ broker work in one change.
 ROLE
 You are a distributed systems engineer hardening ShakerScan multi-node execution.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. Do not implement the HTTPS broker, scanner
+detection changes, or cloud provisioning unless explicitly requested in a separate prompt.
+
 TASK
 Implement production-owned-fleet primitives for multi-node workers.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Verify Docker/compose files, scanner.sh, API handlers, worker queue code, DB migrations, artifact
+storage, rate limiting, UI surfaces, and tests before editing.
+
+STATUS PREFLIGHT
+Confirm:
+- parallel parent/plan/shard/merge is shipped and queue-backed;
+- standalone mode remains default;
+- WireGuard owned-fleet mode is proposed/RFC;
+- HTTPS broker for untrusted workers is future work;
+- Redis/Postgres must not be publicly exposed;
+- current evidence/result storage behavior is local or incomplete for remote workers.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -744,11 +809,51 @@ NON-GOALS
 - Do not implement the HTTPS broker in this task unless explicitly requested.
 - Do not change parallel scan planning semantics.
 
+DO NOT TOUCH
+- HTTPS broker.
+- Cloud provisioning.
+- Scanner vulnerability detection logic.
+- Public exposure of Redis/Postgres.
+- Parallel scan planner semantics.
+
+SAFETY INVARIANTS
+- Standalone mode remains the default.
+- Workers never require public Redis/Postgres exposure.
+- Adding nodes does not multiply target pressure beyond global rate caps.
+- Queue completion remains idempotent under duplicate delivery/retry.
+- Artifacts are readable from the control plane.
+
+AUTHORIZATION / BLAST RADIUS
+- Target authorization assumption: user owns or is authorized to test targets routed to fleet nodes.
+- Allowed preset: unchanged by fleet routing.
+- Credentials/auth states: preserve existing scan options and storage boundaries.
+- Rate limits: distributed target/root-domain caps must be enforced before dispatch.
+- Confirmation is required before active live scans in smoke tests.
+
+DATA CONTRACTS
+Define or verify node registry rows, queue ack/reclaim payloads, object/evidence records, distributed
+rate-token keys, scan/shard/attempt attribution fields, API JSON, and UI fields. For each changed
+contract, state producer, consumer, compatibility, old-row/null behavior, and idempotency key.
+
 MIGRATION / BACKFILL / COMPATIBILITY
 - Add node/evidence/attribution schema in db/init.sql and runtime migrations together.
 - Existing standalone installs should start with one implicit local node or no fleet node requirement.
 - Existing local result files remain readable; new fleet artifacts use object storage.
 - Keep Redis list mode available as a local/dev fallback until Streams parity tests pass.
+
+ROLLOUT / FALLBACK
+- Feature flag: name the fleet queue/evidence mode flag.
+- Default: standalone/local Redis list mode remains available.
+- Fallback: local workers and local artifact paths.
+- Rollback: disable remote node scheduling without losing existing scans/reports.
+- Unsafe signals: unreclaimable jobs, missing artifacts, target rate cap bypass, or node attribution
+  gaps on fleet jobs.
+
+FAILURE-MODE MATRIX
+Cover worker crash mid-job, duplicate job delivery, parent cancellation, timeout after partial work,
+missing credentials, rate budget exhaustion, missing scanner telemetry, corrupt/missing shard
+context, node drain, heartbeat expiry, and object-store/evidence failure. State expected behavior and
+required tests for each.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - Fleet view shows node health, capacity, desired/current worker count, version, egress IP, drain
@@ -771,6 +876,13 @@ TESTS REQUIRED
 - Token bucket concurrency tests across simulated nodes.
 - Node drain, heartbeat expiry, and version mismatch tests.
 - UI/API tests for fleet view and artifact access.
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
+
+OUTPUT FORMAT
+Return status preflight, changed files, behavior summary, safety checks, data contracts changed,
+tests run, remaining risks, and follow-up tasks.
 ```
 
 ### Prompt: two-VPS WireGuard proof
@@ -779,8 +891,32 @@ TESTS REQUIRED
 ROLE
 You are implementing the first owned-fleet proof for ShakerScan.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. Do not build production queue replacement, cloud
+provisioning, HTTPS broker, or scanner detection changes.
+
 TASK
 Implement the smallest safe two-VPS WireGuard join flow.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Verify install/start/remote-mode behavior, scanner.sh, compose files, worker startup, API status
+routes, node registration candidates, and tests before editing.
+
+STATUS PREFLIGHT
+Confirm:
+- standalone mode is default and currently works without fleet init;
+- remote mode binds UI/API for VPS access;
+- fleet init/join commands are proposed;
+- production queue/evidence/routing primitives are not shipped;
+- Redis/Postgres must be reachable only over the overlay in the proof;
+- cloud provisioning remains future work.
 
 CURRENT STATE
 - Verify current install/start/remote-mode behavior before editing.
@@ -800,9 +936,49 @@ NON-GOALS
 - Do not implement the HTTPS broker.
 - Do not expose Redis/Postgres publicly.
 
+DO NOT TOUCH
+- HTTPS broker.
+- Production queue replacement.
+- Cloud provisioning.
+- Scanner detection logic.
+- Public exposure of Redis/Postgres.
+
+SAFETY INVARIANTS
+- Standalone mode remains usable after failed init/join.
+- Join tokens are short-lived and scoped to owned workers.
+- Redis/Postgres are reachable only over WireGuard/overlay.
+- Adding one worker does not bypass target/root-domain rate caps.
+- Remote worker failure does not strand a normal scan permanently.
+
+AUTHORIZATION / BLAST RADIUS
+- Target authorization assumption: user owns or is authorized to test any target routed to the worker.
+- Allowed preset: unchanged by fleet join.
+- Credentials/auth states: preserve existing scan options.
+- Rate limits: keep existing caps; do not multiply pressure by joining a worker.
+- Confirmation is required before live two-VPS smoke scans.
+
+DATA CONTRACTS
+Define or verify join token shape, node registration fields, worker desired-state payloads, status
+JSON, Redis/DB connectivity assumptions, scan job payloads, and UI/status output fields. For each
+changed contract, state producer, consumer, compatibility, old-row/null behavior, and idempotency key.
+
 MIGRATION / BACKFILL / COMPATIBILITY
 - Standalone installs remain unchanged unless fleet init/join is invoked.
 - Existing local workers continue to run without node-agent.
+
+ROLLOUT / FALLBACK
+- Feature flag: fleet mode remains opt-in through fleet init/join.
+- Default: standalone.
+- Fallback: local worker execution.
+- Rollback: leave/remove fleet config without breaking local start.
+- Unsafe signals: public DB/Redis bind, stale join token accepted, node joins without heartbeat, or
+  local scans fail after join failure.
+
+FAILURE-MODE MATRIX
+Cover failed WireGuard setup, duplicate join token use, expired token, worker crash mid-job, duplicate
+job delivery, parent cancellation, timeout after partial work, missing credentials, rate budget
+exhaustion, missing scanner telemetry, and overlay connectivity loss. State expected behavior and
+required tests for each.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - Status output prints local and fleet URLs/config state.
@@ -819,4 +995,11 @@ TESTS REQUIRED
 - CLI/config tests for init/token/join.
 - API tests for node registration and heartbeat.
 - Smoke test with one remote worker consuming a queued scan.
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
+
+OUTPUT FORMAT
+Return status preflight, changed files, behavior summary, safety checks, data contracts changed,
+tests run, remaining risks, and follow-up tasks.
 ```

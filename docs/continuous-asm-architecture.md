@@ -622,6 +622,12 @@ Every prompt should contain:
 ROLE
 You are a senior backend/security architecture agent working on ShakerScan DAST.
 
+MODE
+Choose exactly one: IMPLEMENT | REVIEW | PLAN | TEST_ONLY | DOCS_ONLY.
+
+EDIT PERMISSION
+State whether code edits are allowed. If MODE is REVIEW or PLAN, do not modify files.
+
 TASK
 Implement or review exactly one architecture increment.
 
@@ -632,6 +638,13 @@ Use these docs as authoritative architecture context:
 - docs/multi-node-architecture.md
 Before changing code, verify shipped behavior in the repository, DB migrations, API handlers, worker
 code, scanner code, and tests.
+If repository behavior contradicts these docs, stop and report the discrepancy before editing.
+
+STATUS PREFLIGHT
+Return a 6-row table before implementation:
+| Claim from docs | Code checked | Tests checked | Result | Action |
+If a doc says "shipped", verify it with code and tests. Do not implement proposed behavior as if it
+were already shipped.
 
 CURRENT STATE
 Summarize the shipped behavior relevant to this task in 5 bullets before changing code.
@@ -642,12 +655,34 @@ Describe the desired behavior in observable terms.
 NON-GOALS
 List what must not be changed in this task.
 
+DO NOT TOUCH
+List specific components, files, APIs, UI surfaces, or features out of scope.
+
 SAFETY INVARIANTS
 Preserve the invariants listed below.
+
+AUTHORIZATION / BLAST RADIUS
+State target authorization assumptions, allowed preset (Safe/Balanced/Lab), credentials and auth
+states affected, high-risk families included/excluded, rate limits/daily caps affected, and whether
+confirmation is required before queueing active work.
+
+DATA CONTRACTS
+For DB rows, API JSON, Redis job payloads, scanner telemetry, report rollups, and UI-facing fields
+changed or verified, state producer, consumer, backward compatibility, old-row/null behavior, and the
+idempotency key or uniqueness rule.
 
 MIGRATION / BACKFILL / COMPATIBILITY
 State whether schema/data changes are required, how existing rows are handled, and what rollback or
 fallback behavior exists.
+
+ROLLOUT / FALLBACK
+State feature flag name, default value, fallback path, rollback behavior, old scan/report readability,
+and log/metric signals that indicate unsafe behavior.
+
+FAILURE-MODE MATRIX
+Explicitly cover worker crash mid-job, duplicate job delivery, parent cancellation, timeout after
+partial work, missing credentials, rate budget exhaustion, missing scanner telemetry, and
+corrupt/missing shard context. For each: expected behavior and whether a test is required.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 State what API responses, ASM pages, scan detail pages, logs, reports, and hidden implementation rows
@@ -665,8 +700,13 @@ Provide API behavior, DB state, queue behavior, UI/report behavior, and failure 
 TESTS REQUIRED
 Add or update unit, DB/integration, worker/API, and UI tests where applicable.
 
+TEST COMMANDS
+Before final response, report commands run and commands not run with reasons. Include minimum expected
+unit, DB/integration, worker/API, UI, and live-smoke coverage for the task.
+
 OUTPUT FORMAT
-Return changed files, behavior summary, safety checks, tests run, and remaining risks.
+Return: status preflight; changed files; behavior summary; safety checks; data contracts changed;
+tests run; remaining risks; follow-up tasks.
 ```
 
 Hard rule: exactly one architecture increment per implementation task. Do not combine attempt
@@ -694,9 +734,33 @@ ROLE
 You are a senior backend engineer implementing ShakerScan's campaign allocator and ASM attempt
 ledger.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. Do not edit scanner-stage sharding, check registry,
+multi-node transport, or public POST /scans API shape unless a verified contract bug requires it.
+
 TASK
 Make the shipped campaign/lease/attempt foundation authoritative for coverage rollups and ready for
 dynamic Full Coverage allocation.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Verify api/asm_inventory.py, api/worker.py, api/api.py, db/init.sql, runtime migrations, scanner
+telemetry producers, report rollups, and tests before editing.
+
+STATUS PREFLIGHT
+Confirm:
+- target_endpoints contains shipped lease/status/replay/auth fields;
+- scan_campaigns and asm_endpoint_attempts exist;
+- ASM batches claim durable leases;
+- coverage rollups use attempt facts when available;
+- missing scanner telemetry does not promote coverage;
+- dynamic Full Coverage allocation remains proposed.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -722,10 +786,49 @@ NON-GOALS
 - Do not expose allocator internals as UI knobs.
 - Do not remove the existing static coverage path until campaign allocation is stable.
 
+DO NOT TOUCH
+- Scanner-stage refactor unless required for telemetry correctness.
+- Check registry.
+- Multi-node queue transport.
+- UI redesign beyond rollup fields.
+
+SAFETY INVARIANTS
+- No endpoint is marked tested without scanner telemetry.
+- Partial timeout marks only attempted endpoints partial.
+- Unattempted rows are released or remain stale/untested, never clean.
+- Auth-state and replay semantics are preserved.
+- Parent/merge remains idempotent under duplicate delivery.
+
+AUTHORIZATION / BLAST RADIUS
+- Target authorization assumption: user owns or is authorized to test the target.
+- Allowed preset: Safe/Balanced unless explicitly Lab/deep.
+- Credentials: preserve anonymous/user1/user2 rows and missing-credential behavior.
+- High-risk families: do not add new families.
+- Rate limits: preserve target/root-domain reservation before high-volume active work.
+- Confirmation is required before queueing active work outside tests.
+
+DATA CONTRACTS
+Define or verify DB rows, API JSON, Redis payloads, scanner telemetry JSON, parent report rollups,
+and UI-facing fields. For each changed contract, state producer, consumer, compatibility,
+old-row/null behavior, and idempotency key.
+
 MIGRATION / BACKFILL / COMPATIBILITY
 - Do not infer historical endpoint attempts from completed scan rows unless telemetry exists.
 - Keep existing ASM batch path as fallback during rollout.
 - If new scanner telemetry schema is needed, add it in db/init.sql and runtime migrations together.
+
+ROLLOUT / FALLBACK
+- Feature flag: name it if behavior changes are not strictly backward compatible.
+- Default: existing ASM batch and static Full Coverage paths keep working.
+- Fallback: endpoint-status coverage and assigned-slice partial attempts remain readable.
+- Rollback: preserve old rows/reports and avoid destructive backfills.
+- Unsafe signals: coverage increases without endpoint telemetry, leases remain stuck, or duplicate
+  attempts appear for the same endpoint/campaign/scan.
+
+FAILURE-MODE MATRIX
+Cover worker crash, duplicate delivery, parent cancellation, timeout after partial work, missing
+credentials, rate budget exhaustion, missing scanner telemetry, and corrupt/missing shard context.
+State expected behavior and required tests for each.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - GET /targets/{id}/asm/gaps explains untested, partial, auth-blocked, rate-limited, and leased
@@ -745,6 +848,13 @@ TESTS REQUIRED
 - API tests for gaps and coverage rollups.
 - Worker tests for success, timeout, auth_missing, and retry.
 - Regression tests for replay_spec preservation.
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
+
+OUTPUT FORMAT
+Return status preflight, changed files, behavior summary, safety checks, data contracts changed,
+tests run, remaining risks, and follow-up tasks.
 ```
 
 ### Prompt: add a first-class check registry
@@ -753,8 +863,33 @@ TESTS REQUIRED
 ROLE
 You are a senior DAST platform engineer modularizing ShakerScan active/passive checks.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. Do not change vulnerability detection logic, dynamic
+coverage allocation, multi-node transport, or public scan API shape unless the registry contract
+requires a backward-compatible validation addition.
+
 TASK
 Replace scattered boolean check wiring with a first-class CHECK_REGISTRY.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Verify scanner flag wiring, ASM check_family API handling, worker options, UI labels, and tests before
+editing.
+
+STATUS PREFLIGHT
+Confirm:
+- focused ASM batches currently support sqli and xss;
+- no first-class registry exists yet;
+- high-risk families are not silently enabled;
+- public scan options remain backward compatible;
+- AI router and multi-node work are out of scope;
+- dynamic Full Coverage allocation remains separate.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
@@ -778,9 +913,47 @@ NON-GOALS
 - Do not silently enable ssrf/lfi/rce/business_logic.
 - Do not expose raw internal registry structure in the default UI.
 
+DO NOT TOUCH
+- Exploit payload logic and detection heuristics.
+- Dynamic Full Coverage allocator.
+- Multi-node queue transport.
+- AI router behavior.
+
+SAFETY INVARIANTS
+- Focused family campaigns run only the requested family.
+- High-risk families require explicit Lab/deep policy.
+- Missing credentials cannot be treated as anonymous success.
+- Existing sqli/xss flags remain compatible.
+
+AUTHORIZATION / BLAST RADIUS
+- Target authorization assumption: user owns or is authorized to test the target.
+- Allowed preset: Safe/Balanced for current sqli/xss focused work; Lab/deep required for future
+  high-risk families.
+- Auth states: preserve requested auth-state scope.
+- Rate limits: do not raise target/root-domain caps.
+- Confirmation is required before active high-risk family execution.
+
+DATA CONTRACTS
+Define registry entry shape, API validation JSON, Redis/job option mapping, scanner telemetry family
+labels, report family scope fields, and UI-facing family names. For each changed contract, state
+producer, consumer, compatibility, old-row/null behavior, and uniqueness rule.
+
 MIGRATION / BACKFILL / COMPATIBILITY
 - Avoid schema changes unless telemetry storage requires them.
 - Keep existing sqli/xss flags compatible until all call sites use the registry.
+
+ROLLOUT / FALLBACK
+- Feature flag: name it if registry routing can be disabled.
+- Default: keep existing sqli/xss behavior.
+- Fallback: legacy boolean flags for sqli/xss.
+- Rollback: disable registry routing without changing stored reports.
+- Unsafe signals: unrelated families run during focused campaigns or unknown family errors become
+  silent defaults.
+
+FAILURE-MODE MATRIX
+Cover duplicate job delivery, parent cancellation, timeout after partial work, missing credentials,
+rate budget exhaustion, missing scanner telemetry, and corrupt/missing family context. State expected
+behavior and required tests for each.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - API errors name the rejected family and allowed families.
@@ -797,6 +970,13 @@ TESTS REQUIRED
 - Registry unit tests.
 - API tests for allowed, unknown, and disallowed families.
 - Focused campaign tests proving unrelated scanner flags remain off.
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
+
+OUTPUT FORMAT
+Return status preflight, changed files, behavior summary, safety checks, data contracts changed,
+tests run, remaining risks, and follow-up tasks.
 ```
 
 ### Prompt: make Full Coverage use dynamic pull-based allocation
@@ -805,53 +985,133 @@ TESTS REQUIRED
 ROLE
 You are a backend engineer unifying one-shot Full Coverage and Continuous ASM execution.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. If status preflight finds that a "shipped" claim is
+stale, stop and report before editing.
+
 TASK
-Convert parallel coverage from static round-robin shard partitions to dynamic campaign allocation.
+Convert Full Coverage from static shard slices to dynamic pull-based campaign allocation.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Before editing, verify shipped behavior in api/parallel_scan.py, worker queue handling, DB
+migrations, ASM allocator code, scan_merge, scanner telemetry, API handlers, UI rollups, and tests.
+
+STATUS PREFLIGHT
+Confirm:
+- coverage parents create full_coverage campaigns;
+- child scan rows inherit campaign_id;
+- scan_merge writes telemetry-backed asm_endpoint_attempts;
+- legacy/no-telemetry children fall back to assigned-slice partial rows;
+- one-shot coverage still uses static shard slices;
+- Continuous ASM already claims target_endpoints through durable leases.
 
 CURRENT STATE
-- Verify the current shipped behavior before editing.
-- scan_plan currently runs discover-once recon.
-- harvest_endpoints partitions the worklist into static coverage shards.
-- scan_shard workers run zero-rediscovery scans over disjoint endpoint slices.
-- scan_plan creates a full_coverage campaign for coverage parents, and scan_merge persists the union
-  into ASM inventory plus telemetry-backed attempt rows when child reports include endpoint
-  telemetry. Legacy/no-telemetry child reports fall back to assigned-slice partial attempt rows.
+- Summarize the verified shipped behavior in exactly 5 bullets.
 
 TARGET BEHAVIOR
-- Recon upserts discovered endpoints into target_endpoints with auth_state, method, path,
-  param_location, param_shape, replay_spec, and priority.
-- Workers pull claim batches from the allocator until campaign budget is exhausted or all eligible
-  rows are terminal.
-- scan_merge reads attempt ledger facts and child result files.
-- Parent report shows discovered, tested, partial, untested, auth-blocked, and rate-limited endpoint
+- scan_plan runs discover-once recon and upserts endpoints into target_endpoints.
+- coverage workers claim endpoint batches dynamically from the allocator.
+- workers continue until campaign budget is exhausted or all eligible endpoint rows are terminal.
+- scan_merge reads campaign attempt facts and child result files.
+- parent report shows discovered, tested, partial, untested, auth-blocked, rate-limited, and error
   counts.
 
 NON-GOALS
-- Do not remove static shard fallback yet.
-- Do not mark unattempted endpoints covered.
-- Do not make users configure allocator internals.
+- Do not remove static shard fallback.
+- Do not rewrite scanner-stage execution.
+- Do not add the check registry.
+- Do not implement multi-node transport.
+- Do not expose allocator internals in the UI.
+
+DO NOT TOUCH
+- Scanner-stage refactor unless required for telemetry.
+- Check registry.
+- Multi-node queue transport.
+- UI redesign beyond rollup fields.
+- Public POST /scans API shape.
+
+SAFETY INVARIANTS
+- No endpoint marked tested without scanner telemetry.
+- Partial timeout marks only attempted endpoints partial and releases unattempted rows.
+- Missing credentials mark matching auth-state rows auth_missing/auth_failed.
+- Rate tokens are reserved before queueing active work.
+- Parent/merge remains idempotent under duplicate completion.
+- Parent cancellation releases leases and blocks unsafe merge.
+
+AUTHORIZATION / BLAST RADIUS
+- Target authorization assumption: user owns or is authorized to test the target.
+- Allowed preset: Safe/Balanced by default; Lab/deep only when explicitly requested.
+- Credentials: preserve anonymous/user1/user2 auth states and replay specs.
+- High-risk families: do not add new families or raise exploit depth implicitly.
+- Rate limits: do not raise target/root-domain caps without an explicit budget change.
+- Confirmation is required before queueing active work outside tests.
+
+DATA CONTRACTS
+Define or verify:
+- coverage campaign fields;
+- endpoint lease fields;
+- coverage batch job payload;
+- asm_endpoint_attempts rows;
+- scanner endpoint_attempts telemetry;
+- parent smart_coverage rollup JSON;
+- UI-facing rollup fields.
+For each changed contract, state producer, consumer, compatibility, old-row/null behavior, and
+idempotency key.
 
 MIGRATION / BACKFILL / COMPATIBILITY
-- The campaign allocator and attempt ledger foundation already exists.
-- Keep a fallback flag/path for static coverage until live parity tests pass.
+- Keep old static partition path behind a fallback flag.
 - Do not reinterpret old completed scan rows as attempted endpoint telemetry.
+- Preserve old report readability.
+- Add migrations only with db/init.sql and runtime migration parity.
+
+ROLLOUT / FALLBACK
+- Feature flag: name the dynamic coverage allocation flag.
+- Default value: off until parity tests pass, unless preflight proves the static fallback can remain
+  automatic.
+- Fallback path: static round-robin coverage slices.
+- Rollback behavior: existing parent reports and attempt rows remain readable.
+- Unsafe signals: duplicate claims, stuck leases, coverage increases without telemetry, or parent
+  reports disagree with /asm/gaps.
+
+FAILURE-MODE MATRIX
+Cover worker crash, lease expiry, duplicate job delivery, timeout, cancellation, missing telemetry,
+auth_missing, rate_limited, corrupt child result files, and object/evidence failure if artifacts move.
+For each: expected behavior and required tests.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
-- Scan Detail shows campaign coverage rollup, not raw allocator internals.
-- Logs show claims, releases, retries, and budget exhaustion.
-- Gaps endpoint and parent report agree on tested/partial/untested counts.
+- Scan Detail shows campaign rollup, not raw allocator internals.
+- Logs show claim, release, retry, budget exhaustion, and fallback.
+- /asm/gaps and parent report agree on tested/partial/untested counts.
+- Default scan list still shows one logical scan and hides implementation rows.
 
 ACCEPTANCE CRITERIA
-- Large targets do not suffer static shard stragglers.
-- Retried/expired leases are reclaimed.
-- Coverage parent report is based on attempt outcomes.
+- Concurrent coverage workers claim disjoint endpoint batches.
+- Uneven endpoint durations do not create static shard stragglers.
+- Expired leases are reclaimed.
+- Partial timeout does not create false-clean coverage.
 - Static coverage remains available behind a fallback flag.
+- Parent coverage derives from attempt facts where available.
 
 TESTS REQUIRED
-- Campaign allocator tests with uneven endpoint durations.
-- Retry and lease-expiry tests.
-- Parent report rollup tests.
-- Slow endpoint fixture: timeout yields partial, not false-clean.
+- DB tests for claim/reclaim/disjoint leases.
+- Worker tests for success, timeout, crash/reclaim, cancellation, and missing telemetry.
+- API/report tests for parent rollup and /asm/gaps agreement.
+- Regression tests for replay_spec and auth_state preservation.
+- Slow endpoint fixture proving partial, not false-clean.
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
+
+OUTPUT FORMAT
+Return status preflight, changed files, behavior summary, safety checks, data contracts changed,
+tests run, remaining risks, and follow-up tasks.
 ```
 
 ### Prompt: AI intent router for DAST/ASM operations
@@ -860,8 +1120,32 @@ TESTS REQUIRED
 ROLE
 You are implementing ShakerScan's AI command router for safe DAST and ASM operations.
 
+MODE
+IMPLEMENT
+
+EDIT PERMISSION
+Code and test edits are allowed for this prompt. Do not queue live scans during implementation tests
+unless an explicit test fixture is used.
+
 TASK
 Map natural-language security operations requests to safe API calls and explain the action.
+
+SOURCE OF TRUTH
+Use:
+- docs/parallel-scan-architecture.md
+- docs/continuous-asm-architecture.md
+- docs/multi-node-architecture.md
+Verify shipped API routes, scan execution settings, ASM routes, AI settings, UI command surfaces, and
+tests before editing.
+
+STATUS PREFLIGHT
+Confirm:
+- POST /scans supports parallel coverage;
+- /targets/{id}/asm/gaps exists;
+- /targets/{id}/asm/improve and /asm/test exist;
+- BOLA-focused campaigns remain proposed until registry/multi-user support exists;
+- high-risk active scans require explicit authorization;
+- no existing router path auto-upgrades Safe/Balanced to Lab.
 
 CURRENT STATE
 - Verify the current shipped API routes before editing.
@@ -885,16 +1169,98 @@ TARGET BEHAVIOR
 NON-GOALS
 - Do not expose shard/batch implementation rows unless debugging is requested.
 - Do not let natural-language requests bypass active-scan authorization boundaries.
+- Do not implement the check registry, BOLA campaign support, or multi-node fleet behavior.
+
+DO NOT TOUCH
+- Scanner vulnerability detection logic.
+- ASM allocator internals.
+- Multi-node transport.
+- Public scan API shape beyond router-generated request bodies.
+
+SAFETY INVARIANTS
+- Active or budget-increasing actions default to dry_run=true.
+- Ambiguous language never upgrades Safe/Balanced to Lab.
+- High-risk active exploitation requires explicit confirmation and authorization.
+- Missing target, credentials, or auth-state inputs produce missing_inputs, not execution.
+
+AUTHORIZATION / BLAST RADIUS
+- Include authorization_assumption in every active response.
+- Report affected target, auth states, active families, rate-cap changes, and high-risk families.
+- Require confirmation unless policy explicitly says auto-execute is allowed.
+
+AI ROUTER EXECUTION POLICY
+For active or budget-increasing actions:
+- default to dry_run=true;
+- return the planned API call;
+- explain safety preset and non-goals;
+- require confirmation unless policy says auto-execute is allowed;
+- never upgrade Safe/Balanced to Lab from ambiguous language.
+
+DATA CONTRACTS
+Define or verify router request/response JSON, planned API call body, UI-facing explanation fields,
+audit/log fields, and any Redis/API side effects. For each changed contract, state producer,
+consumer, compatibility, old/null behavior, and idempotency key.
 
 MIGRATION / BACKFILL / COMPATIBILITY
 - No schema migration should be needed for intent mapping alone.
 - Preserve existing API request shapes unless a separate API task changes them.
+
+ROLLOUT / FALLBACK
+- Feature flag: name any router-autonomy flag.
+- Default: dry-run responses for active/budget-increasing actions.
+- Fallback: return planned API call without execution.
+- Rollback: disable execute path while preserving explain/dry-run.
+- Unsafe signals: active scan queued from ambiguous input, Lab preset selected without explicit user
+  request, or missing_inputs ignored.
+
+FAILURE-MODE MATRIX
+Cover duplicate user request delivery, stale target id, missing credentials, rate budget exhaustion,
+API route rejection, parent cancellation after queued execution, and missing scanner telemetry in
+downstream reports. For each: expected behavior and required tests.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - Return the planned API call, safety preset, confirmation requirement, and non-goals before
   execution when the action is active/high impact.
 - After queueing work, return the scan/campaign id and UI link.
 
+ACCEPTANCE CRITERIA
+- Active or budget-increasing intents return dry_run=true unless explicit execution is requested and
+  policy allows it.
+- Planned API calls preserve Safe/Balanced defaults and never infer Lab/deep from ambiguous language.
+- Missing target, credentials, or auth-state inputs are returned in missing_inputs.
+- Executed actions return the queued scan/campaign id and UI link.
+
+TESTS REQUIRED
+- Router unit tests for dry-run defaults, confirmation requirements, and missing_inputs.
+- API-shape tests for planned POST /scans and ASM calls.
+- Safety tests proving ambiguous language cannot select Lab/deep or bypass confirmation.
+- UI/API tests for returned explanation and blast_radius fields where applicable.
+
 OUTPUT FORMAT
-Return JSON with intent, api_call, safety_preset, requires_confirmation, explanation, and non_goals.
+Return JSON:
+{
+  "intent": "run_full_coverage",
+  "dry_run": true,
+  "api_call": {
+    "method": "POST",
+    "path": "/scans",
+    "body": {}
+  },
+  "safety_preset": "Safe",
+  "requires_confirmation": true,
+  "authorization_assumption": "user owns or is authorized to test this target",
+  "blast_radius": {
+    "active_checks": true,
+    "auth_states": ["anonymous"],
+    "rate_caps_changed": false,
+    "high_risk_families": []
+  },
+  "will_do": [],
+  "will_not_do": [],
+  "missing_inputs": [],
+  "explanation": ""
+}
+
+TEST COMMANDS
+Report exact commands run and any expected commands not run with reasons.
 ```
