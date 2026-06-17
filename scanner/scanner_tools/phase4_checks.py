@@ -1000,10 +1000,10 @@ async def test_api_security(
             return None
 
         def _looks_like_doc_path(path: list[str]) -> bool:
-            joined = ".".join(path).lower()
-            if "representative_endpoints" in joined or "curl_example" in joined:
+            segments = {part.lower().replace("-", "_") for part in path}
+            if "representative_endpoints" in segments or "curl_example" in segments:
                 return True
-            return any(token in part.lower() for part in path for token in doc_path_tokens)
+            return any(segment in doc_path_tokens for segment in segments)
 
         def _walk(value: object, path: list[str], out: set[str]) -> None:
             if isinstance(value, dict):

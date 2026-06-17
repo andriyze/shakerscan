@@ -121,6 +121,39 @@ def test_phase4_api_security_ignores_documentation_example_credentials(monkeypat
     assert result["excessive_data_exposure"] == []
 
 
+def test_phase4_api_security_keeps_real_credentials_under_sample_named_data(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if "-I" in command:
+            return ("HTTP/1.1 404 Not Found\r\n\r\n", "", 0)
+        if url.endswith("/api/catalog"):
+            return (
+                _http(
+                    200,
+                    "Content-Type: application/json",
+                    '{"sample_products":[{"id":1,"api_key":"sk-real-secret-value"}]}',
+                ),
+                "",
+                0,
+            )
+        return (_http(200, "Content-Type: text/html", "<html><body>home</body></html>"), "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(
+        phase4_checks.test_api_security(
+            "https://example.test",
+            discovered_urls=["https://example.test/api/catalog"],
+        )
+    )
+
+    exposure = result["excessive_data_exposure"][0]
+    assert result["vulnerable"] is True
+    assert exposure["verified"] is True
+    assert "api_key" in exposure["sensitive_markers"]
+
+
 def test_phase4_api_security_keeps_public_credential_catalog_tokens(monkeypatch):
     async def fake_run(command, *args, **kwargs):
         url = command[-1]
