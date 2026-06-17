@@ -7924,7 +7924,12 @@ async def list_targets_grouped(
                     SELECT DISTINCT ON (te.id)
                         te.target_id,
                         te.id AS endpoint_id,
-                        aea.status
+                        CASE
+                            WHEN aea.status = 'completed'
+                             AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
+                            THEN 'partial'
+                            ELSE aea.status
+                        END AS status
                     FROM target_endpoints te
                     JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
                     WHERE te.target_id = ANY($1::uuid[]) AND te.test_status <> 'gone'

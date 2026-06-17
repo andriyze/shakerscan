@@ -436,7 +436,12 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         WITH latest_attempt AS (
             SELECT DISTINCT ON (te.id)
                 te.id AS endpoint_id,
-                aea.status
+                CASE
+                    WHEN aea.status = 'completed'
+                     AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
+                    THEN 'partial'
+                    ELSE aea.status
+                END AS status
             FROM target_endpoints te
             JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
             WHERE te.target_id = $1 AND te.test_status <> 'gone'

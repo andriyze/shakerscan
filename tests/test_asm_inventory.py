@@ -147,6 +147,8 @@ def test_coverage_summary_defaults_to_endpoint_status_without_attempts():
     assert summary["coverage"] == 0.25
     assert summary["status_coverage"]["tested"] == 1
     assert summary["attempt_coverage"]["attempted"] == 0
+    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[1][0]
+    assert "THEN 'partial'" in conn.queries[1][0]
 
 
 def test_coverage_summary_uses_latest_attempt_ledger_when_present():
@@ -182,6 +184,8 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     assert summary["partial"] == 1
     assert summary["coverage"] == 0.5  # completed / non-gone endpoints
     assert summary["status_coverage"]["coverage"] == 0.25
+    assert "scanner_telemetry_json->>'per_endpoint_telemetry'" in conn.queries[1][0]
+    assert "THEN 'partial'" in conn.queries[1][0]
     assert summary["attempt_coverage"] == {
         "total": 4,
         "attempted": 3,
@@ -303,7 +307,7 @@ def test_record_endpoint_attempts_defaults_completed_param_counts():
             scan_id=str(scan_id),
             worker_id="worker-a",
             status="completed",
-            scanner_telemetry_json={"batch_completed": True},
+            scanner_telemetry_json={"per_endpoint_telemetry": True},
         )
     )
 

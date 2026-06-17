@@ -4586,8 +4586,9 @@ async def process_scan_merge_job(job_data: dict):
 
     # Campaign attempt ledger for one-shot Full Coverage. This records shard
     # assignment outcomes without changing endpoint test_status. New scanner
-    # reports carry per-endpoint telemetry; legacy reports fall back to the
-    # conservative shard-status ledger so old scans still merge.
+    # reports carry per-endpoint telemetry. Legacy/no-telemetry completed
+    # children are recorded as partial, never completed, so coverage cannot be
+    # inflated by a batch-level success.
     if campaign_id and target_id and strategy == 'coverage':
         try:
             async with db_pool.acquire() as conn:
@@ -4669,10 +4670,10 @@ async def process_scan_merge_job(job_data: dict):
                         continue
                     child_status = str(ch['status'] or '')
                     if child_status == 'completed':
-                        attempt_status = 'completed'
-                        attempted_params = None
-                        completed_params = None
-                        error_summary = None
+                        attempt_status = 'partial'
+                        attempted_params = 0
+                        completed_params = 0
+                        error_summary = 'completed_without_endpoint_telemetry'
                     elif child_status == 'cancelled':
                         attempt_status = 'partial'
                         attempted_params = 0
@@ -4700,6 +4701,7 @@ async def process_scan_merge_job(job_data: dict):
                         scanner_telemetry_json={
                             'source': 'parallel_coverage_merge',
                             'per_endpoint_telemetry': False,
+                            'completed_without_endpoint_telemetry': child_status == 'completed',
                             'assigned_endpoints': len(endpoints),
                             'child_status': child_status,
                             'shard_index': ch['shard_index'],
@@ -4986,7 +4988,8 @@ async def process_exploit_batch_job(job_data: dict):
                             },
                         )
                     else:
-                        await asm_inventory.mark_tested(conn, endpoint_ids, verdict=('findings' if findings else 'clean'))
+                        verdict = 'partial_findings' if findings else 'missing_endpoint_telemetry'
+                        await asm_inventory.mark_partial(conn, endpoint_ids, verdict=verdict)
                         await asm_inventory.record_endpoint_attempts(
                             conn,
                             endpoint_ids,
@@ -4996,12 +4999,15 @@ async def process_exploit_batch_job(job_data: dict):
                             auth_state=auth_state,
                             started_at=now,
                             completed_at=completed_at,
-                            status='completed',
+                            status='partial',
+                            attempted_params_count=0,
+                            completed_params_count=0,
+                            error_summary='completed_without_endpoint_telemetry',
                             scanner_telemetry_json={
                                 "claimed_endpoints": len(endpoint_ids),
                                 "findings_count": len(findings),
                                 "per_endpoint_telemetry": False,
-                                "batch_completed": True,
+                                "completed_without_endpoint_telemetry": True,
                             },
                         )
                     await asm_inventory.finish_campaign(conn, campaign_id, status='completed')

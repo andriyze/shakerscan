@@ -24,7 +24,7 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution in the parallel doc. |
+| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Extend attempt-ledger rollups into parent scan reports. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
@@ -145,8 +145,9 @@ Implemented:
 - ASM batches promote only telemetry-completed endpoint IDs to `tested`; partial, skipped, timed-out,
   or missing telemetry rows are released as stale/partial for later retry.
 - Full Coverage merge writes telemetry-backed `asm_endpoint_attempts` when child reports include
-  `active_checks.endpoint_attempts`; legacy/no-telemetry children keep the assigned-slice attempt
-  fallback. Full Coverage merge still does not promote endpoint `test_status`.
+  `active_checks.endpoint_attempts`; legacy/no-telemetry children keep an assigned-slice fallback,
+  but successful child status is recorded as `partial`, not `completed`. Full Coverage merge still
+  does not promote endpoint `test_status`.
 - `/targets/{id}/asm/coverage` returns `status_coverage` and `attempt_coverage`; top-level
   `tested`/`coverage` use the latest attempt per endpoint when attempt facts exist.
 
@@ -362,6 +363,11 @@ Top-level `tested` and `coverage` use `attempt_coverage` when attempt facts exis
 fall back to `status_coverage` for fresh installs and legacy inventories. Parent scan reports still
 need the same attempt-ledger rollup treatment.
 
+Operational note: coverage can decrease after this change if earlier status-based coverage marked
+endpoints tested but the latest attempt facts are partial, timed out, auth-blocked, or missing
+scanner endpoint telemetry. Treat that drop as a correction, not a regression; it means the system is
+no longer counting unproven batch completion as tested coverage.
+
 ---
 
 ## Relationship to Parallel Scans
@@ -376,7 +382,7 @@ Current shipped behavior:
 - `scan_plan` creates a `full_coverage` campaign tied to the parent scan.
 - `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
   telemetry-backed attempt rows for child reports that include endpoint telemetry. Legacy/no-telemetry
-  child reports keep conservative assigned-slice attempt rows.
+  child reports keep conservative assigned-slice partial attempt rows.
 
 Target behavior:
 
@@ -525,7 +531,8 @@ Implemented:
   and auth-state scope.
 - Coverage child scan rows inherit `campaign_id`.
 - `scan_merge` resolves scanner endpoint telemetry back to `target_endpoints` and writes idempotent
-  `asm_endpoint_attempts`; legacy/no-telemetry children fall back to assigned shard endpoint slices.
+  `asm_endpoint_attempts`; legacy/no-telemetry children fall back to assigned shard endpoint slices
+  as partial attempts.
 
 Remaining:
 
@@ -803,7 +810,7 @@ CURRENT STATE
 - scan_shard workers run lean scans over disjoint endpoint slices.
 - scan_plan creates a full_coverage campaign for coverage parents, and scan_merge persists the union
   into ASM inventory plus telemetry-backed attempt rows when child reports include endpoint
-  telemetry. Legacy/no-telemetry child reports fall back to assigned-slice attempt rows.
+  telemetry. Legacy/no-telemetry child reports fall back to assigned-slice partial attempt rows.
 
 TARGET BEHAVIOR
 - Recon upserts discovered endpoints into target_endpoints with auth_state, method, path,

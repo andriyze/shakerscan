@@ -48,7 +48,7 @@ Every implementation task must verify the current state with search/tests before
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows are hidden from `GET /scans` by default (`include_shards=true` to show); ASM batch/recon implementation rows are also hidden by default (`include_internal=true` to show).
 - **Three strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), and `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All four (`auto`/`scope`/`family`/`coverage`) are accepted by `options.shard_strategy`, the `/settings/scan-execution` global policy, and the New Scan UI. The UI exposes this as **Full Coverage** so users do not need to understand every planner knob.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
-- **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry reports keep the legacy conservative assigned-slice fallback. Coverage merge still does not promote endpoint `test_status`.
+- **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry reports keep the legacy conservative assigned-slice fallback as partial attempts. Coverage merge still does not promote endpoint `test_status`.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
 - **Global-check de-duplication:** coverage shards still run full active endpoint checks over their assigned slice, but only the first shard per auth state runs target-global exposure/posture probes such as exposed-file discovery, auxiliary API/XXE discovery, Phase 4 API-security sweeps, and forced browsing. Later shards carry `skip_global_checks=true` and the scanner emits skipped module results, so the merge keeps one logical report without wasting every shard on identical global probes.
 - **Cancellation safety:** parent cancellation fans out to queued/running shard rows, sets child cancel flags, blocks/short-circuits merge, and prevents late shard output from overwriting cancelled rows. Workers now launch scanner subprocesses in their own process group and poll `scan:{id}:cancel`, so active shard subprocesses are terminated instead of running to natural completion after cancellation.
@@ -502,7 +502,7 @@ source, exploit-depth, auth-state sharding, and a pre-fan-out UI state
 attempted/completed parameter counts. Coverage merge consumes those rows for `asm_endpoint_attempts`
 when present and refuses to fall back to whole-shard completion if telemetry exists but cannot be
 resolved to inventory. Legacy/no-telemetry child reports still use the conservative assigned-slice
-attempt fallback so old scans remain mergeable.
+partial-attempt fallback so old scans remain mergeable without inflating tested coverage.
 
 ### Shipped high-budget coverage behavior
 
@@ -559,8 +559,8 @@ Current boundary:
 
 - One-shot `coverage` still uses static shard slices planned by `api/parallel_scan.py`, but those
   parents now create `full_coverage` campaign records. Merge writes telemetry-backed attempt rows
-  when child reports include `active_checks.endpoint_attempts`, and uses assigned-slice attempt rows
-  only for legacy/no-telemetry child reports.
+  when child reports include `active_checks.endpoint_attempts`, and uses assigned-slice partial
+  attempt rows only for legacy/no-telemetry child reports.
 - Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`; claims now set
   durable leases, link to `scan_campaigns`, and write `asm_endpoint_attempts`.
 - Both paths write into the same endpoint inventory and attempt ledger, but one-shot Full Coverage
