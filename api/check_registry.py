@@ -97,8 +97,10 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         is_active=True,
         requires_credentials=True,
         risk_level="medium",
-        telemetry_schema="planned_auth_attempt",
-        description="Authentication, session, and access-control checks. Planned for focused ASM scheduling.",
+        telemetry_schema="active_endpoint_attempt_v1",
+        scanner_options={"sqli": False, "xss": False, "asm_check_family": "auth"},
+        runnable=True,
+        description="Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches.",
     ),
     CheckFamilySpec(
         name="headers",
@@ -205,14 +207,15 @@ def asm_focus_families() -> tuple[CheckFamilySpec, ...]:
 def default_parallel_focus_families() -> tuple[CheckFamilySpec, ...]:
     """Families safe to include in automatic broad/sqli/xss-style fan-out.
 
-    High-risk families such as BOLA are runnable only by explicit focused ASM/API
-    request with their own preconditions; they must not appear in default
-    parallel family lanes.
+    High-risk and credential-required families are runnable only by explicit
+    focused ASM/API request with their own preconditions; they must not appear
+    in default parallel family lanes.
     """
     return tuple(
         spec
         for spec in asm_focus_families()
         if str(spec.risk_level or "").lower() != "high"
+        and not spec.requires_credentials
     )
 
 

@@ -358,6 +358,11 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/test \
   -H "Content-Type: application/json" \
   -d '{"batch_size": 100, "check_family": "xss"}'
 
+# Auth/access-control checks require primary auth context on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "auth"}'
+
 # High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target
 curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
@@ -372,7 +377,7 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `all`, `sqli`, `xss`, and gated `bola`; omit it or use `all` for the normal ASM mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
+ASM actions are target-scoped and reject new work while another pending/running scan exists for the same target. `check_family` currently supports `all`, `sqli`, `xss`, credential-gated `auth`, and gated `bola`; omit it or use `all` for the normal ASM mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. Auth requires primary auth on the target. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After submitting an ASM action that queues a scan, report the returned scan ID and UI link (`/scans/{scan_id}`), then stop. Do not poll unless the user explicitly asks.
 
 ### AI Operations Router
 

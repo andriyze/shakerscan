@@ -16,7 +16,7 @@ import hashlib
 import json
 import time
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
 from .bola_comparison import (
@@ -1730,6 +1730,283 @@ def _finish_bola_endpoint_attempt(
     else:
         attempt["status"] = "completed"
     return attempt
+
+
+SAFE_AUTH_PROBE_METHODS = {"GET", "HEAD"}
+
+
+def _auth_session_headers(session: Any | None) -> dict[str, str]:
+    """Snapshot headers/cookies from an AuthSession-like object."""
+    headers: dict[str, str] = {}
+    if not session or not hasattr(session, "config"):
+        return headers
+    headers.update(getattr(session.config, "headers", None) or {})
+    cookies = dict(getattr(session.config, "cookies", None) or {})
+    state = getattr(session, "state", None)
+    if state is not None:
+        cookies.update(getattr(state, "cookies_received", None) or {})
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return headers
+
+
+def _endpoint_auth_probe_candidate(base_url: str, endpoint: Any) -> dict[str, Any] | None:
+    """Return a read-only URL + inventory replay key for one discovered endpoint."""
+    replay_spec: str | None = None
+    if isinstance(endpoint, str):
+        raw = endpoint.strip()
+        method = "GET"
+        parts = raw.split(" ", 1)
+        if len(parts) == 2 and parts[0].isalpha():
+            method = parts[0].upper()
+            raw = parts[1].strip()
+            replay_spec = endpoint.strip()
+        if " " in raw:
+            raw = raw.split(" ", 1)[0].strip()
+    elif isinstance(endpoint, dict):
+        raw = endpoint.get("url") or endpoint.get("path")
+        method = str(endpoint.get("method") or "GET").upper()
+        replay_spec = endpoint.get("replay_spec") if isinstance(endpoint.get("replay_spec"), str) else None
+    else:
+        return None
+    if not raw or not isinstance(raw, str):
+        return None
+
+    try:
+        absolute = raw if "://" in raw else urljoin(base_url.rstrip("/") + "/", raw.lstrip("/"))
+        parsed = urlsplit(absolute)
+    except Exception:
+        return None
+
+    path = parsed.path or "/"
+    query = parsed.query
+    params: list[str] = []
+    if isinstance(endpoint, dict):
+        params = [str(p) for p in (endpoint.get("params") or []) if p]
+    if not query and params and method in SAFE_AUTH_PROBE_METHODS:
+        query = urlencode([(p, "1") for p in params], doseq=True)
+
+    test_url = urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+    custom_endpoint = replay_spec or (f"{method} {path}?{query}" if query else f"{method} {path}")
+    return {
+        "method": method,
+        "url": test_url,
+        "custom_endpoint": custom_endpoint,
+        "param_count": max(1, len(params)),
+    }
+
+
+def _new_auth_endpoint_attempt(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "custom_endpoint": candidate["custom_endpoint"],
+        "family": "auth",
+        "method": candidate["method"],
+        "url": candidate["url"],
+        "param_count": int(candidate.get("param_count") or 1),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
+def _finish_auth_attempt(
+    attempt: dict[str, Any],
+    *,
+    completed: bool,
+    skip_reason: str | None = None,
+    error_summary: str | None = None,
+) -> dict[str, Any]:
+    if skip_reason:
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = skip_reason
+        return attempt
+    if error_summary:
+        attempt["status"] = "partial"
+        attempt["error_summary"] = error_summary
+        return attempt
+    attempt["status"] = "completed" if completed else "partial"
+    return attempt
+
+
+def _auth_response_status(response: dict[str, Any]) -> int:
+    try:
+        return int(response.get("status_code") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _looks_like_login_or_error(body: str) -> bool:
+    lowered = (body or "")[:4000].lower()
+    markers = (
+        "login", "log in", "sign in", "signin", "authenticate",
+        "unauthorized", "forbidden", "access denied", "permission denied",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+async def _fetch_auth_access_probe(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    cmd = [
+        "curl", "-sS",
+        "-X", method,
+        "-L", "--max-redirs", "5",
+        "-k",
+        "--max-time", str(timeout),
+        "-w", "\n__AUTH_META__%{http_code}__END_AUTH_META__",
+    ]
+    for name, value in (headers or {}).items():
+        cmd.extend(["-H", f"{name}: {value}"])
+    cmd.append(url)
+    stdout, stderr, rc = await run(cmd, timeout=timeout + 5)
+    if rc != 0 and not stdout:
+        return {"status_code": 0, "body": "", "headers": {}, "error": stderr or f"curl failed with code {rc}"}
+    marker = "\n__AUTH_META__"
+    if marker not in stdout:
+        return {"status_code": 0, "body": stdout or "", "headers": {}, "error": "missing_status_metadata"}
+    body, meta = stdout.rsplit(marker, 1)
+    status_raw = meta.split("__END_AUTH_META__", 1)[0]
+    try:
+        status = int(status_raw)
+    except (TypeError, ValueError):
+        status = 0
+    return {"status_code": status, "body": body, "headers": {}, "error": None}
+
+
+async def smart_auth_access_test(
+    base_url: str,
+    endpoints: list[Any],
+    auth_session: Any | None = None,
+    max_endpoints: int = 50,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """Focused auth/access-control probe with per-endpoint telemetry.
+
+    The first runnable `auth` family check is intentionally read-only: for each
+    claimed GET/HEAD endpoint, compare an authenticated request with a truly
+    anonymous request. It reports a finding only when authenticated content
+    carrying concrete user-specific signals is reachable anonymously with an
+    equivalent response. Other public endpoints simply record completed
+    telemetry so ASM coverage is truthful without inflating findings.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "endpoints_analyzed": 0,
+        "anonymous_accessible": 0,
+        "auth_required": 0,
+        "skipped": 0,
+        "endpoint_attempts": [],
+    }
+
+    auth_headers = _auth_session_headers(auth_session)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for endpoint in endpoints or []:
+        candidate = _endpoint_auth_probe_candidate(base_url, endpoint)
+        if not candidate:
+            continue
+        key = candidate["custom_endpoint"]
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+        if len(candidates) >= max(1, int(max_endpoints or 1)):
+            break
+
+    for candidate in candidates:
+        attempt = _new_auth_endpoint_attempt(candidate)
+        method = str(candidate.get("method") or "GET").upper()
+        if method not in SAFE_AUTH_PROBE_METHODS:
+            results["skipped"] += 1
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, skip_reason="unsafe_method_not_tested")
+            )
+            continue
+        if not auth_headers:
+            results["skipped"] += 1
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, skip_reason="auth_missing")
+            )
+            continue
+
+        attempt["attempted_params_count"] += 1
+        auth_resp = await _fetch_auth_access_probe(
+            candidate["url"],
+            method=method,
+            headers=auth_headers,
+            timeout=timeout,
+        )
+        anon_resp = await _fetch_auth_access_probe(
+            candidate["url"],
+            method=method,
+            timeout=timeout,
+        )
+        auth_error = auth_resp.get("error")
+        anon_error = anon_resp.get("error")
+        if auth_error or anon_error:
+            error_summary = str(auth_error or anon_error or "request_error")[:200]
+            results["endpoint_attempts"].append(
+                _finish_auth_attempt(attempt, completed=False, error_summary=error_summary)
+            )
+            continue
+
+        attempt["completed_params_count"] += 1
+        results["endpoints_analyzed"] += 1
+        auth_status = _auth_response_status(auth_resp)
+        anon_status = _auth_response_status(anon_resp)
+        auth_body = str(auth_resp.get("body") or "")
+        anon_body = str(anon_resp.get("body") or "")
+        if anon_status in {401, 403}:
+            results["auth_required"] += 1
+        elif 200 <= anon_status < 300:
+            results["anonymous_accessible"] += 1
+
+        user_signals = extract_user_specific_signals(auth_body)
+        if (
+            200 <= auth_status < 300
+            and 200 <= anon_status < 300
+            and user_signals
+            and len(auth_body) > 50
+            and len(anon_body) > 50
+            and not _looks_like_login_or_error(anon_body)
+            and responses_equivalent(auth_body, anon_body)
+        ):
+            results["vulnerable"] = True
+            path_hash = hashlib.sha256(f"{candidate['custom_endpoint']}:anon".encode()).hexdigest()[:8]
+            similarity = response_similarity(auth_body, anon_body)
+            results["findings"].append({
+                "id": f"smart_auth:{path_hash}",
+                "tool": "smart_auth",
+                "title": f"Authentication bypass: anonymous access to {candidate['custom_endpoint']}",
+                "severity": "high",
+                "confidence": 0.75,
+                "evidence": {
+                    "url": candidate["url"],
+                    "method": method,
+                    "auth_status": auth_status,
+                    "anonymous_status": anon_status,
+                    "responses_equivalent": True,
+                    "response_similarity": round(similarity, 3),
+                    "user_specific_signals": user_signals[:8],
+                    "response_snippet": anon_body[:300],
+                },
+                "description": (
+                    "An endpoint returned equivalent user-specific content with and without "
+                    "authentication. Confirm the endpoint is intended to be public."
+                ),
+                "remediation": "Require authentication for user-specific resources and add anonymous-access regression tests.",
+                "cwe": "CWE-306",
+                "owasp": "A01:2021 - Broken Access Control",
+            })
+
+        results["endpoint_attempts"].append(_finish_auth_attempt(attempt, completed=True))
+
+    return results
 
 
 async def smart_bola_test(

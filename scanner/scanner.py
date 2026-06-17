@@ -1578,6 +1578,7 @@ try:
     from scanner_tools.access_control_checks import (
         check_forced_browsing as _check_forced_browsing_mod,
         format_findings_for_scanner as _format_forced_browsing_findings_mod,
+        smart_auth_access_test as _smart_auth_access_test_mod,
         smart_bola_test as _smart_bola_test_mod,
         # Enhanced BOLA testing
         check_bola_multi_user as _check_bola_multi_user_mod,
@@ -2039,6 +2040,7 @@ try:
     # Access control checks
     check_forced_browsing = _check_forced_browsing_mod
     format_forced_browsing_findings = _format_forced_browsing_findings_mod
+    smart_auth_access_test = _smart_auth_access_test_mod
     smart_bola_test = _smart_bola_test_mod
     check_bola_multi_user = _check_bola_multi_user_mod
     check_bola_enumeration = _check_bola_enumeration_mod
@@ -2307,6 +2309,7 @@ SCANNER_ACTIVE_FAMILY_FLAGS: dict[str, tuple[bool, bool]] = {
     "all": (True, True),
     "sqli": (False, True),
     "xss": (True, False),
+    "auth": (False, False),
     "bola": (False, False),
 }
 
@@ -2317,6 +2320,9 @@ SCANNER_ACTIVE_FAMILY_ALIASES: dict[str, str] = {
     "sql_injection": "sqli",
     "cross-site-scripting": "xss",
     "cross_site_scripting": "xss",
+    "authentication": "auth",
+    "access-control": "auth",
+    "access_control": "auth",
     "idor": "bola",
     "object_authorization": "bola",
     "object-authorization": "bola",
@@ -2356,6 +2362,17 @@ FOCUSED_FAMILY_RULES: dict[str, dict[str, Any]] = {
             "Add multi-user regression tests for the affected resource IDs and methods.",
         ],
     },
+    "auth": {
+        "tools": {"smart_auth", "session_management", "auth_bypass", "forced_browsing"},
+        "cwes": {"CWE-306", "CWE-862", "CWE-287", "CWE-425"},
+        "title_markers": ("authentication", "auth bypass", "anonymous access", "forced browsing"),
+        "type_markers": ("authentication", "access control", "auth"),
+        "remediation": [
+            "Require authentication before returning user-specific resources.",
+            "Centralize authorization middleware so anonymous requests cannot reach protected handlers.",
+            "Add regression tests that replay the affected endpoint without credentials.",
+        ],
+    },
 }
 
 
@@ -2375,9 +2392,9 @@ def resolve_active_check_flags(
     """Resolve the active-family contract at the scanner boundary.
 
     The API owns the full check-family registry. The scanner currently has
-    runnable active implementations for SQLi, XSS, and explicit gated BOLA, so
-    it fails closed for every other family instead of silently widening a
-    focused campaign.
+    runnable active implementations for SQLi, XSS, Auth, and explicit gated
+    BOLA, so it fails closed for every other family instead of silently widening
+    a focused campaign.
     """
     family = normalize_scanner_check_family(check_family)
     legacy_xss = bool(xss)
@@ -9543,6 +9560,53 @@ async def build_report(target: str,
                 dom_xss_decision.reason or "active_time_budget_exhausted",
             )
             print(f"[scanner] Skipping DOM XSS analysis: {dom_xss_decision.reason}", file=sys.stderr)
+
+        # Focused Auth Testing - read-only authenticated-vs-anonymous checks
+        # for claimed endpoints. This is explicit-only through check_family=auth
+        # so default broad scans do not reinterpret public endpoints as auth
+        # obligations.
+        auth_focused = focused_active_family_name == "auth"
+        if auth_focused and smart_mode and smart_succeeded and not public_only:
+            try:
+                if auth_session:
+                    try:
+                        await auth_session.refresh_if_needed()
+                    except Exception as e:
+                        print(f"[scanner] Auth refresh before focused auth tests failed: {e}", file=sys.stderr)
+                emit_progress("active_auth", 94, f"starting authentication checks on {len(endpoints)} endpoints")
+                auth_results = await smart_auth_access_test(
+                    base_url=base_url,
+                    endpoints=endpoints,
+                    auth_session=auth_session,
+                    max_endpoints=int(scan_budget.get("active_max_endpoints") or smart_bola_max_endpoints or 50),
+                    timeout=10,
+                )
+                active_block["smart_auth"] = auth_results
+                _append_endpoint_attempt_telemetry(active_block, auth_results.get("endpoint_attempts"))
+                emit_progress("active_auth", 94, "authentication checks complete")
+
+                for f in auth_results.get("findings") or []:
+                    evidence = dict(f.get("evidence") or {})
+                    nf = normalize_finding(
+                        "smart_auth",
+                        f.get("title", "Authentication access-control issue"),
+                        f.get("severity", "high"),
+                        evidence,
+                        f.get("cwe", "CWE-306"),
+                    )
+                    if f.get("confidence") is not None:
+                        nf["confidence"] = f["confidence"]
+                    report["findings"].append(nf)
+                if auth_results.get("findings"):
+                    print(f"[scanner] Focused auth: found {len(auth_results['findings'])} findings", file=sys.stderr)
+                else:
+                    print(
+                        f"[scanner] Focused auth: no findings (tested {auth_results.get('endpoints_analyzed', 0)} endpoints)",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                active_block["smart_auth_error"] = str(e)
+                print(f"[scanner] Focused auth error: {e}", file=sys.stderr)
 
         # Smart BOLA Testing - run in smart mode to detect authorization issues.
         # Focused BOLA batches are allowed through the otherwise broad

@@ -146,6 +146,11 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "xss"}'
 
+# Auth/access-control checks require primary auth context on the target.
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "auth"}'
+
 # High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target.
 curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
@@ -157,10 +162,11 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -d '{"endpoint_filter": "api", "batch_size": 100}'
 ```
 
-`check_family` currently supports `all`, `sqli`, `xss`, and gated `bola`. BOLA requires
-`exploit_depth: true`, primary auth, and second-user auth. `endpoint_filter: "api"` narrows a batch
-to API-like endpoints without changing target-wide defaults. Normal scan lists hide shard and ASM
-implementation rows by default; use `/targets/{target_id}/asm/activity` for ASM activity and
+`check_family` currently supports `all`, `sqli`, `xss`, credential-gated `auth`, and gated `bola`.
+Auth requires primary auth on the target. BOLA requires `exploit_depth: true`, primary auth, and
+second-user auth. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing
+target-wide defaults. Normal scan lists hide shard and ASM implementation rows by default; use
+`/targets/{target_id}/asm/activity` for ASM activity and
 `/scans?include_shards=true&include_internal=true` only for debugging.
 
 Use `/settings/automation` for compact safe defaults instead of hand-editing many scan knobs:

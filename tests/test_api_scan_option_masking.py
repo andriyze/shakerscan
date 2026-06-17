@@ -283,6 +283,14 @@ def test_asm_check_family_focuses_supported_scanner_flags():
     assert focused["asm_check_family"] == "sqli"
 
 
+def test_asm_check_family_focuses_auth_without_injection_flags():
+    focused = api_module._apply_asm_check_family({"scan_type": "smart", "xss": True, "sqli": True}, "auth")
+
+    assert focused["sqli"] is False
+    assert focused["xss"] is False
+    assert focused["asm_check_family"] == "auth"
+
+
 def test_asm_check_family_all_keeps_normal_active_mix():
     focused = api_module._apply_asm_check_family({"scan_type": "smart", "sqli": True}, "all")
 
@@ -296,7 +304,7 @@ def test_asm_check_family_rejects_registered_but_unrunnable_family():
 
 
 def test_asm_request_validation_rejects_unknown_family_with_allowed_list():
-    with pytest.raises(ValidationError, match="allowed families: all, sqli, xss, bola"):
+    with pytest.raises(ValidationError, match="allowed families: all, sqli, xss, bola, auth"):
         api_module.AsmImproveRequest(check_family="nosuch")
 
 
@@ -304,11 +312,13 @@ def test_asm_check_family_registry_endpoint_lists_runnable_and_planned_families(
     result = asyncio.run(api_module.asm_check_families())
     names = {family["name"]: family for family in result["families"]}
 
-    assert result["asm_focus_allowed"] == ["all", "sqli", "xss", "bola"]
+    assert result["asm_focus_allowed"] == ["all", "sqli", "xss", "bola", "auth"]
     assert names["sqli"]["runnable"] is True
     assert names["xss"]["runnable"] is True
     assert names["bola"]["runnable"] is True
     assert names["bola"]["requires_credentials"] is True
+    assert names["auth"]["runnable"] is True
+    assert names["auth"]["requires_credentials"] is True
     assert names["ssrf"]["risk_level"] == "high"
 
 
@@ -338,6 +348,21 @@ def test_asm_bola_family_requires_lab_policy_and_two_auth_contexts():
         "bola",
         {"scan_type": "smart", "auth_header": "Bearer u1", "user2_header": "Bearer u2"},
         exploit_depth=True,
+    )
+
+
+def test_asm_auth_family_requires_primary_credentials_only():
+    with pytest.raises(api_module.HTTPException, match="primary user credentials"):
+        api_module._enforce_asm_family_preconditions(
+            "auth",
+            {"scan_type": "smart"},
+            exploit_depth=False,
+        )
+
+    api_module._enforce_asm_family_preconditions(
+        "auth",
+        {"scan_type": "smart", "auth_header": "Bearer u1"},
+        exploit_depth=False,
     )
 
 
@@ -436,6 +461,26 @@ def test_ai_ops_router_sqli_focus_does_not_upgrade_to_lab():
         "method": "POST",
         "path": f"/targets/{target_id}/asm/improve",
         "body": {"check_family": "sqli"},
+    }
+
+
+def test_ai_ops_router_auth_focus_requires_primary_auth_context():
+    target_id = str(uuid.uuid4())
+    plan = api_module._build_ai_ops_router_plan(
+        api_module.AIOpsRouterRequest(
+            prompt="Retest anonymous access and authentication bypasses",
+            target_id=target_id,
+        )
+    )
+
+    assert plan["intent"] == "focused_asm_auth"
+    assert plan["safety_preset"] == "balanced"
+    assert plan["missing_inputs"] == ["primary_auth_context"]
+    assert plan["blast_radius"]["active_families"] == ["auth"]
+    assert plan["planned_api_call"] == {
+        "method": "POST",
+        "path": f"/targets/{target_id}/asm/improve",
+        "body": {"check_family": "auth"},
     }
 
 

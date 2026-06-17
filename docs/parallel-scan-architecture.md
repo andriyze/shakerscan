@@ -31,11 +31,11 @@ Every implementation task must verify the current state with search/tests before
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA. |
+| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS/BOLA. |
+| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -69,7 +69,7 @@ suppressed after the first shard per auth state.
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
 request-accurate budgets for internally discovered standalone scans; and more runnable focused
-families beyond SQLi/XSS/BOLA.
+families beyond SQLi/XSS/Auth/BOLA.
 
 ---
 
@@ -232,8 +232,9 @@ Baseline infra ─► Discovery (katana+browser) ─► Nuclei (staged) ─► P
 - **Checks:** `api/check_registry.py` is now the first registry contract for family metadata,
   API validation, ASM focused scheduling, and parallel family shard labels. Scanner internals still
   have legacy `build_report()` wiring, so the remaining work is migrating module execution to
-  registry iteration and adding runnable families beyond SQLi/XSS/BOLA. BOLA is runnable only as an
-  explicit gated ASM/API family, not an automatic parallel family lane.
+  registry iteration and adding more runnable families beyond SQLi/XSS/Auth/BOLA. Auth is runnable
+  only as an explicit credential-gated ASM/API family; BOLA is runnable only as an explicit Lab/deep
+  ASM/API family. Neither is an automatic parallel family lane.
 
 ---
 
@@ -565,8 +566,9 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
   retaining `coverage_allocation=static` and `COVERAGE_ALLOCATION_DEFAULT=static` as fallback
   controls.
 - **More focused families:** `coverage_family` dynamic allocation is shipped for broad/SQLi/XSS.
-  BOLA is explicit ASM/API only and intentionally excluded from automatic lanes. Add more lanes only
-  after the scanner registry can route those modules cleanly and each family has its own safety gate.
+  Auth and BOLA are explicit ASM/API only and intentionally excluded from automatic lanes. Add more
+  lanes only after the scanner registry can route those modules cleanly and each family has its own
+  safety gate.
 - **Rate-limit soak:** known-endpoint static shards and dynamic ASM/Full Coverage batches now reserve
   endpoint budget through shared Redis domain buckets before execution. Keep validating this under
   larger worker fleets and extend it to internally discovered standalone requests only once scanner

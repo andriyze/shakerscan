@@ -28,11 +28,11 @@ Every implementation task must verify the current state with search/tests before
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
 | Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA. |
+| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS/BOLA. |
+| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -85,7 +85,8 @@ Shipped pieces:
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 - `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and
   `include_internal=true` expose them for debugging.
-- ASM test/improve can request the currently supported focused active families: `sqli` and `xss`.
+- ASM test/improve can request the currently supported focused active families: `sqli`, `xss`,
+  credential-gated `auth`, and gated `bola`.
 
 ### Current Table Shape
 
@@ -157,9 +158,9 @@ Implemented:
 
 Still limited:
 
-- Per-endpoint scanner telemetry currently covers smart active SQLi/XSS/hash-route DOM XSS attempts
-  and focused BOLA attempt rows. Registry metadata now exists, but telemetry schemas and runnable
-  scanner integrations are still needed for other active families.
+- Per-endpoint scanner telemetry currently covers smart active SQLi/XSS/hash-route DOM XSS attempts,
+  focused Auth attempts, and focused BOLA attempt rows. Registry metadata now exists, but telemetry
+  schemas and runnable scanner integrations are still needed for other active families.
 - One-shot parallel `coverage` defaults to dynamic pull allocation. It feeds ASM inventory and
   campaign attempt ledgers by claiming campaign-scoped inventory through the ASM allocator; API/AI
   callers can force legacy static slices with `coverage_allocation=static`.
@@ -171,10 +172,11 @@ Still limited:
   as `endpoint_assignment_rollup` for context/fallback.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
-- Focused ASM batches support `sqli`, `xss`, and high-risk `bola` via registry-backed validation and
-  current scanner boundary wiring. BOLA requires `exploit_depth=true` plus primary and second-user
-  credentials on the target. Registered planned families such as `auth`, `ssrf`, `lfi`, `rce`, and
-  `business_logic` are rejected for ASM execution until their scanner integrations exist.
+- Focused ASM batches support `sqli`, `xss`, credential-gated `auth`, and high-risk `bola` via
+  registry-backed validation and current scanner boundary wiring. Auth requires primary credentials
+  on the target. BOLA requires `exploit_depth=true` plus primary and second-user credentials.
+  Registered planned families such as `ssrf`, `lfi`, `rce`, and `business_logic` are rejected for
+  ASM execution until their scanner integrations exist.
 
 ---
 
@@ -477,6 +479,8 @@ AI skills should map natural requests to these APIs, while respecting current ca
 - "Spend more budget on APIs" -> raise endpoint/test budget for the next campaign, not global defaults.
 - "Only retest SQLi/XSS tonight" -> focused family campaign over known inventory using those
   medium-risk supported families.
+- "Retest anonymous access/authentication bypasses" -> focused Auth campaign only when primary
+  credentials are configured; otherwise ask for the missing authorization context.
 - "Only retest BOLA tonight" -> focused BOLA campaign only when Lab/deep intent plus primary and
   second-user credentials are configured; otherwise ask for the missing authorization context rather
   than silently running unrelated active checks.
@@ -518,8 +522,9 @@ Implemented:
 Implemented in this pass:
 
 - Default `/scans` hides shard, ASM batch, and ASM recon rows unless internal flags are supplied.
-- ASM batches can request `check_family=sqli`, `check_family=xss`, or gated `check_family=bola`
-  where the current scanner already supports narrow active-family execution.
+- ASM batches can request `check_family=sqli`, `check_family=xss`, credential-gated
+  `check_family=auth`, or gated `check_family=bola` where the current scanner already supports
+  narrow active-family execution.
 - `api/check_registry.py` centralizes family metadata, ASM focused-family validation, UI/API
   discoverability, and parallel family shard labels. BOLA is runnable only through explicit
   Lab/deep plus two-auth preconditions; remaining planned/high-risk families fail closed instead of
@@ -535,8 +540,9 @@ Implemented in this pass:
 
 Remaining:
 
-- Migrate scanner `build_report()` module execution to registry iteration and add runnable focused
-  families beyond the current `sqli`, `xss`, and explicit gated `bola` paths.
+- Migrate scanner `build_report()` module execution to registry iteration and add further runnable
+  focused families beyond the current `sqli`, `xss`, credential-gated `auth`, and explicit gated
+  `bola` paths.
 
 ### Phase B — Attempt Ledger + Durable Leases
 
@@ -558,8 +564,8 @@ Implemented:
 
 Remaining:
 
-- Extend first-class telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused
-  BOLA.
+- Extend first-class telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS, focused
+  Auth, and focused BOLA.
 
 ### Phase C — Parallel Coverage Uses The Allocator
 
@@ -1205,9 +1211,9 @@ Shipped behavior:
 - Maps "what is still untested?" to `GET /targets/{id}/asm/gaps`.
 - Maps "spend more budget on APIs" to `POST /targets/{id}/asm/improve` with
   `endpoint_filter=api`, a larger one-shot `batch_size`, and no target-wide default changes.
-- Maps focused SQLi/XSS/BOLA requests to `POST /targets/{id}/asm/improve` with the matching
-  `check_family`; BOLA plans include `exploit_depth=true` and require primary plus second-user auth
-  context before execution.
+- Maps focused SQLi/XSS/Auth/BOLA requests to `POST /targets/{id}/asm/improve` with the matching
+  `check_family`; Auth plans require primary auth context, while BOLA plans include
+  `exploit_depth=true` and require primary plus second-user auth context before execution.
 - Returns `dry_run=true` by default for active, state-changing, or budget-increasing intents.
   Execution requires `execute=true`, explicit confirmations, and
   `AI_OPS_ROUTER_EXECUTE_ENABLED=true`.

@@ -11,7 +11,7 @@ import check_registry as r  # noqa: E402
 def test_registry_exposes_runnable_asm_focus_families():
     names = r.asm_focus_family_names()
 
-    assert names == ("all", "sqli", "xss", "bola")
+    assert names == ("all", "sqli", "xss", "bola", "auth")
     assert r.CHECK_REGISTRY_BY_NAME["sqli"].scanner_options == {
         "sqli": True,
         "xss": False,
@@ -27,6 +27,12 @@ def test_registry_exposes_runnable_asm_focus_families():
         "xss": False,
         "asm_check_family": "bola",
     }
+    assert r.CHECK_REGISTRY_BY_NAME["auth"].scanner_options == {
+        "sqli": False,
+        "xss": False,
+        "asm_check_family": "auth",
+    }
+    assert r.CHECK_REGISTRY_BY_NAME["auth"].requires_credentials is True
 
 
 def test_registry_gates_high_risk_families_by_runnable_state():
@@ -48,7 +54,7 @@ def test_validate_asm_focus_rejects_registered_but_unrunnable_family():
 
 
 def test_validate_asm_focus_rejects_unknown_family_with_allowed_list():
-    with pytest.raises(ValueError, match="allowed families: all, sqli, xss, bola"):
+    with pytest.raises(ValueError, match="allowed families: all, sqli, xss, bola, auth"):
         r.validate_asm_focus_family("nosuch")
 
 

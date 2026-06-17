@@ -8741,6 +8741,14 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
         family: str | None = None
         if "bola" in lowered or "idor" in lowered or "object authorization" in lowered:
             family = "bola"
+        elif (
+            "authentication" in lowered
+            or "auth bypass" in lowered
+            or "anonymous access" in lowered
+            or "unauthenticated" in lowered
+            or "access control" in lowered
+        ):
+            family = "auth"
         elif "sqli" in lowered or "sql injection" in lowered:
             family = "sqli"
         elif "xss" in lowered or "cross-site scripting" in lowered:
@@ -8760,6 +8768,10 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
                     missing.append("primary_auth_context")
                 if not _ai_ops_has_auth_context(request, "second_user"):
                     missing.append("second_user_auth_context")
+            elif family == "auth":
+                safety_preset = "balanced"
+                if not _ai_ops_has_auth_context(request, "primary"):
+                    missing.append("primary_auth_context")
             else:
                 safety_preset = "balanced"
             planned_call = _ai_ops_call("POST", f"/targets/{request.target_id or '<target_id>'}/asm/improve", body)

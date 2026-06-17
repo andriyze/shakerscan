@@ -537,6 +537,11 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
   -d '{"check_family": "sqli"}'
 
+# Auth/access-control checks require primary auth context on the target
+curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
+  -H "Content-Type: application/json" \
+  -d '{"check_family": "auth"}'
+
 # High-risk BOLA/IDOR requires Lab/deep intent and two auth contexts on the target
 curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
   -H "Content-Type: application/json" \
@@ -551,7 +556,7 @@ curl -X POST http://localhost:8080/targets/{target_id}/asm/improve \
 curl http://localhost:8080/targets/{target_id}/asm/activity
 ```
 
-Supported `check_family` values today: `all`, `sqli`, `xss`, and gated `bola`. Omit it for the normal active mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
+Supported `check_family` values today: `all`, `sqli`, `xss`, credential-gated `auth`, and gated `bola`. Omit it for the normal active mix. `endpoint_filter: "api"` narrows a batch to API-like endpoints without changing target-wide defaults. Auth requires primary auth on the target. BOLA requires `exploit_depth: true`, primary auth, and second-user auth. After queueing an ASM action, report the scan ID and `/scans/{scan_id}` link, then stop unless the user asks you to poll.
 
 ### AI Operations Router
 

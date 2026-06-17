@@ -54,6 +54,23 @@ def test_check_family_scope_marks_focused_bola():
     assert scope["legacy_flags"] == {"xss": False, "sqli": False}
 
 
+def test_check_family_scope_marks_focused_auth():
+    scope = scanner_mod.build_check_family_scope(
+        True,
+        active_xss=False,
+        active_sqli=False,
+        requested_family="auth",
+    )
+
+    assert scope["mode"] == "focused"
+    assert scope["focused"] is True
+    assert scope["focused_family"] == "auth"
+    assert scope["families"] == ["auth"]
+    assert scope["source"] == "check_family"
+    assert scope["requested_family"] == "auth"
+    assert scope["legacy_flags"] == {"xss": False, "sqli": False}
+
+
 def test_check_family_scope_marks_normal_active_mix():
     scope = scanner_mod.build_check_family_scope(True, active_xss=True, active_sqli=True)
 
@@ -93,6 +110,14 @@ def test_resolve_active_check_flags_accepts_bola_without_injection_flags():
     assert active_xss is False
     assert active_sqli is False
     assert family == "bola"
+
+
+def test_resolve_active_check_flags_accepts_auth_without_injection_flags():
+    active_xss, active_sqli, family = scanner_mod.resolve_active_check_flags(check_family="authentication")
+
+    assert active_xss is False
+    assert active_sqli is False
+    assert family == "auth"
 
 
 def test_resolve_active_check_flags_rejects_unsupported_family():
