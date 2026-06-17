@@ -165,11 +165,12 @@ crAPI. **All completed with zero shard failures.**
 - **Root cause:** `filter_reachable_worklist` only dropped a literal `404`. SPAs serve a 200 index
   shell for unknown routes; API frameworks return 500/401/403/405 under a prefix. Neither is 404.
 - **Fix (done):** learn each path-prefix's *soft-404 signature* (HTTP status + body size) by probing
-  implausible **decoy** paths, then drop a candidate when its response is a literal 404 **or** matches
-  its prefix's decoy signature (status equal + size within tolerance). This is a *differential* check,
-  so per-prefix variation is handled automatically (crAPI 404-at-root vs 401-under-`/identity`). Bias
-  stays conservative: any inconclusive probe keeps the endpoint; a status that differs from the decoy
-  (a real 401 where unknown→500) is kept. `api/asm_inventory.py` (`_probe_path_status`,
+  implausible **decoy** paths, then drop GET entries when their response is a literal 404 **or** matches
+  the prefix's decoy signature (status equal + size within tolerance). Non-GET entries on the same path
+  are kept because the probe is a safe GET and many routers return 404 for unsupported methods even when
+  a POST/PUT route exists. This is a *differential* check, so per-prefix variation is handled automatically
+  (crAPI 404-at-root vs 401-under-`/identity`). Bias stays conservative: any inconclusive probe keeps the
+  endpoint; a status that differs from the decoy (a real 401 where unknown→500) is kept. `api/asm_inventory.py` (`_probe_path_status`,
   `_path_prefix`, `_soft404_matches`, rewritten `filter_reachable_worklist`); env knobs
   `ASM_SOFT404_DETECT=0` (revert to literal-404), `ASM_SOFT404_SIZE_TOL_BYTES`.
   **Validated live on Juice Shop**: an 8-entry real+phantom worklist kept the 3 real endpoints + 1

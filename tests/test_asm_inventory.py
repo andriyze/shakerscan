@@ -53,11 +53,8 @@ def test_domain_rate_reservation_caps_at_positive_limit():
 
 
 def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
-    # Clean-404 server (honey-style): phantom paths (and decoys) -> a LITERAL 404,
-    # which means the path is not routed at all, so every method is dropped (a real
-    # method-specific endpoint answers GET with 405, not 404 -> kept). A real path is
-    # kept. Contrast test_filter_soft404_keeps_non_get_methods, where a soft-404 GET
-    # only drops the GET entry and preserves real POST/PUT on the same path.
+    # Clean-404 server (honey-style): a literal 404 proves the GET path is not
+    # reachable, but not that method-specific POST/PUT routes are absent.
     async def fake_status(base_url, path, auth_args, timeout):
         if path.startswith("/api/ai-redteam") or "shakerscan-probe" in path:
             return ("404", 9)
@@ -71,7 +68,11 @@ def test_filter_reachable_worklist_drops_404_paths(monkeypatch):
         "PUT /api/ai-redteam/tools.list",
     ]
     kept = asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {}))
-    assert kept == ["GET /rest/products/1?id=2"]
+    assert kept == [
+        "GET /rest/products/1?id=2",
+        'POST /api/ai-redteam/user_consent json:{"a":1}',
+        "PUT /api/ai-redteam/tools.list",
+    ]
 
 
 def test_filter_reachable_worklist_keeps_non_404(monkeypatch):
@@ -198,15 +199,18 @@ def test_filter_soft404_keeps_non_get_methods(monkeypatch):
     assert "PUT /api/login" in kept
 
 
-def test_filter_hard404_drops_all_methods(monkeypatch):
-    # A literal 404 means the path is not routed -> drop every method (a real
-    # method-specific endpoint answers GET with 405, which is kept, not dropped).
+def test_filter_hard404_keeps_non_get_methods(monkeypatch):
+    # Even a literal 404 is still evidence from a GET probe. Some routers return
+    # 404 for unsupported methods while a POST/PUT route exists, so preserve non-GET.
     async def fake_status(base_url, path, auth_args, timeout):
         return ("404", 9)
     monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
     monkeypatch.setattr(a, "_probe_path_status", fake_status)
     worklist = ["GET /ghost", "POST /ghost form:x=1", "DELETE /ghost"]
-    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == []
+    assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == [
+        "POST /ghost form:x=1",
+        "DELETE /ghost",
+    ]
 
 
 class _SweepConn:
@@ -300,9 +304,9 @@ def test_sweep_soft404_retires_get_rows_only(monkeypatch):
     assert soft_retire, "soft-404 retire must restrict to GET rows"
 
 
-def test_sweep_hard404_retires_all_methods(monkeypatch):
-    # Literal-404 paths: the path is not routed, so all methods are retired.
-    # The retire SQL must NOT restrict to a single method.
+def test_sweep_hard404_retires_get_rows_only(monkeypatch):
+    # Literal-404 paths are still based on a GET probe; method-specific non-GET
+    # routes may exist, so retire SQL must restrict to method='GET'.
     async def fake_status(base_url, path, auth_args, timeout):
         return ("404", 9)
     monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
@@ -310,8 +314,8 @@ def test_sweep_hard404_retires_all_methods(monkeypatch):
     conn = _SweepConn(["/x", "/y"])
     res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
     assert res["hard_404"] == 2 and res["soft_404"] == 0
-    all_method_retire = [q for q, _ in conn.fetchvals if "method = 'GET'" not in q]
-    assert all_method_retire, "hard-404 retire must cover all methods"
+    get_method_retire = [q for q, _ in conn.fetchvals if "method = 'GET'" in q]
+    assert get_method_retire, "hard-404 retire must restrict to GET rows"
 
 
 def test_normalize_path_templates_volatile_ids():

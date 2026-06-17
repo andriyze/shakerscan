@@ -584,9 +584,9 @@ async def _learn_not_found_signatures(
 def _reachability_verdict(probe: tuple[str, int], not_found_for_prefix: list[tuple[str, int]]) -> str:
     """Classify a GET probe into a method-aware verdict:
 
-    - ``hard_404``    — a literal 404: the path is not routed, so it does not exist
-      for ANY method (a real method-specific endpoint answers GET with 405, not 404).
-      Safe to drop/retire every method of the path.
+    - ``hard_404``    — a literal 404 to a safe GET probe. This proves the GET
+      entry is not reachable, but does not prove a method-specific POST/PUT/PATCH
+      route is absent; many routers return 404 for unsupported methods.
     - ``soft_404``    — matches the app's learned not-found signature (500/SPA-200/etc).
       This is GET-SPECIFIC evidence: a real POST/PUT/PATCH/DELETE endpoint may return
       the app's generic page to a GET. Only the GET entry should be dropped/retired;
@@ -680,7 +680,10 @@ async def filter_reachable_worklist(
             continue
         verdict = _reachability_verdict(status.get(path, ("ERR", -1)), not_found.get(_path_prefix(path), []))
         if verdict == "hard_404":
-            continue  # path not routed -> drop every method
+            # GET-specific evidence: a method-specific API route may return 404
+            # when probed with GET. Drop only GET worklist entries.
+            kept.extend(e for e in group if not _entry_is_get(e))
+            continue
         if verdict == "soft_404":
             # GET-specific evidence: drop only GET entries, keep POST/PUT/etc so a
             # real non-GET endpoint isn't removed because GET hit the app's error page.
@@ -753,11 +756,11 @@ async def sweep_endpoint_reachability(
         asyncio.gather(*(_probe(p) for p in paths)),
     )
 
-    # A GET probe is method-aware (see _reachability_verdict): a literal 404 means
-    # the path is not routed (drop every method); a soft-404 is GET-specific (only
-    # the GET row is affected, so a real POST/PUT endpoint survives).
+    # A GET probe is method-aware (see _reachability_verdict). Both literal and
+    # soft 404 evidence are GET-specific: many routers return 404 when a real
+    # POST/PUT/PATCH route is called with GET. Only GET rows are affected.
     reachable: list[tuple[str, int | None]] = []   # path alive -> reset streak, all methods
-    hard: list[tuple[str, int | None]] = []        # not routed -> bump/retire all methods
+    hard: list[tuple[str, int | None]] = []        # literal GET 404 -> bump/retire GET rows
     soft: list[tuple[str, int | None]] = []        # GET-only not-found -> bump/retire GET rows
     for path in paths:
         st = status.get(path, ("ERR", -1))
@@ -817,9 +820,9 @@ async def sweep_endpoint_reachability(
             """,
             tid, [p for p, _ in reachable], [c for _, c in reachable],
         )
-    await _bump(hard, get_only=False)
+    await _bump(hard, get_only=True)
     await _bump(soft, get_only=True)
-    retired = await _retire([p for p, _ in hard], get_only=False) + \
+    retired = await _retire([p for p, _ in hard], get_only=True) + \
         await _retire([p for p, _ in soft], get_only=True)
 
     return {
