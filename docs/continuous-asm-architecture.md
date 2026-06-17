@@ -30,6 +30,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
+| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -541,8 +542,9 @@ Implemented:
   scan rows back to durable campaign records.
 - Added endpoint lease fields: `lease_owner`, `lease_expires_at`, `attempt_count`, and a lease reaper
   that returns expired work to `stale` without marking it clean.
-- Added `asm_endpoint_attempts` keyed by endpoint, scan, campaign, worker, auth state, status,
-  started/completed time, parameter counts, finding IDs, error summary, and scanner telemetry JSON.
+- Added `asm_endpoint_attempts` keyed by endpoint, check family, scan, campaign, worker, auth state,
+  status, started/completed time, parameter counts, finding IDs, error summary, and scanner
+  telemetry JSON.
 - Record attempt rows for `auth_missing`, partial/timeout, completed, and error ASM batch outcomes.
 - Preserve scanner-proven smart active endpoint attempts when present; completed telemetry can promote
   only those endpoint IDs to `tested`, while missing/partial telemetry keeps rows stale.
@@ -569,8 +571,8 @@ Implemented:
 - Scan Detail renders those campaign endpoint facts in a compact Full Coverage Rollup card on
   parent scans when attempt-ledger coverage is present.
 - Advanced API/AI callers can use `shard_strategy=coverage_family` to run discover-once recon, then
-  multiply static endpoint buckets by broad/SQLi/XSS lanes. This stays off the dynamic campaign
-  allocator until `asm_endpoint_attempts` can identify endpoint+family attempts.
+  multiply coverage by broad/SQLi/XSS lanes. Dynamic mode uses the campaign allocator with
+  endpoint+family attempt identity; `coverage_allocation=static` keeps the static bucket fallback.
 
 Implemented as default:
 
@@ -578,12 +580,14 @@ Implemented as default:
   slices; `coverage_allocation=static` forces the legacy path.
 - Dynamic workers claim through `claim_test_batch(campaign_only=true)`, keep zero-rediscovery
   scanner execution, write parent-linked attempt rows, and let parent merge own final findings.
+  `coverage_family` dynamic workers claim the same campaign inventory separately for `all`, `sqli`,
+  and `xss` attempt families, so one family lane cannot prematurely satisfy another.
 
 Remaining:
 
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
-- Add family-aware attempt identity before `coverage_family` can use dynamic campaign allocation.
+- Add more focused family lanes only after the scanner registry can route those modules cleanly.
 - Parent scan detail now shows per-shard endpoint contribution, aggregate auth/family rollups, and
   runtime-versus-active-cap budget view from child result summaries. Keep extending these rollups
   only when new scanner telemetry fields are added.

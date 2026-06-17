@@ -429,6 +429,7 @@ CREATE TABLE asm_endpoint_attempts (
     campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
     worker_id TEXT,
     auth_state TEXT NOT NULL DEFAULT 'anonymous',
+    check_family TEXT NOT NULL DEFAULT 'all',
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     status TEXT NOT NULL,                      -- completed|partial|timeout|auth_missing|rate_limited|error
@@ -443,6 +444,7 @@ CREATE TABLE asm_endpoint_attempts (
 CREATE INDEX idx_asm_endpoint_attempts_endpoint ON asm_endpoint_attempts(endpoint_id, started_at DESC);
 CREATE INDEX idx_asm_endpoint_attempts_scan ON asm_endpoint_attempts(scan_id) WHERE scan_id IS NOT NULL;
 CREATE INDEX idx_asm_endpoint_attempts_campaign ON asm_endpoint_attempts(campaign_id, status);
+CREATE INDEX idx_asm_endpoint_attempts_campaign_family ON asm_endpoint_attempts(campaign_id, check_family, status);
 
 -- AI targets
 CREATE INDEX idx_ai_targets_active ON ai_targets(is_active) WHERE is_active = true;

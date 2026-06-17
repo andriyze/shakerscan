@@ -787,7 +787,7 @@ def plan_coverage_family_shards(
     )
     notes.append(
         "coverage_family: static endpoint buckets multiplied by broad/focused family lanes; "
-        "dynamic allocator disabled until the attempt ledger is family-aware"
+        "use coverage_allocation=dynamic for allocator-backed endpoint+family pulls"
     )
     notes.append("coverage_family: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
     return ParallelPlan(strategy="coverage_family", shards=shards, notes=notes)
@@ -898,6 +898,100 @@ def plan_dynamic_coverage_shards(
         )
         shards.append(ShardSpec(index=i, label=f"coverage-dynamic[{i}]", options=opts))
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
+
+
+def plan_dynamic_coverage_family_shards(
+    parent_options: dict[str, Any],
+    endpoint_count: int,
+    *,
+    auth_state_count: int = 1,
+    notes: list[str] | None = None,
+) -> ParallelPlan:
+    """Plan pull-based coverage workers for broad plus focused family lanes."""
+    notes = notes if notes is not None else []
+    batch_size = _coverage_dynamic_batch_size(parent_options)
+    auth_scoped_total = max(0, int(endpoint_count or 0)) * max(1, int(auth_state_count or 1))
+    if auth_scoped_total < 1:
+        notes.append("coverage_family dynamic allocation requested but no endpoints were harvested")
+        return ParallelPlan(strategy="coverage_family", shards=[], notes=notes)
+
+    lanes: list[tuple[str, str, dict[str, Any]]] = [("broad", "all", {})]
+    lanes.extend((spec.name, spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    try:
+        max_batches = int(parent_options.get("coverage_dynamic_max_batches") or COVERAGE_MAX_DYNAMIC_BATCHES)
+    except (TypeError, ValueError):
+        max_batches = COVERAGE_MAX_DYNAMIC_BATCHES
+    max_batches = max(1, min(COVERAGE_MAX_DYNAMIC_BATCHES, max_batches))
+    if max_batches < len(lanes):
+        selected_lane_count = max(1, max_batches)
+        dropped = [name for name, _family, _opts in lanes[selected_lane_count:]]
+        notes.append(
+            f"coverage_family dynamic: shard cap leaves {selected_lane_count}/{len(lanes)} lane(s); "
+            f"dropped {', '.join(dropped)}"
+        )
+        lanes = lanes[:selected_lane_count]
+
+    import math
+
+    batches_per_lane = max(1, min(math.ceil(auth_scoped_total / batch_size), max_batches // len(lanes)))
+    planned_attempts = batches_per_lane * len(lanes) * batch_size
+    expected_attempts = auth_scoped_total * len(lanes)
+    if planned_attempts < expected_attempts:
+        notes.append(
+            f"coverage_family dynamic allocation capped at {batches_per_lane} batch(es) x "
+            f"{len(lanes)} lane(s) x {batch_size}; raise coverage_dynamic_max_batches "
+            "or lower coverage_dynamic_batch_size for full fan-out"
+        )
+    notes.append(
+        f"coverage_family: dynamic campaign allocation with {batches_per_lane * len(lanes)} "
+        f"pull worker(s), batch_size={batch_size}, endpoint_family_attempts={expected_attempts}"
+    )
+
+    shards: list[ShardSpec] = []
+    for batch_index in range(batches_per_lane):
+        for lane_name, attempt_family, lane_options in lanes:
+            opts = _base_child_options(parent_options)
+            opts["coverage_allocation"] = "dynamic"
+            opts["coverage_dynamic_worker"] = True
+            opts["coverage_dynamic_batch_size"] = batch_size
+            opts["coverage_dynamic_campaign_only"] = True
+            opts["coverage_stale_days"] = 0
+            opts["coverage_attempt_family"] = attempt_family
+            opts["coverage_family_aware"] = True
+            opts["focused_endpoints_only"] = True
+            opts["zero_rediscovery"] = True
+            opts["skip_global_checks"] = True
+            opts["no_early_stop"] = True
+            if lane_options:
+                opts.update(lane_options)
+                opts["thorough_params"] = True
+                if (opts.get("budget_profile") or "balanced") in ("fast", "balanced"):
+                    opts["budget_profile"] = "thorough"
+            _merge_custom_budget_defaults(
+                opts,
+                {
+                    "max_urls": 200,
+                    "browser_max_pages": 0,
+                    "browser_max_depth": 1,
+                    "discovery_depth": 1,
+                    "api_probe_limit": 0,
+                    "param_discovery_url_limit": 0,
+                    "param_discovery_max_params": 0,
+                    "nuclei_max_targets": 0,
+                    "active_max_endpoints": batch_size,
+                    "active_max_seconds": _coverage_active_seconds(parent_options, batch_size),
+                    "active_params_per_endpoint": 8,
+                    "smart_bola_max_endpoints": batch_size,
+                },
+            )
+            shards.append(
+                ShardSpec(
+                    index=len(shards),
+                    label=f"coverage-dynamic[{batch_index}]:{lane_name}",
+                    options=opts,
+                )
+            )
+    return ParallelPlan(strategy="coverage_family", shards=shards, notes=notes)
 
 
 def _plan_scope(

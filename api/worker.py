@@ -3946,6 +3946,7 @@ async def _record_endpoint_telemetry_attempts(
     campaign_id: str | None = None,
     worker_id: str | None = None,
     auth_state: str = 'anonymous',
+    check_family: str = 'all',
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
     source: str,
@@ -3979,6 +3980,7 @@ async def _record_endpoint_telemetry_attempts(
             campaign_id=campaign_id,
             worker_id=worker_id,
             auth_state=auth_state,
+            check_family=check_family,
             started_at=started_at,
             completed_at=completed_at,
             status=status,
@@ -4016,8 +4018,16 @@ async def _create_full_coverage_campaign(
     harvested_count: int,
     coverage_auth_states: list[str],
     allocation_mode: str,
+    strategy: str = 'coverage',
+    check_families: list[str] | None = None,
 ) -> str:
     custom_budget = options.get('custom_budget') if isinstance(options.get('custom_budget'), dict) else {}
+    normalized_strategy = str(strategy or 'coverage').strip().lower()
+    families = (
+        [asm_inventory.normalize_check_family(f) for f in check_families]
+        if check_families
+        else (['all', 'sqli', 'xss'] if normalized_strategy == 'coverage_family' else ['all'])
+    )
     return await asm_inventory.create_campaign(
         conn,
         target_id,
@@ -4035,14 +4045,19 @@ async def _create_full_coverage_campaign(
             'coverage_max_shards': options.get('coverage_max_shards'),
             'active_worklist_max': custom_budget.get('active_worklist_max'),
             'allocation_mode': allocation_mode,
+            'expected_attempts': harvested_count * max(1, len(coverage_auth_states or ['anonymous'])) * len(families),
         },
         deep_budget={
             'exploit_depth': bool(options.get('exploit_depth')),
             'custom_budget': custom_budget,
         },
-        check_families=['all'],
+        check_families=families,
         auth_states=coverage_auth_states,
-        metadata_json={'parallel_strategy': 'coverage', 'coverage_allocation': allocation_mode},
+        metadata_json={
+            'parallel_strategy': normalized_strategy,
+            'coverage_allocation': allocation_mode,
+            'family_aware_attempts': normalized_strategy == 'coverage_family',
+        },
     )
 
 
@@ -4116,28 +4131,30 @@ async def process_scan_plan_job(job_data: dict):
             list(options.get('custom_endpoints') or []) + harvested
         )
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon", flush=True)
-        coverage_allocation = (
-            'static'
-            if requested_strategy == 'coverage_family'
-            else parallel_scan.coverage_allocation_mode(options)
-        )
-        if requested_strategy == 'coverage_family' and str(options.get('coverage_allocation') or '').lower() == 'dynamic':
-            print(
-                f"[{parent_id[:8]}] coverage_family: dynamic allocation disabled; "
-                "using static slices until attempt ledger is family-aware",
-                flush=True,
-            )
+        coverage_allocation = parallel_scan.coverage_allocation_mode(options)
         coverage_auth_states = (
             parallel_scan.available_auth_states(options)
             if options.get('auth_state_shards')
             else [asm_inventory.auth_state_from_options(options)]
         )
-        if requested_strategy == 'coverage' and coverage_allocation == 'dynamic' and target_id and harvested:
-            planned = parallel_scan.plan_dynamic_coverage_shards(
-                options,
-                len(harvested),
-                auth_state_count=len(coverage_auth_states),
+        if coverage_allocation == 'dynamic' and target_id and harvested:
+            planned = (
+                parallel_scan.plan_dynamic_coverage_family_shards(
+                    options,
+                    len(harvested),
+                    auth_state_count=len(coverage_auth_states),
+                )
+                if requested_strategy == 'coverage_family'
+                else parallel_scan.plan_dynamic_coverage_shards(
+                    options,
+                    len(harvested),
+                    auth_state_count=len(coverage_auth_states),
+                )
             )
+            planned_families = sorted({
+                asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
+                for s in planned.shards
+            }) if requested_strategy == 'coverage_family' else ['all']
             async with db_pool.acquire() as conn:
                 precreated_campaign_id = await _create_full_coverage_campaign(
                     conn,
@@ -4148,6 +4165,8 @@ async def process_scan_plan_job(job_data: dict):
                     harvested_count=len(harvested),
                     coverage_auth_states=coverage_auth_states,
                     allocation_mode='dynamic',
+                    strategy=requested_strategy,
+                    check_families=planned_families,
                 )
         # Continuous ASM: the recon worklist is the richest endpoint source —
         # persist the whole thing into the per-target inventory (docs §16).
@@ -4175,11 +4194,19 @@ async def process_scan_plan_job(job_data: dict):
                 )
             except Exception as e:
                 print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
-        if requested_strategy == 'coverage' and coverage_allocation == 'dynamic' and target_id and harvested:
-            plan = parallel_scan.plan_dynamic_coverage_shards(
-                options,
-                len(harvested),
-                auth_state_count=len(coverage_auth_states),
+        if coverage_allocation == 'dynamic' and target_id and harvested:
+            plan = (
+                parallel_scan.plan_dynamic_coverage_family_shards(
+                    options,
+                    len(harvested),
+                    auth_state_count=len(coverage_auth_states),
+                )
+                if requested_strategy == 'coverage_family'
+                else parallel_scan.plan_dynamic_coverage_shards(
+                    options,
+                    len(harvested),
+                    auth_state_count=len(coverage_auth_states),
+                )
             )
         elif requested_strategy == 'coverage_family':
             coverage_allocation = 'static'
@@ -4229,13 +4256,19 @@ async def process_scan_plan_job(job_data: dict):
     # resolved strategy on the parent options so the merge can report it.
     parent_options = dict(options)
     parent_options['parallel_strategy'] = plan.strategy
-    if plan.strategy == 'coverage':
+    if plan.strategy in {'coverage', 'coverage_family'}:
         parent_options['coverage_allocation'] = coverage_allocation
-    elif plan.strategy == 'coverage_family':
-        parent_options['coverage_allocation'] = 'static'
+        if harvested and coverage_auth_states:
+            planned_families = {
+                asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
+                for s in plan.shards
+            } if plan.strategy == 'coverage_family' and coverage_allocation == 'dynamic' else {'all'}
+            parent_options['coverage_check_families'] = sorted(planned_families)
+            family_multiplier = max(1, len(planned_families))
+            parent_options['coverage_expected_attempts'] = len(harvested) * max(1, len(coverage_auth_states)) * family_multiplier
     async with db_pool.acquire() as conn:
         campaign_id = precreated_campaign_id
-        if plan.strategy == 'coverage' and target_id:
+        if plan.strategy in {'coverage', 'coverage_family'} and coverage_allocation == 'dynamic' and target_id:
             if not coverage_auth_states:
                 coverage_auth_states = (
                     parallel_scan.available_auth_states(options)
@@ -4243,15 +4276,21 @@ async def process_scan_plan_job(job_data: dict):
                     else [asm_inventory.auth_state_from_options(options)]
                 )
             if not campaign_id:
+                planned_families = sorted({
+                    asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
+                    for s in plan.shards
+                }) if plan.strategy == 'coverage_family' else ['all']
                 campaign_id = await _create_full_coverage_campaign(
                     conn,
                     target_id=target_id,
                     parent_scan_id=parent_id,
                     options=options,
                     shard_count=plan.shard_count,
-                    harvested_count=len(harvested) if requested_strategy == 'coverage' else 0,
+                    harvested_count=len(harvested) if requested_strategy in {'coverage', 'coverage_family'} else 0,
                     coverage_auth_states=coverage_auth_states,
                     allocation_mode=coverage_allocation,
+                    strategy=plan.strategy,
+                    check_families=planned_families,
                 )
             parent_options['campaign_id'] = campaign_id
         update_result = await conn.execute("""
@@ -4303,6 +4342,7 @@ async def process_scan_plan_job(job_data: dict):
                 'batch_size': shard.options.get('coverage_dynamic_batch_size') or options.get('coverage_dynamic_batch_size') or options.get('coverage_per_shard_cap') or parallel_scan.COVERAGE_DYNAMIC_BATCH_SIZE,
                 'stale_days': shard.options.get('coverage_stale_days', 0),
                 'exploit_depth': bool(options.get('exploit_depth')),
+                'check_family': shard.options.get('coverage_attempt_family') or shard.options.get('asm_check_family') or 'all',
                 'campaign_only': bool(shard.options.get('coverage_dynamic_campaign_only')),
                 'finish_campaign_on_complete': False,
                 'coverage_dynamic_worker': bool(shard.options.get('coverage_dynamic_worker')),
@@ -4715,17 +4755,24 @@ async def process_scan_merge_job(job_data: dict):
     # reports carry per-endpoint telemetry. Legacy/no-telemetry completed
     # children are recorded as partial, never completed, so coverage cannot be
     # inflated by a batch-level success.
-    if campaign_id and target_id and strategy == 'coverage':
+    if campaign_id and target_id and strategy in {'coverage', 'coverage_family'}:
         try:
             async with db_pool.acquire() as conn:
                 expected_attempts = 0
                 dynamic_coverage = str(parent_options.get('coverage_allocation') or '').strip().lower() == 'dynamic'
+                family_aware = strategy == 'coverage_family'
+                expected_total = parent_options.get('coverage_expected_attempts') if dynamic_coverage else None
                 for ch in children:
                     cres = _as_report_dict(ch['result'])
                     child_options = _as_report_dict(ch['options']) or {}
                     endpoints = child_options.get('custom_endpoints') or []
                     if not isinstance(endpoints, list):
                         endpoints = []
+                    attempt_family = asm_inventory.normalize_check_family(
+                        child_options.get('coverage_attempt_family')
+                        or child_options.get('asm_check_family')
+                        or 'all'
+                    )
                     if not endpoints:
                         continue
                     expected_attempts += len(endpoints)
@@ -4745,6 +4792,7 @@ async def process_scan_merge_job(job_data: dict):
                                 campaign_id=campaign_id,
                                 worker_id=None,
                                 auth_state=auth_state,
+                                check_family=attempt_family,
                                 started_at=ch['started_at'],
                                 completed_at=ch['completed_at'] or completed_at,
                                 source='parallel_coverage_merge',
@@ -4771,6 +4819,7 @@ async def process_scan_merge_job(job_data: dict):
                                 campaign_id=campaign_id,
                                 worker_id=None,
                                 auth_state=auth_state,
+                                check_family=attempt_family,
                                 started_at=ch['started_at'],
                                 completed_at=ch['completed_at'] or completed_at,
                                 status='partial',
@@ -4823,6 +4872,7 @@ async def process_scan_merge_job(job_data: dict):
                         campaign_id=campaign_id,
                         worker_id=None,
                         auth_state=auth_state,
+                        check_family=attempt_family,
                         started_at=ch['started_at'],
                         completed_at=ch['completed_at'] or completed_at,
                         status=attempt_status,
@@ -4843,7 +4893,9 @@ async def process_scan_merge_job(job_data: dict):
                 campaign_coverage = await asm_inventory.campaign_attempt_summary(
                     conn,
                     campaign_id,
-                    expected_total=None if dynamic_coverage else expected_attempts,
+                    expected_total=int(expected_total or 0) if dynamic_coverage and expected_total else expected_attempts,
+                    check_families=parent_options.get('coverage_check_families') if family_aware else None,
+                    family_aware=family_aware,
                 )
                 if _apply_campaign_coverage_rollup(merged, campaign_coverage):
                     filepath = save_result_file(merged, parent_job_id)
@@ -4913,6 +4965,12 @@ async def process_exploit_batch_job(job_data: dict):
     exploit_depth = bool(job_data.get('exploit_depth'))
     coverage_dynamic_worker = bool(options.get('coverage_dynamic_worker') or job_data.get('coverage_dynamic_worker'))
     campaign_only = bool(job_data.get('campaign_only') or options.get('coverage_dynamic_campaign_only'))
+    check_family = asm_inventory.normalize_check_family(
+        job_data.get('check_family')
+        or options.get('coverage_attempt_family')
+        or options.get('asm_check_family')
+        or 'all'
+    )
     finish_campaign_on_complete = bool(job_data.get('finish_campaign_on_complete', not bool(parent_id)))
     worker_id = os.environ.get('HOSTNAME') or os.environ.get('WORKER_ID') or f"worker:{job_id[:8]}"
     r = get_redis()
@@ -5011,6 +5069,7 @@ async def process_exploit_batch_job(job_data: dict):
                 lease_owner=f"{worker_id}:{job_id}",
                 campaign_id=campaign_id,
                 campaign_only=campaign_only,
+                check_family=check_family,
             )
     except Exception as e:
         print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)
@@ -5043,7 +5102,7 @@ async def process_exploit_batch_job(job_data: dict):
     endpoint_ids = [c['id'] for c in claimed]
     print(
         f"[asm {job_id[:8]}] testing {len(endpoints)} inventory endpoints "
-        f"(auth_state={auth_state}, exploit_depth={exploit_depth})",
+        f"(auth_state={auth_state}, check_family={check_family}, exploit_depth={exploit_depth})",
         flush=True,
     )
 
@@ -5073,6 +5132,7 @@ async def process_exploit_batch_job(job_data: dict):
                     campaign_id=campaign_id,
                     worker_id=worker_id,
                     auth_state=auth_state,
+                    check_family=check_family,
                     started_at=now,
                     completed_at=completed_at,
                     status='auth_missing',
@@ -5224,6 +5284,7 @@ async def process_exploit_batch_job(job_data: dict):
                                 campaign_id=campaign_id,
                                 worker_id=worker_id,
                                 auth_state=auth_state,
+                                check_family=check_family,
                                 started_at=now,
                                 completed_at=completed_at,
                                 source='dynamic_full_coverage_batch' if coverage_dynamic_worker else 'asm_exploit_batch',
@@ -5248,6 +5309,7 @@ async def process_exploit_batch_job(job_data: dict):
                                 campaign_id=campaign_id,
                                 worker_id=worker_id,
                                 auth_state=auth_state,
+                                check_family=check_family,
                                 started_at=now,
                                 completed_at=completed_at,
                                 status='partial',
@@ -5275,6 +5337,7 @@ async def process_exploit_batch_job(job_data: dict):
                             campaign_id=campaign_id,
                             worker_id=worker_id,
                             auth_state=auth_state,
+                            check_family=check_family,
                             started_at=now,
                             completed_at=completed_at,
                             status='timeout' if meta.get('timed_out') else 'partial',
@@ -5300,6 +5363,7 @@ async def process_exploit_batch_job(job_data: dict):
                             campaign_id=campaign_id,
                             worker_id=worker_id,
                             auth_state=auth_state,
+                            check_family=check_family,
                             started_at=now,
                             completed_at=completed_at,
                             status='partial',
@@ -5331,6 +5395,7 @@ async def process_exploit_batch_job(job_data: dict):
                         campaign_id=campaign_id,
                         worker_id=worker_id,
                         auth_state=auth_state,
+                        check_family=check_family,
                         started_at=now,
                         completed_at=completed_at,
                         status='error',

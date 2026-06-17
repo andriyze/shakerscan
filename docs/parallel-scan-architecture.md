@@ -33,6 +33,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
+| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; add new runnable families only after registry-driven scanner execution lands. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
@@ -46,7 +47,7 @@ Every implementation task must verify the current state with search/tests before
 - **Parent → plan → shard → merge orchestration** on the existing Redis queue. New job types `scan_plan` / `scan_shard` / `scan_merge` routed in `api/worker.py::process_job`. Planner in `api/parallel_scan.py`.
 - **DB:** `scans.parent_scan_id`, `scan_role`, `shard_index`, `shard_count` (+ `idx_scans_parent`), in `db/init.sql` and `run_schema_migrations()`.
 - **API:** `POST /scans` accepts `options.parallel`, `options.shards`, `options.shard_strategy`. Omitted `options.parallel` now follows `/settings/scan-execution` auto-sharding policy; explicit `parallel:false` forces standalone and explicit `parallel:true` forces a parent scan. `GET /scans/{id}` returns a `shard_rollup` + per-shard list for parents. Shard rows are hidden from `GET /scans` by default (`include_shards=true` to show); ASM batch/recon implementation rows are also hidden by default (`include_internal=true` to show).
-- **Four strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15), and `coverage_family` (advanced API/AI strategy: static endpoint buckets multiplied by broad/SQLi/XSS lanes). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All five (`auto`/`scope`/`family`/`coverage`/`coverage_family`) are accepted by `options.shard_strategy` and `/settings/scan-execution`. The New Scan UI exposes the simple **Full Coverage** path and keeps `coverage_family` out of the primary controls.
+- **Four strategies:** `scope` (partition `custom_endpoints` across shards with small per-shard discovery/active budgets — real speed-up), `family` (broad + deeper SQLi/XSS focused shards — more coverage/budget), `coverage` (a discover-once recon harvests the full endpoint worklist, then partitions it across auto-sized shards to test the whole target — see §15), and `coverage_family` (advanced API/AI strategy: broad/SQLi/XSS lanes over the full endpoint worklist, with dynamic campaign allocation by default and static buckets as fallback). `auto` picks scope when ≥2 endpoints are present, else family; `coverage` is explicit. All five (`auto`/`scope`/`family`/`coverage`/`coverage_family`) are accepted by `options.shard_strategy` and `/settings/scan-execution`. The New Scan UI exposes the simple **Full Coverage** path and keeps `coverage_family` out of the primary controls.
 - **Barrier + merge:** Redis SET-NX guarded `reconcile_parallel_parent`; last shard to reach all-terminal enqueues the merge at the front of the scan queue so completed parents finalize before more shard work starts. Stale checker exempts parents and reconciles when a shard is failed (robust to crashed shards). Merge dedupes the finding union (canonical fingerprint), recomputes attack chains over the union, persists findings under the parent, computes a conservative aggregate score, queues auto-retests once.
 - **Full Coverage campaigns:** `coverage` parents create a `full_coverage` `scan_campaigns` row, link parent and child scan rows through `campaign_id`, and `scan_merge` writes `asm_endpoint_attempts`. Dynamic allocation is the default: the recon harvest is upserted into campaign-scoped inventory and child workers claim endpoint batches through the ASM allocator. API/AI callers can force legacy static slices with `coverage_allocation=static`, and operators can set `COVERAGE_ALLOCATION_DEFAULT=static` as a rollback default. New child reports use scanner-proven `active_checks.endpoint_attempts`; old/no-telemetry static reports keep the legacy conservative assigned-slice fallback as partial attempts. Parent reports overlay `smart_coverage.endpoints` from campaign attempt-ledger facts when they exist. Coverage merge still does not promote endpoint `test_status`.
 - **Shard concurrency guard:** child shard jobs acquire a Redis slot keyed by parent scan before marking themselves running. The default cap is `PARALLEL_SHARD_MAX_PER_PARENT=4`; API/AI callers can override per scan with `options.shard_concurrency` up to the hard cap. This keeps high-budget coverage scans from overwhelming smaller targets while still allowing large fleets to run many different parents.
@@ -66,7 +67,7 @@ suppressed after the first shard per auth state.
 
 **Still deferred (Phase 2):** full `build_report()` module iteration from the first-class check
 registry; deeper in-scanner cooperative cancellation checkpoints between long active-check loops;
-fleet-wide rate limits, and family-aware attempt-ledger identity before dynamic `coverage_family`.
+fleet-wide rate limits; and more runnable focused families beyond SQLi/XSS.
 
 ---
 
@@ -119,9 +120,9 @@ Performance expectations:
   set `coverage_allocation=static` for the legacy round-robin slice path, or tune dynamic fan-out
   with `coverage_dynamic_batch_size` and `coverage_dynamic_max_batches`.
 - **Hybrid endpoint x family depth:** API/AI callers can set `shard_strategy=coverage_family`
-  to run the same discover-once recon, then split static endpoint buckets into broad, SQLi-focused,
-  and XSS-focused lanes. This deliberately forces static slices because the current ASM attempt
-  ledger is endpoint-scoped, not endpoint+family-scoped.
+  to run the same discover-once recon, then split work into broad, SQLi-focused, and XSS-focused
+  lanes. With dynamic allocation, each lane claims campaign-scoped endpoint batches and records
+  endpoint+family attempt rows. `coverage_allocation=static` remains the rollback path.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
@@ -546,17 +547,17 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 5. **Exploit-depth mode.** `exploit_depth` disables early stop and raises proof caps so
    confirmed findings get driven further instead of stopping after a few examples.
 6. **Telemetry-backed attempt ledger.** Smart active endpoint attempts are persisted into the
-   Full Coverage campaign ledger per endpoint when child reports include telemetry. Parent reports
-   use those attempt facts for endpoint coverage rollups while still keeping endpoint status
-   promotion out of coverage merge.
+   Full Coverage campaign ledger per endpoint, or per endpoint+family for `coverage_family`, when
+   child reports include telemetry. Parent reports use those attempt facts for endpoint coverage
+   rollups while still keeping endpoint status promotion out of coverage merge.
 
 ### Remaining next work
 
 - **Dynamic allocation soak:** continue live parity tests on Juice Shop, crAPI, and Honey while
   retaining `coverage_allocation=static` and `COVERAGE_ALLOCATION_DEFAULT=static` as fallback
   controls.
-- **Family-aware dynamic coverage:** `coverage_family` is shipped for static endpoint buckets; add
-  endpoint+family attempt identity before using it with the dynamic allocator/campaign ledger.
+- **More focused families:** `coverage_family` dynamic allocation is shipped for broad/SQLi/XSS.
+  Add more lanes only after the scanner registry can route those modules cleanly.
 - **Richer UI rollups:** parent scan detail now shows campaign endpoint coverage from the attempt
   ledger, per-shard contribution facts, aggregate auth/family rollups, and runtime-versus-active-cap
   budget view.

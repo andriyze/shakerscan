@@ -172,7 +172,7 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
     assert sorted(set(endpoint_appearances)) == sorted(eps)
     assert len(endpoint_appearances) == len(eps) * 3
     assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True, True, True, True]
-    assert any("dynamic allocator disabled" in n for n in plan.notes)
+    assert any("coverage_allocation=dynamic" in n for n in plan.notes)
 
 
 def test_coverage_family_total_shard_cap_limits_family_lanes():
@@ -497,3 +497,29 @@ def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
         assert shard.options["focused_endpoints_only"] is True
         assert "custom_endpoints" not in shard.options
         assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+
+
+def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
+    plan = p.plan_dynamic_coverage_family_shards(
+        {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
+        endpoint_count=100,
+        auth_state_count=1,
+    )
+
+    assert plan.strategy == "coverage_family"
+    assert plan.shard_count == 12
+    assert [s.label for s in plan.shards[:3]] == [
+        "coverage-dynamic[0]:broad",
+        "coverage-dynamic[0]:sqli",
+        "coverage-dynamic[0]:xss",
+    ]
+    assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"all", "sqli", "xss"}
+    assert all(s.options["coverage_dynamic_worker"] is True for s in plan.shards)
+    assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
+    assert all("custom_endpoints" not in s.options for s in plan.shards)
+    sqli = next(s for s in plan.shards if s.label.endswith(":sqli"))
+    xss = next(s for s in plan.shards if s.label.endswith(":xss"))
+    broad = next(s for s in plan.shards if s.label.endswith(":broad"))
+    assert sqli.options["asm_check_family"] == "sqli"
+    assert xss.options["asm_check_family"] == "xss"
+    assert "asm_check_family" not in broad.options

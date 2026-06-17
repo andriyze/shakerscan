@@ -49,6 +49,15 @@ _HIGH_VALUE = (
 )
 
 VALID_AUTH_STATES = frozenset({"anonymous", "user1", "user2"})
+ATTEMPT_TERMINAL_STATUSES = (
+    "completed",
+    "partial",
+    "timeout",
+    "auth_missing",
+    "auth_failed",
+    "rate_limited",
+    "error",
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,11 @@ class ParsedEndpoint:
 def normalize_auth_state(value: Any) -> str:
     state = str(value or "anonymous").strip().lower()
     return state if state in VALID_AUTH_STATES else "anonymous"
+
+
+def normalize_check_family(value: Any) -> str:
+    family = str(value or "all").strip().lower().replace("-", "_")
+    return family if family and family not in {"*", "none", "null"} else "all"
 
 
 def auth_state_from_options(options: dict[str, Any] | None) -> str:
@@ -603,6 +617,8 @@ async def campaign_attempt_summary(
     campaign_id: str,
     *,
     expected_total: int | None = None,
+    check_families: list[str] | tuple[str, ...] | None = None,
+    family_aware: bool = False,
 ) -> dict[str, Any]:
     """Coverage counts for one scan campaign from normalized attempt facts.
 
@@ -614,30 +630,47 @@ async def campaign_attempt_summary(
     import uuid as _uuid
 
     cid = _uuid.UUID(str(campaign_id))
+    families = [normalize_check_family(f) for f in (check_families or [])]
+    family_filter = families or None
+    distinct_on = "aea.endpoint_id, COALESCE(aea.check_family, 'all')" if family_aware else "aea.endpoint_id"
+    order_by = (
+        "aea.endpoint_id, COALESCE(aea.check_family, 'all'), "
+        "COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC"
+        if family_aware
+        else "aea.endpoint_id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC"
+    )
     rows = await conn.fetch(
-        """
+        f"""
         WITH latest_attempt AS (
-            SELECT DISTINCT ON (aea.endpoint_id)
+            SELECT DISTINCT ON ({distinct_on})
                 aea.endpoint_id,
+                COALESCE(aea.check_family, 'all') AS check_family,
                 aea.status,
                 aea.scanner_telemetry_json,
                 aea.attempted_params_count,
                 aea.completed_params_count
             FROM asm_endpoint_attempts aea
             JOIN target_endpoints te ON te.id = aea.endpoint_id
-            WHERE aea.campaign_id = $1 AND te.test_status <> 'gone'
-            ORDER BY aea.endpoint_id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+            WHERE aea.campaign_id = $1
+              AND te.test_status <> 'gone'
+              AND ($2::text[] IS NULL OR COALESCE(aea.check_family, 'all') = ANY($2::text[]))
+            ORDER BY {order_by}
         )
         SELECT status, scanner_telemetry_json, attempted_params_count, completed_params_count
         FROM latest_attempt
         """,
         cid,
+        family_filter,
     )
     return attempt_coverage_from_rows(
         list(rows or []),
         total=int(expected_total or 0),
-        basis="campaign_attempt_ledger",
-        coverage_denominator="assigned_auth_scoped_endpoints" if expected_total is not None else "attempted_endpoints",
+        basis="campaign_family_attempt_ledger" if family_aware else "campaign_attempt_ledger",
+        coverage_denominator=(
+            "assigned_endpoint_family_attempts"
+            if family_aware and expected_total is not None
+            else ("assigned_auth_scoped_endpoints" if expected_total is not None else "attempted_endpoints")
+        ),
     )
 
 
@@ -777,6 +810,7 @@ async def claim_test_batch(
     lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     campaign_id: str | None = None,
     campaign_only: bool = False,
+    check_family: str | None = None,
 ) -> list[dict]:
     """Atomically claim the next batch of untested/stale endpoints (priority
     first) and mark them in_progress. Uses FOR UPDATE SKIP LOCKED so multiple
@@ -790,43 +824,90 @@ async def claim_test_batch(
     if campaign_only and not cid:
         return []
     restrict_campaign = bool(campaign_only and cid)
+    family = normalize_check_family(check_family)
     owner = str(lease_owner or "asm-worker")
     lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
     async with conn.transaction():
         await reap_expired_leases(conn, target_id)
-        first = await conn.fetchrow(
-            """
-            SELECT auth_state
-            FROM target_endpoints
-            WHERE target_id = $1
-              AND (test_status IN ('untested', 'stale')
-                   OR (test_status = 'tested' AND last_tested_at < NOW() - ($2 || ' days')::interval))
-              AND ($3::boolean = false OR campaign_id = $4)
-            ORDER BY priority_score DESC, last_seen_at DESC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-            """,
-            tid, str(stale_days), restrict_campaign, cid,
-        )
+        if restrict_campaign:
+            first = await conn.fetchrow(
+                """
+                SELECT te.auth_state
+                FROM target_endpoints te
+                WHERE te.target_id = $1
+                  AND te.campaign_id = $2
+                  AND te.test_status NOT IN ('gone', 'in_progress')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM asm_endpoint_attempts aea
+                      WHERE aea.endpoint_id = te.id
+                        AND aea.campaign_id = $2
+                        AND COALESCE(aea.check_family, 'all') = $3
+                        AND aea.status = ANY($4::text[])
+                  )
+                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                tid, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
+            )
+        else:
+            first = await conn.fetchrow(
+                """
+                SELECT auth_state
+                FROM target_endpoints
+                WHERE target_id = $1
+                  AND (test_status IN ('untested', 'stale')
+                       OR (test_status = 'tested' AND last_tested_at < NOW() - ($2 || ' days')::interval))
+                ORDER BY priority_score DESC, last_seen_at DESC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                tid, str(stale_days),
+            )
         if not first:
             return []
         auth_state = normalize_auth_state(first["auth_state"])
-        rows = await conn.fetch(
-            """
-            SELECT id, method, path, param_shape, auth_state, param_location, replay_spec,
-                   content_type, campaign_id, lease_owner, lease_expires_at, attempt_count
-            FROM target_endpoints
-            WHERE target_id = $1
-              AND auth_state = $4
-              AND (test_status IN ('untested', 'stale')
-                   OR (test_status = 'tested' AND last_tested_at < NOW() - ($3 || ' days')::interval))
-              AND ($5::boolean = false OR campaign_id = $6)
-            ORDER BY priority_score DESC, last_seen_at DESC
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
-            """,
-            tid, limit, str(stale_days), auth_state, restrict_campaign, cid,
-        )
+        if restrict_campaign:
+            rows = await conn.fetch(
+                """
+                SELECT te.id, te.method, te.path, te.param_shape, te.auth_state, te.param_location, te.replay_spec,
+                       te.content_type, te.campaign_id, te.lease_owner, te.lease_expires_at, te.attempt_count
+                FROM target_endpoints te
+                WHERE te.target_id = $1
+                  AND te.auth_state = $3
+                  AND te.campaign_id = $4
+                  AND te.test_status NOT IN ('gone', 'in_progress')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM asm_endpoint_attempts aea
+                      WHERE aea.endpoint_id = te.id
+                        AND aea.campaign_id = $4
+                        AND COALESCE(aea.check_family, 'all') = $5
+                        AND aea.status = ANY($6::text[])
+                  )
+                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+                """,
+                tid, limit, auth_state, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, method, path, param_shape, auth_state, param_location, replay_spec,
+                       content_type, campaign_id, lease_owner, lease_expires_at, attempt_count
+                FROM target_endpoints
+                WHERE target_id = $1
+                  AND auth_state = $4
+                  AND (test_status IN ('untested', 'stale')
+                       OR (test_status = 'tested' AND last_tested_at < NOW() - ($3 || ' days')::interval))
+                ORDER BY priority_score DESC, last_seen_at DESC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+                """,
+                tid, limit, str(stale_days), auth_state,
+            )
         if rows:
             await conn.execute(
                 """
@@ -861,6 +942,7 @@ async def record_endpoint_attempts(
     campaign_id: str | None = None,
     worker_id: str | None = None,
     auth_state: str | None = None,
+    check_family: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
     status: str,
@@ -893,6 +975,7 @@ async def record_endpoint_attempts(
     parent_id = _uuid.UUID(str(parent_scan_id)) if parent_scan_id else None
     cid = _uuid.UUID(str(campaign_id)) if campaign_id else None
     fids = [_uuid.UUID(str(fid)) for fid in (finding_ids or [])]
+    family = normalize_check_family(check_family)
     if replace_existing and (sid or parent_id or cid):
         await conn.execute(
             """
@@ -901,11 +984,13 @@ async def record_endpoint_attempts(
               AND ($2::uuid IS NULL OR scan_id = $2)
               AND ($3::uuid IS NULL OR parent_scan_id = $3)
               AND ($4::uuid IS NULL OR campaign_id = $4)
+              AND COALESCE(check_family, 'all') = $5
             """,
             endpoint_ids,
             sid,
             parent_id,
             cid,
+            family,
         )
     started = started_at or datetime.now(timezone.utc)
     completed = completed_at or datetime.now(timezone.utc)
@@ -922,6 +1007,7 @@ async def record_endpoint_attempts(
             cid or row["campaign_id"],
             worker_id,
             normalize_auth_state(auth_state or row["auth_state"]),
+            family,
             started,
             completed,
             status,
@@ -934,13 +1020,13 @@ async def record_endpoint_attempts(
     await conn.executemany(
         """
         INSERT INTO asm_endpoint_attempts (
-            endpoint_id, scan_id, parent_scan_id, campaign_id, worker_id, auth_state,
+            endpoint_id, scan_id, parent_scan_id, campaign_id, worker_id, auth_state, check_family,
             started_at, completed_at, status, attempted_params_count,
             completed_params_count, finding_ids, error_summary, scanner_telemetry_json
         ) VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10,
-            $11, $12::uuid[], $13, $14::jsonb
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11,
+            $12, $13::uuid[], $14, $15::jsonb
         )
         """,
         records,

@@ -865,6 +865,7 @@ async def run_schema_migrations(pool) -> None:
                     campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
                     worker_id TEXT,
                     auth_state TEXT NOT NULL DEFAULT 'anonymous',
+                    check_family TEXT NOT NULL DEFAULT 'all',
                     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     completed_at TIMESTAMPTZ,
                     status TEXT NOT NULL,
@@ -878,6 +879,10 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("""
+                ALTER TABLE asm_endpoint_attempts
+                ADD COLUMN IF NOT EXISTS check_family TEXT NOT NULL DEFAULT 'all'
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_endpoint
                 ON asm_endpoint_attempts(endpoint_id, started_at DESC)
             """)
@@ -888,6 +893,10 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_campaign
                 ON asm_endpoint_attempts(campaign_id, status)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_asm_endpoint_attempts_campaign_family
+                ON asm_endpoint_attempts(campaign_id, check_family, status)
             """)
             await conn.execute("""
                 CREATE OR REPLACE VIEW latest_scans AS

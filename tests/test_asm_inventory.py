@@ -284,7 +284,47 @@ def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard(
         "basis": "campaign_attempt_ledger",
         "coverage_denominator": "assigned_auth_scoped_endpoints",
     }
-    assert conn.queries[0][1] == (campaign_id,)
+    assert conn.queries[0][1] == (campaign_id, None)
+
+
+def test_campaign_attempt_summary_can_count_endpoint_family_attempts():
+    campaign_id = uuid.uuid4()
+    conn = _CampaignAttemptConn(
+        [
+            {
+                "status": "completed",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "attempted_params_count": 1,
+                "completed_params_count": 1,
+            },
+            {
+                "status": "partial",
+                "scanner_telemetry_json": {"per_endpoint_telemetry": True},
+                "attempted_params_count": 1,
+                "completed_params_count": 0,
+            },
+        ]
+    )
+
+    summary = asyncio.run(
+        a.campaign_attempt_summary(
+            conn,
+            str(campaign_id),
+            expected_total=6,
+            check_families=["all", "sqli", "xss"],
+            family_aware=True,
+        )
+    )
+
+    assert summary["basis"] == "campaign_family_attempt_ledger"
+    assert summary["coverage_denominator"] == "assigned_endpoint_family_attempts"
+    assert summary["total"] == 6
+    assert summary["attempted"] == 2
+    assert summary["completed"] == 1
+    assert summary["partial"] == 1
+    query, args = conn.queries[0]
+    assert "DISTINCT ON (aea.endpoint_id, COALESCE(aea.check_family, 'all'))" in query
+    assert args == (campaign_id, ["all", "sqli", "xss"])
 
 
 # ---- Allocator helpers -----------------------------------------------------
@@ -374,13 +414,16 @@ def test_claim_test_batch_can_scope_to_campaign_inventory():
             str(target_id),
             campaign_id=str(campaign_id),
             campaign_only=True,
+            check_family="sqli",
         )
     )
 
     first_query, first_args = conn.fetchrow_calls[0]
-    assert "campaign_id = $4" in first_query
-    assert first_args[2] is True
-    assert first_args[3] == campaign_id
+    assert "NOT EXISTS" in first_query
+    assert "COALESCE(aea.check_family, 'all') = $3" in first_query
+    assert first_args[1] == campaign_id
+    assert first_args[2] == "sqli"
+    assert "completed" in first_args[3]
 
 
 def test_claim_test_batch_campaign_only_without_campaign_fails_closed():
@@ -445,9 +488,10 @@ def test_record_endpoint_attempts_defaults_completed_param_counts():
     assert record[0] == endpoint_id
     assert record[1] == scan_id
     assert record[5] == "user1"
-    assert record[8] == "completed"
-    assert record[9] == 2
+    assert record[6] == "all"
+    assert record[9] == "completed"
     assert record[10] == 2
+    assert record[11] == 2
 
 
 def test_record_endpoint_attempts_allows_conservative_partial_counts():
@@ -466,10 +510,11 @@ def test_record_endpoint_attempts_allows_conservative_partial_counts():
     )
 
     record = conn.executemany_calls[0][1][0]
-    assert record[8] == "timeout"
-    assert record[9] == 0
+    assert record[6] == "all"
+    assert record[9] == "timeout"
     assert record[10] == 0
-    assert record[12] == "partial_timeout"
+    assert record[11] == 0
+    assert record[13] == "partial_timeout"
 
 
 def test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge():
@@ -486,6 +531,7 @@ def test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge():
             scan_id=str(scan_id),
             parent_scan_id=str(parent_id),
             campaign_id=str(campaign_id),
+            check_family="xss",
             status="completed",
             replace_existing=True,
         )
@@ -494,7 +540,8 @@ def test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge():
     assert conn.executed
     query, args = conn.executed[0]
     assert "DELETE FROM asm_endpoint_attempts" in query
-    assert args == ([endpoint_id], scan_id, parent_id, campaign_id)
+    assert "COALESCE(check_family, 'all') = $5" in query
+    assert args == ([endpoint_id], scan_id, parent_id, campaign_id, "xss")
 
 
 class _EndpointIdsConn:
