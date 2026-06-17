@@ -2,7 +2,8 @@
 
 **Status:** living plan from a live validation run (Juice Shop / crAPI / honey.shakerscan.com,
 2026-06-17). Each item lists the **evidence** observed, the **root cause**, and the **fix**.
-Worker scaling (P1) is **fixed & committed**; the rest are prioritized below.
+P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
+planner bug), and P3 (observability) are **fixed & committed**; P4, A2, and the P1 follow-up remain.
 
 ## How this was found
 Ran Full Coverage scans against the three targets and inspected logs, the DB (scans,
@@ -30,31 +31,35 @@ not match the shipped design.
   must be re-scaled); consider a worker code-version handshake so a version-skewed worker refuses
   jobs instead of silently running old code.
 
-### P2 — Dynamic Full Coverage executes *static*  🔴 HIGH
-- **Evidence (clean uniform new-code fleet):** recon harvested 1591 endpoints; the plan logged
-  `coverage: dynamic campaign allocation with 11 pull worker(s)` and **created a `full_coverage`
-  campaign** — but all 11 shard children are `scan_role='shard'` with `custom_endpoints` and
-  **no `coverage_dynamic_worker`** (i.e. static `plan_coverage_shards` output, not the dynamic
-  pull-workers from `plan_dynamic_coverage_shards`). No "falling back to static" log fired.
-- **Impact:** dynamic allocation (made default in `0a888cf`) is effectively non-functional — it
-  plans/campaigns as dynamic but runs as static slices, so the lease/attempt-ledger pull model
-  isn't exercised. This is the path that was shipped-as-default without live validation.
-- **Root cause:** not yet pinned. `plan.notes` carries the dynamic note (so `plan` came from
-  `plan_dynamic_coverage_shards`, `api/parallel_scan.py:831` which sets `coverage_dynamic_worker=True`
-  on every shard), yet the fanned-out children lack that flag — so the `plan` reaching the fan-out
-  loop (`api/worker.py:4447`) is not the dynamic plan, or its shards lost the flag. Needs focused
-  tracing between the plan decision (`worker.py:4327`) and fan-out.
-- **Fix:** (1) add a decisive per-parent log at fan-out: resolved `coverage_allocation`, plan
-  strategy, and **job type per shard** (`exploit_batch` vs `shard`); (2) trace why the dynamic
-  plan's `coverage_dynamic_worker` shards don't reach the fan-out; (3) regression test asserting a
-  dynamic coverage plan fans out `EXPLOIT_BATCH`/`coverage_dynamic_worker` children, not static ones.
+### P2 — "Dynamic Full Coverage executes static"  ✅ NOT A BUG — was a P1 (skew) symptom
+- **Original evidence:** a Full Coverage scan (`6f3e9dec`) planned/campaigned as dynamic but its 11
+  children were static (`scan_role='shard'`, `custom_endpoints` populated, **no
+  `coverage_dynamic_worker`**). This looked like the dynamic planner being bypassed.
+- **Re-investigation (corrected):** the earlier `->>` DB query that reported "0 dynamic shards"
+  was **mis-evaluated**. Re-checking the raw `scans.options` directly:
+  - **Clean uniform new-code fleet** (`c901c31b`): all 11 children carry
+    `coverage_dynamic_worker=true`, `coverage_dynamic_campaign_only=true`, `zero_rediscovery=true`,
+    `custom_endpoints=null` — i.e. genuine **dynamic pull-workers**, queued as
+    `EXPLOIT_BATCH_JOB_TYPE` (`api/worker.py:4470`) and claiming batches via
+    `claim_test_batch` (`worker.py:5245`).
+  - **Skewed fleet** (`6f3e9dec`): children have `coverage_dynamic_worker=null` (static) — because
+    the `scan_plan` job landed on a **stale-code worker** that pre-dated dynamic allocation.
+- **Root cause:** the static execution was the **P1 worker-version-skew symptom**, not a planner
+  bug. `plan_dynamic_coverage_shards` (`api/parallel_scan.py:831`) was always correct (verified:
+  produces `coverage-dynamic[i]` shards with `coverage_dynamic_worker=True`, no static slices;
+  locked by `tests/test_coverage_strategy.py:479`).
+- **Resolution:** fixed by **P1** — a uniform new-code fleet runs dynamic correctly. No separate
+  code change needed for execution. The hard-to-diagnose part (no decisive fan-out log) is fixed
+  under **P3** so a future skew is obvious immediately instead of needing DB archaeology.
 
-### P3 — Observability & log spam  🟡 MEDIUM
-- **Evidence:** the `Shard 'coverage[N]' waiting for parent slot` retries flood worker stdout and
-  rotate out the plan-stage decision lines, making P2 hard to diagnose; no single line states the
-  chosen allocation + per-shard job type.
-- **Fix:** log the slot-wait **once per shard** (not every retry), and emit one allocation-decision
-  summary line per parent.
+### P3 — Observability & log spam  ✅ FIXED
+- **Evidence:** the `Shard '…' waiting for parent slot` / `Coverage batch waiting for parent slot`
+  retries flooded worker stdout every ~2s and rotated out the plan-stage decision lines, making the
+  P2 mis-diagnosis possible; no single line stated the chosen allocation + per-shard job type.
+- **Fix (done):** (1) the fan-out now emits one decisive summary line per parent —
+  `fanned out N '<strategy>' shards (allocation=dynamic|static|mixed, dynamic_pull_workers=…,
+  static_slices=…)` (`api/worker.py:4493`); (2) both slot-wait requeue paths log **once on the
+  first wait, then every 15th cycle** instead of every retry (`worker.py:4575`, `:5232`).
 
 ### P4 — `parallel:true` dropped → standalone  🟡 MEDIUM
 - **Evidence:** crAPI was submitted with `parallel:true, shard_strategy:coverage` (same payload as
@@ -85,16 +90,22 @@ not match the shipped design.
 ### A2 — Inventory bloat / no campaign linkage  🟡 MEDIUM
 - **Evidence:** 3000+ `target_endpoints` rows per target, mixed `source` (recon/scan/asm), **zero**
   `campaign_id`-linked rows even for coverage parents.
-- **Root cause:** compounds A1 (phantom rows accumulate) and the static-execution bug P2 (dynamic
-  campaign-scoped upserts don't run, so rows aren't campaign-linked). Also revisit fingerprint/
-  auth-state dedup so re-recon doesn't grow near-duplicates.
-- **Fix:** lands largely once A1 (don't record phantoms) and P2 (dynamic path actually runs) are
-  fixed; add inventory GC for `gone`/unreachable rows.
+- **Root cause:** compounds A1 (phantom rows accumulate). The "zero campaign-linked rows" was the
+  P1/P2 skew symptom — when the `scan_plan` ran on a stale worker, the campaign-scoped dynamic
+  upsert path (`source='coverage_recon'`, `campaign_id=…`) never executed, so rows landed as plain
+  `source='recon'` with no campaign link. On a uniform new-code fleet the dynamic path runs and
+  links rows. Also revisit fingerprint/auth-state dedup so re-recon doesn't grow near-duplicates.
+- **Fix:** lands largely now that A1 (don't record phantoms) is fixed and the fleet is uniform
+  (dynamic campaign-scoped upserts run); remaining work is inventory GC for `gone`/unreachable rows.
 
 ---
 
-## Suggested order
-1. **A1** (phantom-endpoint pollution) — user-visible, corrupts coverage + new-surface. 
-2. **P2** (dynamic executes static) — the default coverage path is mis-executing.
-3. **P3/P4** (observability + parallel-drop) — make P2 and future issues debuggable.
-4. **P1 follow-up** (scale-aware rebuild + version handshake) and **A2** (GC) clean up the rest.
+## Status / remaining order
+1. **A1** (phantom-endpoint pollution) — ✅ fixed (`3c9afff`), validated live against honey.
+2. **P2** (dynamic executes static) — ✅ resolved: it was the P1 skew symptom, not a planner bug;
+   dynamic coverage runs correctly on a uniform new-code fleet (verified on `c901c31b`).
+3. **P3** (observability + slot-spam) — ✅ fixed: decisive fan-out allocation line + throttled
+   slot-wait logging, so a future skew is visible immediately.
+4. **Remaining:** **P4** (reproduce `parallel:true`→standalone drop), **P1 follow-up** (scale-aware
+   `rebuild/restart` recreates API-scaled workers + a worker code-version handshake so a skewed
+   worker refuses jobs), and **A2** (inventory GC for `gone`/unreachable rows).

@@ -4490,7 +4490,19 @@ async def process_scan_plan_job(job_data: dict):
             r.hset(f"job:{child_job_id}", mapping={'status': 'queued', 'target': target})
 
     r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
-    print(f"[{parent_id[:8]}] fanned out {plan.shard_count} '{plan.strategy}' shards", flush=True)
+    _dyn_shards = sum(1 for s in plan.shards if s.options.get('coverage_dynamic_worker'))
+    _static_shards = plan.shard_count - _dyn_shards
+    if _dyn_shards and not _static_shards:
+        _allocation = 'dynamic'
+    elif _static_shards and not _dyn_shards:
+        _allocation = 'static'
+    else:
+        _allocation = 'mixed'
+    print(
+        f"[{parent_id[:8]}] fanned out {plan.shard_count} '{plan.strategy}' shards "
+        f"(allocation={_allocation}, dynamic_pull_workers={_dyn_shards}, static_slices={_static_shards})",
+        flush=True,
+    )
 
 
 async def process_scan_shard_job(job_data: dict):
@@ -4560,11 +4572,12 @@ async def process_scan_shard_job(job_data: dict):
             'shard_slot_wait_cycles': str(wait_cycles),
         })
         r.expire(f"job:{job_id}", 86400)
-        print(
-            f"[{job_id[:8]}] Shard '{label}' waiting for parent slot "
-            f"({shard_limit} max active shards for {parent_id[:8]})",
-            flush=True,
-        )
+        if wait_cycles == 1 or wait_cycles % 15 == 0:
+            print(
+                f"[{job_id[:8]}] Shard '{label}' waiting for parent slot "
+                f"({shard_limit} max active shards for {parent_id[:8]}; wait_cycle {wait_cycles})",
+                flush=True,
+            )
         await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
         return
 
@@ -5216,11 +5229,12 @@ async def process_exploit_batch_job(job_data: dict):
                 'shard_slot_wait_cycles': str(wait_cycles),
             })
             r.expire(f"job:{job_id}", 86400)
-            print(
-                f"[asm {job_id[:8]}] Coverage batch waiting for parent slot "
-                f"({shard_limit} max active children for {parent_id[:8]})",
-                flush=True,
-            )
+            if wait_cycles == 1 or wait_cycles % 15 == 0:
+                print(
+                    f"[asm {job_id[:8]}] Coverage batch waiting for parent slot "
+                    f"({shard_limit} max active children for {parent_id[:8]}; wait_cycle {wait_cycles})",
+                    flush=True,
+                )
             await asyncio.sleep(PARALLEL_SHARD_REQUEUE_DELAY_SECONDS)
             return
 
