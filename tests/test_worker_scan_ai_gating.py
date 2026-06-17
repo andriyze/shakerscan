@@ -686,6 +686,62 @@ def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch
     assert parent_options["campaign_id"] == str(campaign_id)
 
 
+def test_scan_plan_coverage_defaults_to_dynamic_allocation(monkeypatch):
+    parent_id = "56565656-5656-5656-5656-565656565656"
+    target_id = uuid.UUID("34343434-3434-3434-3434-343434343434")
+    campaign_id = uuid.UUID("45454545-4545-4545-4545-454545454545")
+    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    redis = _FakeJobRedis()
+    monkeypatch.delenv("COVERAGE_ALLOCATION_DEFAULT", raising=False)
+    monkeypatch.delenv("FULL_COVERAGE_ALLOCATION_DEFAULT", raising=False)
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        return {
+            "target": target,
+            "findings": [],
+            "active_checks": {
+                "active_worklist": [
+                    "GET /api/a?id=1",
+                    "GET /api/b?id=1",
+                    "GET /api/c?id=1",
+                    "GET /api/d?id=1",
+                ]
+            },
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+
+    asyncio.run(
+        worker.process_scan_plan_job(
+            {
+                "job_id": "parent-job-default-dynamic",
+                "scan_id": parent_id,
+                "target": "https://example.test",
+                "options": {
+                    "scan_type": "smart",
+                    "parallel": True,
+                    "shard_strategy": "coverage",
+                    "coverage_dynamic_batch_size": 2,
+                },
+            }
+        )
+    )
+
+    child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(child_jobs) == 2
+    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
+    assert all(job["options"]["coverage_dynamic_worker"] is True for job in child_jobs)
+    parent_update = [
+        args for query, args in conn.executions
+        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+    ][0]
+    parent_options = json.loads(parent_update[3])
+    assert parent_options["coverage_allocation"] == "dynamic"
+    assert parent_options["campaign_id"] == str(campaign_id)
+
+
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):
     endpoint_id = "11111111-1111-1111-1111-111111111111"
     calls = {"mark_partial": [], "record": []}

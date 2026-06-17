@@ -373,11 +373,27 @@ def test_auth_state_noop_without_credentials():
     assert any("no credentials" in n for n in plan.notes)
 
 
-def test_coverage_allocation_mode_accepts_dynamic_aliases():
+def test_coverage_allocation_mode_defaults_to_dynamic(monkeypatch):
+    monkeypatch.delenv("COVERAGE_ALLOCATION_DEFAULT", raising=False)
+    monkeypatch.delenv("FULL_COVERAGE_ALLOCATION_DEFAULT", raising=False)
+
+    assert p.coverage_allocation_mode({}) == "dynamic"
+
+
+def test_coverage_allocation_mode_accepts_dynamic_aliases(monkeypatch):
+    monkeypatch.setenv("COVERAGE_ALLOCATION_DEFAULT", "static")
+
     assert p.coverage_allocation_mode({"coverage_allocation": "dynamic"}) == "dynamic"
     assert p.coverage_allocation_mode({"coverage_allocation": "pull"}) == "dynamic"
     assert p.coverage_allocation_mode({"dynamic_coverage_allocation": True}) == "dynamic"
     assert p.coverage_allocation_mode({"coverage_allocation": "static"}) == "static"
+
+
+def test_coverage_allocation_mode_env_can_restore_static_default(monkeypatch):
+    monkeypatch.setenv("COVERAGE_ALLOCATION_DEFAULT", "static")
+
+    assert p.coverage_allocation_mode({}) == "static"
+    assert p.coverage_allocation_mode({"dynamic_coverage_allocation": False}) == "static"
 
 
 def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():

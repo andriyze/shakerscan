@@ -690,10 +690,18 @@ def coverage_allocation_mode(parent_options: dict[str, Any]) -> str:
 
     ``static`` keeps the shipped round-robin endpoint slices. ``dynamic`` uses
     campaign-scoped inventory claims so child jobs pull work at execution time.
+    Dynamic is the default for Full Coverage; operators can set
+    ``COVERAGE_ALLOCATION_DEFAULT=static`` to force the older static default.
     """
     raw = str(parent_options.get("coverage_allocation") or "").strip().lower()
     if not raw and parent_options.get("dynamic_coverage_allocation") is not None:
         raw = "dynamic" if parent_options.get("dynamic_coverage_allocation") else "static"
+    if not raw:
+        raw = str(
+            os.environ.get("COVERAGE_ALLOCATION_DEFAULT")
+            or os.environ.get("FULL_COVERAGE_ALLOCATION_DEFAULT")
+            or "dynamic"
+        ).strip().lower()
     if raw in {"dynamic", "pull", "allocator", "campaign"}:
         return "dynamic"
     return "static"

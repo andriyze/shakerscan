@@ -2119,7 +2119,7 @@ class ScanOptions(BaseModel):
     coverage_allocation: Optional[str] = Field(
         default=None,
         pattern="^(static|dynamic)$",
-        description="Full Coverage allocator mode. static preserves round-robin slices; dynamic uses campaign pull claims.",
+        description="Full Coverage allocator mode. dynamic is the default; static preserves legacy round-robin slices as an explicit fallback.",
     )
     coverage_dynamic_batch_size: Optional[int] = Field(
         default=None,
