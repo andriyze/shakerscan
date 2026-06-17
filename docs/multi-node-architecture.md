@@ -18,7 +18,7 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |

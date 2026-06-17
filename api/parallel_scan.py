@@ -541,13 +541,11 @@ def plan_coverage_shards(
     max_shards: int | None = None,
     notes: list[str] | None = None,
 ) -> "ParallelPlan":
-    """Partition a discovered endpoint worklist across N=ceil(len/cap) shards so
-    the union approaches full endpoint coverage. Unlike ``scope`` (lean,
-    known-API speed path), each coverage shard runs the FULL active suite over
-    its slice. The plan handler harvests ``endpoints`` from a single discover-once
-    recon pass; shards then run lean scans (reduced crawl/nuclei) over their
-    injected slice -- so full discovery happens once, with bounded per-shard
-    re-crawl (not a zero-rediscovery carve-out).
+    """Partition a discovered endpoint worklist across N=ceil(len/cap) shards.
+
+    The plan handler harvests ``endpoints`` from a single discover-once recon
+    pass; child shards then run the full active suite over only their assigned
+    slice in zero-rediscovery mode.
     """
     notes = notes if notes is not None else []
     if max_shards is None:
@@ -600,9 +598,38 @@ def plan_coverage_shards(
             per_shard_cap = COVERAGE_PER_SHARD_CAP
     per_shard_cap = max(1, per_shard_cap)
     eps = _normalize_endpoint_list(endpoints)
+
+    def _coverage_child_options(slice_eps: list[str]) -> dict[str, Any]:
+        opts = _base_child_options(parent_options)
+        opts["custom_endpoints"] = slice_eps
+        opts["focused_endpoints_only"] = True
+        opts["zero_rediscovery"] = True
+        opts["no_early_stop"] = True
+        cnt = max(1, len(slice_eps))
+        # Endpoints are injected, so skip discovery work and run the full active
+        # suite deeply over every endpoint in the assigned slice.
+        _merge_custom_budget_defaults(
+            opts,
+            {
+                "max_urls": max(200, min(1000, cnt + 50)),
+                "browser_max_pages": 0,
+                "browser_max_depth": 1,
+                "discovery_depth": 1,
+                "api_probe_limit": 0,
+                "param_discovery_url_limit": 0,
+                "param_discovery_max_params": 0,
+                "nuclei_max_targets": 0,
+                "active_max_endpoints": cnt,
+                "active_max_seconds": _coverage_active_seconds(parent_options, cnt),
+                "active_params_per_endpoint": 8,
+                "smart_bola_max_endpoints": cnt,
+            },
+        )
+        return opts
+
     if len(eps) < 2:
         notes.append(f"coverage: only {len(eps)} endpoints to partition; single shard")
-        opts = _base_child_options(parent_options)
+        opts = _coverage_child_options(eps) if eps else _base_child_options(parent_options)
         shards = _finalize_shards(
             [ShardSpec(0, "coverage[0]", opts)],
             parent_options,
@@ -610,6 +637,8 @@ def plan_coverage_shards(
             max_expanded_shards=expanded_cap,
             global_checks_once=True,
         )
+        if eps:
+            notes.append("coverage: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
         return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
     import math
@@ -629,30 +658,7 @@ def plan_coverage_shards(
         )
     shards: list[ShardSpec] = []
     for i, slice_eps in enumerate(buckets):
-        opts = _base_child_options(parent_options)
-        opts["custom_endpoints"] = slice_eps
-        opts["focused_endpoints_only"] = True
-        opts["no_early_stop"] = True
-        cnt = max(1, len(slice_eps))
-        # Endpoints are injected, so keep discovery lean but run the full active
-        # suite (all families) deeply over every endpoint in the slice.
-        _merge_custom_budget_defaults(
-            opts,
-            {
-                "max_urls": max(200, min(1000, cnt + 50)),
-                "browser_max_pages": 0,
-                "browser_max_depth": 1,
-                "discovery_depth": 1,
-                "api_probe_limit": 0,
-                "param_discovery_url_limit": 0,
-                "param_discovery_max_params": 0,
-                "nuclei_max_targets": 300,
-                "active_max_endpoints": cnt,
-                "active_max_seconds": _coverage_active_seconds(parent_options, cnt),
-                "active_params_per_endpoint": 8,
-                "smart_bola_max_endpoints": cnt,
-            },
-        )
+        opts = _coverage_child_options(slice_eps)
         shards.append(ShardSpec(index=i, label=f"coverage[{i}]", options=opts))
     shards = _finalize_shards(
         shards,
@@ -661,13 +667,7 @@ def plan_coverage_shards(
         max_expanded_shards=expanded_cap,
         global_checks_once=True,
     )
-    skipped_nuclei = 0
-    for shard in shards:
-        if shard.options.get("skip_global_checks"):
-            _merge_custom_budget(shard.options, {"nuclei_max_targets": 0})
-            skipped_nuclei += 1
-    if skipped_nuclei:
-        notes.append(f"coverage: disabled duplicate nuclei waves on {skipped_nuclei} shard(s)")
+    notes.append("coverage: zero-rediscovery shards skip crawl, parameter discovery, and nuclei")
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 

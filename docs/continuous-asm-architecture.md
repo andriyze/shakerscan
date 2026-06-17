@@ -25,7 +25,7 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
@@ -158,6 +158,8 @@ Still limited:
   A first-class check registry and telemetry schemas are still needed for every family.
 - One-shot parallel `coverage` still uses static shard slices. It feeds ASM inventory, but it does not
   yet claim work through the ASM allocator.
+- Coverage child shards now run in zero-rediscovery mode over assigned endpoint slices: no crawl,
+  recursive, JS, JSON, OPTIONS, or Nuclei discovery is run inside children.
 - Full Coverage parent scan reports overlay `smart_coverage.endpoints` from campaign
   `asm_endpoint_attempts` when merge-time attempt facts exist; the assigned-slice rollup is retained
   as `endpoint_assignment_rollup` for context/fallback.
@@ -380,7 +382,7 @@ Current shipped behavior:
 
 - `scan_plan` runs discover-once recon.
 - `harvest_endpoints()` partitions the worklist into static coverage shards.
-- `scan_shard` workers run lean scans over disjoint endpoint slices.
+- `scan_shard` workers run zero-rediscovery scans over disjoint endpoint slices.
 - `scan_plan` creates a `full_coverage` campaign tied to the parent scan.
 - `scan_merge` produces one parent report, persists the union into ASM inventory, and writes
   telemetry-backed attempt rows for child reports that include endpoint telemetry. Legacy/no-telemetry
@@ -810,7 +812,7 @@ CURRENT STATE
 - Verify the current shipped behavior before editing.
 - scan_plan currently runs discover-once recon.
 - harvest_endpoints partitions the worklist into static coverage shards.
-- scan_shard workers run lean scans over disjoint endpoint slices.
+- scan_shard workers run zero-rediscovery scans over disjoint endpoint slices.
 - scan_plan creates a full_coverage campaign for coverage parents, and scan_merge persists the union
   into ASM inventory plus telemetry-backed attempt rows when child reports include endpoint
   telemetry. Legacy/no-telemetry child reports fall back to assigned-slice partial attempt rows.

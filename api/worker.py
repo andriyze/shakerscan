@@ -711,6 +711,8 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         cmd.append('--skip-global-checks')
     if options.get('focused_endpoints_only'):
         cmd.append('--focused-endpoints-only')
+    if options.get('zero_rediscovery'):
+        cmd.append('--zero-rediscovery')
 
     # Smart scan tuning options
     if options.get('no_early_stop'):
@@ -4035,9 +4037,9 @@ async def process_scan_plan_job(job_data: dict):
     if requested_strategy == 'coverage':
         # Discover-once: run a discovery-focused recon pass (active disabled),
         # harvest the endpoint worklist, then partition it across shards so the
-        # union approaches full endpoint coverage. Full discovery runs ONCE here;
-        # shards then run lean scans (reduced crawl/nuclei) over their injected
-        # slice -- bounded re-crawl, not a zero-rediscovery carve-out.
+        # union approaches full endpoint coverage. Full discovery runs once
+        # here; shards then run zero-rediscovery active checks over their
+        # assigned endpoint slice.
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET status = 'running', started_at = $1, current_phase = 'recon', progress = 3 WHERE id = $2",

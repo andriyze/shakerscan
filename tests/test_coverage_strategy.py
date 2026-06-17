@@ -59,7 +59,9 @@ def test_coverage_partitions_all_endpoints_disjoint():
         assert resolved["browser_max_pages"] == 0
         assert resolved["active_max_endpoints"] == len(s.options["custom_endpoints"])
         assert s.options["focused_endpoints_only"] is True
+        assert s.options["zero_rediscovery"] is True
         assert s.options["no_early_stop"] is True
+        assert cb["nuclei_max_targets"] == 0
 
 
 def test_coverage_runs_global_checks_once_per_plan():
@@ -67,9 +69,9 @@ def test_coverage_runs_global_checks_once_per_plan():
     plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150)
 
     assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True]
-    assert [s.options["custom_budget"].get("nuclei_max_targets") for s in plan.shards] == [300, 0, 0]
-    assert [s.options["resolved_budget"].get("nuclei_max_targets") for s in plan.shards] == [300, 0, 0]
-    assert any("disabled duplicate nuclei waves" in n for n in plan.notes)
+    assert [s.options["custom_budget"].get("nuclei_max_targets") for s in plan.shards] == [0, 0, 0]
+    assert [s.options["resolved_budget"].get("nuclei_max_targets") for s in plan.shards] == [0, 0, 0]
+    assert any("zero-rediscovery shards skip" in n for n in plan.notes)
 
 
 def test_exhaustive_coverage_shards_get_deeper_active_budget():
@@ -119,6 +121,13 @@ def test_coverage_single_endpoint_falls_back_to_one_shard():
     plan = p.plan_coverage_shards({"scan_type": "smart"}, ["GET /only?x=1"])
     assert plan.shard_count == 1
     assert plan.is_parallel is False
+    shard = plan.shards[0]
+    assert shard.options["custom_endpoints"] == ["GET /only?x=1"]
+    assert shard.options["focused_endpoints_only"] is True
+    assert shard.options["zero_rediscovery"] is True
+    assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+    assert shard.options["resolved_budget"]["active_max_endpoints"] == 1
+    assert any("zero-rediscovery shards skip" in n for n in plan.notes)
 
 
 # --------------------------- harvest ---------------------------

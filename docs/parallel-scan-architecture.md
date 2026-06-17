@@ -1,6 +1,6 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; true zero-rediscovery shard execution remains deferred. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
+**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented for assigned endpoint slices. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -29,7 +29,7 @@ Every implementation task must verify the current state with search/tests before
 | Capability | Status | Next implementation prompt |
 |---|---|---|
 | Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Implement true zero-rediscovery child execution. |
+| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation lands. |
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage campaign linkage | Shipped | Convert static slices to dynamic pull-based allocation. |
@@ -57,17 +57,15 @@ Every implementation task must verify the current state with search/tests before
 - **Phase 0 dictionaries:** first-class `custom_wordlist` (inline keywords → ffuf, via `SHAKERSCAN_CUSTOM_WORDLIST`) and file/inline-driven `custom_sqli_payloads` / `custom_xss_payloads` (drop-in `payloads/<cat>/custom.txt` or `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`), appended additively in `_select_sqli_payloads` / `_select_xss_payloads`.
 - **Tests:** `tests/test_parallel_scan.py`, `tests/test_coverage_strategy.py`, `tests/test_worker_scan_ai_gating.py`, `tests/test_active_checks.py`, `tests/test_custom_dictionaries.py`, scan budget coverage in `tests/test_scan_budget_profiles.py`, and auto-sharding policy coverage in `tests/test_api_scan_option_masking.py`. Verified live on Juice Shop after rebuilding images: auto scope run completed and merged 4/4 shards into one parent in 195s (2 deduped findings); family run completed 3/3 shards and merged duplicate findings under the parent.
 
-**Discover-once is now implemented** as the `coverage` strategy (§15): the plan stage runs one
-discovery-focused recon, harvests the scanner's full emitted worklist, and partitions it across
-shards. **Caveat (precise):** this is *discover-once recon + lean child scans*, not a
-zero-rediscovery carve-out — each shard still runs a normal scan over its injected endpoint slice
-with a reduced crawl/nuclei budget, so there is some bounded re-crawl per shard. Duplicate
-target-global probes are suppressed after the first shard per auth state, but a true
-no-rediscovery shard mode (children skip discovery entirely) and the `build_report` recon carve-out
-remain the deeper optimization.
+**Discover-once + zero-rediscovery children are now implemented** as the `coverage` strategy (§15):
+the plan stage runs one discovery-focused recon, harvests the scanner's full emitted worklist, and
+partitions it across shards. Coverage child shards carry `zero_rediscovery=true`, pass
+`--zero-rediscovery` to the scanner, skip crawl/recursive/JS/json/OPTIONS/Nuclei discovery, and run
+active checks over only their assigned endpoint slice. Duplicate target-global probes are still
+suppressed after the first shard per auth state.
 
-**Still deferred (Phase 2):** the true zero-rediscovery shard mode / `build_report` recon carve-out;
-a first-class check registry; deeper in-scanner cooperative cancellation checkpoints between long
+**Still deferred (Phase 2):** dynamic pull-based coverage allocation through the ASM allocator; a
+first-class check registry; deeper in-scanner cooperative cancellation checkpoints between long
 active-check loops; richer UI breakdowns for shard coverage contribution.
 
 ---
@@ -117,9 +115,8 @@ Performance expectations:
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Explicit Normal/Parallel on New Scan
   overrides the global policy for that scan only.
-- **Still deferred:** the ideal zero-rediscovery scanner refactor where children skip
-  discovery entirely and run only an injected active-check stage. Current coverage mode is
-  discover-once recon plus lean child scans.
+- **Zero-rediscovery child mode:** coverage children skip generic crawl/discovery/Nuclei work and
+  run active checks only over their assigned endpoint slices.
 
 API shape for the high-budget path:
 
@@ -159,9 +156,9 @@ Productization plan:
    running scanner subprocess groups through the worker cancel watchdog.
 4. **Make statistics count logical scans.** Implemented: shard rows are excluded from
    target scan totals, latest-scan views, and dashboard scan counts.
-5. **Implement true scanner-stage sharding.** Partially implemented as `coverage`:
-   discover once, emit the active worklist, then run lean child scans over endpoint
-   slices. Deferred: extract an active-check-only child stage that skips discovery entirely.
+5. **Implement true scanner-stage sharding.** Implemented for `coverage` active slices:
+   discover once, emit the active worklist, then run zero-rediscovery child scans over assigned
+   endpoint slices. Deferred: dynamic allocator claims and richer shard contribution UI.
 
 ---
 
@@ -510,7 +507,7 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
    merged `input` identity back to the parent target.
 2. **`coverage` strategy.** Plan/recon runs once, harvests the full emitted active
    worklist, partitions every harvested endpoint round-robin across coverage shards, and
-   runs the full active suite over each slice with lean child discovery/nuclei budgets.
+   runs the full active suite over each slice with zero-rediscovery child execution.
 3. **Large budget overrides.** `custom_budget` values are capped by
    `SCAN_BUDGET_CEILINGS`, not the smaller exhaustive profile defaults. This includes
    `active_worklist_max`, so API/UI callers can ask recon to emit much larger endpoint
@@ -528,8 +525,6 @@ partial-attempt fallback so old scans remain mergeable without inflating tested 
 
 ### Remaining next work
 
-- **True zero-rediscovery child execution:** extract a scanner stage that accepts the
-  persisted recon context and runs only active checks over injected endpoint slices.
 - **Hybrid `coverage x family`:** split by endpoint slice and then by deeper family pass
   when a very large fleet is available.
 - **Richer UI rollups:** show per-shard endpoint contribution, auth-state coverage, and
@@ -559,6 +554,7 @@ Current boundary:
   when child reports include `active_checks.endpoint_attempts`, and uses assigned-slice partial
   attempt rows only for legacy/no-telemetry child reports. Parent endpoint coverage uses the
   campaign attempt ledger when rows exist, with assigned-slice coverage retained as fallback context.
+  Coverage children run in zero-rediscovery mode over their assigned endpoint slices.
 - Continuous ASM batches use pull-based `claim_test_batch()` over `target_endpoints`; claims now set
   durable leases, link to `scan_campaigns`, and write `asm_endpoint_attempts`.
 - Both paths write into the same endpoint inventory and attempt ledger, but one-shot Full Coverage
@@ -653,43 +649,40 @@ refactors, campaign allocation, check registry, multi-node, and UI redesign in t
 - Active exploitation remains bounded unless an explicit Lab/deep policy is selected.
 - Attack-chain and AI correlation run once after merge, not independently inside shards.
 
-### Prompt: implement true zero-rediscovery child execution
+### Prompt: harden zero-rediscovery child execution
 
 ```text
 ROLE
 You are a senior DAST engine engineer refactoring ShakerScan scanner stages.
 
 TASK
-Implement true zero-rediscovery child execution for parallel coverage shards.
+Harden zero-rediscovery child execution for parallel coverage shards and preserve it while the
+allocator moves from static slices to dynamic claims.
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
-- Coverage mode is shipped as discover-once recon plus lean child scans.
-- Each child still runs a normal scan over its injected endpoint slice with reduced crawl/nuclei
-  budget.
+- Coverage mode is shipped as discover-once recon plus zero-rediscovery child execution.
+- Each child receives an injected endpoint slice, passes --zero-rediscovery to the scanner, skips
+  crawl/recursive/JS/json/OPTIONS/Nuclei discovery, and runs active checks over assigned endpoints.
 - Duplicate target-global probes are suppressed after the first shard per auth state.
-- True no-rediscovery child execution and build_report recon carve-out remain deferred.
+- Static round-robin slices remain the work allocation model until dynamic ASM allocation lands.
 
 TARGET BEHAVIOR
-- Extract run_recon_stage(target, options) -> ScanContext.
-- Extract run_shard_stage(ctx, slice_spec, sub_budget) -> ShardResult.
-- Extract merge_reports(ctx, shard_results) -> Report.
-- scan_plan runs recon once and persists crawl URLs, endpoint/param worklist, tech stack, nuclei
-  signals, auth recipe, and DBMS hints.
-- scan_shard accepts injected context and endpoint IDs/slices and runs active checks without
-  rediscovering or reauthing from scratch except when auth refresh is required.
-- Single-worker scans still work by running recon + one full-slice shard + merge.
+- Keep scanner child runs active-only over assigned endpoints.
+- Preserve parent merge/attempt-ledger rollups as dynamic allocation replaces static slices.
+- Add live parity tests that prove coverage children do not invoke crawl/discovery/Nuclei modules.
+- Single-slice coverage remains valid: it either runs as a zero-rediscovery standalone fallback or,
+  after dynamic allocation lands, through the same parent rollup path.
 
 NON-GOALS
 - Do not change public POST /scans API shape.
-- Do not remove current coverage mode until parity tests pass.
 - Do not implement the campaign allocator in this task.
 - Do not run attack-chain or AI correlation inside shards; run it once after merge.
 
 MIGRATION / BACKFILL / COMPATIBILITY
-- Prefer serialized scan context in existing result/artifact storage if possible.
-- If a schema change is required, update db/init.sql and runtime migrations together.
-- Keep the current coverage path as fallback when context is missing or corrupt.
+- Keep the current static coverage path as fallback until dynamic allocation parity tests pass.
+- Do not reinterpret older coverage child rows as telemetry-backed attempts unless endpoint
+  telemetry is present.
 
 OBSERVABILITY / UI / REPORT BEHAVIOR
 - Shard logs clearly show active-stage-only execution.
@@ -697,13 +690,13 @@ OBSERVABILITY / UI / REPORT BEHAVIOR
 - The Scans list still hides child shards by default.
 
 ACCEPTANCE CRITERIA
-- Coverage children skip discovery entirely when context is available.
-- Parent report remains identical or more complete than previous coverage mode.
-- If context is missing/corrupt, shard fails safely and parent reports partial/failure accurately.
+- Coverage children skip crawl/discovery/Nuclei modules and run active checks over assigned endpoints.
+- Parent report remains ledger-backed and does not count unattempted endpoints as covered.
+- If assigned endpoints cannot be resolved or telemetry is missing, the parent reports partial/failure accurately.
 - Parent cancellation still blocks merge and terminates child subprocesses.
 
 TESTS REQUIRED
-- Unit tests for ScanContext serialization/deserialization.
+- Planner/worker/scanner tests proving zero-rediscovery flags and skip branches stay wired.
 - Worker tests for scan_plan -> scan_shard -> scan_merge.
 - Regression tests proving attack-chain correlation runs once on merged findings.
 - Cancellation tests for queued/running shards.

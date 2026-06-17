@@ -14,6 +14,23 @@ from scanner.scanner_tools.focused_scope import (
 )
 
 
+def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    assert "--zero-rediscovery" in source
+    assert "zero_rediscovery=getattr(args, \"zero_rediscovery\", False)" in source
+    assert "zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)" in source
+    assert "if zero_rediscovery_scope:\n        async def dummy_katana_zero" in source
+    assert "if zero_rediscovery_scope:\n        browser_task = asyncio.create_task(_focused_async_value(None))" in source
+    assert "elif smart_mode and not zero_rediscovery_scope:\n        # Smart mode: Use recursive discovery" in source
+    assert "elif smart_mode and not zero_rediscovery_scope:\n        js_urls =" in source
+    assert "if json_link_following and not public_only and not zero_rediscovery_scope" in source
+    assert "if options_method_discovery and not public_only and not zero_rediscovery_scope" in source
+    assert "reason\": \"zero_rediscovery_child\"" in source
+
+
 def test_from_request_active_requires_smart_family_and_endpoints():
     scope = FocusedScope.from_request(
         smart_mode=True,

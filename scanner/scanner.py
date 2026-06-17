@@ -2424,6 +2424,7 @@ async def build_report(target: str,
                        verified_findings_only: bool | None=None,
                        skip_global_checks: bool=False,
                        focused_endpoints_only: bool=False,
+                       zero_rediscovery: bool=False,
                        # Smart scan mode
                        smart_mode: bool=False,
                        # Smart scan tuning
@@ -2638,6 +2639,8 @@ async def build_report(target: str,
                 file=sys.stderr
             )
 
+    if zero_rediscovery and manual_endpoints_norm:
+        focused_endpoints_only = True
     focused_scope_family = focused_active_family_name or ("endpoints" if focused_endpoints_only else None)
     focused_scope = FocusedScope.from_request(
         smart_mode=smart_mode,
@@ -2648,6 +2651,7 @@ async def build_report(target: str,
     )
     # Backwards-compatible alias. New code should reference focused_scope.
     focused_manual_active_scope = focused_scope.active
+    zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)
     discovery_budget = scan_budget
     if focused_manual_active_scope:
         discovery_budget = dict(scan_budget)
@@ -2663,6 +2667,8 @@ async def build_report(target: str,
         print("[scanner] Parallel child shard: skipping duplicate global exposure checks", file=sys.stderr)
     if focused_endpoints_only and focused_manual_active_scope:
         print("[scanner] Endpoint-focused shard: using assigned endpoints without generic discovery expansion", file=sys.stderr)
+    if zero_rediscovery_scope:
+        print("[scanner] Zero-rediscovery shard: skipping crawl/discovery modules; active checks use assigned endpoints", file=sys.stderr)
 
     # Initialize scan session ID early for consistent reporting.
     import uuid as _uuid
@@ -3446,10 +3452,13 @@ async def build_report(target: str,
     else:
         discovery_scan_type = "standard"
 
-    if public_only and quick_mode:
+    if zero_rediscovery_scope:
+        async def dummy_katana_zero(): return []
+        katana_task = asyncio.create_task(dummy_katana_zero())
+    elif public_only and quick_mode:
         async def dummy_katana(): return []
         katana_task = asyncio.create_task(dummy_katana())
-    elif smart_mode:
+    elif smart_mode and not zero_rediscovery_scope:
         # Smart mode: Use recursive discovery
         # Note: signals=None because discovery runs before nuclei; nuclei signals are used
         # later in run_smart_active_tests for adaptive XSS/SQLi testing
@@ -3478,7 +3487,7 @@ async def build_report(target: str,
     # For smart mode: Quick JS route discovery to seed browser crawl
     # This helps SPAs by finding routes before the browser crawl starts
     browser_seed_urls: list[str] = list(seed_entry_urls)
-    if smart_mode and not no_browser and not focused_manual_active_scope:
+    if smart_mode and not no_browser and not focused_manual_active_scope and not zero_rediscovery_scope:
         try:
             import re
             import httpx as _httpx
@@ -3605,16 +3614,19 @@ async def build_report(target: str,
             print(f"[smart] Quick JS route discovery failed: {e}", file=sys.stderr)
             browser_seed_urls = []
 
-    browser_task= asyncio.create_task(browser_fetch(
-        base_url,
-        "/tmp",
-        no_browser or focused_manual_active_scope,
-        auth_session=auth_session,
-        crawl=enable_browser_crawl,
-        max_pages=crawl_limits["max_pages"],
-        max_depth=crawl_limits["max_depth"],
-        seed_urls=browser_seed_urls if browser_seed_urls else None,
-    ))
+    if zero_rediscovery_scope:
+        browser_task = asyncio.create_task(_focused_async_value(None))
+    else:
+        browser_task= asyncio.create_task(browser_fetch(
+            base_url,
+            "/tmp",
+            no_browser or focused_manual_active_scope,
+            auth_session=auth_session,
+            crawl=enable_browser_crawl,
+            max_pages=crawl_limits["max_pages"],
+            max_depth=crawl_limits["max_depth"],
+            seed_urls=browser_seed_urls if browser_seed_urls else None,
+        ))
 
     # Additional security checks
     if not public_only:
@@ -4029,7 +4041,7 @@ async def build_report(target: str,
         js_bundle_analysis = smart_discovery_data.get("js_bundle_analysis") if smart_discovery_data else None
         if not js_bundle_analysis:
             js_bundle_analysis = {"source": "discovery_phase", "js_parsing_enabled": True}
-    elif smart_mode:
+    elif smart_mode and not zero_rediscovery_scope:
         js_urls = [u for u in crawl_urls if u.endswith(".js") or ".js?" in u]
         if seed_js_urls:
             for js_url in seed_js_urls:
@@ -4057,7 +4069,7 @@ async def build_report(target: str,
                     print(f"[scanner] Added {added_from_js} hidden API endpoints from JS bundles", file=sys.stderr)
 
     json_link_results = None
-    if json_link_following and not public_only:
+    if json_link_following and not public_only and not zero_rediscovery_scope:
         json_seed_limit = discovery_config.get("json_link_seed_limit", 60)
         json_total_limit = discovery_config.get("json_link_total_limit", 200)
         json_depth = discovery_config.get("json_link_depth", 2)
@@ -4127,7 +4139,7 @@ async def build_report(target: str,
         )
 
     options_method_results = None
-    if options_method_discovery and not public_only:
+    if options_method_discovery and not public_only and not zero_rediscovery_scope:
         options_limit = discovery_config.get("options_method_limit", 150)
         options_method_results = await discover_allowed_methods(
             base_url=base_url,
@@ -4255,6 +4267,16 @@ async def build_report(target: str,
             coverage_tracker.record_auth_state("user2")
 
     # Start nuclei once discovery has populated targets and auth is ready
+    if zero_rediscovery_scope and nuclei_task is None:
+        async def dummy_nuclei_zero(): return {
+            "vulnerabilities": [],
+            "info": [],
+            "scan_completed": False,
+            "templates_used": 0,
+            "skipped": True,
+            "reason": "zero_rediscovery_child",
+        }
+        nuclei_task = asyncio.create_task(dummy_nuclei_zero())
     if nuclei_task is None and not public_only:
         nuclei_target_limits = {
             "quick": 120,
@@ -10875,6 +10897,7 @@ async def cli_main():
     ap.add_argument("--endpoints", action="append", help="Manual endpoint (e.g., 'GET /api/v1/users id,email' or '/api/login')")
     ap.add_argument("--endpoints-file", help="File with manual endpoints (one per line, same format as --endpoints)")
     ap.add_argument("--focused-endpoints-only", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--zero-rediscovery", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--active", action="store_true", help="Run active security checks (dalfox/sqlmap) on discovered/synthetic URLs")
     ap.add_argument("--xss", action="store_true", help="Run only XSS active checks (implies --active)")
     ap.add_argument("--sqli", action="store_true", help="Run only SQLi active checks (implies --active)")
@@ -12098,6 +12121,7 @@ async def cli_main():
         verified_findings_only=args.verified_findings_only,
         skip_global_checks=args.skip_global_checks,
         focused_endpoints_only=getattr(args, "focused_endpoints_only", False),
+        zero_rediscovery=getattr(args, "zero_rediscovery", False),
         # Smart scan mode
         smart_mode=getattr(args, 'smart_mode', False),
         # Smart scan tuning
