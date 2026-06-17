@@ -160,6 +160,90 @@ def test_path_prefix_and_soft404_matches():
     assert a._soft404_matches(("ERR", -1), ("500", 3060)) is False     # inconclusive
 
 
+def test_is_unreachable_classification():
+    # literal 404 -> phantom
+    assert a._is_unreachable(("404", 9), []) is True
+    # soft-404 match -> phantom
+    assert a._is_unreachable(("500", 3060), [("500", 3055)]) is True
+    # reachable (status differs from the not-found signature) -> keep
+    assert a._is_unreachable(("200", 631), [("500", 3060)]) is False
+    # inconclusive probe -> None (leave unchanged / keep)
+    assert a._is_unreachable(("ERR", -1), [("404", 9)]) is None
+
+
+class _SweepConn:
+    """Minimal asyncpg-conn stand-in for sweep_endpoint_reachability: returns the
+    inventory paths from fetch(), records execute()s, and reports a retired count
+    from fetchval() equal to the unreachable-path array it is handed."""
+    def __init__(self, paths):
+        self._paths = paths
+        self.executes = []
+        self.fetchval_args = None
+
+    async def fetch(self, query, *args):
+        return [{"path": p} for p in self._paths]
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        return "UPDATE 1"
+
+    async def fetchval(self, query, *args):
+        self.fetchval_args = args
+        # args = (tid, unreachable_paths, threshold); simulate all hitting threshold
+        return len(args[1]) if len(args) > 1 and args[1] is not None else 0
+
+
+_TID = "11111111-1111-1111-1111-111111111111"
+
+
+def test_sweep_retires_phantoms_and_keeps_real(monkeypatch):
+    # Clean-404 server: one real path, two phantom 404s. Sweep retires the 2.
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("200", 512) if path == "/api/real" else ("404", 9)
+    monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/api/real", "/api/phantom1", "/api/phantom2"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
+    assert res["probed"] == 3
+    assert res["reachable"] == 1
+    assert res["unreachable"] == 2
+    assert res["retired"] == 2
+    # the retire query was handed exactly the two unreachable paths + threshold 1
+    assert sorted(conn.fetchval_args[1]) == ["/api/phantom1", "/api/phantom2"]
+    assert conn.fetchval_args[2] == 1
+
+
+def test_sweep_classifies_soft404_500_as_unreachable(monkeypatch):
+    # 500-for-unknown app: real 200 endpoint kept, 500 phantoms retired.
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("200", 13212) if path == "/api/Products" else ("500", 3060)
+    monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/api/Products", "/api/v3/auth", "/api/fake"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
+    assert res["reachable"] == 1 and res["unreachable"] == 2
+
+
+def test_sweep_inconclusive_probe_leaves_row_untouched(monkeypatch):
+    async def fake_status(base_url, path, auth_args, timeout):
+        return ("ERR", -1)
+    monkeypatch.delenv("ASM_REACHABILITY_SWEEP", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/a", "/b"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}, retire_threshold=1))
+    assert res["reachable"] == 0 and res["unreachable"] == 0 and res["retired"] == 0
+
+
+def test_sweep_disabled_via_env(monkeypatch):
+    async def fake_status(*_a, **_k):
+        raise AssertionError("should not probe when disabled")
+    monkeypatch.setenv("ASM_REACHABILITY_SWEEP", "0")
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    conn = _SweepConn(["/a"])
+    res = asyncio.run(a.sweep_endpoint_reachability(conn, "http://t.test", _TID, {}))
+    assert res.get("disabled") is True and res["probed"] == 0
+
+
 def test_normalize_path_templates_volatile_ids():
     assert a.normalize_path("/users/42") == "/users/{id}"
     assert a.normalize_path("/u/550e8400-e29b-41d4-a716-446655440000/x") == "/u/{uuid}/x"

@@ -8666,6 +8666,46 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
     }
 
 
+class AsmPruneRequest(BaseModel):
+    """On-demand reachability sweep / GC of the persistent endpoint inventory."""
+    max_probe: int = Field(default=2000, ge=1, le=20000)
+    retire_threshold: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+@app.post("/targets/{target_id}/asm/prune")
+async def asm_prune(target_id: str, request: AsmPruneRequest = None):
+    """Re-probe existing inventory rows, persist reachability, and retire phantom
+    (404/soft-404) endpoints to ``gone`` so they stop consuming test budget and
+    inflating coverage. Read-only GET probes + status bookkeeping; safe anytime.
+    Retirement is reversible (re-discovery resurrects ``gone`` -> ``untested``).
+    Probes least-recently-swept paths first, so repeated calls rotate the whole
+    inventory; bounded by ``max_probe`` to stay responsive."""
+    request = request or AsmPruneRequest()
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        before = await asm_inventory.coverage_summary(conn, target_id)
+        base_opts = _decode_target_scan_options(target["scan_options"])
+        result = await asm_inventory.sweep_endpoint_reachability(
+            conn, target["url"], target_id, base_opts,
+            max_probe=request.max_probe, retire_threshold=request.retire_threshold,
+        )
+        after = await asm_inventory.coverage_summary(conn, target_id)
+    return {
+        "action": "prune",
+        "target_id": target_id,
+        "sweep": result,
+        "inventory_total_before": before.get("total"),
+        "inventory_testable_after": (after.get("total") or 0) - (after.get("gone") or 0),
+        "gone_after": after.get("gone"),
+        "reason": (
+            f"Probed {result.get('probed', 0)} path(s); retired {result.get('retired', 0)} "
+            f"unreachable endpoint(s) to 'gone' (reversible on re-discovery)."
+        ),
+    }
+
+
 @app.post("/targets/{target_id}/asm/improve")
 async def asm_improve(target_id: str, request: AsmImproveRequest = None):
     """Choose and queue the next best ASM action: recon if inventory is empty,

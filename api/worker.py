@@ -3873,6 +3873,30 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] ASM inventory error: {e}", flush=True)
 
+        # Incremental reachability GC: re-probe a bounded slice of the existing
+        # inventory (least-recently-swept first) and retire phantom/dead endpoints
+        # to 'gone' so they stop consuming test budget. Best-effort, bounded so it
+        # adds little to scan time; successive scans rotate through the inventory.
+        if target_id and not error:
+            try:
+                try:
+                    _sweep_max = int(os.environ.get("ASM_SCAN_SWEEP_MAX") or 400)
+                except (TypeError, ValueError):
+                    _sweep_max = 400
+                if _sweep_max > 0:
+                    async with db_pool.acquire() as conn:
+                        _sw = await asm_inventory.sweep_endpoint_reachability(
+                            conn, target, target_id, options, max_probe=_sweep_max
+                        )
+                    if _sw.get("retired") or _sw.get("unreachable"):
+                        print(
+                            f"[{job_id[:8]}] ASM reachability sweep: probed {_sw.get('probed', 0)}, "
+                            f"unreachable {_sw.get('unreachable', 0)}, retired {_sw.get('retired', 0)} to 'gone'",
+                            flush=True,
+                        )
+            except Exception as e:
+                print(f"[{job_id[:8]}] ASM reachability sweep error: {e}", flush=True)
+
         try:
             await finalize_ai_finding_retest(
                 options=options,

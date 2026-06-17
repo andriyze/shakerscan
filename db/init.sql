@@ -409,6 +409,9 @@ CREATE TABLE target_endpoints (
     lease_owner TEXT,
     lease_expires_at TIMESTAMPTZ,
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_http_status INTEGER,                  -- HTTP status from last reachability probe
+    unreachable_streak INTEGER NOT NULL DEFAULT 0, -- consecutive 404/soft-404 observations; retire to 'gone' at threshold
+    last_reachability_at TIMESTAMPTZ,          -- when reachability was last probed
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_tested_at TIMESTAMPTZ,

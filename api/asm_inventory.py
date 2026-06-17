@@ -555,6 +555,37 @@ async def _probe_path_exists(base_url: str, path: str, auth_args: list[str], tim
     return code != "404"
 
 
+async def _learn_not_found_signatures(
+    base_url: str, prefixes: list[str], auth_args: list[str], timeout: int, sem: "asyncio.Semaphore"
+) -> dict[str, list[tuple[str, int]]]:
+    """Probe implausible decoy paths under each prefix to learn its soft-404
+    signature(s) — the (status, body-size) the server returns for unknown routes."""
+    not_found: dict[str, list[tuple[str, int]]] = {}
+
+    async def _learn(prefix: str) -> None:
+        sigs: list[tuple[str, int]] = []
+        for token in _SOFT404_DECOY_TOKENS:
+            async with sem:
+                sig = await _probe_path_status(base_url, prefix.rstrip("/") + "/" + token, auth_args, timeout)
+            if sig[0] not in ("ERR", ""):
+                sigs.append(sig)
+        not_found[prefix] = sigs
+
+    await asyncio.gather(*(_learn(p) for p in prefixes))
+    return not_found
+
+
+def _is_unreachable(probe: tuple[str, int], not_found_for_prefix: list[tuple[str, int]]) -> bool | None:
+    """Classify a probe response: True = phantom (literal 404 or soft-404 match),
+    False = reachable, None = inconclusive (probe error). Callers must treat None
+    as 'keep / leave unchanged' so a flaky probe never drops a real endpoint."""
+    if probe[0] in ("ERR", ""):
+        return None
+    if probe[0] == "404":
+        return True
+    return any(_soft404_matches(probe, sig) for sig in not_found_for_prefix)
+
+
 async def filter_reachable_worklist(
     base_url: str,
     worklist: Any,
@@ -602,39 +633,144 @@ async def filter_reachable_worklist(
 
     # Learn the not-found signature for each path prefix by probing decoys.
     soft404 = _soft404_enabled()
-    not_found: dict[str, list[tuple[str, int]]] = {}
-    prefixes = sorted({_path_prefix(p) for p in probe_paths})[:_SOFT404_MAX_PREFIXES]
-
-    async def _learn(prefix: str) -> None:
-        sigs: list[tuple[str, int]] = []
-        for token in _SOFT404_DECOY_TOKENS:
-            async with sem:
-                sig = await _probe_path_status(base_url, prefix.rstrip("/") + "/" + token, auth_args, timeout)
-            if sig[0] not in ("ERR", ""):
-                sigs.append(sig)
-        not_found[prefix] = sigs
-
-    learn_tasks = [_learn(p) for p in prefixes] if soft404 else []
-    await asyncio.gather(*(_probe(p) for p in probe_paths), *learn_tasks)
+    prefixes = sorted({_path_prefix(p) for p in probe_paths})[:_SOFT404_MAX_PREFIXES] if soft404 else []
+    not_found, _ = await asyncio.gather(
+        _learn_not_found_signatures(base_url, prefixes, auth_args, timeout, sem),
+        asyncio.gather(*(_probe(p) for p in probe_paths)),
+    )
 
     kept: list[str] = []
-    dropped = 0
     for path, group in by_path.items():
         if path == "__unparsed__":
             kept.extend(group)
             continue
-        st = status.get(path, ("ERR", -1))
-        if st[0] in ("ERR", ""):
-            kept.extend(group)  # inconclusive probe -> keep
-            continue
-        if st[0] == "404":
-            dropped += 1
-            continue
-        if soft404 and any(_soft404_matches(st, sig) for sig in not_found.get(_path_prefix(path), [])):
-            dropped += 1
+        unreach = _is_unreachable(status.get(path, ("ERR", -1)), not_found.get(_path_prefix(path), []))
+        if unreach:  # True only; None (inconclusive) and False both keep
             continue
         kept.extend(group)
     return kept
+
+
+async def sweep_endpoint_reachability(
+    conn,
+    base_url: str,
+    target_id: str,
+    options: dict[str, Any] | None = None,
+    *,
+    max_probe: int = 4000,
+    concurrency: int = 24,
+    timeout: int = 5,
+    retire_threshold: int | None = None,
+) -> dict[str, Any]:
+    """Re-probe EXISTING (non-``gone``) inventory rows, persist the reachability
+    result (``last_http_status``/``unreachable_streak``/``last_reachability_at``),
+    and retire endpoints to ``test_status='gone'`` once their unreachable streak
+    reaches the threshold — so phantom rows (incl. soft-404s the worklist filter
+    can't retroactively clean) stop consuming test budget and stop inflating
+    coverage. Retirement is reversible: re-discovery resets ``gone`` -> ``untested``
+    (see :func:`upsert_endpoints`), so an endpoint that returns later comes back.
+
+    Probes the least-recently-checked paths first, so a bounded sweep run on every
+    recon cycles through the whole inventory over time. ``ASM_REACHABILITY_SWEEP=0``
+    disables; ``ASM_GONE_STREAK_THRESHOLD`` (default 2) sets confirmations to retire."""
+    empty = {"probed": 0, "reachable": 0, "unreachable": 0, "retired": 0}
+    if not base_url or str(os.environ.get("ASM_REACHABILITY_SWEEP", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return {**empty, "disabled": True}
+    if retire_threshold is None:
+        try:
+            retire_threshold = max(1, int(os.environ.get("ASM_GONE_STREAK_THRESHOLD") or 2))
+        except (TypeError, ValueError):
+            retire_threshold = 2
+
+    import uuid as _uuid
+    tid = _uuid.UUID(str(target_id))
+    # Distinct paths, least-recently-swept first, so a bounded run rotates coverage.
+    order = await conn.fetch(
+        """
+        SELECT path FROM target_endpoints
+        WHERE target_id = $1 AND test_status <> 'gone'
+        GROUP BY path
+        ORDER BY MIN(COALESCE(last_reachability_at, '-infinity'::timestamptz)) ASC, path
+        LIMIT $2
+        """,
+        tid, int(max_probe),
+    )
+    paths = [r["path"] for r in order if r["path"]]
+    if not paths:
+        return empty
+
+    auth_args = _probe_auth_curl_args(options)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    status: dict[str, tuple[str, int]] = {}
+
+    async def _probe(path: str) -> None:
+        async with sem:
+            status[path] = await _probe_path_status(base_url, path, auth_args, timeout)
+
+    soft404 = _soft404_enabled()
+    prefixes = sorted({_path_prefix(p) for p in paths})[:_SOFT404_MAX_PREFIXES] if soft404 else []
+    not_found, _ = await asyncio.gather(
+        _learn_not_found_signatures(base_url, prefixes, auth_args, timeout, sem),
+        asyncio.gather(*(_probe(p) for p in paths)),
+    )
+
+    reachable: list[tuple[str, int | None]] = []
+    unreachable: list[tuple[str, int | None]] = []
+    for path in paths:
+        st = status.get(path, ("ERR", -1))
+        verdict = _is_unreachable(st, not_found.get(_path_prefix(path), []))
+        if verdict is None:
+            continue  # inconclusive -> leave row untouched
+        code = int(st[0]) if st[0].isdigit() else None
+        (unreachable if verdict else reachable).append((path, code))
+
+    if reachable:
+        await conn.execute(
+            """
+            UPDATE target_endpoints te
+            SET unreachable_streak = 0, last_http_status = v.code,
+                last_reachability_at = NOW(), updated_at = NOW()
+            FROM unnest($2::text[], $3::int[]) AS v(path, code)
+            WHERE te.target_id = $1 AND te.path = v.path AND te.test_status <> 'gone'
+            """,
+            tid, [p for p, _ in reachable], [c for _, c in reachable],
+        )
+
+    retired = 0
+    if unreachable:
+        u_paths = [p for p, _ in unreachable]
+        await conn.execute(
+            """
+            UPDATE target_endpoints te
+            SET unreachable_streak = te.unreachable_streak + 1, last_http_status = v.code,
+                last_reachability_at = NOW(), updated_at = NOW()
+            FROM unnest($2::text[], $3::int[]) AS v(path, code)
+            WHERE te.target_id = $1 AND te.path = v.path AND te.test_status <> 'gone'
+            """,
+            tid, u_paths, [c for _, c in unreachable],
+        )
+        retired = await conn.fetchval(
+            """
+            WITH retired AS (
+                UPDATE target_endpoints
+                SET test_status = 'gone', last_attempt_status = 'unreachable', updated_at = NOW()
+                WHERE target_id = $1 AND path = ANY($2::text[])
+                  AND test_status NOT IN ('gone', 'in_progress')
+                  AND unreachable_streak >= $3
+                RETURNING 1
+            )
+            SELECT count(*) FROM retired
+            """,
+            tid, u_paths, retire_threshold,
+        ) or 0
+
+    return {
+        "probed": len(paths),
+        "reachable": len(reachable),
+        "unreachable": len(unreachable),
+        "retired": int(retired),
+        "threshold": retire_threshold,
+    }
 
 
 async def upsert_endpoints(

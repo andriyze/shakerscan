@@ -832,7 +832,10 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS lease_owner TEXT,
                 ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0
+                ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_http_status INTEGER,
+                ADD COLUMN IF NOT EXISTS unreachable_streak INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_reachability_at TIMESTAMPTZ
             """)
             async with conn.transaction():
                 await _backfill_target_endpoint_fingerprints(conn)

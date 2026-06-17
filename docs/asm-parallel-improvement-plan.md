@@ -177,17 +177,34 @@ crAPI. **All completed with zero shard failures.**
   worklist the harvest went **1138 → 480 (658 / 58% phantoms dropped)**, versus A1's 1137 → 1137
   (0 dropped) on the same target.
 
-### A2 — Inventory bloat / GC  🔴 STILL OPEN (now the top ASM item)
+### A2 — Inventory bloat / GC + reachability lifecycle  ✅ FIXED
 - **Evidence:** rows / distinct-paths — Juice Shop **9391 / 2339**, honey **5394 / 852**,
   crAPI **2351 / 307**. Most Juice Shop "paths" are synthetic permutations (4475 versioned,
-  1677 `/api/{Resource}s/…`) that A1 could not drop (they soft-404). There is **no HTTP-status
+  1677 `/api/{Resource}s/…`) that A1 could not drop (they soft-404). There was **no HTTP-status
   reachability column** — `last_attempt_status` holds the *lease lifecycle* (`leased`/`completed`),
-  not the response code — so nothing records whether a tested endpoint was actually reachable.
-- **Fix (next):** (1) persist a reachability signal (`last_http_status` + `reachable`) recorded at
-  probe/test time; (2) a GC pass that re-probes existing rows with the A3 soft-404 logic and
-  deletes/`gone`-marks phantoms (A3 prevents *new* phantoms on soft-404 apps but does not clean the
-  ~17 k pre-existing rows); (3) exclude unreachable rows from coverage denominators and the
-  new-surface diff so coverage % becomes meaningful again.
+  not the response code — and **nothing ever set `test_status='gone'`** (the status was honored by
+  the dispatcher but had no writer), so dead endpoints were re-tested every `stale_days` forever.
+- **Fix (done):**
+  1. **Schema** (`db/init.sql` + `run_schema_migrations`): `last_http_status`,
+     `unreachable_streak`, `last_reachability_at` on `target_endpoints`.
+  2. **`sweep_endpoint_reachability`** (`api/asm_inventory.py`): re-probes existing non-`gone` rows
+     (least-recently-swept first, so bounded runs rotate the whole inventory), records the status,
+     bumps `unreachable_streak` on 404/soft-404 (resets it on reachable), and **retires to `gone`**
+     at `ASM_GONE_STREAK_THRESHOLD` confirmations. Reuses the A3 soft-404 signature logic, so it
+     handles soft-404 apps too. Retirement is **reversible** — re-discovery resets `gone`→`untested`
+     (existing `upsert_endpoints` logic), so an endpoint that returns later comes back.
+  3. **On-demand GC**: `POST /targets/{id}/asm/prune` runs the sweep and reports retired counts.
+  4. **Automatic**: `process_scan_job` runs a bounded sweep (`ASM_SCAN_SWEEP_MAX`, default 400)
+     after each scan's inventory upsert, so the inventory self-heals incrementally over time.
+  - The dispatcher already excludes `gone` (`claim_test_batch`), so retired phantoms drop out of the
+    testable set and the coverage denominator immediately.
+- **Validated live on honey**: one prune retired **4022 / 5395 rows (75%)** to `gone` in ~21 s —
+  and was *precise*: it kept real 200 endpoints even inside a mostly-phantom prefix
+  (`/api/ai-redteam/course` 200 kept while `/api/ai-redteam/llm_app` 404 retired), and the gaps
+  recommendation dropped from "test all 5395" to "1194 untested" real endpoints.
+- **Answers the lifecycle question:** phantom/dead endpoints are now retired (not re-scanned
+  forever), cleanup runs both on-demand and automatically, and endpoints that come back are
+  auto-resurrected — so we do **not** scan vanished endpoints indefinitely.
 
 ### A4 — Cap synthetic endpoint permutation  🟡 MEDIUM
 - **Evidence:** 4475 versioned + 1677 resource-permuted Juice Shop paths, the bulk phantom.
@@ -207,8 +224,9 @@ crAPI. **All completed with zero shard failures.**
 - **Fix:** a `scanner.sh logs` mode that aggregates *all* `shakerscan-worker-*` containers, not just
   compose-managed ones.
 
-### Round 2 order
-1. **A2** (reachability persistence + GC) — now the highest-value ASM item; cleans the ~17 k
-   pre-existing phantom rows A3 can't retroactively remove and makes coverage % meaningful.
-2. **A4** (cap synthetic permutation) — stop generating the phantoms at the source.
-3. **P5 / P6** (batch taper, all-worker logs) and the **P1 follow-up** (code-version handshake).
+### Round 2 status
+1. **A3** (soft-404 detection) — ✅ fixed (`6736dea`).
+2. **A2** (reachability persistence + `gone`-retirement + GC sweep) — ✅ fixed; validated live
+   (honey 4022/5395 retired, real endpoints preserved, dispatcher excludes them).
+3. **Remaining:** **A4** (cap synthetic permutation — stop generating phantoms at the source),
+   **P5 / P6** (batch taper, all-worker logs), and the **P1 follow-up** (code-version handshake).
