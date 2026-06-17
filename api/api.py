@@ -82,10 +82,10 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+import check_registry
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
-ASM_CHECK_FAMILIES = {"all", "sqli", "xss"}
 
 try:
     from ai_demo_scenarios import get_ai_test_scenarios
@@ -808,34 +808,21 @@ def _apply_auto_sharding_policy(
 
 
 def _normalize_asm_check_family(value: Any) -> str | None:
-    candidate = str(value or "").strip().lower()
-    if not candidate or candidate == "all":
-        return None
-    if candidate not in ASM_CHECK_FAMILIES:
-        return None
-    return candidate
+    return check_registry.validate_asm_focus_family(value)
 
 
 def _apply_asm_check_family(options: dict[str, Any], check_family: Any) -> dict[str, Any]:
     """Apply a supported focused ASM family to scan options.
 
-    This intentionally covers only families the current scanner already exposes
-    as stable active-check flags. The broader check-registry design remains a
-    future architecture item.
+    This uses the first-class check registry, while preserving the scanner's
+    current legacy focused flags for the runnable SQLi/XSS families.
     """
-    opts = dict(options or {})
-    family = _normalize_asm_check_family(check_family)
-    if family == "sqli":
-        opts["sqli"] = True
-        opts["xss"] = False
-        opts["asm_check_family"] = "sqli"
-    elif family == "xss":
-        opts["xss"] = True
-        opts["sqli"] = False
-        opts["asm_check_family"] = "xss"
-    else:
-        opts.pop("asm_check_family", None)
+    opts, _family = check_registry.apply_asm_focus(options or {}, check_family)
     return opts
+
+
+def _validate_asm_check_family_value(value: Any) -> str | None:
+    return check_registry.validate_asm_focus_family(value)
 
 
 def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_internal: bool = False) -> list[str]:
@@ -8233,11 +8220,26 @@ async def scan_target(target_id: str, options: ScanOptions = None):
 # CONTINUOUS ASM - per-target endpoint inventory + async testing (docs §16)
 # ============================================================
 
+@app.get("/asm/check-families")
+async def asm_check_families():
+    """Return the registered check-family contract for API/UI/AI clients."""
+    return {
+        "families": check_registry.describe_check_families(),
+        "asm_focus_allowed": list(check_registry.asm_focus_family_names()),
+        "default": "all",
+    }
+
+
 class AsmTestRequest(BaseModel):
     batch_size: int = Field(default=100, ge=1, le=1000)
     stale_days: int = Field(default=30, ge=0)
     exploit_depth: bool = False
-    check_family: Optional[str] = Field(default=None, pattern="^(all|sqli|xss)$")
+    check_family: Optional[str] = None
+
+    @field_validator("check_family")
+    @classmethod
+    def validate_check_family(cls, value):
+        return _validate_asm_check_family_value(value)
 
 
 class AsmReconRequest(BaseModel):
@@ -8248,7 +8250,12 @@ class AsmImproveRequest(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=1, le=1000)
     stale_days: Optional[int] = Field(default=None, ge=0)
     exploit_depth: Optional[bool] = None
-    check_family: Optional[str] = Field(default=None, pattern="^(all|sqli|xss)$")
+    check_family: Optional[str] = None
+
+    @field_validator("check_family")
+    @classmethod
+    def validate_check_family(cls, value):
+        return _validate_asm_check_family_value(value)
 
 
 class AsmPolicyUpdate(BaseModel):

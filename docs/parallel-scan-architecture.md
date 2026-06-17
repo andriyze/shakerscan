@@ -33,7 +33,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
-| First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
+| First-class check registry | Foundation shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -220,7 +220,10 @@ Baseline infra ─► Discovery (katana+browser) ─► Nuclei (staged) ─► P
 - **Budgets:** `SCAN_BUDGET_DEFAULTS[scan_type][profile]` matrix in `scanner/constants.py:50-205`; profiles `fast|balanced|thorough|exhaustive`; overridable with `custom_budget` (capped at the exhaustive ceiling). Knobs: `max_urls`, `browser_max_pages`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, `active_params_per_endpoint`, etc.
 - **Wordlists:** 6 bundled lists in `scanner/wordlists/`, loaded via `WORDLIST_PATHS` + `_read_wordlist()` (`discovery.py:164-185`); ffuf list chosen per scan_type (`discovery.py:1533-1545`). **No first-class user wordlist option** (only `custom_endpoints`).
 - **Payloads:** 9 files in `scanner/payloads/`, but most active payloads are **hardcoded** in `active_checks.py`/`constants.py`; only JWT secrets load from file (`_load_jwt_secrets_wordlist`, `active_checks.py:3191-3207`).
-- **Checks:** ~73 modules in `scanner_tools/`; **no registry** — each check is a boolean parameter on `build_report()` wired at ~5 edit sites (import, signature, task-create, await, consume). Mapped to scan_type in `api/worker.py:575-610`.
+- **Checks:** `api/check_registry.py` is now the first registry contract for family metadata,
+  API validation, ASM focused scheduling, and parallel family shard labels. Scanner internals still
+  have the legacy `build_report()` boolean wiring, so the remaining work is migrating module
+  execution to registry iteration and adding runnable families beyond SQLi/XSS.
 
 ---
 
@@ -357,7 +360,13 @@ Splitting work means the **global budget must be split or shared**, or shards wi
 - Generalize the JWT loader pattern (`_load_*_wordlist`, `active_checks.py:3191-3207`) into a shared `load_payloads(category, fallback)` helper and convert the currently-hardcoded SQLi/XSS payload tables to **file + inline-default** so users can drop in `payloads/<category>/<name>.txt`. The files already exist (`payloads/sqli/*`, `payloads/xss/*`, `payloads/ssrf/*`, `payloads/lfi/*`) but most are unused — wire them in.
 
 ### 8.3 A real check registry (removes the 5-edit-site tax)
-- Replace the scattered boolean-parameter wiring with a **registry** (`CHECK_REGISTRY: list[CheckSpec]` with `name, phase, family, fn, default_profiles, is_active`). `build_report()` iterates the registry per phase; adding a check = one registry entry + module. This also lets the **plan stage assign families to shards declaratively** (§6.2) and lets budgets/scan-types reference families by name.
+- Registry foundation is shipped in `api/check_registry.py`: `CHECK_REGISTRY` carries family
+  metadata (`name`, `phase`, `family`, profiles, active/risk/auth requirements, telemetry schema,
+  scanner option mapping, runnable/planned state), ASM validation rejects unknown or planned-only
+  families, and the parallel `family` planner derives focused SQLi/XSS lanes from the registry.
+- Remaining scanner refactor: make `build_report()` iterate registry entries per phase so adding a
+  runnable check is one registry entry plus module integration, not another set of scattered boolean
+  parameters.
 
 ---
 

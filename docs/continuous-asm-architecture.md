@@ -30,7 +30,7 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active families. |
 | Full Coverage dynamic allocation | Opt-in shipped | Make dynamic allocation the default after live parity, UI/report polish, and operational soak. |
-| First-class check registry | Proposed | Replace scattered boolean family wiring with registry-backed scheduling. |
+| First-class check registry | Foundation shipped | Migrate scanner `build_report()` module execution to registry iteration and add runnable families beyond SQLi/XSS. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable leases, object evidence, routing, and global rate limits. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -156,7 +156,8 @@ Implemented:
 Still limited:
 
 - Per-endpoint scanner telemetry currently covers smart active SQLi/XSS/hash-route DOM XSS attempts.
-  A first-class check registry and telemetry schemas are still needed for every family.
+  Registry metadata now exists, but telemetry schemas and runnable scanner integrations are still
+  needed for families beyond SQLi/XSS.
 - One-shot parallel `coverage` defaults to static shard slices. It feeds ASM inventory and campaign
   attempt ledgers; API/AI callers can opt into dynamic pull allocation through
   `coverage_allocation=dynamic`, which claims campaign-scoped inventory through the ASM allocator.
@@ -168,8 +169,9 @@ Still limited:
   as `endpoint_assignment_rollup` for context/fallback.
 - ASM batch scan rows still exist in the `scans` table, but they are hidden from the default scan
   list and exposed through ASM activity.
-- Focused ASM batches support `sqli` and `xss` via current scanner flags. A first-class check
-  registry for all families does not exist yet.
+- Focused ASM batches support `sqli` and `xss` via registry-backed validation and current scanner
+  flags. Registered planned families such as `bola`, `auth`, `ssrf`, `lfi`, `rce`, and
+  `business_logic` are rejected for ASM execution until their scanner integrations exist.
 
 ---
 
@@ -507,12 +509,16 @@ Implemented in this pass:
 - Default `/scans` hides shard, ASM batch, and ASM recon rows unless internal flags are supplied.
 - ASM batches can request `check_family=sqli` or `check_family=xss` where the current scanner already
   supports narrow active flags.
+- `api/check_registry.py` centralizes family metadata, ASM focused-family validation, UI/API
+  discoverability, and parallel family shard labels. Planned/high-risk families are registered but
+  not runnable, so they fail closed instead of silently running all checks.
 - AGENTS, CLAUDE, and the scanner skill now describe Full Coverage, ASM improve/gaps/activity, and
   focused ASM batches.
 
 Remaining:
 
-- Add a first-class check registry for families beyond the current `sqli` and `xss` flags.
+- Migrate scanner `build_report()` module execution to registry iteration and add runnable focused
+  families beyond the current `sqli` and `xss` flags.
 
 ### Phase B — Attempt Ledger + Durable Leases
 
@@ -872,7 +878,7 @@ Return status preflight, changed files, behavior summary, safety checks, data co
 tests run, remaining risks, and follow-up tasks.
 ```
 
-### Prompt: add a first-class check registry
+### Prompt: migrate scanner execution to the check registry
 
 ```text
 ROLE
@@ -887,7 +893,8 @@ coverage allocation, multi-node transport, or public scan API shape unless the r
 requires a backward-compatible validation addition.
 
 TASK
-Replace scattered boolean check wiring with a first-class CHECK_REGISTRY.
+Migrate scanner module execution from scattered boolean wiring to the shipped CHECK_REGISTRY
+foundation.
 
 SOURCE OF TRUTH
 Use:
@@ -900,7 +907,7 @@ editing.
 STATUS PREFLIGHT
 Confirm:
 - focused ASM batches currently support sqli and xss;
-- no first-class registry exists yet;
+- `api/check_registry.py` exists and rejects registered-but-unrunnable families for ASM batches;
 - high-risk families are not silently enabled;
 - public scan options remain backward compatible;
 - AI router and multi-node work are out of scope;
@@ -908,20 +915,19 @@ Confirm:
 
 CURRENT STATE
 - Verify the current shipped behavior before editing.
-- Focused ASM batches currently support sqli and xss through current scanner flags.
-- A registry for recon/passive, nuclei, sqli, xss, bola, auth, ssrf/lfi/rce, and business_logic does
-  not exist yet.
+- Focused ASM batches currently support sqli and xss through registry-backed validation plus legacy
+  scanner flags.
+- A registry for recon/passive, nuclei, sqli, xss, bola, auth, ssrf/lfi/rce, and business_logic
+  exists, but scanner `build_report()` still uses legacy boolean/module wiring.
 
 TARGET BEHAVIOR
-Create a registry model with name, phase, family, fn, default_profiles, is_active,
-requires_auth_states, requires_credentials, risk_level, allowed_presets, and telemetry_schema.
-
 Use the registry so:
 - scan types select families declaratively;
 - focused_family campaigns schedule exactly one family;
 - parallel plan stage can assign families to shards;
 - API rejects unknown or disallowed families;
 - high-risk families require explicit Lab/deep policy.
+- scanner `build_report()` iterates runnable registry entries per phase where practical.
 
 NON-GOALS
 - Do not change vulnerability detection logic in this task.
@@ -949,9 +955,9 @@ AUTHORIZATION / BLAST RADIUS
 - Confirmation is required before active high-risk family execution.
 
 DATA CONTRACTS
-Define registry entry shape, API validation JSON, Redis/job option mapping, scanner telemetry family
-labels, report family scope fields, and UI-facing family names. For each changed contract, state
-producer, consumer, compatibility, old-row/null behavior, and uniqueness rule.
+Verify or extend registry entry shape, API validation JSON, Redis/job option mapping, scanner
+telemetry family labels, report family scope fields, and UI-facing family names. For each changed
+contract, state producer, consumer, compatibility, old-row/null behavior, and uniqueness rule.
 
 MIGRATION / BACKFILL / COMPATIBILITY
 - Avoid schema changes unless telemetry storage requires them.

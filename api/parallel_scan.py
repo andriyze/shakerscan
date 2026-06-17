@@ -53,6 +53,13 @@ except ModuleNotFoundError as exc:
         raise
     from scanner.constants import resolve_scan_budget
 
+try:
+    import check_registry
+except ModuleNotFoundError as exc:
+    if exc.name != "check_registry":
+        raise
+    from api import check_registry
+
 
 def _env_int(name: str, default: int) -> int:
     """Operator override for a shard cap via env var, falling back to default."""
@@ -165,9 +172,10 @@ COVERAGE_MAX_DYNAMIC_BATCHES = _env_int("SHAKERSCAN_COVERAGE_MAX_DYNAMIC_BATCHES
 # in scanner/constants.py). Used only to warn when capped slices grow past it.
 ACTIVE_ENDPOINTS_CEILING = 10000
 
-# ``family`` strategy can express at most these distinct, non-overlapping shards
-# with the focused flags the scanner exposes today.
-FAMILY_SHARD_LABELS = ("broad", "sqli", "xss")
+# ``family`` strategy can express a broad shard plus the runnable focused active
+# families currently backed by scanner flags.
+FAMILY_FOCUSED_SPECS = check_registry.asm_focus_families()
+FAMILY_SHARD_LABELS = ("broad",) + tuple(spec.name for spec in FAMILY_FOCUSED_SPECS)
 
 
 @dataclass
@@ -838,23 +846,14 @@ def _plan_family(
     # broad: full breadth at the parent budget (all active families).
     broad = _base_child_options(parent_options)
 
-    # sqli: focused, deeper. Disable XSS so the scanner enters focused mode and
-    # limits active modules to SQLi; bump depth/budget.
-    sqli = _base_child_options(parent_options)
-    sqli.update({"sqli": True, "xss": False, "no_early_stop": True, "thorough_params": True})
-    if (sqli.get("budget_profile") or "balanced") in ("fast", "balanced"):
-        sqli["budget_profile"] = "thorough"
-
-    xss = _base_child_options(parent_options)
-    xss.update({"xss": True, "sqli": False, "no_early_stop": True, "thorough_params": True})
-    if (xss.get("budget_profile") or "balanced") in ("fast", "balanced"):
-        xss["budget_profile"] = "thorough"
-
-    ordered = [
-        ShardSpec(index=0, label="broad", options=broad),
-        ShardSpec(index=1, label="sqli", options=sqli),
-        ShardSpec(index=2, label="xss", options=xss),
-    ]
+    ordered = [ShardSpec(index=0, label="broad", options=broad)]
+    for i, spec in enumerate(FAMILY_FOCUSED_SPECS, start=1):
+        opts = _base_child_options(parent_options)
+        opts.update(spec.scanner_options)
+        opts.update({"no_early_stop": True, "thorough_params": True})
+        if (opts.get("budget_profile") or "balanced") in ("fast", "balanced"):
+            opts["budget_profile"] = "thorough"
+        ordered.append(ShardSpec(index=i, label=spec.name, options=opts))
 
     n = min(requested, len(FAMILY_SHARD_LABELS))
     if requested > len(FAMILY_SHARD_LABELS):

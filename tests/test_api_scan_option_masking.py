@@ -6,6 +6,7 @@ import types
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -184,7 +185,7 @@ def test_asm_recommendation_auth_missing_is_visible_but_does_not_block_recon():
 
 
 def test_asm_check_family_focuses_supported_scanner_flags():
-    focused = api_module._apply_asm_check_family({"scan_type": "smart", "xss": True}, "sqli")
+    focused = api_module._apply_asm_check_family({"scan_type": "smart", "xss": True}, "sql")
 
     assert focused["sqli"] is True
     assert focused["xss"] is False
@@ -196,6 +197,28 @@ def test_asm_check_family_all_keeps_normal_active_mix():
 
     assert focused["sqli"] is True
     assert "asm_check_family" not in focused
+
+
+def test_asm_check_family_rejects_registered_but_unrunnable_family():
+    with pytest.raises(ValueError, match="registered but not runnable"):
+        api_module._apply_asm_check_family({"scan_type": "smart"}, "bola")
+
+
+def test_asm_request_validation_rejects_unknown_family_with_allowed_list():
+    with pytest.raises(ValidationError, match="allowed families: all, sqli, xss"):
+        api_module.AsmImproveRequest(check_family="nosuch")
+
+
+def test_asm_check_family_registry_endpoint_lists_runnable_and_planned_families():
+    result = asyncio.run(api_module.asm_check_families())
+    names = {family["name"]: family for family in result["families"]}
+
+    assert result["asm_focus_allowed"] == ["all", "sqli", "xss"]
+    assert names["sqli"]["runnable"] is True
+    assert names["xss"]["runnable"] is True
+    assert names["bola"]["runnable"] is False
+    assert names["bola"]["requires_credentials"] is True
+    assert names["ssrf"]["risk_level"] == "high"
 
 
 def test_default_scan_list_hides_shards_and_asm_activity_rows():
