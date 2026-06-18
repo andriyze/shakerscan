@@ -11,7 +11,7 @@ _SCANNER_DIR = Path(__file__).resolve().parents[1] / "scanner"
 if str(_SCANNER_DIR) not in sys.path:
     sys.path.insert(0, str(_SCANNER_DIR))
 
-from scanner_tools.access_control_checks import smart_bola_test
+from scanner_tools.access_control_checks import _looks_like_bola_resource_response, smart_bola_test
 
 
 def _fake_http_response(url: str, status_code: int, body: str) -> dict:
@@ -31,6 +31,18 @@ def _fake_session(token: str) -> SimpleNamespace:
         config=SimpleNamespace(headers={"Authorization": f"Bearer {token}"}, cookies={}),
         state=SimpleNamespace(cookies_received={}),
     )
+
+
+def test_bola_resource_heuristic_recognizes_juice_shop_address_resource():
+    body = json.dumps({"id": 7, "fullName": "Alice", "mobileNum": "1234567890"})
+
+    assert _looks_like_bola_resource_response("https://shop.test/api/Addresss/7", body) is True
+
+
+def test_bola_resource_heuristic_recognizes_crapi_vehicle_resource():
+    body = json.dumps({"id": 2, "vin": "VIN123", "model": "Corsa", "year": 2020})
+
+    assert _looks_like_bola_resource_response("https://crapi.test/identity/api/v2/vehicle/2", body) is True
 
 
 def test_smart_bola_skips_operational_rate_limit_endpoint(monkeypatch):

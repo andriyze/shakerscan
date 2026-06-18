@@ -1391,6 +1391,15 @@ BOLA_RESOURCE_PATH_SEGMENTS = {
     "cart", "carts", "basket", "baskets", "customer", "customers",
     "member", "members", "tenant", "tenants", "project", "projects",
     "organization", "organizations", "org", "company", "companies",
+    # Vulnerable-app/API resource names observed in Juice Shop, crAPI, and
+    # similar REST labs. These should influence only object-resource heuristics,
+    # not operational endpoints such as health/rate-limit.
+    "address", "addresses", "addresss", "card", "cards", "wallet", "wallets",
+    "vehicle", "vehicles", "mechanic", "mechanics", "report", "reports",
+    "service", "services", "shop", "shops", "item", "items", "product",
+    "products", "review", "reviews", "feedback", "complaint", "complaints",
+    "post", "posts", "comment", "comments", "video", "videos", "coupon",
+    "coupons",
 }
 
 BOLA_OPERATIONAL_PATH_SEGMENTS = {
