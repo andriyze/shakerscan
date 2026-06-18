@@ -140,6 +140,7 @@ RECON_DISCOVERY_BUDGET = {
     "active_max_seconds": 0,
     "nuclei_max_targets": 0,
     "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
+    "api_probe_limit": 250,       # keep speculative API fan-out bounded in planning
     "browser_max_pages": 25,
     "browser_max_depth": 3,
     "discovery_depth": 3,

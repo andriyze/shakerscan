@@ -52,6 +52,7 @@ def test_coverage_recon_budget_skips_heavy_active_and_nuclei_work():
     budget = p.RECON_DISCOVERY_BUDGET
     assert budget["active_max_endpoints"] == 1
     assert budget["active_max_seconds"] == 0
+    assert budget["api_probe_limit"] == 250
     assert budget["param_discovery_url_limit"] == 0
     assert budget["nuclei_max_targets"] == 0
     assert budget["phase4_max_seconds"] == 0
