@@ -61,6 +61,20 @@ def test_focused_manual_scope_disables_nuclei_before_delayed_launcher():
     assert focused_scope_index < forced_budget_index < delayed_launcher_index
 
 
+def test_focused_non_injection_families_skip_primary_active_runner():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    primary_guard_index = source.index("if run_sqli or run_xss:")
+    runner_index = source.index("smart_results = await run_smart_active_tests(")
+    focused_skip_index = source.index('active_block["primary_active_skipped"] = reason')
+    budget_message_index = source.index("family-specific checks keep the active budget")
+    bola_decision_index = source.index("bola_decision = (")
+
+    assert primary_guard_index < runner_index < focused_skip_index < budget_message_index < bola_decision_index
+
+
 def test_from_request_active_requires_smart_family_and_endpoints():
     scope = FocusedScope.from_request(
         smart_mode=True,

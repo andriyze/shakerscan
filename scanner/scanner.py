@@ -8544,21 +8544,40 @@ async def build_report(target: str,
                         file=sys.stderr,
                     )
 
-                smart_results = await run_smart_active_tests(
-                    url=base_url,
-                    endpoints=active_candidate_endpoints,
-                    tech_stack=tech_stack,
-                    dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
-                    signals=nuclei_signals,  # Pass signals from nuclei findings
-                    auth_session=auth_session,  # Pass auth session for authenticated testing
-                    run_xss=run_xss,
-                    run_sqli=run_sqli,
-                    thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
-                    active_max_seconds=active_primary_max_seconds,
-                    active_max_endpoints=scan_budget.get("active_max_endpoints"),
-                    active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
-                    max_findings_per_family=scan_budget.get("max_findings_per_family"),
-                )
+                if run_sqli or run_xss:
+                    smart_results = await run_smart_active_tests(
+                        url=base_url,
+                        endpoints=active_candidate_endpoints,
+                        tech_stack=tech_stack,
+                        dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
+                        signals=nuclei_signals,  # Pass signals from nuclei findings
+                        auth_session=auth_session,  # Pass auth session for authenticated testing
+                        run_xss=run_xss,
+                        run_sqli=run_sqli,
+                        thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
+                        active_max_seconds=active_primary_max_seconds,
+                        active_max_endpoints=scan_budget.get("active_max_endpoints"),
+                        active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
+                        max_findings_per_family=scan_budget.get("max_findings_per_family"),
+                    )
+                else:
+                    reason = f"focused_family_{focused_active_family_name}" if focused_active_family_name else "no_primary_active_families"
+                    active_block["primary_active_skipped"] = reason
+                    print(
+                        (
+                            "[active] Skipping primary SQLi/XSS probes: "
+                            f"{reason}; family-specific checks keep the active budget"
+                        ),
+                        file=sys.stderr,
+                    )
+                    smart_results = {
+                        "sqli": {},
+                        "xss": {},
+                        "endpoint_attempts": [],
+                        "budget": {
+                            "active_remaining_seconds": active_primary_max_seconds,
+                        },
+                    }
                 endpoint_attempts = smart_results.get("endpoint_attempts")
                 _append_endpoint_attempt_telemetry(active_block, endpoint_attempts)
                 smart_budget = smart_results.get("budget") or {}
