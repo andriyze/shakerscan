@@ -101,3 +101,41 @@ def test_hash_routes_survive_tight_active_budget_for_dom_xss():
 
     assert selected[0]["source"] == "hash_route"
     assert selected[0]["url"] == "https://example.test/#/search?q=test"
+
+
+def test_budget_reserves_slots_for_post_body_endpoints():
+    # Many high-scoring observed GET routes + a real (synthetic-sourced) POST login
+    # buried among POST phantoms. Pure top-by-score would select all GET; the
+    # reservation must still pull the real request-body endpoint into the budget.
+    endpoints = []
+    for i in range(60):
+        endpoints.append({
+            "url": f"https://t.test/rest/item{i}?id=1", "method": "GET",
+            "params": ["id"], "source": "har_discovery",
+        })
+    endpoints.append({
+        "url": "https://t.test/rest/user/login", "method": "POST",
+        "body_params": ["email", "password"], "source": "options",
+    })
+    for i in range(40):
+        endpoints.append({
+            "url": f"https://t.test/api/Thing{i}s/x", "method": "POST",
+            "body_params": ["id", "limit", "offset", "page"], "source": "options",
+        })
+
+    selected = prioritize_active_endpoints(endpoints, budget=10)
+    methods = [e["method"] for e in selected]
+    # ~40% of the budget reserved for request-body endpoints, not 100% GET
+    assert methods.count("POST") >= 4
+    # the real login body endpoint is now selected for active testing
+    assert any("/rest/user/login" in e["url"] for e in selected)
+
+
+def test_budget_without_body_endpoints_is_unaffected():
+    endpoints = [
+        {"url": f"https://t.test/g{i}?id=1", "method": "GET", "params": ["id"], "source": "har_discovery"}
+        for i in range(10)
+    ]
+    selected = prioritize_active_endpoints(endpoints, budget=3)
+    assert len(selected) == 3
+    assert all(e["method"] == "GET" for e in selected)

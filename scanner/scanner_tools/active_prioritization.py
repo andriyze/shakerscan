@@ -147,17 +147,45 @@ def active_endpoint_priority_key(
     return (-active_endpoint_score(endpoint), source_rank, method, url)
 
 
+def _is_body_endpoint(endpoint: dict[str, Any]) -> bool:
+    """True for request-body injection surfaces (POST/PUT/PATCH with params)."""
+    method = str(endpoint.get("method") or "GET").upper()
+    return method in ("POST", "PUT", "PATCH") and bool(
+        endpoint.get("body_params") or endpoint.get("params")
+    )
+
+
+# Fraction of a tight active budget guaranteed to request-body endpoints so they
+# are never fully crowded out by higher-source-scored GET routes.
+BODY_ENDPOINT_BUDGET_FRACTION = 0.4
+
+
 def prioritize_active_endpoints(
     endpoints: list[dict[str, Any]],
     *,
     budget: int | None = None,
     source_priority: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Sort endpoints for active DAST and optionally apply an endpoint budget."""
-    ordered = sorted(
-        endpoints,
-        key=lambda endpoint: active_endpoint_priority_key(endpoint, source_priority=source_priority),
-    )
-    if budget and budget > 0:
-        return ordered[:budget]
-    return ordered
+    """Sort endpoints for active DAST and optionally apply an endpoint budget.
+
+    The budget cap reserves a share for request-body endpoints (POST/PUT/PATCH).
+    Pure top-by-score selection can be 100% GET when observed GET routes outrank
+    generated POST routes, which leaves request-body injection (e.g. a JSON login
+    SQLi) entirely untested under a tight budget — the cause of shallow API scans.
+    """
+    key = lambda endpoint: active_endpoint_priority_key(endpoint, source_priority=source_priority)
+    ordered = sorted(endpoints, key=key)
+    if not (budget and budget > 0):
+        return ordered
+
+    selected = ordered[:budget]
+    body_all = [e for e in ordered if _is_body_endpoint(e)]
+    if body_all:
+        reserve = min(len(body_all), max(1, int(budget * BODY_ENDPOINT_BUDGET_FRACTION)))
+        if sum(1 for e in selected if _is_body_endpoint(e)) < reserve:
+            # Guarantee the top-scoring body endpoints a place, then fill the rest
+            # with the top-scoring non-body endpoints, keeping overall score order.
+            reserved_body = body_all[:reserve]
+            non_body = [e for e in ordered if not _is_body_endpoint(e)][: budget - reserve]
+            selected = sorted(reserved_body + non_body, key=key)[:budget]
+    return selected
