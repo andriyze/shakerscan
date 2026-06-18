@@ -1,6 +1,13 @@
 import asyncio
+import os
+import sys
 
-from scanner.scanner_tools import active_checks
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools import active_checks  # noqa: E402
 
 
 def test_sqli_payload_selection_keeps_cross_dbms_fallbacks():

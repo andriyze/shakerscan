@@ -2540,6 +2540,24 @@ def _focused_family_remediation(family: str | None) -> list[str]:
     return list(rules["remediation"])
 
 
+FOCUSED_ACTIVE_MODULE_FAMILIES: dict[str, frozenset[str]] = {
+    "dom_xss": frozenset({"xss"}),
+    "bola_idor": frozenset({"bola"}),
+    "smart_auth": frozenset({"auth"}),
+}
+
+
+def focused_family_allows_active_module(focused_family: str | None, module: str) -> bool:
+    """Return whether a focused active scan should run an enrichment module."""
+    family = normalize_scanner_check_family(focused_family)
+    if not family or family == "all":
+        return True
+    allowed_families = FOCUSED_ACTIVE_MODULE_FAMILIES.get(str(module or "").lower())
+    if allowed_families is None:
+        return True
+    return family in allowed_families
+
+
 def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
     if not isinstance(attempts, list):
         return
@@ -9557,7 +9575,16 @@ async def build_report(target: str,
 
         # DOM XSS Analysis - run in broad smart mode after smart active tests.
         # Focused manual active scans keep reporting limited to the requested family.
-        dom_xss_eligible = smart_mode and smart_succeeded and not focused_manual_active_scope
+        dom_xss_allowed_by_focus = focused_family_allows_active_module(
+            focused_active_family_name,
+            "dom_xss",
+        )
+        dom_xss_eligible = (
+            smart_mode
+            and smart_succeeded
+            and not focused_manual_active_scope
+            and dom_xss_allowed_by_focus
+        )
         dom_xss_decision = (
             should_run_active_enrichment(
                 "dom_xss",
@@ -9629,7 +9656,21 @@ async def build_report(target: str,
             except Exception as e:
                 active_block["dom_xss_error"] = str(e)
                 print(f"[scanner] DOM XSS analysis error: {e}", file=sys.stderr)
-        elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_decision.run:
+        elif smart_mode and smart_succeeded and not focused_manual_active_scope and not dom_xss_allowed_by_focus:
+            reason = f"focused_family_{focused_active_family_name}"
+            record_active_enrichment_skip(active_block, "dom_xss", reason)
+            active_block.setdefault("active_enrichment_decisions", {})["dom_xss"] = {
+                "run": False,
+                "reason": reason,
+            }
+            print(f"[scanner] Skipping DOM XSS analysis: {reason}", file=sys.stderr)
+        elif (
+            smart_mode
+            and smart_succeeded
+            and not focused_manual_active_scope
+            and dom_xss_decision
+            and not dom_xss_decision.run
+        ):
             record_active_enrichment_skip(
                 active_block,
                 "dom_xss",
@@ -9690,8 +9731,16 @@ async def build_report(target: str,
         # user2_session enables the multi-user comparison required by the
         # registry/API gate for ASM BOLA campaigns.
         bola_focused = focused_active_family_name == "bola"
-        bola_eligible = smart_mode and smart_succeeded and not public_only and (
-            bola_focused or not focused_manual_active_scope
+        bola_allowed_by_focus = focused_family_allows_active_module(
+            focused_active_family_name,
+            "bola_idor",
+        )
+        bola_eligible = (
+            smart_mode
+            and smart_succeeded
+            and not public_only
+            and bola_allowed_by_focus
+            and (bola_focused or not focused_manual_active_scope)
         )
         bola_decision = (
             should_run_active_enrichment(
@@ -9717,6 +9766,14 @@ async def build_report(target: str,
                 "multi_user_credentials_required",
             )
             print("[scanner] Skipping focused BOLA: primary and second-user credentials are required", file=sys.stderr)
+        elif smart_mode and smart_succeeded and not public_only and not bola_allowed_by_focus:
+            reason = f"focused_family_{focused_active_family_name}"
+            record_active_enrichment_skip(active_block, "bola_idor", reason)
+            active_block.setdefault("active_enrichment_decisions", {})["bola_idor"] = {
+                "run": False,
+                "reason": reason,
+            }
+            print(f"[scanner] Skipping BOLA/IDOR testing: {reason}", file=sys.stderr)
         elif bola_eligible and bola_decision.run:
             try:
                 # Get discovered URLs from crawl + smart discovery + JS/HAR for BOLA pattern analysis

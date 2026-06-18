@@ -130,6 +130,25 @@ def test_resolve_active_check_flags_rejects_conflicting_legacy_flags():
         scanner_mod.resolve_active_check_flags(check_family="sqli", xss=True)
 
 
+def test_focused_sqli_does_not_allow_xss_or_bola_enrichment():
+    assert scanner_mod.focused_family_allows_active_module("sqli", "dom_xss") is False
+    assert scanner_mod.focused_family_allows_active_module("sqli", "bola_idor") is False
+    assert scanner_mod.focused_family_allows_active_module("sqli", "nosql_injection") is True
+    assert scanner_mod.focused_family_allows_active_module("sqli", "sqlmap") is True
+
+
+def test_focused_xss_and_bola_allow_only_their_enrichment_modules():
+    assert scanner_mod.focused_family_allows_active_module("xss", "dom_xss") is True
+    assert scanner_mod.focused_family_allows_active_module("xss", "bola_idor") is False
+    assert scanner_mod.focused_family_allows_active_module("bola", "bola_idor") is True
+    assert scanner_mod.focused_family_allows_active_module("bola", "dom_xss") is False
+
+
+def test_broad_active_scan_allows_enrichment_modules():
+    assert scanner_mod.focused_family_allows_active_module(None, "dom_xss") is True
+    assert scanner_mod.focused_family_allows_active_module("all", "bola_idor") is True
+
+
 # --- ACTIVE_CHECK_FAMILIES registry: single source of truth (keystone) ---
 
 def test_registry_is_single_source_of_truth_for_runnable_families():

@@ -5,7 +5,15 @@ The FocusedScope helper centralizes the previously open-coded
 module migrations don't accidentally drift.
 """
 
-from scanner.scanner_tools.focused_scope import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools.focused_scope import (  # noqa: E402
     CORS_SHAPE,
     DMARC_SHAPE,
     FOCUSED_SKIP_REASON,

@@ -1,4 +1,12 @@
-from scanner.constants import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from constants import (  # noqa: E402
     resolve_active_enrichment_limits,
     resolve_bola_deadline_seconds,
     resolve_phase4_max_seconds,
@@ -104,7 +112,7 @@ def test_custom_budget_is_capped_to_generous_ceiling():
     # custom_budget is intentionally allowed to exceed the exhaustive PROFILE so
     # operators can dial in huge on-demand budgets; it is capped at the generous
     # SCAN_BUDGET_CEILINGS, not the per-scan-type exhaustive default.
-    from scanner.constants import SCAN_BUDGET_CEILINGS
+    from constants import SCAN_BUDGET_CEILINGS
 
     budget = resolve_scan_budget("quick", "balanced", {"max_urls": 10**9, "active_max_endpoints": 10**9})
 
