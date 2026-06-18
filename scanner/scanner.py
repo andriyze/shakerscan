@@ -36,6 +36,7 @@ except ImportError:
         resolve_scan_budget,
     )
 from scanner_tools.active_enrichment_policy import (
+    ActiveEnrichmentDecision,
     record_active_enrichment_skip,
     reserve_active_enrichment_budget,
     should_run_active_enrichment,
@@ -2608,6 +2609,29 @@ def focused_family_allows_active_module(focused_family: str | None, module: str)
     if allowed_families is None:
         return True
     return family in allowed_families
+
+
+def bola_enrichment_decision(
+    *,
+    bola_focused: bool,
+    post_active_budget_exhausted: bool,
+    active_block: dict[str, Any] | None,
+) -> ActiveEnrichmentDecision:
+    """Focused BOLA has its own gated deadline and must not be skipped by primary active budget."""
+    if bola_focused:
+        decision = ActiveEnrichmentDecision(module="bola_idor", run=True)
+        if active_block is not None:
+            active_block.setdefault("active_enrichment_decisions", {})["bola_idor"] = {
+                "run": True,
+                "reason": None,
+                "source": "focused_bola_deadline",
+            }
+        return decision
+    return should_run_active_enrichment(
+        "bola_idor",
+        post_active_budget_exhausted=post_active_budget_exhausted,
+        active_block=active_block,
+    )
 
 
 def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
@@ -9853,8 +9877,8 @@ async def build_report(target: str,
             and (bola_focused or not focused_manual_active_scope)
         )
         bola_decision = (
-            should_run_active_enrichment(
-                "bola_idor",
+            bola_enrichment_decision(
+                bola_focused=bola_focused,
                 post_active_budget_exhausted=post_active_budget_exhausted,
                 active_block=active_block,
             )

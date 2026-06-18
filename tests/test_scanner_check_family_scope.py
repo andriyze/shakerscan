@@ -144,6 +144,37 @@ def test_focused_xss_and_bola_allow_only_their_enrichment_modules():
     assert scanner_mod.focused_family_allows_active_module("bola", "dom_xss") is False
 
 
+def test_focused_bola_uses_bola_deadline_even_when_primary_active_budget_is_exhausted():
+    active_block = {"post_active_enrichment_skipped": "active_time_budget_exhausted"}
+
+    decision = scanner_mod.bola_enrichment_decision(
+        bola_focused=True,
+        post_active_budget_exhausted=True,
+        active_block=active_block,
+    )
+
+    assert decision.run is True
+    assert decision.reason is None
+    assert active_block["active_enrichment_decisions"]["bola_idor"] == {
+        "run": True,
+        "reason": None,
+        "source": "focused_bola_deadline",
+    }
+
+
+def test_broad_bola_still_respects_post_active_budget_gate():
+    active_block = {"post_active_enrichment_skipped": "active_time_budget_exhausted"}
+
+    decision = scanner_mod.bola_enrichment_decision(
+        bola_focused=False,
+        post_active_budget_exhausted=True,
+        active_block=active_block,
+    )
+
+    assert decision.run is False
+    assert decision.reason == "active_time_budget_exhausted"
+
+
 def test_broad_active_scan_allows_enrichment_modules():
     assert scanner_mod.focused_family_allows_active_module(None, "dom_xss") is True
     assert scanner_mod.focused_family_allows_active_module("all", "bola_idor") is True
