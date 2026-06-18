@@ -16,6 +16,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
                 "/v2/vehicle/vehicles",
                 "/v2/community/posts",
                 "/shop/orders",
+                "/api/shop/orders/all",
+                "/api/shop/orders/<orderId>",
                 "/mechanic/service_requests",
                 "/orders",
                 "/past-orders",
@@ -27,6 +29,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
     assert "/identity/api/v2/vehicle/vehicles" in expanded
     assert "/community/api/v2/community/posts" in expanded
     assert "/workshop/api/shop/orders" in expanded
+    assert "/workshop/api/shop/orders/all" in expanded
+    assert "/workshop/api/shop/orders/<orderId>" in expanded
     assert "/workshop/api/mechanic/service_requests" in expanded
     assert "/workshop/api/orders" in expanded
     assert "/workshop/api/past-orders" in expanded
@@ -51,6 +55,8 @@ def test_extracts_minified_crapi_style_route_fragments():
       GET_VEHICLES:"/v2/vehicle/vehicles",
       GET_POSTS:"/v2/community/posts/<postId>",
       GET_ORDERS:"/shop/orders",
+      GET_ORDERS_REAL:"api/shop/orders/all",
+      GET_ORDER_BY_ID:"api/shop/orders/<orderId>",
       GET_SERVICE:"/mechanic/service_requests",
       GET_PAST:"/past-orders"
     };
@@ -70,5 +76,7 @@ def test_extracts_minified_crapi_style_route_fragments():
     assert "/identity/api/v2/vehicle/vehicles" in expanded
     assert "/community/api/v2/community/posts/<postId>" in expanded
     assert "/workshop/api/shop/orders" in expanded
+    assert "/workshop/api/shop/orders/all" in expanded
+    assert "/workshop/api/shop/orders/<orderId>" in expanded
     assert "/workshop/api/mechanic/service_requests" in expanded
     assert "/workshop/api/past-orders" in expanded
