@@ -11,7 +11,8 @@ detectors** — it is **discovery + scope + auth**:
 
 | Symptom (measured) | Evidence | Consequence |
 |---|---|---|
-| API surface never discovered | `discovery_sources = [manual_endpoints, url_crawl]` on every scan; only **35 (Juice) / 8 (crAPI)** endpoints found | On an SPA/API app, crawling the HTML shell finds ~nothing → the routes with the bugs are never tested |
+| **Synthetic phantom-endpoint explosion drowns the active scan** | live log: SQLi phase grinding through `{api,rest}×{v1,v2,v3}×{auth,oauth,oauth2}×{login,logout,refresh,authorize}` permutations (`/api/v2/oauth2/authorize`, …) each with `[email,username,password,token]`; `endpoints=172 params=914`, **hung 10+ min**, `findings=1`. Generator: `discovery.py:377/2704` blind permutation wordlist. **No reachability gate** — phantom 404s are fuzzed anyway | Active budget is spent on endpoints that don't exist; the real routes (`/rest/products/search?q=`) never get a payload, and the scan **hangs** before XSS/IDOR ever run |
+| API surface never discovered (coverage/focused scans) | `discovery_sources = [manual_endpoints, url_crawl]`; only **35 (Juice) / 8 (crAPI)** endpoints found | On an SPA/API app, crawling the HTML shell finds ~nothing → the routes with the bugs are never tested |
 | Browser crawl disabled for focused/coverage scans | `scanner.py:3884` `enable_browser_crawl = … and not focused_manual_active_scope`; coverage shards run `check_family`+harvested endpoints → "focused" → no crawl | Focusing to find SQLi also turns off the discovery needed to find where SQLi is |
 | Coverage recon skips param enumeration | `parallel_scan.py:147` `param_discovery_url_limit: 0` | Harvested endpoints carry no params → injection probes have nothing to inject into |
 | Anonymous-only | `auth_states_tested: ['anonymous']` (Juice Shop) | Every authenticated SQLi/XSS/IDOR is invisible — and that's most of them |
@@ -31,7 +32,21 @@ Use these as benchmark fixtures (expected families/routes, not hardcoded answers
 
 ---
 
-## P0 — Discovery & scope (the unlock; do these first)
+## P0 — Stop the active scan from drowning (do this FIRST — it's why scans hang & miss)
+- **D0a — Reachability-gate the active worklist.** Before fuzzing, probe each candidate's baseline
+  once (concurrent, cached); **drop hard-404 / not-found endpoints** so SQLi/XSS payloads are never
+  spent on phantom routes. Reuse the ASM soft-404 logic (`asm_inventory._probe_path_status`,
+  `filter_reachable_worklist`) on the scanner's active worklist. This alone reclaims most of the
+  wasted budget and stops the hangs.
+- **D0b — Cap & demote blind synthetic permutations.** The API-permutation wordlist
+  (`discovery.py:377/2704`) generates a combinatorial blowup of unverified auth/oauth/version paths.
+  Hard-cap synthetic/inferred endpoints, and rank **observed** (har/browser/crawl/openapi) endpoints
+  strictly above synthesized ones in active selection (extends `active_prioritization.py`).
+- **D0c — Enforce a real active time budget.** With `no_early_stop` + `thorough`, the SQLi phase
+  ground for 10+ min with no cap. The per-family deadline (`_split_active_family_budget`) must be a
+  hard ceiling even under `no_early_stop`, and the loop must honor cooperative cancel.
+
+## P0 — Discovery & scope (the second unlock)
 - **D1 — Decouple discovery from active focus.** A focused or coverage scan must still run full
   browser + JS-bundle discovery to *find* what to test. Gate `enable_browser_crawl`
   (`scanner.py:3884`) and the SPA seed-route step (`3889`) on **"explicit endpoints supplied"**
@@ -97,7 +112,8 @@ miss-analysis must justify before it's built.
 ## Sequencing
 | Priority | Step | Why |
 |---|---|---|
-| **P0** | D1 decouple discovery from focus · D2 recon param enumeration | Single biggest lift — feeds every detector the real surface |
+| **P0 (first)** | D0a reachability-gate active worklist · D0b cap synthetic perms · D0c hard active time budget | Stops the hang + reclaims budget wasted on phantom 404s — without this nothing else runs to completion |
+| **P0** | D1 decouple discovery from focus · D2 recon param enumeration | Single biggest discovery lift — feeds every detector the real surface |
 | **P0** | D4 authenticated + multi-auth discovery/test | Unlocks the majority of Highs (authn-gated) |
 | **P0** | D3 SPA/API capture → worklist · D5 per-family union passes | Right endpoints, no dilution |
 | **P1** | W1 safe write-BOLA · W2 fire JWT/mass-assign · W3 DOM/stored XSS | Detector depth on the now-discovered surface |
