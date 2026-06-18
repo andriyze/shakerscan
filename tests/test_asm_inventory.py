@@ -376,10 +376,12 @@ def test_priority_prefers_canonical_auth_and_search_over_version_fanout():
 def test_priority_lifts_state_changing_resource_endpoints():
     basket_item = a.priority_score("POST", "/api/BasketItems", "ProductId,BasketId,quantity")
     order = a.priority_score("GET", "/workshop/api/shop/orders/{id}", "id")
+    order_list = a.priority_score("GET", "/workshop/api/shop/orders/all", "")
     generic = a.priority_score("GET", "/api/status", "")
 
     assert basket_item > generic
     assert order > generic
+    assert order_list > generic
 
 
 def test_parse_worklist_entry_detail_preserves_replay_context():
@@ -789,6 +791,76 @@ def test_claim_test_batch_can_scope_to_campaign_inventory():
     assert "leased" in first_args[3]
     assert "te.test_status <> 'gone'" in first_query
     assert "te.test_status NOT IN ('gone', 'in_progress')" not in first_query
+
+
+def test_claim_test_batch_uses_bola_read_resource_ordering():
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "GET",
+            "path": "/workshop/api/shop/orders/all",
+            "param_shape": "",
+            "auth_state": "user1",
+            "param_location": "query",
+            "replay_spec": "GET /workshop/api/shop/orders/all",
+            "content_type": None,
+            "campaign_id": campaign_id,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            campaign_id=str(campaign_id),
+            campaign_only=True,
+            check_family="bola",
+            lease_owner="worker-a:job",
+        )
+    )
+
+    first_query, first_args = conn.fetchrow_calls[0]
+    rows_query, rows_args = conn.fetch_calls[0]
+    assert "CASE" in first_query
+    assert "te.method = 'GET'" in first_query
+    assert "te.method IN ('POST', 'PUT', 'PATCH', 'DELETE') THEN -75" in rows_query
+    assert "te.priority_score DESC" in rows_query
+    assert first_args[2] == "bola"
+    assert rows_args[4] == "bola"
+
+
+def test_claim_test_batch_default_ordering_stays_generic_priority():
+    target_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "POST",
+            "path": "/api/login",
+            "param_shape": "email,password",
+            "auth_state": "anonymous",
+            "param_location": "json",
+            "replay_spec": 'POST /api/login json:{"email":"test@example.com","password":"TestPass123!"}',
+            "content_type": "application/json",
+            "campaign_id": None,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    asyncio.run(a.claim_test_batch(conn, str(target_id), check_family="sqli"))
+
+    first_query, _first_args = conn.fetchrow_calls[0]
+    rows_query, _rows_args = conn.fetch_calls[0]
+    assert "CASE" not in first_query
+    assert "ORDER BY te.priority_score DESC, te.last_seen_at DESC" in rows_query
 
 
 def test_claim_test_batch_writes_campaign_family_lease_attempt():

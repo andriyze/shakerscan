@@ -82,6 +82,17 @@ _MUTATION_RESOURCE_RE = re.compile(
 )
 _SPECULATIVE_VERSION_RE = re.compile(r"/(?:api|rest)/v\d+(?:\.\d+)?/(?:auth|oauth|signin|validate|coupon|payment|checkout)(?:/|$)")
 
+_BOLA_RESOURCE_SQL_RE = (
+    "/(user|users|account|accounts|profile|profiles|order|orders|invoice|invoices|"
+    "document|documents|payment|payments|basket|baskets|cart|carts|address|addresses|"
+    "addresss|vehicle|vehicles|service|services|report|reports|post|posts|comment|comments)"
+)
+_BOLA_COLLECTION_SQL_RE = (
+    _BOLA_RESOURCE_SQL_RE
+    + "(/(all|list|listing|recent|history|past|mine|my|owned|search|results))?/?$"
+)
+_BOLA_DETAIL_SQL_RE = _BOLA_RESOURCE_SQL_RE + "/([^/]*\\{[^/]+\\}|<[^/]+>|[0-9]+|[0-9a-fA-F-]{24,36})/?$"
+
 VALID_AUTH_STATES = frozenset({"anonymous", "user1", "user2"})
 ATTEMPT_TERMINAL_STATUSES = (
     "completed",
@@ -430,6 +441,29 @@ def priority_score(method: str, path: str, param_shape: str) -> int:
     if _SPECULATIVE_VERSION_RE.search(p):
         score -= 10
     return score
+
+
+def _claim_order_clause(family: str) -> str:
+    """SQL ORDER BY expression for claim_test_batch.
+
+    BOLA is read/proof driven: the useful first batch is a set of GET producers
+    and detail candidates. Generic priority tends to over-rank auth and POST
+    mutation guesses, which can burn focused BOLA batches before object replay
+    sees owner-scoped list/detail routes.
+    """
+    if normalize_check_family(family) != "bola":
+        return "te.priority_score DESC, te.last_seen_at DESC"
+    return f"""
+        CASE
+            WHEN te.method = 'GET' AND te.path ~* '{_BOLA_DETAIL_SQL_RE}' THEN 500
+            WHEN te.method = 'GET' AND te.path ~* '{_BOLA_COLLECTION_SQL_RE}' THEN 450
+            WHEN te.method = 'GET' AND te.path ~* '{_BOLA_RESOURCE_SQL_RE}' THEN 300
+            WHEN te.method IN ('POST', 'PUT', 'PATCH', 'DELETE') THEN -75
+            ELSE 0
+        END DESC,
+        te.priority_score DESC,
+        te.last_seen_at DESC
+    """
 
 
 def _build_replay_spec(
@@ -1373,6 +1407,7 @@ async def claim_test_batch(
     family = normalize_check_family(check_family)
     endpoint_filter = normalize_endpoint_filter(endpoint_filter)
     endpoint_clause = _endpoint_filter_clause("te", endpoint_filter)
+    order_clause = _claim_order_clause(family)
     owner = str(lease_owner or "asm-worker")
     lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
     async with conn.transaction():
@@ -1394,10 +1429,10 @@ async def claim_test_batch(
                         AND aea.status = ANY($4::text[])
                   )
                   {endpoint_clause}
-                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                ORDER BY {order_clause}
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause),
+                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
                 tid, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES),
             )
         else:
@@ -1409,10 +1444,10 @@ async def claim_test_batch(
                   AND (te.test_status IN ('untested', 'stale')
                        OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($2 || ' days')::interval))
                   {endpoint_clause}
-                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                ORDER BY {order_clause}
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause),
+                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
                 tid, str(stale_days),
             )
         if not first:
@@ -1437,10 +1472,10 @@ async def claim_test_batch(
                         AND aea.status = ANY($6::text[])
                   )
                   {endpoint_clause}
-                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                ORDER BY {order_clause}
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause),
+                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
                 tid, limit, auth_state, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES),
             )
         else:
@@ -1454,10 +1489,10 @@ async def claim_test_batch(
                   AND (te.test_status IN ('untested', 'stale')
                        OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($3 || ' days')::interval))
                   {endpoint_clause}
-                ORDER BY te.priority_score DESC, te.last_seen_at DESC
+                ORDER BY {order_clause}
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause),
+                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
                 tid, limit, str(stale_days), auth_state,
             )
         if rows:
