@@ -2585,6 +2585,166 @@ async def nosql_injection_test_json_body(
     return results
 
 
+async def mass_assignment_test_json_body(
+    url: str,
+    method: str = "POST",
+    params: list[str] | None = None,
+    auth_session: Any | None = None,
+    body_template: dict[str, Any] | None = None,
+    body_param_defaults: dict[str, Any] | None = None,
+    content_type: str = "application/json",
+    max_fields: int = 8,
+) -> dict[str, Any]:
+    """Test discovered JSON endpoints for strict mass-assignment acceptance.
+
+    This is intentionally proof-oriented: it only reports when the response is
+    successful JSON and reflects the injected privileged field/value while the
+    baseline response did not already expose that same value.
+    """
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "fields_tested": 0,
+        "url": url,
+        "method": method,
+    }
+    if "json" not in (content_type or "").lower():
+        results["skipped"] = True
+        results["reason"] = "non_json_content_type"
+        return results
+
+    params = params or []
+    base_body: dict[str, Any] = {}
+    if isinstance(body_template, dict):
+        base_body = copy.deepcopy(body_template)
+    for name, value in (body_param_defaults or {}).items():
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, value, overwrite=False)
+    for name in params[:12]:
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
+
+    dangerous_fields: list[tuple[str, Any, str]] = [
+        ("role", "admin", "role_escalation"),
+        ("user_role", "admin", "role_escalation"),
+        ("userType", "admin", "role_escalation"),
+        ("isAdmin", True, "admin_flags"),
+        ("is_admin", True, "admin_flags"),
+        ("admin", True, "admin_flags"),
+        ("isVerified", True, "account_status"),
+        ("verified", True, "account_status"),
+        ("balance", 1000000, "business_logic"),
+        ("discount", 100, "business_logic"),
+    ]
+
+    rejection_markers = (
+        "not allowed", "forbidden", "unknown field", "invalid field",
+        "unexpected", "cannot set", "read only", "readonly", "not permitted",
+    )
+
+    def _parse_meta(raw: str) -> tuple[str, int | None]:
+        marker_pattern = re.compile(r"__SHAKERSCAN_MASS_ASSIGN__(\d{3})__SHAKERSCAN_MASS_ASSIGN__$")
+        if not raw:
+            return raw or "", None
+        match = marker_pattern.search(raw.strip())
+        if not match:
+            return raw, None
+        return raw[: match.start()], int(match.group(1))
+
+    def _norm_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", name.lower())
+
+    def _values_equal(observed: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            return observed is expected or str(observed).lower() == str(expected).lower()
+        if isinstance(expected, (int, float)):
+            try:
+                return float(observed) == float(expected)
+            except (TypeError, ValueError):
+                return False
+        return str(observed).lower() == str(expected).lower()
+
+    def _json_field_matches(body: str, field: str, expected: Any) -> bool:
+        if not body:
+            return False
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return False
+        target = _norm_key(field)
+
+        def _walk(value: Any) -> bool:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if _norm_key(str(key)) == target and _values_equal(child, expected):
+                        return True
+                    if _walk(child):
+                        return True
+            elif isinstance(value, list):
+                return any(_walk(child) for child in value[:10])
+            return False
+
+        return _walk(parsed)
+
+    auth_args = _filter_curl_headers(get_auth_curl_args(auth_session), {"content-type"})
+    baseline_body_args, baseline_header_args = _build_curl_body_args(base_body, content_type)
+    baseline_cmd = [
+        "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+    ] + baseline_header_args + auth_args + baseline_body_args + [
+        "-w", "__SHAKERSCAN_MASS_ASSIGN__%{http_code}__SHAKERSCAN_MASS_ASSIGN__",
+        url,
+    ]
+    baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
+    baseline_out, baseline_status = _parse_meta(baseline_raw or "")
+    if baseline_rc != 0:
+        results["skipped"] = True
+        results["reason"] = "baseline_request_failed"
+        return results
+    if baseline_status in (405, 415, 501):
+        results["skipped"] = True
+        results["reason"] = "method_or_content_type_not_supported"
+        results["baseline_status"] = baseline_status
+        return results
+
+    for field, value, category in dangerous_fields[:max(1, max_fields)]:
+        results["fields_tested"] += 1
+        test_body = copy.deepcopy(base_body)
+        _set_nested_value(test_body, field, value, overwrite=True)
+        test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
+        test_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+        ] + test_header_args + auth_args + test_body_args + [
+            "-w", "__SHAKERSCAN_MASS_ASSIGN__%{http_code}__SHAKERSCAN_MASS_ASSIGN__",
+            url,
+        ]
+        test_raw, _, test_rc = await run(test_cmd, timeout=15)
+        if test_rc != 0:
+            continue
+        test_out, test_status = _parse_meta(test_raw or "")
+        test_lower = (test_out or "").lower()
+        if test_status is None or test_status >= 300:
+            continue
+        if any(marker in test_lower for marker in rejection_markers):
+            continue
+        if not _json_field_matches(test_out, field, value):
+            continue
+        if _json_field_matches(baseline_out, field, value):
+            continue
+
+        results["vulnerable"] = True
+        results["findings"].append({
+            "parameter": field,
+            "value": value,
+            "category": category,
+            "baseline_status": baseline_status,
+            "payload_status": test_status,
+            "evidence_type": "privileged_field_reflected",
+            "response_snippet": test_out[:500] if test_out else "",
+        })
+
+    return results
+
+
 async def ldap_injection_test(
     url: str,
     params_to_test: list[str] | None = None,

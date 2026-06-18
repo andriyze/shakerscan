@@ -1614,6 +1614,7 @@ try:
         jwt_vulnerability_test as _jwt_vulnerability_test_mod,
         ldap_injection_test as _ldap_injection_test_mod,
         ldap_injection_test_json_body as _ldap_injection_test_json_body_mod,
+        mass_assignment_test_json_body as _mass_assignment_test_json_body_mod,
         nosql_injection_test as _nosql_injection_test_mod,
         nosql_injection_test_json_body as _nosql_injection_test_json_body_mod,
         oauth_vulnerability_test as _oauth_vulnerability_test_mod,
@@ -1938,6 +1939,7 @@ try:
     subdomain_takeover_check = _subdomain_takeover_check_mod
     nosql_injection_test = _nosql_injection_test_mod
     nosql_injection_test_json_body = _nosql_injection_test_json_body_mod
+    mass_assignment_test_json_body = _mass_assignment_test_json_body_mod
     ldap_injection_test = _ldap_injection_test_mod
     ldap_injection_test_json_body = _ldap_injection_test_json_body_mod
     xpath_injection_test = _xpath_injection_test_mod
@@ -8863,11 +8865,12 @@ async def build_report(target: str,
                         ]
                         post_json_endpoints = post_json_endpoints[:aux_post_json_limit]
 
-                    if post_json_endpoints:
-                        ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                        xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        if post_json_endpoints:
+                            ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                            mass_assignment_post = {"vulnerable": False, "tested_fields": set(), "evidence": []}
 
                         for ep in post_json_endpoints:
                             params = _coerce_param_list(ep.get("body_params") or ep.get("params"))
@@ -8952,6 +8955,25 @@ async def build_report(target: str,
                                     xxe_post["payloads_tested"].update(xxe_res.get("payloads_tested", []))
                                     xxe_post["tested_params"].update(xxe_res.get("tested_params", []))
 
+                            mass_assignment_res = await mass_assignment_test_json_body(
+                                url=url,
+                                method=method,
+                                params=params,
+                                auth_session=auth_session,
+                                body_template=ep.get("body_template"),
+                                body_param_defaults=defaults,
+                                content_type=content_type,
+                                max_fields=max(4, min(10, aux_payload_limit + 2)),
+                            )
+                            if mass_assignment_res.get("vulnerable"):
+                                mass_assignment_post["vulnerable"] = True
+                                mass_assignment_post["evidence"].extend(mass_assignment_res.get("findings", []))
+                                mass_assignment_post["tested_fields"].update(
+                                    f.get("parameter")
+                                    for f in mass_assignment_res.get("findings", [])
+                                    if f.get("parameter")
+                                )
+
                         if ldap_post["vulnerable"]:
                             active_block["ldap_json"] = {
                                 "payloads_tested": sorted(ldap_post["payloads_tested"]),
@@ -9022,6 +9044,22 @@ async def build_report(target: str,
                                     "tested_params": sorted(xxe_post["tested_params"]),
                                 },
                                 "CWE-611"
+                            ))
+
+                        if mass_assignment_post["vulnerable"]:
+                            active_block["mass_assignment_json"] = {
+                                "tested_fields": sorted(mass_assignment_post["tested_fields"]),
+                                "evidence": mass_assignment_post["evidence"][:10],
+                            }
+                            report["findings"].append(normalize_finding(
+                                "mass_assignment",
+                                "Mass Assignment (JSON body)",
+                                "high",
+                                {
+                                    "evidence": mass_assignment_post["evidence"][:10],
+                                    "tested_fields": sorted(mass_assignment_post["tested_fields"]),
+                                },
+                                "CWE-915"
                             ))
 
                     # Blind SSRF (OOB) for smart mode when callback is provided
