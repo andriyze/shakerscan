@@ -71,6 +71,17 @@ _HIGH_VALUE = (
     "upload", "file", "payment", "checkout", "order", "basket", "cart", "config",
 )
 
+_AUTH_ROUTE_RE = re.compile(
+    r"/(?:api|rest)?/?(?:v\d+(?:\.\d+)?/)?(?:user|users|auth|session|sessions|account|accounts)/(?:login|signin|authenticate|token|authentication)(?:/|$)"
+)
+_SEARCH_ROUTE_RE = re.compile(
+    r"/(?:api|rest)?/?(?:v\d+(?:\.\d+)?/)?(?:products?/)?(?:search|query)(?:/|$)"
+)
+_MUTATION_RESOURCE_RE = re.compile(
+    r"/(?:api|rest)?/?(?:v\d+(?:\.\d+)?/)?(?:basket|cart|order|orders|feedback|feedbacks|review|reviews|address|addresses|card|cards|coupon|payment)(?:/|$)"
+)
+_SPECULATIVE_VERSION_RE = re.compile(r"/(?:api|rest)/v\d+(?:\.\d+)?/(?:auth|oauth|signin|validate|coupon|payment|checkout)(?:/|$)")
+
 VALID_AUTH_STATES = frozenset({"anonymous", "user1", "user2"})
 ATTEMPT_TERMINAL_STATUSES = (
     "completed",
@@ -400,12 +411,24 @@ def priority_score(method: str, path: str, param_shape: str) -> int:
     """Rank endpoints so partial coverage still hits the juiciest first."""
     score = 10
     p = (path or "").lower()
-    if any(k in p for k in _HIGH_VALUE):
-        score += 20
+    segments = {seg for seg in re.split(r"[^a-z0-9]+", p) if seg}
+    keyword_hits = sum(1 for k in _HIGH_VALUE if k in segments)
+    if keyword_hits:
+        score += min(45, keyword_hits * 10)
+    if _AUTH_ROUTE_RE.search(p):
+        score += 30
+    if _SEARCH_ROUTE_RE.search(p):
+        score += 25
+    if _MUTATION_RESOURCE_RE.search(p):
+        score += 15
     if param_shape:  # parameter-bearing = injection candidate
         score += 15
     if method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
         score += 5
+    # Version fan-out guesses are useful eventually, but they should not outrank
+    # canonical routes extracted from the app bundle such as /rest/user/login.
+    if _SPECULATIVE_VERSION_RE.search(p):
+        score -= 10
     return score
 
 

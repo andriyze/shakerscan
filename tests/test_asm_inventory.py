@@ -362,6 +362,26 @@ def test_parse_worklist_entry_shapes():
     assert a.parse_worklist_entry(None) is None
 
 
+def test_priority_prefers_canonical_auth_and_search_over_version_fanout():
+    canonical_login = a.priority_score("POST", "/rest/user/login", "email,password")
+    version_guess = a.priority_score("POST", "/rest/v2/auth/login", "email,password,token")
+    search = a.priority_score("GET", "/rest/products/search", "q")
+    api_base = a.priority_score("GET", "/api", "")
+
+    assert canonical_login > version_guess
+    assert search > api_base
+    assert search > a.priority_score("GET", "/rest", "")
+
+
+def test_priority_lifts_state_changing_resource_endpoints():
+    basket_item = a.priority_score("POST", "/api/BasketItems", "ProductId,BasketId,quantity")
+    order = a.priority_score("GET", "/workshop/api/shop/orders/{id}", "id")
+    generic = a.priority_score("GET", "/api/status", "")
+
+    assert basket_item > generic
+    assert order > generic
+
+
 def test_parse_worklist_entry_detail_preserves_replay_context():
     form = a.parse_worklist_entry_detail("POST /login form:email=1&password=1")
     assert form is not None
