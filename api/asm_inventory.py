@@ -81,6 +81,7 @@ ATTEMPT_TERMINAL_STATUSES = (
     "rate_limited",
     "error",
 )
+ATTEMPT_CLAIM_BLOCKING_STATUSES = ATTEMPT_TERMINAL_STATUSES + ("leased",)
 
 
 API_ENDPOINT_FILTER_SQL = """(
@@ -1360,7 +1361,7 @@ async def claim_test_batch(
                 FROM target_endpoints te
                 WHERE te.target_id = $1
                   AND te.campaign_id = $2
-                  AND te.test_status NOT IN ('gone', 'in_progress')
+                  AND te.test_status <> 'gone'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM asm_endpoint_attempts aea
@@ -1374,7 +1375,7 @@ async def claim_test_batch(
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
                 """.format(endpoint_clause=endpoint_clause),
-                tid, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
+                tid, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES),
             )
         else:
             first = await conn.fetchrow(
@@ -1403,7 +1404,7 @@ async def claim_test_batch(
                 WHERE te.target_id = $1
                   AND te.auth_state = $3
                   AND te.campaign_id = $4
-                  AND te.test_status NOT IN ('gone', 'in_progress')
+                  AND te.test_status <> 'gone'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM asm_endpoint_attempts aea
@@ -1417,7 +1418,7 @@ async def claim_test_batch(
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
                 """.format(endpoint_clause=endpoint_clause),
-                tid, limit, auth_state, cid, family, list(ATTEMPT_TERMINAL_STATUSES),
+                tid, limit, auth_state, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES),
             )
         else:
             rows = await conn.fetch(
@@ -1437,6 +1438,31 @@ async def claim_test_batch(
                 tid, limit, str(stale_days), auth_state,
             )
         if rows:
+            if restrict_campaign:
+                await conn.executemany(
+                    """
+                    INSERT INTO asm_endpoint_attempts (
+                        endpoint_id, campaign_id, worker_id, auth_state, check_family,
+                        started_at, status, attempted_params_count,
+                        completed_params_count, error_summary, scanner_telemetry_json
+                    ) VALUES (
+                        $1, $2, $3, $4, $5,
+                        NOW(), 'leased', 0,
+                        0, 'campaign_family_lease', $6::jsonb
+                    )
+                    """,
+                    [
+                        (
+                            r["id"],
+                            cid,
+                            owner,
+                            normalize_auth_state(r["auth_state"]),
+                            family,
+                            '{"per_endpoint_telemetry": true, "lease": true}',
+                        )
+                        for r in rows
+                    ],
+                )
             await conn.execute(
                 """
                 UPDATE target_endpoints

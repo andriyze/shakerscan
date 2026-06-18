@@ -689,6 +689,10 @@ class _ClaimConn:
         self.executed.append((query, args))
         return "UPDATE 0" if "lease_expired" in query else f"UPDATE {len(self.rows)}"
 
+    async def executemany(self, query, args):
+        self.executed.append((query, args))
+        return None
+
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
         return {"auth_state": "anonymous"} if self.rows else None
@@ -762,6 +766,51 @@ def test_claim_test_batch_can_scope_to_campaign_inventory():
     assert first_args[1] == campaign_id
     assert first_args[2] == "sqli"
     assert "completed" in first_args[3]
+    assert "leased" in first_args[3]
+    assert "te.test_status <> 'gone'" in first_query
+    assert "te.test_status NOT IN ('gone', 'in_progress')" not in first_query
+
+
+def test_claim_test_batch_writes_campaign_family_lease_attempt():
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "POST",
+            "path": "/api/login",
+            "param_shape": "email,password",
+            "auth_state": "anonymous",
+            "param_location": "json",
+            "replay_spec": 'POST /api/login json:{"email":"test@example.com","password":"TestPass123!"}',
+            "content_type": "application/json",
+            "campaign_id": campaign_id,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    claimed = asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            campaign_id=str(campaign_id),
+            campaign_only=True,
+            check_family="sqli",
+            lease_owner="worker-a:job",
+        )
+    )
+
+    assert claimed[0]["id"] == endpoint_id
+    lease_query, lease_args = conn.executed[-2]
+    assert "INSERT INTO asm_endpoint_attempts" in lease_query
+    assert "status, attempted_params_count" in lease_query
+    assert lease_args[0][0] == endpoint_id
+    assert lease_args[0][1] == campaign_id
+    assert lease_args[0][2] == "worker-a:job"
+    assert lease_args[0][4] == "sqli"
 
 
 def test_claim_test_batch_can_scope_to_api_endpoint_filter():
