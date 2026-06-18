@@ -146,6 +146,7 @@ def test_coverage_single_endpoint_falls_back_to_one_shard():
     assert shard.options["focused_endpoints_only"] is True
     assert shard.options["zero_rediscovery"] is True
     assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+    assert shard.options["custom_budget"]["phase4_max_seconds"] == 0
     assert shard.options["resolved_budget"]["active_max_endpoints"] == 1
     assert any("zero-rediscovery shards skip" in n for n in plan.notes)
 
@@ -175,6 +176,7 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
         assert shard.options["focused_endpoints_only"] is True
         assert shard.options["zero_rediscovery"] is True
         assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+        assert shard.options["custom_budget"]["phase4_max_seconds"] == 0
         if shard.label.endswith(":sqli"):
             lane_counts["sqli"] += 1
             assert shard.options["asm_check_family"] == "sqli"
@@ -530,6 +532,7 @@ def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
         assert shard.options["focused_endpoints_only"] is True
         assert "custom_endpoints" not in shard.options
         assert shard.options["custom_budget"]["nuclei_max_targets"] == 0
+        assert shard.options["custom_budget"]["phase4_max_seconds"] == 0
 
 
 def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
@@ -550,6 +553,7 @@ def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     assert all(s.options["coverage_dynamic_worker"] is True for s in plan.shards)
     assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
     assert all("custom_endpoints" not in s.options for s in plan.shards)
+    assert all(s.options["custom_budget"]["phase4_max_seconds"] == 0 for s in plan.shards)
     sqli = next(s for s in plan.shards if s.label.endswith(":sqli"))
     xss = next(s for s in plan.shards if s.label.endswith(":xss"))
     broad = next(s for s in plan.shards if s.label.endswith(":broad"))

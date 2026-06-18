@@ -831,6 +831,7 @@ def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch
         assert job["finish_campaign_on_complete"] is False
         assert job["options"]["coverage_dynamic_worker"] is True
         assert job["options"]["zero_rediscovery"] is True
+        assert job["options"]["custom_budget"]["phase4_max_seconds"] == 0
         assert "custom_endpoints" not in job["options"]
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
     assert redis.sets[0][1] == 2
@@ -1028,6 +1029,7 @@ def test_scan_plan_coverage_family_dynamic_uses_family_aware_batches(monkeypatch
     assert child_jobs[1]["options"]["asm_check_family"] == "sqli"
     assert child_jobs[2]["options"]["coverage_attempt_family"] == "xss"
     assert child_jobs[2]["options"]["asm_check_family"] == "xss"
+    assert all(job["options"]["custom_budget"]["phase4_max_seconds"] == 0 for job in child_jobs)
     assert all(job["options"]["coverage_family_aware"] is True for job in child_jobs)
     assert all(job["campaign_only"] is True for job in child_jobs)
     parent_update = [
@@ -1226,6 +1228,7 @@ def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypat
     assert calls["run"]["focused_endpoints_only"] is True
     assert calls["run"]["skip_global_checks"] is True
     assert calls["run"]["custom_budget"]["nuclei_max_targets"] == 0
+    assert calls["run"]["custom_budget"]["phase4_max_seconds"] == 0
     assert calls["record"]["parent_scan_id"] == "55555555-5555-5555-5555-555555555555"
     assert calls["record"]["campaign_id"] == "44444444-4444-4444-4444-444444444444"
     assert calls["record"]["check_family"] == "xss"

@@ -5471,6 +5471,7 @@ async def process_exploit_batch_job(job_data: dict):
             'browser_max_pages': 0,
             'api_probe_limit': 0,
             'nuclei_max_targets': 0,
+            'phase4_max_seconds': 0,
         })
     if exploit_depth:
         scan_opts['no_early_stop'] = True
