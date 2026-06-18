@@ -33,6 +33,11 @@ def _fake_session(token: str) -> SimpleNamespace:
     )
 
 
+def _auth_token(headers: dict | None) -> str:
+    auth = (headers or {}).get("Authorization") or ""
+    return auth.replace("Bearer ", "")
+
+
 def test_bola_resource_heuristic_recognizes_juice_shop_address_resource():
     body = json.dumps({"id": 7, "fullName": "Alice", "mobileNum": "1234567890"})
 
@@ -247,6 +252,104 @@ def test_smart_bola_cross_user_chrome_only_is_not_flagged(monkeypatch):
 
     cross = [f for f in results["findings"] if "Cross-user data access" in f.get("title", "")]
     assert cross == []
+
+
+def test_smart_bola_authz_replay_confirms_user1_object_access_by_user2(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        token = _auth_token(kwargs.get("headers"))
+        path = urlsplit(url).path
+        if path == "/api/orders":
+            if token == "user1":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps([{"id": 101, "email": "alice@example.com", "amount": 42}]),
+                )
+            if token == "user2":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps([{"id": 202, "email": "bob@example.com", "amount": 7}]),
+                )
+            return _fake_http_response(url, 401, json.dumps({"error": "unauthorized"}))
+        if path == "/api/orders/101":
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps({"id": 101, "email": "alice@example.com", "amount": 42}),
+            )
+        if path == "/api/orders/202":
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps({"id": 202, "email": "bob@example.com", "amount": 7}),
+            )
+        return _fake_http_response(url, 404, json.dumps({"error": "not found"}))
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/orders"],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    authz = [f for f in results["findings"] if f.get("tool") == "smart_authz"]
+    assert authz, "expected confirmed authz replay finding"
+    finding = authz[0]
+    assert finding["severity"] == "high"
+    assert finding["evidence"]["producer_endpoint"] == "GET /api/orders"
+    assert finding["evidence"]["consumer_endpoint"] == "GET /api/orders/101"
+    assert finding["evidence"]["source_principal"] == "user1"
+    assert finding["evidence"]["attacker_principal"] == "user2"
+    assert finding["evidence"]["object_id_absent_from_attacker_listing"] is True
+    assert finding["evidence"]["authz_diff"]["replayed_owner_object_missing_from_attacker_listing"] is True
+    attempts = [a for a in results["endpoint_attempts"] if a.get("family") == "authz"]
+    assert attempts
+    assert attempts[0]["producer_endpoint"] == "GET /api/orders"
+    assert attempts[0]["consumer_endpoint"] == "GET /api/orders/101"
+    assert attempts[0]["auth_state"] == "user2"
+    assert attempts[0]["proof_type"] == "cross_principal_replay"
+    assert attempts[0]["status"] == "completed"
+
+
+def test_smart_bola_authz_replay_skips_object_visible_in_both_listings(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        token = _auth_token(kwargs.get("headers"))
+        path = urlsplit(url).path
+        if path == "/api/projects":
+            body = json.dumps([{"id": 101, "name": f"shared-for-{token}"}])
+            return _fake_http_response(url, 200, body)
+        if path == "/api/projects/101":
+            return _fake_http_response(url, 200, json.dumps({"id": 101, "name": "shared"}))
+        return _fake_http_response(url, 404, "{}")
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/projects"],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    assert [f for f in results["findings"] if f.get("tool") == "smart_authz"] == []
+    assert [a for a in results["endpoint_attempts"] if a.get("family") == "authz"] == []
 
 
 def test_smart_bola_respects_max_seconds_budget(monkeypatch):

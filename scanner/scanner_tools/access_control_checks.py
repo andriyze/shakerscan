@@ -16,7 +16,7 @@ import hashlib
 import json
 import time
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
 from .bola_comparison import (
@@ -1420,6 +1420,8 @@ BOLA_RESOURCE_STRONG_KEYS = {
     "email", "username", "profile", "order_id", "orderid", "invoice_id",
     "invoiceid", "document_id", "documentid", "payment_id", "paymentid",
     "customer_id", "customerid", "member_id", "memberid",
+    "vehicle_id", "vehicleid", "vin", "address_id", "addressid",
+    "basket_id", "basketid", "cart_id", "cartid",
 }
 
 BOLA_JSON_ENVELOPE_KEYS = {
@@ -1454,6 +1456,211 @@ def _extract_json_keys(body: str) -> set[str]:
     except Exception:
         return set()
     return _collect_json_keys(parsed)
+
+
+BOLA_RESOURCE_ID_KEYS = {
+    "id", "_id", "uuid", "uid", "object_id", "objectid",
+    "user_id", "userid", "owner_id", "ownerid", "account_id", "accountid",
+    "customer_id", "customerid", "member_id", "memberid", "order_id", "orderid",
+    "invoice_id", "invoiceid", "document_id", "documentid", "payment_id",
+    "paymentid", "vehicle_id", "vehicleid", "address_id", "addressid",
+    "basket_id", "basketid", "cart_id", "cartid", "product_id", "productid",
+}
+
+BOLA_SENSITIVE_FIELD_KEYS = {
+    "email", "username", "phone", "mobile", "mobile_num", "mobilenum",
+    "address", "street", "zip", "postal_code", "vin", "license_plate",
+    "card", "card_number", "credit_card", "token", "jwt", "secret",
+    "api_key", "apikey", "password", "ssn", "dob", "balance", "amount",
+}
+
+
+def _parse_json_body(body: str) -> Any | None:
+    if not body:
+        return None
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+def _is_json_like_response(response: dict[str, Any] | None) -> bool:
+    if not response:
+        return False
+    body = str(response.get("body") or "")
+    if not body:
+        return False
+    if _parse_json_body(body) is not None:
+        return True
+    content_type = ""
+    headers = response.get("headers") or {}
+    if isinstance(headers, dict):
+        content_type = str(headers.get("content-type") or headers.get("Content-Type") or "").lower()
+    return "json" in content_type
+
+
+def _flatten_json_objects(value: Any, *, depth: int = 0, max_depth: int = 4) -> list[dict[str, Any]]:
+    """Return object dictionaries from a JSON value without traversing unbounded payloads."""
+    if depth > max_depth:
+        return []
+    objects: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        objects.append(value)
+        for nested in list(value.values())[:40]:
+            objects.extend(_flatten_json_objects(nested, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(value, list):
+        for nested in value[:80]:
+            objects.extend(_flatten_json_objects(nested, depth=depth + 1, max_depth=max_depth))
+    return objects
+
+
+def _safe_scalar_id(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate or len(candidate) > 128:
+            return None
+        lowered = candidate.lower()
+        if lowered in {"true", "false", "null", "undefined", "nan"}:
+            return None
+        if candidate.isdigit():
+            return candidate
+        import re
+        if re.fullmatch(r"[a-f0-9]{24}", candidate, re.IGNORECASE):
+            return candidate
+        if re.fullmatch(r"[a-f0-9-]{32,36}", candidate, re.IGNORECASE):
+            return candidate
+        if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", candidate) and any(ch.isdigit() for ch in candidate):
+            return candidate
+    return None
+
+
+def _extract_resource_refs_from_json(body: str) -> list[dict[str, Any]]:
+    """Extract generic object IDs and sensitive field names from JSON responses."""
+    parsed = _parse_json_body(body)
+    if parsed is None:
+        return []
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for obj in _flatten_json_objects(parsed):
+        if not isinstance(obj, dict):
+            continue
+        sensitive_fields = sorted(
+            str(k) for k in obj.keys()
+            if isinstance(k, str) and k.strip().lower() in BOLA_SENSITIVE_FIELD_KEYS
+        )
+        keys_lower = {str(k).strip().lower(): str(k) for k in obj.keys() if isinstance(k, str)}
+        for lowered, original_key in keys_lower.items():
+            if lowered not in BOLA_RESOURCE_ID_KEYS and not lowered.endswith("id"):
+                continue
+            object_id = _safe_scalar_id(obj.get(original_key))
+            if not object_id:
+                continue
+            key = (lowered, object_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append({
+                "object_id": object_id,
+                "object_id_key": original_key,
+                "object_id_location": "json",
+                "sensitive_fields": sensitive_fields[:12],
+            })
+    return refs[:100]
+
+
+def _resource_ids_from_response(body: str) -> set[str]:
+    return {ref["object_id"] for ref in _extract_resource_refs_from_json(body) if ref.get("object_id")}
+
+
+def _sensitive_fields_from_body(body: str) -> list[str]:
+    parsed = _parse_json_body(body)
+    if parsed is None:
+        return []
+    fields: set[str] = set()
+    for obj in _flatten_json_objects(parsed):
+        for key in obj.keys():
+            if isinstance(key, str) and key.strip().lower() in BOLA_SENSITIVE_FIELD_KEYS:
+                fields.add(key)
+    return sorted(fields)[:20]
+
+
+def _path_with_resource_id(base_path: str, object_id: str) -> str:
+    path = (base_path or "/").rstrip("/")
+    if not path:
+        path = "/"
+    return f"{path}/{object_id}"
+
+
+def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build read-safe candidate consumer URLs from a producer response reference."""
+    object_id = str(ref.get("object_id") or "").strip()
+    object_key = str(ref.get("object_id_key") or "id")
+    if not object_id:
+        return []
+    try:
+        parsed = urlsplit(producer_url)
+    except Exception:
+        return []
+    base_path = parsed.path or "/"
+    host = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    candidates: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    path_url = host + _path_with_resource_id(base_path, object_id)
+    candidates.append({
+        "method": "GET",
+        "url": path_url,
+        "object_id_location": "path",
+        "custom_endpoint": f"GET {_path_with_resource_id(base_path, object_id)}",
+    })
+    seen_urls.add(path_url)
+
+    query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not _is_probable_id_param(k)]
+    query_key = object_key if _is_probable_id_param(object_key) else "id"
+    query_pairs.append((query_key, object_id))
+    query = urlencode(query_pairs, doseq=True)
+    query_url = urlunsplit((parsed.scheme, parsed.netloc, base_path, query, ""))
+    if query_url not in seen_urls:
+        candidates.append({
+            "method": "GET",
+            "url": query_url,
+            "object_id_location": "query",
+            "custom_endpoint": f"GET {base_path}?{query}",
+        })
+    return candidates[:2]
+
+
+def _new_authz_endpoint_attempt(
+    *,
+    producer_endpoint: str,
+    consumer_endpoint: str,
+    object_id_location: str,
+    principal_label: str,
+    attacker_label: str,
+    property_names: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "custom_endpoint": consumer_endpoint,
+        "family": "authz",
+        "method": "GET",
+        "auth_state": attacker_label,
+        "principal_label": attacker_label,
+        "source_principal": principal_label,
+        "attacker_principal": attacker_label,
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": consumer_endpoint,
+        "object_id_location": object_id_location,
+        "property_names_tested": list(property_names or []),
+        "proof_type": "cross_principal_replay",
+        "param_count": 1,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
 
 
 def _bola_path_segments(url_or_template: str) -> set[str]:
@@ -2018,6 +2225,243 @@ async def smart_auth_access_test(
     return results
 
 
+async def authz_resource_replay_test(
+    base_url: str,
+    discovered_urls: list[str],
+    user1_session: Any | None,
+    user2_session: Any | None,
+    *,
+    max_producers: int = 25,
+    max_replays: int = 80,
+    timeout: int = 10,
+    max_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Auth-aware object authorization check built from real producer responses.
+
+    The check is intentionally read-only. It first fetches collection/resource
+    producer endpoints as user1 and user2, extracts object IDs from JSON bodies,
+    then lets user2 replay only IDs seen in user1's response but not in user2's
+    own producer response. A finding requires deterministic proof: user1 and
+    user2 both receive equivalent resource-like data for the same object ID, and
+    that ID was absent from user2's producer response.
+    """
+    from .proof_of_exploit import fetch_with_capture
+
+    started = time.monotonic()
+
+    def _deadline_exceeded() -> bool:
+        return bool(max_seconds and max_seconds > 0 and (time.monotonic() - started) >= max_seconds)
+
+    results: dict[str, Any] = {
+        "vulnerable": False,
+        "findings": [],
+        "producers_tested": 0,
+        "producer_ids_found": 0,
+        "replays_attempted": 0,
+        "replays_completed": 0,
+        "cross_principal_violations": 0,
+        "budget_exceeded": False,
+        "resource_map": [],
+        "endpoint_attempts": [],
+    }
+
+    user1_headers = _auth_session_headers(user1_session)
+    user2_headers = _auth_session_headers(user2_session)
+    if not user1_headers or not user2_headers:
+        results["skipped"] = True
+        results["reason"] = "multi_user_credentials_required"
+        return results
+
+    producers: list[str] = []
+    seen: set[str] = set()
+    for raw_url in discovered_urls or []:
+        if not isinstance(raw_url, str):
+            continue
+        url = raw_url.strip()
+        if not url:
+            continue
+        if url.startswith("//"):
+            url = "https:" + url
+        if url.startswith("/"):
+            url = urljoin(base_url.rstrip("/") + "/", url.lstrip("/"))
+        if not url.startswith("http"):
+            url = urljoin(base_url.rstrip("/") + "/", url)
+        if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+            continue
+        if _has_excluded_synth_path_segment(url):
+            continue
+        try:
+            parsed = urlsplit(url)
+        except Exception:
+            continue
+        if parsed.fragment:
+            continue
+        # Producer responses should be read-safe. Keep URL-pattern endpoints
+        # too because some APIs expose a single resource that can produce nested IDs.
+        custom = _bola_custom_endpoint(url, "GET")
+        if not custom or custom in seen:
+            continue
+        seen.add(custom)
+        producers.append(url)
+        if len(producers) >= max(1, int(max_producers or 1)):
+            break
+
+    for producer_url in producers:
+        if _deadline_exceeded():
+            results["budget_exceeded"] = True
+            break
+        results["producers_tested"] += 1
+        producer_endpoint = _bola_custom_endpoint(producer_url, "GET") or f"GET {producer_url}"
+        try:
+            user1_resp = await fetch_with_capture(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            user2_listing_resp = await fetch_with_capture(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
+        except Exception:
+            continue
+        user1_status = _auth_response_status(user1_resp)
+        user2_listing_status = _auth_response_status(user2_listing_resp)
+        if not (200 <= user1_status < 300) or not _is_json_like_response(user1_resp):
+            continue
+        user1_body = str(user1_resp.get("body") or "")
+        user2_listing_body = str(user2_listing_resp.get("body") or "")
+        user1_refs = _extract_resource_refs_from_json(user1_body)
+        if not user1_refs:
+            continue
+        user2_ids = (
+            _resource_ids_from_response(user2_listing_body)
+            if 200 <= user2_listing_status < 300 and _is_json_like_response(user2_listing_resp)
+            else set()
+        )
+        results["producer_ids_found"] += len(user1_refs)
+
+        for ref in user1_refs:
+            if _deadline_exceeded():
+                results["budget_exceeded"] = True
+                break
+            object_id = str(ref.get("object_id") or "")
+            if not object_id or object_id in user2_ids:
+                continue
+            candidates = _resource_replay_candidates(producer_url, ref)
+            if not candidates:
+                continue
+            results["resource_map"].append({
+                "producer_endpoint": producer_endpoint,
+                "object_id_key": ref.get("object_id_key"),
+                "object_id_location": ref.get("object_id_location"),
+                "source_principal": "user1",
+                "excluded_from_principal": "user2",
+                "consumer_candidates": [c["custom_endpoint"] for c in candidates],
+                "sensitive_fields": ref.get("sensitive_fields") or [],
+            })
+            for candidate in candidates:
+                if results["replays_attempted"] >= max(1, int(max_replays or 1)):
+                    results["budget_exceeded"] = True
+                    break
+                attempt = _new_authz_endpoint_attempt(
+                    producer_endpoint=producer_endpoint,
+                    consumer_endpoint=candidate["custom_endpoint"],
+                    object_id_location=candidate["object_id_location"],
+                    principal_label="user1",
+                    attacker_label="user2",
+                    property_names=ref.get("sensitive_fields") or [],
+                )
+                attempt["attempted_params_count"] = 1
+                results["replays_attempted"] += 1
+                try:
+                    owner_resp = await fetch_with_capture(
+                        candidate["url"], headers=user1_headers, timeout=timeout, budget_key="bola"
+                    )
+                    attacker_resp = await fetch_with_capture(
+                        candidate["url"], headers=user2_headers, timeout=timeout, budget_key="bola"
+                    )
+                except Exception as exc:
+                    attempt["status"] = "partial"
+                    attempt["error_summary"] = str(exc)[:200]
+                    results["endpoint_attempts"].append(attempt)
+                    continue
+
+                owner_status = _auth_response_status(owner_resp)
+                attacker_status = _auth_response_status(attacker_resp)
+                owner_body = str(owner_resp.get("body") or "")
+                attacker_body = str(attacker_resp.get("body") or "")
+                attempt["completed_params_count"] = 1
+                attempt["status"] = "completed"
+                results["replays_completed"] += 1
+
+                sensitive_fields = sorted(set((ref.get("sensitive_fields") or []) + _sensitive_fields_from_body(attacker_body)))[:20]
+                equivalent = (
+                    200 <= owner_status < 300
+                    and 200 <= attacker_status < 300
+                    and len(owner_body) > 20
+                    and len(attacker_body) > 20
+                    and responses_equivalent(owner_body, attacker_body)
+                )
+                resource_like = _looks_like_bola_resource_response(candidate["url"], attacker_body)
+                user_signals = extract_user_specific_signals(attacker_body)
+                if equivalent and resource_like and (user_signals or sensitive_fields):
+                    results["vulnerable"] = True
+                    results["cross_principal_violations"] += 1
+                    path_hash = hashlib.sha256(
+                        f"{producer_endpoint}:{candidate['custom_endpoint']}:{object_id}:user2".encode()
+                    ).hexdigest()[:10]
+                    similarity = response_similarity(owner_body, attacker_body)
+                    evidence = {
+                        "family": "authz",
+                        "producer_endpoint": producer_endpoint,
+                        "consumer_endpoint": candidate["custom_endpoint"],
+                        "url": candidate["url"],
+                        "source_principal": "user1",
+                        "attacker_principal": "user2",
+                        "object_id_key": ref.get("object_id_key"),
+                        "object_id_location": candidate["object_id_location"],
+                        "object_id_absent_from_attacker_listing": True,
+                        "owner_status": owner_status,
+                        "attacker_status": attacker_status,
+                        "responses_equivalent": True,
+                        "response_similarity": round(similarity, 3),
+                        "sensitive_fields": sensitive_fields,
+                        "user_specific_signals": user_signals[:8],
+                        "authz_diff": {
+                            "producer_ids_owner_count": len(user1_refs),
+                            "producer_ids_attacker_count": len(user2_ids),
+                            "replayed_owner_object_missing_from_attacker_listing": True,
+                            "owner_resource_equivalent_to_attacker_resource": True,
+                        },
+                        "proof_type": "cross_principal_replay",
+                        "response_snippet": attacker_body[:300],
+                    }
+                    results["findings"].append({
+                        "id": f"smart_authz:{path_hash}",
+                        "tool": "smart_authz",
+                        "title": f"Broken object authorization: user2 can access user1 object at {candidate['custom_endpoint']}",
+                        "severity": "high",
+                        "confidence": 0.82,
+                        "severity_rationale": (
+                            "High: deterministic cross-principal replay returned equivalent "
+                            "resource data for an object ID produced by user1 and absent from "
+                            "user2's own producer response."
+                        ),
+                        "evidence": evidence,
+                        "description": (
+                            "A resource ID observed in user1's authenticated response was not "
+                            "present in user2's own listing, but user2 could replay the object "
+                            "endpoint and receive equivalent resource data."
+                        ),
+                        "remediation": (
+                            "Authorize every object read against the requesting principal. "
+                            "Add regression tests for cross-user object access."
+                        ),
+                        "cwe": "CWE-639",
+                        "owasp": "API1:2023 - Broken Object Level Authorization",
+                    })
+                results["endpoint_attempts"].append(attempt)
+                if results["cross_principal_violations"] >= 10:
+                    return results
+            if results.get("budget_exceeded"):
+                break
+
+    return results
+
+
 async def smart_bola_test(
     base_url: str,
     discovered_urls: list[str],
@@ -2093,6 +2537,26 @@ async def smart_bola_test(
                 cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                 headers["Cookie"] = cookie_str
         return headers
+
+    if user1_session is not None and user2_session is not None:
+        authz_results = await authz_resource_replay_test(
+            base_url=base_url,
+            discovered_urls=discovered_urls,
+            user1_session=user1_session,
+            user2_session=user2_session,
+            max_producers=min(40, max_endpoints),
+            max_replays=max(20, max_endpoints * 2),
+            timeout=timeout,
+            max_seconds=max_seconds * 0.35 if max_seconds and max_seconds > 0 else None,
+        )
+        results["authz_resource_replay"] = authz_results
+        results["findings"].extend(authz_results.get("findings") or [])
+        results["endpoint_attempts"].extend(authz_results.get("endpoint_attempts") or [])
+        results["cross_user_violations"] += int(authz_results.get("cross_principal_violations") or 0)
+        if authz_results.get("vulnerable"):
+            results["vulnerable"] = True
+        if authz_results.get("budget_exceeded"):
+            results["budget_exceeded"] = True
 
     # Synthesize resource URLs from collection endpoints
     synthesized_urls = synthesize_resource_urls_from_collections(

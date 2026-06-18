@@ -2222,7 +2222,13 @@ except Exception:
 
 # Triage fields a BOLA detector sets on a finding dict that normalize_finding
 # does not carry through on its own.
-_BOLA_TRIAGE_FIELDS = ("suspected", "needs_verification", "verification_reason", "confidence")
+_BOLA_TRIAGE_FIELDS = (
+    "suspected",
+    "needs_verification",
+    "verification_reason",
+    "confidence",
+    "severity_rationale",
+)
 
 
 def _append_bola_finding(
@@ -10007,7 +10013,7 @@ async def build_report(target: str,
                         for f in bola_results["findings"]:
                             _append_bola_finding(
                                 report, f,
-                                tool="smart_bola",
+                                tool=str(f.get("tool") or "smart_bola"),
                                 default_title="BOLA/IDOR Vulnerability",
                             )
                         print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
