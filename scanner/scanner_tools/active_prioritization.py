@@ -2,8 +2,35 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any
+
+
+# A path *segment* that looks like a concrete or templated object identifier.
+# These are the IDOR / BOLA / SQLi-on-path-param goldmines (e.g. crAPI's
+# /identity/api/v2/vehicle/{vehicleId}/location or /api/orders/42): the
+# vulnerable code path only runs when a real resource id reaches it, yet such
+# routes often carry no high-value path *keyword* and would otherwise score low.
+_OBJECT_ID_SEGMENT_RE = re.compile(
+    r"^(?:"
+    r"\d+"                                   # numeric id: 42
+    r"|[0-9a-fA-F]{24}"                      # mongo ObjectId
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"  # uuid
+    r"|\{[^/}]+\}"                           # templated: {id}, {vehicleId}
+    r"|:[A-Za-z_][\w-]*"                     # express-style: :id
+    r")$"
+)
+
+STATE_CHANGING_METHODS = frozenset({"PUT", "PATCH", "DELETE"})
+
+
+def _path_has_object_id_segment(path: str) -> bool:
+    """True if any path segment is a concrete or templated object identifier."""
+    for segment in str(path or "").split("/"):
+        if segment and _OBJECT_ID_SEGMENT_RE.match(segment):
+            return True
+    return False
 
 
 DEFAULT_SOURCE_PRIORITY: dict[str, int] = {
@@ -141,6 +168,15 @@ def active_endpoint_score(endpoint: dict[str, Any]) -> int:
     score = SOURCE_BONUS.get(source, 0)
     score += _param_score(endpoint)
     score += _path_score(path)
+
+    # Object-id-bearing consumer routes (/orders/42, /vehicle/{id}/location) are
+    # prime IDOR/BOLA/SQLi-on-path targets even without a high-value keyword.
+    if _path_has_object_id_segment(path):
+        score += 12
+        # A state-changing method on an object route is a BOLA-write / object
+        # mutation candidate — the highest-impact access-control bug class.
+        if method in STATE_CHANGING_METHODS:
+            score += 6
 
     if method in {"POST", "PUT", "PATCH"}:
         score += 6

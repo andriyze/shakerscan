@@ -7,6 +7,7 @@ if _SCANNER_DIR not in sys.path:
     sys.path.insert(0, _SCANNER_DIR)
 
 from scanner_tools.active_prioritization import (  # noqa: E402
+    _path_has_object_id_segment,
     active_endpoint_score,
     prioritize_active_endpoints,
 )
@@ -227,3 +228,39 @@ def test_static_discovery_paths_do_not_crowd_out_app_routes():
     assert "https://example.test/rest/products/search?q=test" in selected_urls
     assert "https://example.test/.well-known/security.txt/auth/login" not in selected_urls
     assert "https://example.test/socket.io/?token=abc" not in selected_urls
+
+
+def test_object_id_segment_detection():
+    assert _path_has_object_id_segment("/api/orders/42")
+    assert _path_has_object_id_segment("/identity/api/v2/vehicle/{vehicleId}/location")
+    assert _path_has_object_id_segment("/users/:id")
+    assert _path_has_object_id_segment("/docs/507f1f77bcf86cd799439011")  # mongo ObjectId
+    assert _path_has_object_id_segment("/x/123e4567-e89b-12d3-a456-426614174000")  # uuid
+    # plain word/listing/version segments must NOT look like object ids
+    assert not _path_has_object_id_segment("/api/orders/all")
+    assert not _path_has_object_id_segment("/rest/products/search")
+    assert not _path_has_object_id_segment("/api/v2/users")
+    assert not _path_has_object_id_segment("/")
+
+
+def test_object_id_consumer_routes_win_budget_over_generic_routes():
+    endpoints = [
+        {"url": "https://t.test/api/status", "method": "GET", "source": "har_discovery"},
+        {"url": "https://t.test/identity/api/v2/vehicle/{vehicleId}/location",
+         "method": "GET", "source": "har_discovery"},
+        {"url": "https://t.test/api/orders/42", "method": "GET", "source": "har_discovery"},
+    ]
+    selected_urls = [e["url"] for e in prioritize_active_endpoints(endpoints, budget=2)]
+    assert "https://t.test/identity/api/v2/vehicle/{vehicleId}/location" in selected_urls
+    assert "https://t.test/api/orders/42" in selected_urls
+    assert "https://t.test/api/status" not in selected_urls
+
+
+def test_state_changing_method_on_object_route_scores_higher():
+    read_obj = {"url": "https://t.test/api/orders/42", "method": "GET", "source": "openapi"}
+    delete_obj = {"url": "https://t.test/api/orders/42", "method": "DELETE", "source": "openapi"}
+    # a DELETE on an object route (BOLA-write) must outrank reading the same object
+    assert active_endpoint_score(delete_obj) > active_endpoint_score(read_obj)
+    # and an object route must outrank the same route without an id segment
+    no_id = {"url": "https://t.test/api/orders", "method": "GET", "source": "openapi"}
+    assert active_endpoint_score(read_obj) > active_endpoint_score(no_id)
