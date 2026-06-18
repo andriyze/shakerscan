@@ -11,7 +11,11 @@ _SCANNER_DIR = Path(__file__).resolve().parents[1] / "scanner"
 if str(_SCANNER_DIR) not in sys.path:
     sys.path.insert(0, str(_SCANNER_DIR))
 
-from scanner_tools.access_control_checks import _looks_like_bola_resource_response, smart_bola_test
+from scanner_tools.access_control_checks import (
+    _looks_like_bola_resource_response,
+    authz_resource_replay_test,
+    smart_bola_test,
+)
 
 
 def _fake_http_response(url: str, status_code: int, body: str) -> dict:
@@ -322,6 +326,62 @@ def test_smart_bola_authz_replay_confirms_user1_object_access_by_user2(monkeypat
     assert attempts[0]["auth_state"] == "user2"
     assert attempts[0]["proof_type"] == "cross_principal_replay"
     assert attempts[0]["status"] == "completed"
+
+
+def test_authz_replay_prioritizes_owned_resource_producers_over_noise(monkeypatch):
+    fetched_paths = []
+
+    async def fake_fetch(url, **kwargs):
+        token = _auth_token(kwargs.get("headers"))
+        path = urlsplit(url).path
+        fetched_paths.append(path)
+        if path == "/api/orders":
+            if token == "user1":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps([{"id": 101, "email": "alice@example.com", "amount": 42}]),
+                )
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps([{"id": 202, "email": "bob@example.com", "amount": 7}]),
+            )
+        if path == "/api/orders/101":
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps({"id": 101, "email": "alice@example.com", "amount": 42}),
+            )
+        if path == "/api/products":
+            return _fake_http_response(url, 200, json.dumps([{"id": 1, "name": "public"}]))
+        return _fake_http_response(url, 404, json.dumps({"error": "not found"}))
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        authz_resource_replay_test(
+            base_url="https://example.com",
+            discovered_urls=[
+                "https://example.com/api/products",
+                "https://example.com/api/health",
+                "https://example.com/api/docs",
+                "https://example.com/api/orders",
+            ],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_producers=1,
+            timeout=1,
+        )
+    )
+
+    assert results["producer_selection_strategy"] == "owned_resource_path_rank_v1"
+    assert results["producer_candidate_count"] == 2
+    assert fetched_paths[:2] == ["/api/orders", "/api/orders"]
+    assert [f for f in results["findings"] if f.get("tool") == "smart_authz"]
 
 
 def test_smart_bola_authz_replay_skips_object_visible_in_both_listings(monkeypatch):

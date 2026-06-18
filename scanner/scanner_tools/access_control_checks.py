@@ -1428,6 +1428,27 @@ BOLA_JSON_ENVELOPE_KEYS = {
     "id", "status", "message", "code", "ok", "success", "data", "result", "errors",
 }
 
+AUTHZ_PRODUCER_STRONG_SEGMENTS = {
+    "me", "dashboard", "profile", "profiles", "account", "accounts",
+    "user", "users", "customer", "customers", "member", "members",
+    "order", "orders", "invoice", "invoices", "payment", "payments",
+    "basket", "baskets", "cart", "carts", "address", "addresses", "addresss",
+    "wallet", "wallets", "vehicle", "vehicles", "garage", "garages",
+    "service", "services", "booking", "bookings", "appointment", "appointments",
+    "report", "reports", "complaint", "complaints", "message", "messages",
+    "conversation", "conversations", "thread", "threads", "post", "posts",
+    "comment", "comments",
+}
+
+AUTHZ_PRODUCER_LOW_VALUE_SEGMENTS = {
+    "auth", "login", "logout", "signin", "signup", "register", "token",
+    "session", "sessions", "csrf", "captcha", "swagger", "openapi", "docs",
+    "health", "status", "metrics", "version", "info", "static", "assets",
+    "images", "files", "uploads", "download", "downloads", "search",
+    "products", "product", "category", "categories", "catalog", "popular",
+    "recommended", "trending", "featured",
+}
+
 
 def _collect_json_keys(value: Any, depth: int = 0, max_depth: int = 2) -> set[str]:
     """Collect lowercase JSON keys from nested objects."""
@@ -1632,6 +1653,49 @@ def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[
             "custom_endpoint": f"GET {base_path}?{query}",
         })
     return candidates[:2]
+
+
+def _rank_authz_producer_url(url: str) -> int:
+    """Score endpoints by likelihood of producing principal-owned resource IDs."""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or "/"))
+    path = parsed.path or "/"
+    segments = {segment.lower() for segment in path.split("/") if segment}
+    score = 0
+
+    if segments & AUTHZ_PRODUCER_STRONG_SEGMENTS:
+        score += 40
+    if any(segment in {"api", "rest"} or segment.startswith("v") and segment[1:].isdigit() for segment in segments):
+        score += 15
+    if parsed.query:
+        score += 5
+    if any(segment.endswith(("s", "es", "ies")) for segment in segments):
+        score += 8
+    if segments & BOLA_RESOURCE_PATH_SEGMENTS:
+        score += 10
+
+    low_value_hits = segments & AUTHZ_PRODUCER_LOW_VALUE_SEGMENTS
+    score -= 15 * len(low_value_hits)
+    if _is_operational_only_bola_endpoint(url):
+        score -= 40
+    if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
+        score -= 80
+    if _has_excluded_synth_path_segment(url):
+        score -= 35
+    if any(ch in path for ch in "<>{}"):
+        score -= 25
+
+    # Authenticated producer discovery is read-only. GET collection-ish
+    # endpoints are better producers than deeply nested guessed leaves.
+    depth = len(segments)
+    if depth <= 4:
+        score += 6
+    elif depth >= 8:
+        score -= 10
+
+    return score
 
 
 def _new_authz_endpoint_attempt(
@@ -2293,7 +2357,7 @@ async def authz_resource_replay_test(
         results["reason"] = "multi_user_credentials_required"
         return results
 
-    producers: list[str] = []
+    producer_candidates: list[str] = []
     seen: set[str] = set()
     for raw_url in discovered_urls or []:
         if not isinstance(raw_url, str):
@@ -2323,9 +2387,27 @@ async def authz_resource_replay_test(
         if not custom or custom in seen:
             continue
         seen.add(custom)
-        producers.append(url)
-        if len(producers) >= max(1, int(max_producers or 1)):
-            break
+        producer_candidates.append(url)
+
+    producer_limit = max(1, int(max_producers or 1))
+    ranked_pairs = sorted(
+        enumerate(producer_candidates),
+        key=lambda item: (_rank_authz_producer_url(item[1]), -item[0]),
+        reverse=True,
+    )
+    ranked_producers = [url for _idx, url in ranked_pairs]
+    producers = ranked_producers[:producer_limit]
+    selected_producers = set(producers)
+    results["producer_candidate_count"] = len(producer_candidates)
+    results["producer_selection_strategy"] = "owned_resource_path_rank_v1"
+    results["producer_candidates_sample"] = [
+        {
+            "url": url,
+            "rank": _rank_authz_producer_url(url),
+            "selected": url in selected_producers,
+        }
+        for url in ranked_producers[: min(20, len(ranked_producers))]
+    ]
 
     for producer_url in producers:
         if _deadline_exceeded():
