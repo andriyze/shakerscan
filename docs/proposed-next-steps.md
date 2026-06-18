@@ -122,9 +122,9 @@ First end-to-end validation of the committed increments against the live honey t
 2. **Benchmark harness confirms `family_not_attempted`** dominates when a scan is focused (`check_family=sqli` ⇒ XSS never run). Default validation should run the **full active mix**, not a single family.
 
 **Evidence-ranked next work to raise crAPI/Juice Shop High/Critical counts:**
-- **W1 — Safe write-BOLA / BOPLA verifier** (biggest crAPI lift; unblocks increments 1+3).
-- **W2 — Mass-assignment depth on authenticated JSON endpoints** (crAPI BOPLA; array-body fix already helps the request reach the endpoint).
-- **W3 — JWT attacks** (`alg:none`, weak/secret key, kid traversal) — crAPI's canonical High, no detector today.
-- **W4 — Run full active mix by default** in validation; reserve focused scans for triage.
+- **W1 — Safe write-BOLA / BOPLA verifier** (biggest crAPI lift; the one genuine *capability* gap). `smart_authz` proves cross-principal **reads** only; add a non-destructive cross-principal **write** proof (idempotent re-PUT of the foreign object's own values, gated on `exploit_depth`). Unblocks increments 1+3.
+- **W2 — Dispatch/coverage, not new detectors.** The engine **already has** mass-assignment (`mass_assignment_test_json_body`) and a full JWT suite (`jwt_vulnerability_test`, `jwt_comprehensive_test`, `jwt_algorithm_confusion_test`, `jwt_kid_injection_test`, `jwt_claim_manipulation_test`, scanner.py:1221/1642-1645). They under-fire on crAPI because of **scan focus + dispatch**, not missing code. Verify each runs on crAPI with auth context and emits a finding; fix the dispatch gap (ties back to **N5** registry-driven dispatch).
+- **W3 — Don't broaden blindly: full-mix *dilutes*.** Measured this loop — a crAPI `coverage` full-mix found **0 High** vs the **13 High** from the focused-BOLA scan, because per-family depth got starved. Run **focused deep passes per family** (bola, then jwt, then mass-assignment) and union the findings, rather than one diluted mix.
+- **W4 — Increment 1/3 only help concrete-id-in-URL apps.** Verified `resource_id_propagation` fired **0×** on crAPI (object ids live in response **bodies**, harvested at runtime by `smart_authz`, not in discovered URLs). The increments help crawled-SPA / id-in-path apps; crAPI needs the runtime-side W1 instead.
 
 **Operational caution (learned the hard way):** authenticated `exploit_depth` scans **mutate the test account** (our crAPI user creds were burned mid-loop — a write hit an account-update endpoint). So: (a) register fresh users per authenticated run, and (b) any new write-test (W1/W2) MUST be non-destructive / self-healing. See `[[crapi-juiceshop-validation-setup]]`.
