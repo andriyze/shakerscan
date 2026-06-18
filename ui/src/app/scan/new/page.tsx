@@ -65,7 +65,7 @@ export default function NewScanPage() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('auto')
   const [parallelStrategy, setParallelStrategy] = useState<ParallelStrategy>('auto')
   const [parallelShards, setParallelShards] = useState<ShardSelection>('auto')
-  const [coveragePerShardCap, setCoveragePerShardCap] = useState<CoveragePerShardSelection>('100')
+  const [coveragePerShardCap, setCoveragePerShardCap] = useState<CoveragePerShardSelection>('50')
   const [coverageMaxShards, setCoverageMaxShards] = useState<CoverageMaxShardSelection>('128')
   const [coverageDepth, setCoverageDepth] = useState<CoverageDepth>('standard')
   const [runningWorkers, setRunningWorkers] = useState<number | null>(null)

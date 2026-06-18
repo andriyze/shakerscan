@@ -112,6 +112,12 @@ EXPLOIT_DEPTH_BUDGET = {
 # more shards and more queue fan-out; larger values create fewer heavier shards.
 COVERAGE_PER_SHARD_CAP = 150
 
+# Broad coverage shards run both SQLi and XSS before enrichment. Keep their
+# automatic batches smaller so primary probes do not starve SQLMap/NoSQL/stored
+# XSS. Explicit per-scan caps still win.
+COVERAGE_ACTIVE_MIX_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_ACTIVE_MIX_PER_SHARD_CAP", 50)
+COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP", 35)
+
 # Default harvested worklist size. The scanner also emits 5000 by default, but
 # callers can raise this with custom_budget.active_worklist_max.
 COVERAGE_WORKLIST_MAX = 5000
@@ -387,6 +393,33 @@ def _coverage_active_seconds(parent_options: dict[str, Any], endpoint_count: int
         seconds_per_endpoint = 8
         ceiling = 2400
     return min(ceiling, max(300, seconds_per_endpoint * max(1, endpoint_count)))
+
+
+def _coverage_runs_active_mix(parent_options: dict[str, Any]) -> bool:
+    """Return true when a coverage shard will run both primary active families."""
+    family = str(
+        parent_options.get("coverage_attempt_family")
+        or parent_options.get("asm_check_family")
+        or parent_options.get("check_family")
+        or ""
+    ).strip().lower()
+    if family in {"sqli", "xss"}:
+        return False
+    xss_flag = bool(parent_options.get("xss"))
+    sqli_flag = bool(parent_options.get("sqli"))
+    if xss_flag != sqli_flag:
+        return False
+    scan_type = str(parent_options.get("scan_type") or "").strip().lower()
+    return bool(parent_options.get("active")) or scan_type in ACTIVE_SCAN_TYPES
+
+
+def _default_coverage_per_shard_cap(parent_options: dict[str, Any]) -> int:
+    """Default endpoint batch size for coverage shards when caller did not tune it."""
+    if _coverage_runs_active_mix(parent_options):
+        if parent_options.get("exploit_depth") or str(parent_options.get("budget_profile") or "").lower() == "exhaustive":
+            return max(1, COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP)
+        return max(1, COVERAGE_ACTIVE_MIX_PER_SHARD_CAP)
+    return COVERAGE_PER_SHARD_CAP
 
 
 def _coverage_child_options(parent_options: dict[str, Any], slice_eps: list[str]) -> dict[str, Any]:
@@ -665,9 +698,9 @@ def plan_coverage_shards(
     # Tunable per-shard endpoint cap: smaller cap -> more (smaller) shards.
     if per_shard_cap is None:
         try:
-            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or COVERAGE_PER_SHARD_CAP)
+            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or _default_coverage_per_shard_cap(parent_options))
         except (TypeError, ValueError):
-            per_shard_cap = COVERAGE_PER_SHARD_CAP
+            per_shard_cap = _default_coverage_per_shard_cap(parent_options)
     per_shard_cap = max(1, per_shard_cap)
     eps = _normalize_endpoint_list(endpoints)
 
@@ -753,9 +786,9 @@ def plan_coverage_family_shards(
 
     if per_shard_cap is None:
         try:
-            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or COVERAGE_PER_SHARD_CAP)
+            per_shard_cap = int(parent_options.get("coverage_per_shard_cap") or _default_coverage_per_shard_cap(parent_options))
         except (TypeError, ValueError):
-            per_shard_cap = COVERAGE_PER_SHARD_CAP
+            per_shard_cap = _default_coverage_per_shard_cap(parent_options)
     per_shard_cap = max(1, int(per_shard_cap))
     eps = _normalize_endpoint_list(endpoints)
     if not eps:
@@ -843,12 +876,12 @@ def _coverage_dynamic_batch_size(parent_options: dict[str, Any]) -> int:
     raw = (
         parent_options.get("coverage_dynamic_batch_size")
         or parent_options.get("coverage_per_shard_cap")
-        or COVERAGE_DYNAMIC_BATCH_SIZE
+        or _default_coverage_per_shard_cap(parent_options)
     )
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = COVERAGE_DYNAMIC_BATCH_SIZE
+        value = _default_coverage_per_shard_cap(parent_options)
     return max(1, value)
 
 

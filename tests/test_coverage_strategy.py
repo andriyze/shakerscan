@@ -265,29 +265,42 @@ def test_harvest_default_keeps_large_worklist():
 
 def test_coverage_per_shard_cap_option_controls_shard_count():
     eps = [f"GET /e{i}?id=1" for i in range(390)]
-    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # default cap 150
+    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # active-mix default cap 50
     many = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 50}, eps)
-    assert few.shard_count == 3
-    assert many.shard_count == 8  # smaller cap -> more shards
+    explicit_large = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 150}, eps)
+    assert few.shard_count == 8
+    assert many.shard_count == 8
+    assert explicit_large.shard_count == 3
     # still covers every endpoint, disjoint
     union = [e for s in many.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)
 
 
+def test_coverage_default_cap_is_smaller_for_broad_active_mix():
+    assert p._default_coverage_per_shard_cap({"scan_type": "smart"}) == 50
+    assert p._coverage_dynamic_batch_size({"scan_type": "smart"}) == 50
+    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "exploit_depth": True}) == 35
+    assert p._coverage_dynamic_batch_size({"scan_type": "smart", "coverage_dynamic_batch_size": 90}) == 90
+
+
+def test_coverage_default_cap_keeps_focused_family_lanes_larger():
+    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "asm_check_family": "sqli"}) == 150
+
+
 def test_coverage_honors_explicit_shards_cap():
-    # 1800 endpoints would auto-size to ~12 shards (cap 150); an explicit
+    # 1800 endpoints auto-size to 36 broad active shards (cap 50); an explicit
     # shards=3 must cap the fan-out to 3 without dropping any endpoint.
     eps = [f"GET /e{i}?id=1" for i in range(1800)]
     auto = p.plan_coverage_shards({"scan_type": "smart"}, eps)
     capped = p.plan_coverage_shards({"scan_type": "smart", "shards": 3}, eps)
-    assert auto.shard_count == 12
+    assert auto.shard_count == 36
     assert capped.shard_count == 3  # explicit request honored as a hard cap
     union = [e for s in capped.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)  # every endpoint still covered
     # string form also honored
     assert p.plan_coverage_shards({"scan_type": "smart", "shards": "4"}, eps).shard_count == 4
     # an explicit request LARGER than auto-size doesn't inflate beyond need
-    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 12
+    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 36
 
 
 def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
