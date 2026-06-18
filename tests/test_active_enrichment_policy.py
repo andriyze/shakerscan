@@ -8,9 +8,31 @@ if _SCANNER_DIR not in sys.path:
 
 from scanner_tools.active_enrichment_policy import (  # noqa: E402
     record_active_enrichment_skip,
+    reserve_active_enrichment_budget,
     should_run_active_enrichment,
 )
 from scanner_tools.completion_status import build_scan_completion_status  # noqa: E402
+
+
+def test_reserve_active_enrichment_budget_for_large_active_scan():
+    primary, reserve = reserve_active_enrichment_budget(640)
+
+    assert primary == 512
+    assert reserve == 128
+
+
+def test_reserve_active_enrichment_budget_keeps_small_scans_unchanged():
+    primary, reserve = reserve_active_enrichment_budget(60)
+
+    assert primary == 60
+    assert reserve == 0
+
+
+def test_reserve_active_enrichment_budget_handles_missing_budget():
+    primary, reserve = reserve_active_enrichment_budget(None)
+
+    assert primary is None
+    assert reserve == 0
 
 
 def test_enrichment_decision_uses_canonical_post_active_skip_reason():

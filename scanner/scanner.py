@@ -37,6 +37,7 @@ except ImportError:
     )
 from scanner_tools.active_enrichment_policy import (
     record_active_enrichment_skip,
+    reserve_active_enrichment_budget,
     should_run_active_enrichment,
 )
 from scanner_tools.active_prioritization import (
@@ -8436,6 +8437,23 @@ async def build_report(target: str,
                     except Exception as e:
                         print(f"[scanner] Auth refresh before smart active tests failed: {e}", file=sys.stderr)
 
+                active_primary_max_seconds, active_enrichment_reserved_seconds = reserve_active_enrichment_budget(
+                    scan_budget.get("active_max_seconds"),
+                    primary_enabled=bool(run_sqli or run_xss),
+                )
+                active_block["active_total_max_seconds"] = scan_budget.get("active_max_seconds")
+                active_block["active_primary_max_seconds"] = active_primary_max_seconds
+                active_block["active_enrichment_reserved_seconds"] = active_enrichment_reserved_seconds
+                if active_enrichment_reserved_seconds:
+                    print(
+                        (
+                            "[active] Reserved post-active enrichment budget: "
+                            f"{active_enrichment_reserved_seconds:.0f}s "
+                            f"(primary probes <= {active_primary_max_seconds:.0f}s)"
+                        ),
+                        file=sys.stderr,
+                    )
+
                 smart_results = await run_smart_active_tests(
                     url=base_url,
                     endpoints=active_candidate_endpoints,
@@ -8446,7 +8464,7 @@ async def build_report(target: str,
                     run_xss=run_xss,
                     run_sqli=run_sqli,
                     thorough_params=thorough_params,  # Test more params if --thorough-params flag is set
-                    active_max_seconds=scan_budget.get("active_max_seconds"),
+                    active_max_seconds=active_primary_max_seconds,
                     active_max_endpoints=scan_budget.get("active_max_endpoints"),
                     active_params_per_endpoint=scan_budget.get("active_params_per_endpoint"),
                     max_findings_per_family=scan_budget.get("max_findings_per_family"),
@@ -8463,6 +8481,13 @@ async def build_report(target: str,
                     )
                 except (TypeError, ValueError):
                     active_remaining_after_smart = None
+                active_primary_remaining_after_smart = active_remaining_after_smart
+                if active_remaining_after_smart is not None:
+                    active_remaining_after_smart = (
+                        active_remaining_after_smart + float(active_enrichment_reserved_seconds or 0.0)
+                    )
+                    active_block["active_primary_remaining_after_smart"] = round(active_primary_remaining_after_smart, 3)
+                    active_block["active_remaining_after_smart"] = round(active_remaining_after_smart, 3)
 
                 def _active_family_time_exhausted(family_stats: dict[str, Any] | None) -> bool:
                     family_stats = family_stats or {}
@@ -8483,22 +8508,15 @@ async def build_report(target: str,
                     active_block["smart_sqli_budget_exhausted_reason"] = sqli_budget_reason
                 if xss_budget_reason:
                     active_block["smart_xss_budget_exhausted_reason"] = xss_budget_reason
+                if primary_active_budget_exhausted:
+                    active_block["primary_active_budget_exhausted"] = True
                 post_active_budget_exhausted = (
                     active_checks
-                    and (
-                        primary_active_budget_exhausted
-                        or (
-                            active_remaining_after_smart is not None
-                            and active_remaining_after_smart < 15.0
-                        )
-                    )
+                    and active_remaining_after_smart is not None
+                    and active_remaining_after_smart < 15.0
                 )
                 if post_active_budget_exhausted:
-                    skip_reason = (
-                        "primary_family_budget_exhausted"
-                        if primary_active_budget_exhausted
-                        else "active_time_budget_exhausted"
-                    )
+                    skip_reason = "active_time_budget_exhausted"
                     active_block["post_active_enrichment_skipped"] = skip_reason
                     remaining_text = (
                         f"{active_remaining_after_smart:.1f}s"
