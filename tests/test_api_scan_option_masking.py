@@ -1041,7 +1041,7 @@ def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch)
     assert "auto_sharded" not in payload
 
 
-def test_auto_sharding_uses_family_for_active_scan_when_enabled(monkeypatch):
+def test_auto_sharding_uses_coverage_for_active_scan_when_enabled(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
 
@@ -1051,9 +1051,26 @@ def test_auto_sharding_uses_family_for_active_scan_when_enabled(monkeypatch):
     assert worker_count == 6
     assert payload["parallel"] is True
     assert payload["auto_sharded"] is True
-    assert payload["shard_strategy"] == "auto"
+    assert payload["shard_strategy"] == "coverage"
+    assert payload["shards"] == 4
+    assert "endpoint coverage" in payload["auto_sharding_reason"]
+
+
+def test_auto_sharding_honors_explicit_family_strategy(monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "_load_effective_scan_execution_settings",
+        lambda: _auto_shard_settings(True, auto_sharding_strategy="family"),
+    )
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
+
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+
+    assert enabled is True
+    assert worker_count == 6
+    assert payload["parallel"] is True
+    assert payload["shard_strategy"] == "family"
     assert payload["shards"] == 3
-    assert "broad/SQLi/XSS" in payload["auto_sharding_reason"]
 
 
 def test_auto_sharding_uses_scope_for_explicit_endpoint_list(monkeypatch):
@@ -1067,6 +1084,7 @@ def test_auto_sharding_uses_scope_for_explicit_endpoint_list(monkeypatch):
 
     assert enabled is True
     assert payload["parallel"] is True
+    assert payload["shard_strategy"] == "scope"
     assert payload["shards"] == 4
     assert "explicit endpoints" in payload["auto_sharding_reason"]
 
@@ -1093,6 +1111,7 @@ def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
     assert worker_count == 1
     assert payload["parallel"] is True
     assert payload["shards"] == "auto"
+    assert payload["shard_strategy"] == "coverage"
 
 
 def test_full_coverage_dynamic_allocation_options_survive_api_payload():

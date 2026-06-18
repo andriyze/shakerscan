@@ -28,6 +28,26 @@ def test_exploit_depth_off_by_default():
     assert all(not (s.options.get("custom_budget") or {}).get("sqli_extract_max") for s in plan.shards)
 
 
+def test_auto_strategy_resolves_active_scan_to_coverage_in_plan_worker():
+    assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "auto") == "coverage"
+    assert p.resolve_auto_strategy({"scan_type": "full"}, "full", "auto") == "coverage"
+
+
+def test_auto_strategy_resolves_explicit_endpoints_to_scope():
+    assert (
+        p.resolve_auto_strategy(
+            {"scan_type": "smart", "custom_endpoints": ["GET /a?id=1", "POST /b json:{\"id\":1}"]},
+            "smart",
+            "auto",
+        )
+        == "scope"
+    )
+
+
+def test_auto_strategy_honors_explicit_family():
+    assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "family") == "family"
+
+
 def test_coverage_recon_budget_skips_heavy_active_and_nuclei_work():
     budget = p.RECON_DISCOVERY_BUDGET
     assert budget["active_max_endpoints"] == 1

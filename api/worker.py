@@ -4249,7 +4249,11 @@ async def process_scan_plan_job(job_data: dict):
     target_id = str(row['target_id']) if row and row['target_id'] else None
     target_url = (row['target_url'] if row else None) or target
 
-    requested_strategy = (options.get('shard_strategy') or 'auto').strip().lower()
+    requested_strategy = parallel_scan.resolve_auto_strategy(
+        options,
+        scan_type,
+        options.get('shard_strategy') or 'auto',
+    )
     coverage_auth_states: list[str] = []
     coverage_allocation = 'static'
     harvested: list[str] = []

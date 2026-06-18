@@ -923,8 +923,25 @@ def _auto_shard_eligibility(scan_type: str, options_payload: dict[str, Any]) -> 
     if endpoint_count >= 2:
         return True, f"{endpoint_count} explicit endpoints can be split by scope"
     if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
-        return True, f"{scan_type} scan can run broad/SQLi/XSS families in parallel"
+        return True, f"{scan_type} scan can fan out endpoint coverage across workers"
     return False, f"{scan_type} scan has no endpoint list and no active families to shard"
+
+
+def _resolve_auto_parallel_strategy(
+    strategy: Any,
+    scan_type: str,
+    options_payload: dict[str, Any],
+) -> str:
+    """Resolve auto-sharding to the concrete strategy we will store/execute."""
+    normalized = _normalize_parallel_strategy(strategy, default="auto")
+    if normalized != "auto":
+        return normalized
+    endpoint_count = _custom_endpoint_count(options_payload)
+    if endpoint_count >= 2:
+        return "scope"
+    if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+        return "coverage"
+    return "family"
 
 
 def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
@@ -957,9 +974,10 @@ def _apply_auto_sharding_policy(
             options_payload["parallel"] = True
             if not options_payload.get("shards"):
                 options_payload["shards"] = "auto"
-            options_payload["shard_strategy"] = _normalize_parallel_strategy(
+            options_payload["shard_strategy"] = _resolve_auto_parallel_strategy(
                 options_payload.get("shard_strategy"),
-                default="auto",
+                scan_type,
+                options_payload,
             )
             return True, _running_scan_worker_count_best_effort()
         options_payload["parallel"] = False
@@ -985,13 +1003,14 @@ def _apply_auto_sharding_policy(
         )
         return False, worker_count
 
-    strategy = _normalize_parallel_strategy(
+    strategy = _resolve_auto_parallel_strategy(
         settings.get("auto_sharding_strategy"),
-        default="auto",
+        scan_type,
+        options_payload,
     )
     max_shards = _normalize_auto_shard_count(settings.get("auto_sharding_max_shards"), default=4)
     if _custom_endpoint_count(options_payload) < 2 and scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
-        if strategy in {"auto", "family"}:
+        if strategy == "family":
             max_shards = min(max_shards, len(parallel_scan.FAMILY_SHARD_LABELS))
     requested_shards: Any = "auto"
     if worker_count is not None:

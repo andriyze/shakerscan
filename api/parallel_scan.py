@@ -38,8 +38,11 @@ Strategies:
     endpoint bucket. This spends more total budget on every endpoint when a
     large worker fleet is available.
 
-``auto`` resolves to ``scope`` when >=2 custom endpoints are present, else
-``family``.
+``auto`` resolves to ``scope`` when >=2 custom endpoints are present. In the
+plan worker, active scan types without explicit endpoints resolve to
+``coverage`` so the scanner discovers once and fans out endpoint batches instead
+of repeating recon in family shards. The pure ``plan_shards`` helper still
+degrades coverage to family because it cannot run the required recon harvest.
 """
 
 from __future__ import annotations
@@ -181,6 +184,27 @@ ACTIVE_ENDPOINTS_CEILING = 10000
 # families currently backed by scanner flags.
 FAMILY_FOCUSED_SPECS = check_registry.default_parallel_focus_families()
 FAMILY_SHARD_LABELS = ("broad",) + tuple(spec.name for spec in FAMILY_FOCUSED_SPECS)
+
+
+def resolve_auto_strategy(parent_options: dict[str, Any], scan_type: str, strategy: str | None) -> str:
+    """Resolve the user-facing ``auto`` strategy for the async plan worker.
+
+    The plan worker can run the discover-once recon required by coverage
+    sharding, so auto active scans should use coverage rather than family
+    sharding. This keeps family available as an explicit depth/specialization
+    mode without making it the default for large targets.
+    """
+    requested = (strategy or "auto").strip().lower()
+    if requested not in VALID_STRATEGIES:
+        requested = "auto"
+    if requested != "auto":
+        return requested
+    endpoints = _normalize_endpoint_list((parent_options or {}).get("custom_endpoints"))
+    if len(endpoints) >= 2:
+        return "scope"
+    if (scan_type or "").strip().lower() in ACTIVE_SCAN_TYPES:
+        return "coverage"
+    return "family"
 
 
 @dataclass
