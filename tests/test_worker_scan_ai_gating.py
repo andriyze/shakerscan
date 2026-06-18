@@ -587,6 +587,7 @@ def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch
     monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
     monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=True))
     monkeypatch.setattr(worker, "SCAN_CANCEL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS", 0.01)
 
     result = asyncio.run(worker.run_scan(
         "https://example.com",
@@ -599,6 +600,36 @@ def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch
     assert proc.terminated is True
     assert proc.killed is False
     assert result["error"] == "Cancelled by user"
+
+
+def test_run_scan_sets_cooperative_cancel_file_env_and_signal(monkeypatch, tmp_path):
+    captured = {}
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        proc = _CancellableFakeProcess()
+        captured["proc"] = proc
+        captured["env"] = kwargs.get("env") or {}
+        return proc
+
+    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=True))
+    monkeypatch.setattr(worker, "SCAN_CANCEL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS", 0.01)
+
+    result = asyncio.run(worker.run_scan(
+        "https://example.com",
+        {"scan_type": "standard"},
+        scan_id="00000000-0000-0000-0000-000000000124",
+        job_id="job-cancel-file-test",
+    ))
+
+    cancel_file = captured["env"].get("SHAKERSCAN_CANCEL_FILE")
+    assert result["error"] == "Cancelled by user"
+    assert cancel_file
+    assert os.path.exists(cancel_file)
+    assert open(cancel_file, encoding="utf-8").read().strip() == "1"
 
 
 def test_run_scan_maps_skip_global_checks_flag(monkeypatch):

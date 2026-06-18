@@ -80,6 +80,16 @@ def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
     print(f"[progress] phase={phase} pct={pct} message={safe_message}", file=sys.stderr, flush=True)
 
 
+def _scanner_cancel_requested() -> bool:
+    cancel_file = os.environ.get("SHAKERSCAN_CANCEL_FILE")
+    if not cancel_file:
+        return False
+    try:
+        return os.path.exists(cancel_file)
+    except Exception:
+        return False
+
+
 def _coerce_param_names(raw: Any) -> list[str]:
     if isinstance(raw, dict):
         return [str(k) for k in raw.keys() if k]
@@ -6302,6 +6312,14 @@ async def smart_sqli_test(
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
+        if _scanner_cancel_requested():
+            results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "cancelled"
+            if not budget_logged:
+                print("[sqli] Cancellation requested; stopping SQLi probes", file=sys.stderr)
+                _emit_sqli_progress("cancel requested", force=True)
+                budget_logged = True
+            return True
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
             results["budget_exhausted_reason"] = "finding_cap"
@@ -7378,6 +7396,14 @@ async def smart_xss_test(
 
     def _budget_exhausted() -> bool:
         nonlocal budget_logged
+        if _scanner_cancel_requested():
+            results["budget_exhausted"] = True
+            results["budget_exhausted_reason"] = "cancelled"
+            if not budget_logged:
+                print("[xss] Cancellation requested; stopping XSS probes", file=sys.stderr)
+                _emit_xss_progress("cancel requested", force=True)
+                budget_logged = True
+            return True
         if max_findings is not None and results["vulnerabilities_found"] >= max_findings:
             results["budget_exhausted"] = True
             results["budget_exhausted_reason"] = "finding_cap"
@@ -8184,6 +8210,17 @@ def _split_active_family_budget(active_max_seconds: float, run_sqli: bool, run_x
 USE_DEFAULT_MAX_FINDINGS_PER_FAMILY: Any = object()
 
 
+ACTIVE_FAMILY_DISPATCH_ORDER = ("sqli", "xss")
+
+
+def _enabled_active_family_names(*, run_sqli: bool, run_xss: bool) -> tuple[str, ...]:
+    enabled = {
+        "sqli": bool(run_sqli),
+        "xss": bool(run_xss),
+    }
+    return tuple(name for name in ACTIVE_FAMILY_DISPATCH_ORDER if enabled.get(name))
+
+
 async def run_smart_active_tests(
     url: str,
     endpoints: list[dict],
@@ -8315,61 +8352,62 @@ async def run_smart_active_tests(
             file=sys.stderr,
         )
 
-    if run_sqli:
-        _emit_scan_progress("active_sqli", 91, "starting SQLi probes")
-        sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
-        sqli_results = await smart_sqli_test(
-            url, prioritized_endpoints, dbms, auth_session,
-            max_endpoints=sqli_max_endpoints,
-            max_params_per_endpoint=sqli_max_params,
-            max_seconds=sqli_remaining,
-            max_findings=max_findings_per_family,
-        )
-    else:
-        sqli_results = {
-            "findings": [],
-            "dbms_detected": dbms,
-            "vulnerabilities_found": 0,
-            "get_endpoints_tested": 0,
-            "post_endpoints_tested": 0,
-            "endpoints_tested": 0,
-            "skipped": True,
-            "reason": "sql_tests_disabled",
-        }
+    sqli_results = {
+        "findings": [],
+        "dbms_detected": dbms,
+        "vulnerabilities_found": 0,
+        "get_endpoints_tested": 0,
+        "post_endpoints_tested": 0,
+        "endpoints_tested": 0,
+        "skipped": True,
+        "reason": "sql_tests_disabled",
+    }
+    xss_results = {
+        "findings": [],
+        "reflections_found": 0,
+        "vulnerabilities_found": 0,
+        "endpoints_tested": 0,
+        "skipped": True,
+        "reason": "xss_tests_disabled",
+    }
 
-    if run_xss:
-        remaining = _remaining_active_seconds()
-        if remaining <= 1.0:
-            print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
-            _emit_scan_progress("active_xss", 92, "skipping XSS probes; active time budget exhausted")
-            xss_results = {
-                "findings": [],
-                "reflections_found": 0,
-                "vulnerabilities_found": 0,
-                "endpoints_tested": 0,
-                "skipped": True,
-                "reason": "active_time_budget_exhausted",
-                "budget_exhausted": True,
-                "budget_exhausted_reason": "time_budget",
-            }
-        else:
-            _emit_scan_progress("active_xss", 92, "starting XSS probes")
-            xss_results = await smart_xss_test(
-                url, endpoints, auth_session=auth_session,
-                max_endpoints=xss_max_endpoints,
-                max_params_per_endpoint=xss_max_params,
-                max_seconds=remaining,
+    for family_name in _enabled_active_family_names(run_sqli=run_sqli, run_xss=run_xss):
+        if family_name == "sqli":
+            _emit_scan_progress("active_sqli", 91, "starting SQLi probes")
+            sqli_remaining = min(_remaining_active_seconds(), sqli_active_max_seconds)
+            sqli_results = await smart_sqli_test(
+                url, prioritized_endpoints, dbms, auth_session,
+                max_endpoints=sqli_max_endpoints,
+                max_params_per_endpoint=sqli_max_params,
+                max_seconds=sqli_remaining,
                 max_findings=max_findings_per_family,
             )
-    else:
-        xss_results = {
-            "findings": [],
-            "reflections_found": 0,
-            "vulnerabilities_found": 0,
-            "endpoints_tested": 0,
-            "skipped": True,
-            "reason": "xss_tests_disabled",
-        }
+            continue
+
+        if family_name == "xss":
+            remaining = _remaining_active_seconds()
+            if remaining <= 1.0:
+                print("[active] Skipping XSS probes: active probing time budget exhausted by SQLi", file=sys.stderr)
+                _emit_scan_progress("active_xss", 92, "skipping XSS probes; active time budget exhausted")
+                xss_results = {
+                    "findings": [],
+                    "reflections_found": 0,
+                    "vulnerabilities_found": 0,
+                    "endpoints_tested": 0,
+                    "skipped": True,
+                    "reason": "active_time_budget_exhausted",
+                    "budget_exhausted": True,
+                    "budget_exhausted_reason": "time_budget",
+                }
+            else:
+                _emit_scan_progress("active_xss", 92, "starting XSS probes")
+                xss_results = await smart_xss_test(
+                    url, endpoints, auth_session=auth_session,
+                    max_endpoints=xss_max_endpoints,
+                    max_params_per_endpoint=xss_max_params,
+                    max_seconds=remaining,
+                    max_findings=max_findings_per_family,
+                )
 
     # Hash-route DOM XSS is part of XSS coverage. Keep it in default smart
     # scans, but honor focused SQLi-only scans.

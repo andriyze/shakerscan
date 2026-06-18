@@ -432,6 +432,58 @@ def test_run_smart_active_tests_reserves_time_for_xss(monkeypatch):
     assert result["xss"]["endpoints_tested"] == 1
 
 
+def test_enabled_active_family_names_are_registry_ordered():
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=True) == ("sqli", "xss")
+    assert active_checks._enabled_active_family_names(run_sqli=False, run_xss=True) == ("xss",)
+    assert active_checks._enabled_active_family_names(run_sqli=True, run_xss=False) == ("sqli",)
+
+
+def test_smart_sqli_stops_on_cooperative_cancel_file(monkeypatch, tmp_path):
+    cancel_file = tmp_path / "scan.cancel"
+    cancel_file.write_text("1", encoding="utf-8")
+    monkeypatch.setenv("SHAKERSCAN_CANCEL_FILE", str(cancel_file))
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("SQLi should stop before issuing probes when cancelled")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [{"url": "https://example.test/search?q=1", "method": "GET", "params": ["q"]}],
+            max_seconds=30,
+        )
+    )
+
+    assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoints_tested"] == 0
+
+
+def test_smart_xss_stops_on_cooperative_cancel_file(monkeypatch, tmp_path):
+    cancel_file = tmp_path / "scan.cancel"
+    cancel_file.write_text("1", encoding="utf-8")
+    monkeypatch.setenv("SHAKERSCAN_CANCEL_FILE", str(cancel_file))
+
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("XSS should stop before issuing probes when cancelled")
+
+    monkeypatch.setattr(active_checks, "run", fail_run)
+
+    result = asyncio.run(
+        active_checks.smart_xss_test(
+            "https://example.test",
+            [{"url": "https://example.test/search?q=1", "method": "GET", "params": ["q"]}],
+            max_seconds=30,
+        )
+    )
+
+    assert result["budget_exhausted"] is True
+    assert result["budget_exhausted_reason"] == "cancelled"
+    assert result["endpoints_tested"] == 0
+
+
 def test_thorough_params_honors_explicit_active_caps(monkeypatch):
     captures = {}
 

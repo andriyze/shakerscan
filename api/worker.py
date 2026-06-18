@@ -87,6 +87,10 @@ def utc_now_iso() -> str:
 DEFAULT_MAX_DURATION_MINUTES = int(os.environ.get('SCAN_MAX_DURATION_DEFAULT_MINUTES', '120'))
 SCAN_KILL_GRACE_SECONDS = int(os.environ.get('SCAN_KILL_GRACE_SECONDS', '10'))
 SCAN_CANCEL_POLL_SECONDS = max(0.5, float(os.environ.get('SCAN_CANCEL_POLL_SECONDS', '2')))
+SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS = max(
+    0.0,
+    float(os.environ.get('SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS', '2')),
+)
 RETEST_MAX_PARALLEL = max(1, int(os.environ.get("RETEST_MAX_PARALLEL", "2")))
 RETEST_SLOT_KEY = os.environ.get("RETEST_SLOT_KEY", "retest:active_workers")
 RETEST_SLOT_TTL_SECONDS = int(os.environ.get("RETEST_SLOT_TTL_SECONDS", "120"))
@@ -572,6 +576,17 @@ def _scan_cancel_requested(scan_id: str | None, redis_client: Any | None = None)
         return False
 
 
+def _signal_scanner_cancel_file(cancel_file: str | None) -> None:
+    if not cancel_file:
+        return
+    try:
+        path = Path(cancel_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("1\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 async def _terminate_scanner_process(proc: Any) -> None:
     """Terminate a scanner subprocess, preferring the process group on POSIX."""
     if getattr(proc, "returncode", None) is not None:
@@ -903,6 +918,14 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     if scan_id:
         checkpoint_file = RESULTS_DIR / f"{scan_id}_checkpoint.json"
         scan_env["SCAN_CHECKPOINT_FILE"] = str(checkpoint_file)
+        cancel_file = RESULTS_DIR / f"{scan_id}_cancel"
+        scan_env["SHAKERSCAN_CANCEL_FILE"] = str(cancel_file)
+        try:
+            cancel_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+    else:
+        cancel_file = None
 
     # User-supplied content-discovery keywords (additive; off when absent).
     custom_wordlist = options.get("custom_wordlist")
@@ -982,6 +1005,13 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         while proc.returncode is None:
             if await asyncio.to_thread(_scan_cancel_requested, scan_id):
                 cancel_reason = "Cancelled by user"
+                await asyncio.to_thread(_signal_scanner_cancel_file, str(cancel_file) if cancel_file else None)
+                if SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS > 0:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS)
+                        return
+                    except asyncio.TimeoutError:
+                        pass
                 await _terminate_scanner_process(proc)
                 return
             await asyncio.sleep(SCAN_CANCEL_POLL_SECONDS)

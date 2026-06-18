@@ -271,3 +271,91 @@ def apply_asm_focus(options: dict[str, Any], value: Any) -> tuple[dict[str, Any]
     spec = CHECK_REGISTRY_BY_NAME[family]
     opts.update(spec.scanner_options)
     return opts, family
+
+
+def has_primary_auth_context(options: dict[str, Any]) -> bool:
+    opts = options or {}
+    return bool(
+        opts.get("auth_header")
+        or opts.get("auth_cookies")
+        or opts.get("auth_headers_json")
+        or opts.get("auth_scenario_json")
+        or (opts.get("login_username") and opts.get("login_password"))
+    )
+
+
+def has_second_user_auth_context(options: dict[str, Any]) -> bool:
+    opts = options or {}
+    return bool(opts.get("user2_header") or opts.get("user2_cookies"))
+
+
+def family_precondition_error(
+    family: str | None,
+    options: dict[str, Any],
+    *,
+    exploit_depth: bool,
+) -> str | None:
+    """Return a fail-closed policy error for a focused runnable family.
+
+    This intentionally has no FastAPI dependency so API, ASM, AI routing, and
+    tests can share one policy contract.
+    """
+    if not family:
+        return None
+    spec = get_check_family(family)
+    if not spec:
+        return None
+    allowed = {str(p).lower() for p in spec.allowed_presets or ()}
+    if spec.risk_level == "high" and "lab" in allowed and not exploit_depth:
+        return f"check_family '{family}' requires Lab/deep policy (set exploit_depth=true)"
+    if spec.requires_credentials and not has_primary_auth_context(options):
+        return f"check_family '{family}' requires primary user credentials in target scan options"
+    if spec.requires_auth_states and not has_second_user_auth_context(options):
+        return f"check_family '{family}' requires second-user credentials in target scan options"
+    return None
+
+
+def enforce_family_preconditions(
+    family: str | None,
+    options: dict[str, Any],
+    *,
+    exploit_depth: bool,
+) -> None:
+    error = family_precondition_error(family, options, exploit_depth=exploit_depth)
+    if error:
+        raise ValueError(error)
+
+
+def validate_scan_focus_family(value: Any) -> str | None:
+    """Validate a DAST focused-family request for POST /scans.
+
+    Unlike ASM, this validator is for the public scan API contract, so it uses
+    the same runnable family set but says "DAST scans" in errors.
+    """
+    normalized = normalize_check_family(value)
+    if normalized in (None, "all"):
+        return None
+    allowed = set(asm_focus_family_names(include_all=False))
+    if normalized in allowed:
+        return normalized
+    known = get_check_family(normalized)
+    allowed_text = ", ".join(asm_focus_family_names())
+    if known:
+        raise ValueError(
+            f"check_family '{normalized}' is registered but not runnable for DAST scans yet; "
+            f"allowed families: {allowed_text}"
+        )
+    raise ValueError(f"unknown check_family '{normalized}'; allowed families: {allowed_text}")
+
+
+def apply_scan_focus(options: dict[str, Any], value: Any) -> tuple[dict[str, Any], str | None]:
+    family = validate_scan_focus_family(value)
+    opts = dict(options or {})
+    if not family:
+        opts.pop("asm_check_family", None)
+        opts.pop("check_family", None)
+        return opts, None
+    spec = CHECK_REGISTRY_BY_NAME[family]
+    opts.update(spec.scanner_options)
+    opts["check_family"] = family
+    return opts, family

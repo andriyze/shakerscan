@@ -956,6 +956,7 @@ def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
     )
     options_payload["budget_profile"] = resolved_budget["budget_profile"]
     options_payload["resolved_budget"] = resolved_budget
+    options_payload, _family = _apply_scan_check_family_policy(options_payload)
     return options_payload
 
 
@@ -1048,19 +1049,11 @@ def _validate_asm_endpoint_filter_value(value: Any) -> str | None:
 
 
 def _has_primary_auth_context(options: dict[str, Any]) -> bool:
-    opts = options or {}
-    return bool(
-        opts.get("auth_header")
-        or opts.get("auth_cookies")
-        or opts.get("auth_headers_json")
-        or opts.get("auth_scenario_json")
-        or (opts.get("login_username") and opts.get("login_password"))
-    )
+    return check_registry.has_primary_auth_context(options or {})
 
 
 def _has_second_user_auth_context(options: dict[str, Any]) -> bool:
-    opts = options or {}
-    return bool(opts.get("user2_header") or opts.get("user2_cookies"))
+    return check_registry.has_second_user_auth_context(options or {})
 
 
 def _enforce_asm_family_preconditions(
@@ -1070,27 +1063,41 @@ def _enforce_asm_family_preconditions(
     exploit_depth: bool,
 ) -> None:
     """Fail closed for focused families whose registry metadata needs more context."""
-    if not family:
-        return
-    spec = check_registry.get_check_family(family)
-    if not spec:
-        return
-    allowed = {str(p).lower() for p in spec.allowed_presets or ()}
-    if spec.risk_level == "high" and "lab" in allowed and not exploit_depth:
+    error = check_registry.family_precondition_error(
+        family,
+        options or {},
+        exploit_depth=exploit_depth,
+    )
+    if error:
         raise HTTPException(
             status_code=400,
-            detail=f"check_family '{family}' requires Lab/deep policy (set exploit_depth=true)",
+            detail=error,
         )
-    if spec.requires_credentials and not _has_primary_auth_context(options):
-        raise HTTPException(
-            status_code=400,
-            detail=f"check_family '{family}' requires primary user credentials in target scan options",
+
+
+def _scan_check_family_value(options_payload: dict[str, Any]) -> Any:
+    return (
+        options_payload.get("check_family")
+        or options_payload.get("asm_check_family")
+        or options_payload.get("coverage_attempt_family")
+    )
+
+
+def _apply_scan_check_family_policy(options_payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Apply the shared DAST family policy to a public POST /scans payload."""
+    try:
+        opts, family = check_registry.apply_scan_focus(
+            options_payload,
+            _scan_check_family_value(options_payload),
         )
-    if spec.requires_auth_states and not _has_second_user_auth_context(options):
-        raise HTTPException(
-            status_code=400,
-            detail=f"check_family '{family}' requires second-user credentials in target scan options",
+        check_registry.enforce_family_preconditions(
+            family,
+            opts,
+            exploit_depth=bool(opts.get("exploit_depth")),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return opts, family
 
 
 def _hidden_scan_roles_for_list(*, include_shards: bool = False, include_internal: bool = False) -> list[str]:
@@ -2234,6 +2241,8 @@ class ScanOptions(BaseModel):
     active: bool = False
     xss: bool = False
     sqli: bool = False
+    check_family: Optional[str] = None
+    asm_check_family: Optional[str] = None
     thorough: bool = False
     deep_domxss: Optional[bool] = None
 
@@ -2414,6 +2423,11 @@ class ScanOptions(BaseModel):
         le=20,
         description="Advanced API/AI override for max active shard jobs per parent scan.",
     )
+
+    @field_validator("check_family", "asm_check_family")
+    @classmethod
+    def validate_scan_check_family(cls, value):
+        return check_registry.validate_scan_focus_family(value)
 
 
 class ScanRequest(BaseModel):

@@ -366,6 +366,40 @@ def test_asm_auth_family_requires_primary_credentials_only():
     )
 
 
+def test_post_scans_policy_rejects_bola_without_lab_and_two_users():
+    with pytest.raises(api_module.HTTPException, match="Lab/deep"):
+        api_module._apply_scan_check_family_policy({
+            "scan_type": "smart",
+            "check_family": "bola",
+            "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2",
+            "exploit_depth": False,
+        })
+
+    with pytest.raises(api_module.HTTPException, match="second-user credentials"):
+        api_module._apply_scan_check_family_policy({
+            "scan_type": "smart",
+            "check_family": "bola",
+            "auth_header": "Bearer u1",
+            "exploit_depth": True,
+        })
+
+
+def test_post_scans_policy_applies_registry_scanner_options():
+    opts, family = api_module._apply_scan_check_family_policy({
+        "scan_type": "smart",
+        "check_family": "sqli",
+        "xss": True,
+        "sqli": False,
+    })
+
+    assert family == "sqli"
+    assert opts["asm_check_family"] == "sqli"
+    assert opts["check_family"] == "sqli"
+    assert opts["sqli"] is True
+    assert opts["xss"] is False
+
+
 def test_ai_ops_router_full_coverage_is_dry_run_by_default():
     plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(
