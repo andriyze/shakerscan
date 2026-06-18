@@ -3,8 +3,9 @@
 **Status:** living plan from a live validation run (Juice Shop / crAPI / honey.shakerscan.com,
 2026-06-17). Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
-planner bug), P3 (observability), and P4 (re-classified as a stale-API skew + a misread, not a
-submit bug) are **fixed & committed**; A2 and the P1 follow-up (code-version handshake) remain.
+planner bug), P3 (observability), P4 (re-classified as a stale-API skew + a misread, not a submit
+bug), A2, and P5 (batch granularity defaults) are **fixed & committed**; A4, P6, and the P1 follow-up
+(code-version handshake) remain.
 
 ## How this was found
 Ran Full Coverage scans against the three targets and inspected logs, the DB (scans,
@@ -212,11 +213,14 @@ crAPI. **All completed with zero shard failures.**
 - **Fix:** gate synthetic/version-permutation generation behind A3 reachability and/or cap the
   permutation breadth so generation can't dominate the worklist before filtering.
 
-### P5 — Dynamic-coverage batch granularity  🟢 LOW
+### P5 — Dynamic-coverage batch granularity  ✅ FIXED (commit 5dd019e)
 - **Evidence:** dynamic shard durations spread 228–1319 s (~6×) on Juice Shop; with
   `batch_size=150` the final claimed batch runs long while earlier workers idle.
-- **Fix:** taper the claimed batch size as the worklist drains (smaller terminal batches) so the
-  long-tail batch can't dominate wall-clock. Minor — the pull model already balances the bulk.
+- **Fix (done):** automatic broad active coverage now claims smaller endpoint batches by default:
+  50 endpoints for normal active mixes and 35 for exploit-depth/exhaustive runs. Focused SQLi/XSS
+  lanes and explicit API/UI overrides can still use larger batches when needed.
+- **Optional future tuning:** taper the claimed batch size as the worklist drains so terminal batches
+  shrink further under very uneven endpoint costs.
 
 ### P6 — API-scaled worker logs are invisible  🟢 LOW (observability)
 - **Evidence:** plan jobs for the new scans ran on API-scaled workers 6–10, whose logs are **not**
@@ -230,4 +234,4 @@ crAPI. **All completed with zero shard failures.**
 2. **A2** (reachability persistence + `gone`-retirement + GC sweep) — ✅ fixed; validated live
    (honey 4022/5395 retired, real endpoints preserved, dispatcher excludes them).
 3. **Remaining:** **A4** (cap synthetic permutation — stop generating phantoms at the source),
-   **P5 / P6** (batch taper, all-worker logs), and the **P1 follow-up** (code-version handshake).
+   **P6** (all-worker logs), optional P5 tapering, and the **P1 follow-up** (code-version handshake).

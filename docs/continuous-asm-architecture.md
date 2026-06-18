@@ -406,8 +406,8 @@ Current shipped behavior:
 
 Target behavior:
 
-- Dynamic allocation becomes the default after live parity; the campaign asks the allocator for work
-  until it hits its budget or all eligible rows are terminal.
+- Dynamic allocation is the default; the campaign asks the allocator for work until it hits its
+  budget or all eligible rows are terminal. Static allocation remains a rollback/fallback path.
 - Worker jobs are coverage-batch/ASM-batch equivalents; the difference is the rollup target:
   `parent_scan_id` for one-shot scans, target policy for continuous ASM.
 - The parent report shows tested, partial, untested, auth-blocked, and rate-limited counts so the

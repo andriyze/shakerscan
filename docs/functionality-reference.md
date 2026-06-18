@@ -361,7 +361,7 @@ Strategies (`options.shard_strategy`):
 
 | Strategy | Behavior |
 |----------|----------|
-| `auto` | scope when ≥2 `custom_endpoints` present, else family |
+| `auto` | scope when ≥2 `custom_endpoints` are present; otherwise coverage for Smart/Full/Aggressive active scans |
 | `scope` | partition `custom_endpoints` across shards — genuine speed-up for APIs |
 | `family` | broad + deeper SQLi-focused + XSS-focused shards (capped at 3) — more depth |
 | `coverage` | discover once, harvest the full endpoint worklist, partition it across auto-sized shards — maximum breadth (UI: **Full Coverage**) |
@@ -371,6 +371,11 @@ Full Coverage uses **dynamic pull-based allocation** by default (workers claim c
 endpoint batches from the allocator); `coverage_allocation=static` keeps the legacy round-robin
 slices as a fallback. Coverage children run in zero-rediscovery mode (no re-crawl). The parent appears
 as one row on the Scans page; shard rows are hidden unless `include_shards=true`.
+
+Automatic broad active coverage uses smaller endpoint batches by default so workers can keep claiming
+new work instead of leaving one large straggler: 50 endpoints per dynamic batch for normal active
+mixes, 35 for exploit-depth/exhaustive scans. Focused SQLi/XSS lanes and explicit caller overrides can
+still use larger batches through `coverage_per_shard_cap` or `coverage_dynamic_batch_size`.
 
 Full design and current status: [`docs/parallel-scan-architecture.md`](parallel-scan-architecture.md).
 
