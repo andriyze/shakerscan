@@ -5835,18 +5835,28 @@ _ACTIVE_HIGH_VALUE_KEYWORDS = (
     "register", "signup", "user", "order", "coupon", "product", "payment",
 )
 
+# Sources from actually-observed traffic/crawl (trustworthy) vs. generated guesses
+# (OPTIONS method fan-out, inferred resource×action permutations) which are mostly
+# phantom and otherwise dominate the budget.
+_ACTIVE_REAL_SOURCES = frozenset({
+    "har_discovery", "har_network_capture", "har", "browser_api_capture", "browser",
+    "url_crawl", "crawl", "js_bundle_analysis", "js", "manual", "openapi", "swagger",
+})
+
 
 def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
-    """Rank endpoints so real, high-value injection points (login/search, request
-    bodies) lead the active-test budget instead of synthetic GET permutations
-    (e.g. ``/api/<Model>s/<action>``) that otherwise consume it first."""
+    """Rank endpoints so real, high-value injection points (observed request bodies,
+    login/search) lead the active-test budget instead of synthetic permutations
+    (e.g. OPTIONS-derived ``/api/<Model>s/<action>``). Keyword alone is not enough —
+    the synthetic generator mimics high-value keywords — so SOURCE leads the sort."""
     path = str(ep.get("url") or "").lower()
     method = str(ep.get("method") or "GET").upper()
     body = ep.get("body_params") or []
-    params = ep.get("params") or ep.get("query_params") or []
     keyword_hits = sum(1 for k in _ACTIVE_HIGH_VALUE_KEYWORDS if k in path)
     has_body = 1 if (method in ("POST", "PUT", "PATCH") and body) else 0
-    return (keyword_hits, has_body, len(body) + len(params))
+    real_source = 1 if str(ep.get("source") or "").lower() in _ACTIVE_REAL_SOURCES else 0
+    # real observed source first, then request-body surface, then keyword relevance.
+    return (real_source, has_body, keyword_hits)
 
 
 def _prioritize_active_endpoints(endpoints: list) -> list:
@@ -5967,23 +5977,26 @@ async def smart_sqli_test(
         and not _is_sqli_documentation_noise_endpoint(e)
     ]
 
-    # Value-sort so real, high-value injection points lead. Otherwise a flood of
-    # GET endpoints (incl. synthetic /api/<Model>s/<action> permutations) consumes
-    # the whole budget before real endpoints like POST /rest/user/login are reached.
+    # Value-sort so real, observed injection points lead. Otherwise a flood of GET
+    # endpoints (incl. synthetic OPTIONS-derived /api/<Model>s/<action> permutations)
+    # consumes the whole budget before real endpoints like POST /rest/user/login.
     get_endpoints = _prioritize_active_endpoints(get_endpoints)
     post_endpoints = _prioritize_active_endpoints(post_endpoints)
-    # Reserve part of the time budget for POST-body endpoints (the high-value
-    # injection surface) so the GET phase cannot starve them.
+    # Guarantee POST-body endpoints (the high-value injection surface) get a share of
+    # the budget. The COUNT reservation is the reliable guard (a single slow GET
+    # iteration can overshoot a time deadline); the time deadline is a secondary cap.
+    _post_reserve = min(len(post_endpoints), max(1, max_endpoints // 2)) if post_endpoints else 0
+    _get_cap = max(1, max_endpoints - _post_reserve)
     _get_phase_deadline = None
     if deadline is not None and post_endpoints and get_endpoints:
         _get_phase_deadline = time.monotonic() + max(1.0, (deadline - time.monotonic()) * 0.6)
 
-    # Test GET endpoints
-    for endpoint in get_endpoints[:max_endpoints]:
+    # Test GET endpoints (capped to reserve budget for POST-body endpoints)
+    for endpoint in get_endpoints[:_get_cap]:
         if _budget_exhausted():
             break
         if _get_phase_deadline is not None and time.monotonic() >= _get_phase_deadline:
-            print("[sqli] GET phase time reserve hit; reserving budget for POST-body endpoints", file=sys.stderr)
+            print("[sqli] GET phase reserve hit; reserving budget for POST-body endpoints", file=sys.stderr)
             break
         endpoint_url = endpoint.get("url", "")
         params = endpoint.get("params", []) or endpoint.get("query_params", [])
