@@ -49,6 +49,18 @@ def test_endpoint_focused_shards_do_not_apply_family_filter_or_grading():
     assert "coverage[\"focused_endpoint_scope\"] = True" in source
 
 
+def test_focused_manual_scope_disables_nuclei_before_delayed_launcher():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    focused_scope_index = source.index("if focused_manual_active_scope:")
+    forced_budget_index = source.index('scan_budget["nuclei_max_targets"] = 0')
+    delayed_launcher_index = source.index("# Start nuclei once discovery has populated targets and auth is ready")
+
+    assert focused_scope_index < forced_budget_index < delayed_launcher_index
+
+
 def test_from_request_active_requires_smart_family_and_endpoints():
     scope = FocusedScope.from_request(
         smart_mode=True,

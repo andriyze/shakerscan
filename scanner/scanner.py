@@ -3027,6 +3027,8 @@ async def build_report(target: str,
     zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)
     discovery_budget = scan_budget
     if focused_manual_active_scope:
+        scan_budget = dict(scan_budget)
+        scan_budget["nuclei_max_targets"] = 0
         discovery_budget = dict(scan_budget)
         discovery_budget["api_probe_limit"] = 0
         discovery_budget["disable_browser_fallback"] = True
