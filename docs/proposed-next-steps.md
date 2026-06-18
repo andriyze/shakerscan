@@ -1,130 +1,114 @@
-# Proposed Next Steps — DAST Engine Direction
+# Proposed Next Steps — DAST Engine Quality Plan
 
-**Status:** proposal, 2026-06-18. Grounded against code at HEAD `3cf4804` (audited this session),
-**not** against the architecture docs — so it credits what already shipped and proposes only the
-work that is actually missing. Turns the "continuous internal scanner + bug-bounty-strength hunter"
-strategy into a measured, benchmark-driven plan.
+**Status:** proposal, 2026-06-18. Grounded against live scans of the crAPI + Juice Shop honey
+targets on the rebuilt engine, plus code audit. The headline problem is no longer "which detector
+to build" — it is **why scans find only the tip of the iceberg**. This plan leads with that.
 
-## Why this doc
-A strategy review compared ShakerScan to Burp Pro / ZAP / Tenable WAS / StackHawk and recommended
-shifting the next work away from "more parallelism / more payloads" toward **workflow understanding,
-authz / business-logic testing, proof depth, and benchmark-driven detector quality**. The direction
-is right and matches where the codebase is already heading (continuous campaign + endpoint inventory
-+ attempt ledger). But the review was written against the docs and **understates what already
-shipped**, so several of its "P0 builds" already exist. This doc re-grounds the plan and proposes
-only the missing pieces.
+## TL;DR — why we find so little
+On both targets the engine found a *fraction* of the known bugs (Juice Shop: 2 SQLi, 0 XSS, 0 IDOR;
+crAPI: 13 read-BOLA, 0 write-BOLA / mass-assignment / JWT). The audit shows the cause is **not weak
+detectors** — it is **discovery + scope + auth**:
 
-**Guiding principle — benchmark-driven, not speculative.** Do not build the target architecture up
-front. Wire crAPI + Juice Shop into the existing benchmark harness, run it, and let the
-**miss-analysis** decide which detector work actually moves High/Critical counts. "Tune the engine
-to find crAPI/Juice Shop bugs" and "move toward the hunter/graph architecture" are the **same loop**,
-not sequential phases.
+| Symptom (measured) | Evidence | Consequence |
+|---|---|---|
+| API surface never discovered | `discovery_sources = [manual_endpoints, url_crawl]` on every scan; only **35 (Juice) / 8 (crAPI)** endpoints found | On an SPA/API app, crawling the HTML shell finds ~nothing → the routes with the bugs are never tested |
+| Browser crawl disabled for focused/coverage scans | `scanner.py:3884` `enable_browser_crawl = … and not focused_manual_active_scope`; coverage shards run `check_family`+harvested endpoints → "focused" → no crawl | Focusing to find SQLi also turns off the discovery needed to find where SQLi is |
+| Coverage recon skips param enumeration | `parallel_scan.py:147` `param_discovery_url_limit: 0` | Harvested endpoints carry no params → injection probes have nothing to inject into |
+| Anonymous-only | `auth_states_tested: ['anonymous']` (Juice Shop) | Every authenticated SQLi/XSS/IDOR is invisible — and that's most of them |
+| Wrong endpoints/methods selected | active set was `PUT/POST/PATCH`, **no GET**; `GET /rest/products/search?q=` (famous SQLi) not in the tested set | The single most famous Juice Shop SQLi is never sent a payload |
+
+**The detectors mostly work** (login auth-bypass SQLi ✅, cross-principal read-BOLA ✅, and a full
+JWT + mass-assignment suite already exists in code). They just never receive the right
+endpoints/params/auth. **Fix discovery + scope + auth first; it unlocks the existing detectors.**
+
+## Where the real findings live (the target map)
+Use these as benchmark fixtures (expected families/routes, not hardcoded answers).
+- **Juice Shop** — SQLi: `/rest/user/login` ✅, `/rest/products/search?q=` (UNION), `/rest/track-order/:id`.
+  XSS: DOM `#/search?q=`, reflected product search, stored (review / last-login-IP).
+  IDOR: `/rest/basket/:id`, `/api/Feedbacks`, `PUT /api/Users/:id`.
+- **crAPI** — BOLA read ✅ (vehicle location, mechanic reports, orders) + **write**; mass-assignment
+  (profile/video, internal coupon); JWT alg/signature bypass; SSRF (mechanic `?url=`).
+
+---
+
+## P0 — Discovery & scope (the unlock; do these first)
+- **D1 — Decouple discovery from active focus.** A focused or coverage scan must still run full
+  browser + JS-bundle discovery to *find* what to test. Gate `enable_browser_crawl`
+  (`scanner.py:3884`) and the SPA seed-route step (`3889`) on **"explicit endpoints supplied"**
+  (custom_endpoints / `zero_rediscovery`), **not** on `focused_manual_active_scope`. A
+  `check_family=sqli` run with no custom endpoints should browser-crawl like a broad scan.
+- **D2 — Coverage recon must enumerate params.** Stop forcing `param_discovery_url_limit: 0` in the
+  coverage recon (`parallel_scan.py:147`); enumerate query/body params (bounded) so the harvested
+  worklist carries injectable params. Verify body shapes (now array-aware via `3cb0ff0`) survive into shards.
+- **D3 — Capture & feed SPA/API calls into the worklist.** Ensure browser-captured XHR/fetch
+  endpoints (`browser_api_endpoints`, scanner.py:4327) with method+params reach both the active
+  selection **and** the coverage harvest (`harvest_endpoints`) — for API-only apps (crAPI) too.
+- **D4 — Authenticated discovery + multi-auth by default.** When creds exist, crawl and test as
+  user1/user2 (and admin); the post-login API surface is where most Highs live. Auto-login
+  (form/JSON), keep the session warm, and record `auth_states_tested` honestly.
+- **D5 — Per-family deep passes, unioned.** A full-mix *dilutes* (measured: crAPI full-mix found
+  **0 High** vs **13** focused). A single family misses the others. Orchestrate focused-deep
+  sqli + xss + bola/idor passes over the **same discovered surface**, then union — instead of one
+  diluted mix or one narrow family.
+
+## P1 — Detector depth (after discovery feeds them)
+- **W1 — Safe write-BOLA / BOPLA.** The one genuine *capability* gap: `smart_authz` proves
+  cross-principal **reads** only (read-safe by design). Add a **non-destructive** cross-principal
+  **write** proof (idempotent re-PUT of the foreign object's own values, gated on `exploit_depth`)
+  → turns crAPI's read-Highs into more-severe write-Highs.
+- **W2 — Make existing detectors fire, don't rebuild them.** Mass-assignment
+  (`mass_assignment_test_json_body`) and the full JWT suite (`jwt_vulnerability_test`,
+  `jwt_comprehensive_test`, `jwt_algorithm_confusion_test`, `jwt_kid_injection_test`,
+  `jwt_claim_manipulation_test`, scanner.py:1221/1642-1645) already exist; they under-fire because
+  of scan focus + dispatch. Verify each runs with auth context on crAPI and emits a finding.
+- **W3 — Stored/DOM XSS proof depth on SPAs.** Juice Shop's XSS is DOM/stored; ensure
+  `deep_domxss` + the stored-XSS workflow run on browser-discovered sinks, not just reflected GET params.
+
+## P2 — Architecture (enables the above to scale; mostly already-scaffolded)
+- **N5 — Registry-driven dispatch** (keystone): `build_report()` still uses the per-module boolean
+  ladder (`scanner.py:5148,5156` + ~7 `if run_sqli/run_xss`). Migrate to iterate
+  `ACTIVE_CHECK_FAMILIES` / `check_registry.CheckFamilySpec` so families are independently
+  schedulable — this is what makes D5 (per-family passes) and W2 (firing all detectors) clean.
+- **N1/N2 — Workflow/state modeling + persisted resource graph.** Multi-step
+  register→login→create→access→mutate sequences (only single-hop producer→consumer exists today),
+  persisted so detectors and Continuous ASM reuse object IDs/ownership instead of re-discovering.
+- **N4 — Discovery imports** (OpenAPI/Postman/GraphQL-introspection into the inventory) — high
+  leverage for crAPI-class API coverage; complements D1–D3.
+- **N6 — Proof contracts per family** + benchmark `proof_gap` enforcement.
 
 ## Already shipped — do NOT rebuild
-The review lists these as work to do; they already exist in code.
+| Capability | Where |
+|---|---|
+| Benchmark miss-analysis harness | `fefe781` `benchmark_summary.py`, `tests/benchmark/analyze_dast_benchmark.py` |
+| Cross-principal **read**-BOLA replay | `c88f54f` `authz_resource_replay_test` |
+| Mass-assignment + telemetry | `017a186`/`4277c17` `mass_assignment_test_json_body` |
+| Forced browsing + vertical priv-esc | `access_control_checks.py:722,3269` |
+| Full JWT attack suite | `scanner.py:1221,1642-1645` |
+| Per-family active-time budget split | `active_checks.py::_split_active_family_budget` |
+| Login auth-bypass SQLi | `ddd3de9` |
+| Object-id route prioritization · array-body reconstruction · real-id propagation | this session: `1a6d9d2`, `3cb0ff0`, `641edcc` (help id-in-URL apps; crAPI ids live in response bodies, so D1–D4 + W1 matter more there) |
 
-| Capability the review asked for | Status in code | Where |
-|---|---|---|
-| Benchmark miss-analysis harness | ✅ shipped — classifies misses as `family_not_attempted` / `proof_gap` / `auth_state_untested` | `fefe781` `scanner_tools/benchmark_summary.py`, `tests/benchmark/analyze_dast_benchmark.py` |
-| BOLA / cross-principal resource replay | ✅ shipped — extract resource IDs from a producer JSON response, replay as user2 only for IDs absent from user2's own listing | `c88f54f` `access_control_checks.py::authz_resource_replay_test` |
-| BOPLA / mass assignment + telemetry | ✅ shipped — per-endpoint `endpoint_attempts` | `017a186`, `4277c17` `active_checks.py::mass_assignment_test_json_body` |
-| Vertical privilege escalation + forced browsing | ✅ shipped | `access_control_checks.py::check_vertical_privilege_escalation` (3269), `check_forced_browsing` (722) |
-| Wide / deep budget split | ✅ shipped — `wide_budget` / `deep_budget` are columns **and** consumed | `asm_inventory.create_campaign`, `api.py:8968` |
-| Unified family policy + cooperative cancellation | ✅ shipped | `655bd1d` `check_registry` policy contract; file-based scanner cancel |
-| Standalone-scan request-budget reservation | ✅ shipped | `4277c17` `process_scan_job` |
-| Login auth-bypass SQLi detection | ✅ shipped — failed-login → 200 + token/identity = strong evidence | `ddd3de9` |
-
-So the work ahead is **finish + connect what exists**, not a rebuild.
-
-## The benchmark feedback loop (the spine of this plan)
-1. Wire **crAPI** and **Juice Shop** into the benchmark harness (`fefe781`) as fixtures:
-   `benchmarks/<target>/{profile.yml, auth.yml, expected_families.yml}` (+ `openapi.yml` for crAPI).
-   Do **not** hardcode challenge solutions — store expected *families / route categories / auth
-   states*, not answers.
-2. Run the harness to get a baseline: `discovered`, `attempted`, `auth_coverage`,
-   `resource_id_pairs_found`, `confirmed_findings`, `expected_family_misses`, `proof_gaps`,
-   `severity_gaps`.
-3. Treat every item below as a hypothesis the miss-analysis must justify before we build it.
-   The two targets pull in opposite directions, which is the point:
-   - **crAPI** → API import + authz graph + BOLA / BOPLA / JWT.
-   - **Juice Shop** → browser / JS route discovery + stored-XSS proof + SQLi.
-
-## Genuinely-missing capabilities (prioritized)
-Only build the ones the benchmark baseline shows as real misses.
-
-- **N1 — Multi-step workflow / state modeling.** *(highest-value gap)* No
-  register → login → create → share → mutate sequence model exists today (only single-hop
-  producer→consumer in BOLA and one internal `stored_xss_workflow`). This is what unlocks
-  business-logic High/Critical bugs. Seed traces from browser sessions, HAR, OpenAPI examples,
-  and previous successful scans; test mutations around those sequences.
-- **N2 — Persist the resource / principal / producer-consumer graph.** The BOLA replay pack already
-  builds this in memory; lift it into a durable structure (extend `target_endpoints` or a sibling
-  table) so other detectors and the Continuous ASM loop can reuse object IDs, ownership, and
-  producer→consumer edges instead of rediscovering them per scan.
-- **N3 — BFLA as a first-class role-matrix.** We have the ingredients (forced browsing, vertical
-  priv-esc); add the explicit `anon / user1 / user2 / admin × endpoint` matrix view and the
-  function-level-access detector that reads it.
-- **N4 — Discovery-source imports.** Add **GraphQL introspection-as-import** and **Postman** import,
-  and unify **OpenAPI** import into the same endpoint-inventory path (detection exists today;
-  import-into-inventory does not). Critical for crAPI-class API coverage.
-- **N5 — Registry-driven scanner execution (keystone "A").** `build_report()` still dispatches via
-  the per-module boolean ladder (`scanner.py:5148,5156` + ~7 `if run_sqli/run_xss` sites); the
-  `ACTIVE_FAMILY_DISPATCH_ORDER` loop is cosmetic. Migrate active-check dispatch to iterate the
-  `ACTIVE_CHECK_FAMILIES` / `check_registry.CheckFamilySpec` registry so families are independently
-  schedulable and each new check is one registry entry, not N edit sites. Large, high-risk refactor
-  of the scanner's most critical function — do it behind the byte-identical family-scope tests.
-- **N6 — Formalized proof contracts across detectors.** The pieces exist per-detector (BOLA
-  cross-principal proof, SQLi evidence, mass-assignment state-change). Define a shared
-  `proof_contract` per family (what evidence is required to confirm + assign severity by impact),
-  and have the benchmark harness's `proof_gap` metric enforce it.
-
-## Explicitly deprioritized (don't build yet)
-- **Hunter campaign mode** — mostly repackages `deep_budget` + focused families + Lab gating that
-  already exist; not worth a new campaign type until detector depth justifies it.
-- **Full ApplicationGraph ontology** — build the N1/N2 slice that feeds authz/business-logic, not
-  the whole ontology.
-- **Multi-node fleet / object evidence store / reliable queue leases** — infra; correct long-term,
-  but it does not find High bugs. After the detector loop improves.
-
-## Watch-items to verify (from recent commits, not confirmed bugs)
-- `a729602` dropped `in_progress` from claim-blocking — confirm the `leased` rows prevent duplicate
-  cross-family claims / coverage over-count.
-- `4277c17` mutates `custom_budget["active_max_endpoints"]` in-place on a partial rate grant —
-  confirm a throttled scan isn't later escalated to ASM carrying the reduced cap.
-- Benchmark harness treats "family ran but emitted no `endpoint_attempts`" as `family_not_attempted`
-  — could mislabel early-exit skips; ensure every active module emits ≥1 attempt even on skip.
+## Benchmark loop (the spine)
+Wire crAPI + Juice Shop as fixtures (`benchmarks/<target>/{profile,auth,expected_families}.yml`),
+run `analyze_dast_benchmark.py` each pass, and gate progress on **confirmed High/Critical up**,
+`expected_family_misses` **down**, `proof_gaps` **down**. Every item above is a hypothesis the
+miss-analysis must justify before it's built.
 
 ## Sequencing
 | Priority | Step | Why |
 |---|---|---|
-| **P0** | crAPI + Juice Shop benchmark fixtures + baseline run | Objective miss-analysis; turns the roadmap into numbers |
-| **P0** | Close benchmark-confirmed detector misses (N3/N4 first if `auth_state_untested` / `family_not_attempted` dominate) | Direct High/Critical lift |
-| **P1** | N1 workflow/state modeling + N2 persisted resource graph | The real business-logic unlock |
-| **P1** | N5 registry-driven execution | Makes families independently schedulable; enables new runnable families cheaply |
-| **P1** | N6 proof contracts | Stops weak/noisy findings; impact-based severity |
-| **P2** | Object evidence store, then queue leases / node registry | Production fleet scale — after the detector loop |
+| **P0** | D1 decouple discovery from focus · D2 recon param enumeration | Single biggest lift — feeds every detector the real surface |
+| **P0** | D4 authenticated + multi-auth discovery/test | Unlocks the majority of Highs (authn-gated) |
+| **P0** | D3 SPA/API capture → worklist · D5 per-family union passes | Right endpoints, no dilution |
+| **P1** | W1 safe write-BOLA · W2 fire JWT/mass-assign · W3 DOM/stored XSS | Detector depth on the now-discovered surface |
+| **P1** | N5 registry-driven dispatch | Makes D5/W2 clean and per-family schedulable |
+| **P2** | N1/N2 workflow+graph · N4 spec imports · N6 proof contracts | Business-logic depth + scale |
 
-## Success metric
-Benchmark deltas across runs (`compare_benchmark_summaries`): **confirmed High/Critical up**,
-`expected_family_misses` **down**, `proof_gaps` **down** — on both crAPI and Juice Shop.
-
----
-
-## Validation findings — 2026-06-18 live loop (rebuilt engine)
-First end-to-end validation of the committed increments against the live honey targets.
-
-**Confirmed working on the rebuilt engine (no regression):**
-- Juice Shop: Grade D, **2 Critical SQLi** (`boolean_comment` + `auth_bypass_boolean` login bypass) — `66a91659`.
-- crAPI: Grade D, **13 High BOLA** (`smart_authz`, user2→user1 reads at `/workshop`, `/identity`) — `6127e7e5`.
-
-**Why the increments didn't yet *add* Highs (the real next-gap evidence):**
-1. **`smart_authz` BOLA replay is read-only by design** — it builds "read-safe candidate consumer URLs" and never sends `PUT`/`PATCH`/`DELETE`. So increments 1 (state-changing object routes win budget) and 3 (real-id propagation onto write routes) *feed* write routes that the BOLA verifier then declines to exercise. **All 13 crAPI Highs are GET reads.** → Highest-value next build: a **safe write-BOLA / BOPLA verifier** that, under `exploit_depth`, performs a non-destructive cross-principal write check (e.g. idempotent re-read proof, or PATCH of an owned-vs-foreign field) on the id-propagated routes.
-2. **Benchmark harness confirms `family_not_attempted`** dominates when a scan is focused (`check_family=sqli` ⇒ XSS never run). Default validation should run the **full active mix**, not a single family.
-
-**Evidence-ranked next work to raise crAPI/Juice Shop High/Critical counts:**
-- **W1 — Safe write-BOLA / BOPLA verifier** (biggest crAPI lift; the one genuine *capability* gap). `smart_authz` proves cross-principal **reads** only; add a non-destructive cross-principal **write** proof (idempotent re-PUT of the foreign object's own values, gated on `exploit_depth`). Unblocks increments 1+3.
-- **W2 — Dispatch/coverage, not new detectors.** The engine **already has** mass-assignment (`mass_assignment_test_json_body`) and a full JWT suite (`jwt_vulnerability_test`, `jwt_comprehensive_test`, `jwt_algorithm_confusion_test`, `jwt_kid_injection_test`, `jwt_claim_manipulation_test`, scanner.py:1221/1642-1645). They under-fire on crAPI because of **scan focus + dispatch**, not missing code. Verify each runs on crAPI with auth context and emits a finding; fix the dispatch gap (ties back to **N5** registry-driven dispatch).
-- **W3 — Don't broaden blindly: full-mix *dilutes*.** Measured this loop — a crAPI `coverage` full-mix found **0 High** vs the **13 High** from the focused-BOLA scan, because per-family depth got starved. Run **focused deep passes per family** (bola, then jwt, then mass-assignment) and union the findings, rather than one diluted mix.
-- **W4 — Increment 1/3 only help concrete-id-in-URL apps.** Verified `resource_id_propagation` fired **0×** on crAPI (object ids live in response **bodies**, harvested at runtime by `smart_authz`, not in discovered URLs). The increments help crawled-SPA / id-in-path apps; crAPI needs the runtime-side W1 instead.
-
-**Operational caution (learned the hard way):** authenticated `exploit_depth` scans **mutate the test account** (our crAPI user creds were burned mid-loop — a write hit an account-update endpoint). So: (a) register fresh users per authenticated run, and (b) any new write-test (W1/W2) MUST be non-destructive / self-healing. See `[[crapi-juiceshop-validation-setup]]`.
+## Operational cautions (learned live, 2026-06-18)
+- **Authenticated `exploit_depth` scans mutate the test account** (our crAPI creds were burned
+  mid-loop). Register fresh users per authenticated run; W1/W2 writes MUST be non-destructive.
+  Self-mint crAPI tokens via signup/login — see `[[crapi-juiceshop-validation-setup]]`.
+- **Single-file mount staleness:** after editing `scanner.py`, `docker compose up -d
+  --force-recreate worker` and verify each worker (`grep`/`ast.parse`) before trusting results —
+  `restart` left a truncated copy. See `[[docker-single-file-mount-staleness]]`.
+- **Verify against current HEAD before acting** — it advances between turns. `[[reaudit-head-before-acting]]`.
