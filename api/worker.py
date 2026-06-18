@@ -4157,7 +4157,12 @@ def _as_report_dict(value) -> dict | None:
     return None
 
 
-def _asm_scan_options_for_auth_state(options: dict[str, Any], auth_state: Any) -> dict[str, Any] | None:
+def _asm_scan_options_for_auth_state(
+    options: dict[str, Any],
+    auth_state: Any,
+    *,
+    check_family: str | None = None,
+) -> dict[str, Any] | None:
     """Scope scan options to the auth identity claimed from ASM inventory.
 
     Returning None means the endpoint was discovered under an auth state that
@@ -4168,6 +4173,12 @@ def _asm_scan_options_for_auth_state(options: dict[str, Any], auth_state: Any) -
     base = dict(options or {})
     if state not in parallel_scan.available_auth_states(base):
         return None
+    if state == "user1" and asm_inventory.normalize_check_family(check_family) == "bola":
+        # BOLA is a cross-principal check. A user1-scoped inventory batch still
+        # needs the secondary identity so the scanner can compare user1 vs user2.
+        scoped = dict(base)
+        scoped["auth_state"] = state
+        return scoped
     return parallel_scan._apply_auth_state(base, state)
 
 
@@ -5514,7 +5525,7 @@ async def process_exploit_batch_job(job_data: dict):
     )
 
     # Active testing over the injected endpoints; lean discovery (they're known).
-    scoped_opts = _asm_scan_options_for_auth_state(options, auth_state)
+    scoped_opts = _asm_scan_options_for_auth_state(options, auth_state, check_family=check_family)
     if scoped_opts is None:
         completed_at = utc_now()
         result = {

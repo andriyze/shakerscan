@@ -599,6 +599,9 @@ Implemented as default:
   cannot prematurely satisfy another.
 - The coverage recon pass is discovery-only: workers strip focused active-family flags from recon
   options before calling the scanner, then restore the requested family only on child/batch jobs.
+- BOLA batch execution is user1-scoped for inventory ownership, but keeps the supplied second-user
+  credential as a comparator. Other focused families continue to scope to one auth identity and drop
+  unrelated credentials.
 - Worker execution enforces the target/root-domain endpoint cap through shared Redis token buckets
   before known endpoint batches run. Dispatcher-reserved ASM batches carry their reservation into the
   job payload to avoid double-counting; unreserved static shards wait, and dynamic batches can shrink

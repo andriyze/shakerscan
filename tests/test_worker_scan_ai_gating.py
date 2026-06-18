@@ -19,6 +19,25 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 import worker  # noqa: E402
 
 
+def test_asm_bola_user1_scope_preserves_second_user_comparator():
+    opts = {
+        "auth_header": "Bearer user1",
+        "user2_header": "Bearer user2",
+        "check_family": "bola",
+        "asm_check_family": "bola",
+    }
+
+    bola = worker._asm_scan_options_for_auth_state(opts, "user1", check_family="bola")
+    assert bola["auth_header"] == "Bearer user1"
+    assert bola["user2_header"] == "Bearer user2"
+    assert bola["auth_state"] == "user1"
+
+    sqli = worker._asm_scan_options_for_auth_state(opts, "user1", check_family="sqli")
+    assert sqli["auth_header"] == "Bearer user1"
+    assert "user2_header" not in sqli
+    assert sqli["auth_state"] == "user1"
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()
