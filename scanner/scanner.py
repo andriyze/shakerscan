@@ -2301,7 +2301,30 @@ def _synthetic_json_value_for_param(param: str) -> Any:
     return "test"
 
 
+def _descend_synthetic_array(cursor: dict[str, Any], part: str) -> dict[str, Any]:
+    """Return the child dict for ``part`` while preserving list-of-object shape.
+
+    ``_flatten_json_keys`` emits a list-of-objects as the list key *plus* its
+    element keys (``{"orders": [{"id": 1}]}`` -> ``["orders", "orders.id"]``).
+    So when a scalar placeholder already exists for ``part`` and we now need to
+    descend into it, it was an array: reconstruct it as a single-element list.
+    """
+    existing = cursor.get(part)
+    if isinstance(existing, list):
+        if not existing or not isinstance(existing[0], dict):
+            existing[:] = [{}]
+        return existing[0]
+    if isinstance(existing, dict):
+        return existing
+    child: dict[str, Any] = {}
+    cursor[part] = [child] if existing is not None else child
+    return child
+
+
 def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
+    """Build a synthetic JSON body from flattened param paths, keeping the real
+    request shape (incl. arrays) so type-strict endpoints accept it and active
+    probes actually reach the vulnerable code path."""
     template: dict[str, Any] = {}
     for raw in params:
         parts = [p for p in str(raw or "").split(".") if p]
@@ -2309,12 +2332,11 @@ def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
             continue
         cursor = template
         for part in parts[:-1]:
-            existing = cursor.get(part)
-            if not isinstance(existing, dict):
-                existing = {}
-                cursor[part] = existing
-            cursor = existing
-        cursor[parts[-1]] = _synthetic_json_value_for_param(raw)
+            cursor = _descend_synthetic_array(cursor, part)
+        leaf = parts[-1]
+        if isinstance(cursor.get(leaf), (dict, list)):
+            continue  # children already populated for this key; don't clobber
+        cursor[leaf] = _synthetic_json_value_for_param(raw)
     return template
 
 

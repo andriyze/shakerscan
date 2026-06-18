@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import importlib.util
@@ -52,3 +53,35 @@ def test_active_worklist_preserves_form_body_shape():
     ])
 
     assert worklist == ["POST /login form:email=1&password=1"]
+
+
+def test_synthetic_body_reconstructs_array_of_objects():
+    # _flatten_json_keys emits a list-of-objects as the list key + element keys,
+    # e.g. {"orders": [{"id": 1}]} -> ["orders", "orders.id"]. Rebuild as a list.
+    template = scanner_module._synthetic_json_template_from_params(
+        ["orders", "orders.id", "orders.name", "user.email"]
+    )
+    assert isinstance(template["orders"], list)
+    assert template["orders"] and isinstance(template["orders"][0], dict)
+    assert set(template["orders"][0].keys()) == {"id", "name"}
+    assert template["orders"][0]["id"] == 1            # id -> numeric seed
+    assert isinstance(template["user"], dict)          # pure nested dict stays a dict
+    assert template["user"]["email"] == "test@example.com"
+
+
+def test_active_worklist_reconstructs_array_body_from_params():
+    worklist = scanner_module._serialize_active_worklist([
+        {
+            "method": "POST",
+            "url": "/api/basket/checkout",
+            "body_params": ["items", "items.id", "items.qty"],
+            "content_type": "application/json",
+        }
+    ])
+    assert len(worklist) == 1
+    entry = worklist[0]
+    assert entry.startswith("POST /api/basket/checkout json:")
+    payload = json.loads(entry.split("json:", 1)[1])
+    assert isinstance(payload["items"], list)
+    assert payload["items"][0]["id"] == 1
+    assert "qty" in payload["items"][0]

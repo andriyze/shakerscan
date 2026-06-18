@@ -28,6 +28,16 @@ from scanner_tools.active_checks import (
 )
 
 
+def test_active_checks_synthetic_body_reconstructs_arrays():
+    template = active_checks._synthetic_json_template_from_params(
+        ["items", "items.id", "items.price", "shipping.zip"]
+    )
+    assert isinstance(template["items"], list)
+    assert isinstance(template["items"][0], dict)
+    assert set(template["items"][0].keys()) == {"id", "price"}
+    assert isinstance(template["shipping"], dict)  # plain nested dict stays a dict
+
+
 class TestDetectReflectionContext:
     """Tests for the detect_reflection_context function."""
 

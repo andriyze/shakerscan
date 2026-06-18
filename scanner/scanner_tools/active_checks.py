@@ -6042,13 +6042,41 @@ def _set_nested_value(container: dict[str, Any], key: str, value: Any, overwrite
         cursor[parts[-1]] = value
 
 
+def _descend_synthetic_array(cursor: dict[str, Any], part: str) -> dict[str, Any]:
+    """Return the child dict for ``part`` while preserving list-of-object shape.
+
+    A list-of-objects is flattened as the list key *plus* its element keys, so a
+    scalar placeholder already present for ``part`` when we descend signals an
+    array: reconstruct it as a single-element list rather than a plain dict.
+    """
+    existing = cursor.get(part)
+    if isinstance(existing, list):
+        if not existing or not isinstance(existing[0], dict):
+            existing[:] = [{}]
+        return existing[0]
+    if isinstance(existing, dict):
+        return existing
+    child: dict[str, Any] = {}
+    cursor[part] = [child] if existing is not None else child
+    return child
+
+
 def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
+    """Build a synthetic JSON body from flattened param paths, reconstructing
+    arrays (list-of-objects) so type-strict endpoints accept the request and
+    active probes reach the vulnerable code path."""
     template: dict[str, Any] = {}
     for raw in params:
         parts = _normalize_nested_key(str(raw or ""))
         if not parts:
             continue
-        _set_nested_value(template, ".".join(parts), _fallback_value_for_param(str(raw)), overwrite=True)
+        cursor = template
+        for part in parts[:-1]:
+            cursor = _descend_synthetic_array(cursor, part)
+        leaf = parts[-1]
+        if isinstance(cursor.get(leaf), (dict, list)):
+            continue  # children already populated for this key; don't clobber
+        cursor[leaf] = _fallback_value_for_param(str(raw))
     return template
 
 
