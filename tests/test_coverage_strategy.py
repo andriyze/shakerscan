@@ -54,6 +54,7 @@ def test_coverage_recon_budget_skips_heavy_active_and_nuclei_work():
     assert budget["active_max_seconds"] == 0
     assert budget["param_discovery_url_limit"] == 0
     assert budget["nuclei_max_targets"] == 0
+    assert budget["phase4_max_seconds"] == 0
     assert budget["max_duration_minutes"] <= 10
 
 

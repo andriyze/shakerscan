@@ -145,6 +145,7 @@ RECON_DISCOVERY_BUDGET = {
     "discovery_depth": 3,
     "param_discovery_url_limit": 0,   # skip per-URL param discovery in recon
     "param_discovery_max_params": 0,
+    "phase4_max_seconds": 0,
     "max_duration_minutes": 10,       # hard bound so planning can't run away
 }
 
