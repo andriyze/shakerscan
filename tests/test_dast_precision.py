@@ -881,6 +881,43 @@ def test_smart_authz_cross_principal_replay_is_verified():
     assert updated["confidence_tier"] == "verified"
 
 
+def test_precision_policy_caps_unverified_smart_bola_lead_below_high():
+    finding = {
+        "tool": "smart_bola",
+        "title": (
+            "BOLA: Cross-user data access at "
+            "https://example.test/identity/api/v2/user/dashboard?id={id}"
+        ),
+        "severity": "high",
+        "cvss_score": 8.0,
+        "confidence": 0.5,
+        "suspected": True,
+        "needs_verification": True,
+        "validation": {
+            "verified": False,
+            "confidence": 0.5,
+            "evidence_level": "weak_indicator",
+            "reason": "IDOR pattern detected but not confirmed",
+        },
+        "evidence": {
+            "url": "https://example.test/identity/api/v2/user/dashboard?id=9999",
+            "responses_equivalent": True,
+            "response_similarity": 0.969,
+            "user_specific_signals": ["field:email"],
+        },
+    }
+
+    adjusted = apply_dast_precision_policy([finding])[0]
+
+    assert adjusted["severity"] == "medium"
+    assert adjusted["cvss_score"] <= 6.0
+    assert adjusted["verified"] is False
+    assert adjusted["needs_verification"] is True
+    assert adjusted["suspected"] is True
+    assert adjusted["confidence_tier"] == "low"
+    assert adjusted["precision_policy"]["confidence_cap_reason"] == "bola_lead_without_cross_principal_proof"
+
+
 def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):
     async def fake_run(cmd, timeout=10):
         url = cmd[-1]

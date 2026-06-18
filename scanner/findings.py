@@ -391,6 +391,26 @@ def apply_dast_precision_policy(
                 finding["verification_reason"] = "Missing OTP throttling is a brute-force hardening gap, not a confirmed 2FA bypass"
                 _cap_confidence_for_precision(finding, 0.64, "otp_rate_limit_gap_not_bypass")
 
+        elif tool == "smart_bola":
+            evidence_level = str(validation.get("evidence_level") or "").lower()
+            weak_or_suspected = (
+                finding.get("suspected") is True
+                or finding.get("needs_verification") is True
+                or evidence_level in {"weak_indicator", "strong_indicator"}
+            )
+            if weak_or_suspected:
+                finding["suspected"] = True
+                finding["needs_verification"] = True
+                finding["verification_reason"] = (
+                    finding.get("verification_reason")
+                    or "BOLA/IDOR lead lacks deterministic owner-vs-attacker replay proof"
+                )
+                _cap_confidence_for_precision(
+                    finding,
+                    0.64,
+                    "bola_lead_without_cross_principal_proof",
+                )
+
         confidence = float(finding.get("confidence") or 0.5)
         finding["confidence_tier"] = get_confidence_tier(confidence)
 

@@ -74,6 +74,29 @@ MAX_SCAN_DURATION = {
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 
+FOCUSED_MERGE_FAMILY_RULES = {
+    "sqli": {
+        "tools": {"smart_sqli", "sqlmap", "sqli", "nosql_injection", "nosql"},
+        "cwes": {"CWE-89", "CWE-943"},
+        "title_markers": ("sql injection", "nosql", "injection"),
+    },
+    "xss": {
+        "tools": {"active_xss", "dom_xss", "xss", "dalfox"},
+        "cwes": {"CWE-79"},
+        "title_markers": ("xss", "cross-site scripting", "script execution"),
+    },
+    "auth": {
+        "tools": {"smart_auth", "auth_access"},
+        "cwes": {"CWE-287", "CWE-306"},
+        "title_markers": ("authentication", "authorization", "access control"),
+    },
+    "bola": {
+        "tools": {"smart_bola", "smart_authz"},
+        "cwes": {"CWE-639", "CWE-862", "CWE-863"},
+        "title_markers": ("bola", "idor", "object authorization", "object level authorization"),
+    },
+}
+
 
 def utc_now() -> datetime:
     """Return UTC as a naive datetime to match existing DB timestamp columns."""
@@ -4229,6 +4252,117 @@ def _apply_campaign_coverage_rollup(merged: dict[str, Any], campaign_coverage: d
     return True
 
 
+def _merge_finding_matches_family(finding: dict[str, Any], family: str | None) -> bool:
+    rules = FOCUSED_MERGE_FAMILY_RULES.get(str(family or ""))
+    if not rules or not isinstance(finding, dict):
+        return False
+    tool = str(finding.get("tool") or "").lower()
+    cwe = str(finding.get("cwe") or "").upper()
+    title = str(finding.get("title") or "").lower()
+    type_name = str(finding.get("type") or "").lower()
+    return (
+        tool in rules["tools"]
+        or cwe in rules["cwes"]
+        or any(marker in title for marker in rules["title_markers"])
+        or any(marker in type_name for marker in rules["title_markers"])
+    )
+
+
+def _focused_family_from_parent_options(parent_options: dict[str, Any]) -> str | None:
+    raw_families = parent_options.get("coverage_check_families")
+    if isinstance(raw_families, list):
+        families = [
+            asm_inventory.normalize_check_family(f)
+            for f in raw_families
+            if asm_inventory.normalize_check_family(f) != "all"
+        ]
+        if len(set(families)) == 1:
+            return families[0]
+    for key in ("check_family", "asm_check_family", "coverage_attempt_family"):
+        family = asm_inventory.normalize_check_family(parent_options.get(key))
+        if family and family != "all":
+            return family
+    return None
+
+
+def _recompute_focused_parent_result(
+    merged: dict[str, Any],
+    union_findings: list[dict[str, Any]],
+    family: str | None,
+) -> tuple[int | None, str | None]:
+    """Rebuild focused-family parent grade from the merged finding set."""
+    family = asm_inventory.normalize_check_family(family)
+    if not family or family == "all":
+        return None, None
+    result = merged.setdefault("result", {})
+    if not isinstance(result, dict):
+        result = {}
+        merged["result"] = result
+
+    focused_findings = [
+        f for f in union_findings
+        if isinstance(f, dict) and _merge_finding_matches_family(f, family)
+    ]
+    severity_counts = {
+        "critical": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "critical"),
+        "high": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "high"),
+        "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
+        "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
+    }
+    score = 100
+    score -= min(severity_counts["critical"] * 15, 45)
+    score -= min(severity_counts["high"] * 10, 30)
+    score -= min(severity_counts["medium"] * 4, 20)
+    score -= min(severity_counts["low"] * 1, 10)
+    score = max(0, min(100, score))
+    max_severity = "info"
+    for sev in ("critical", "high", "medium", "low"):
+        if severity_counts[sev]:
+            max_severity = sev
+            break
+    if max_severity == "critical":
+        grade = "D" if score >= 55 else "F"
+    elif max_severity == "high":
+        grade = "C" if score >= 70 else "D" if score >= 55 else "F"
+    else:
+        grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 55 else "F"
+
+    notes: list[str] = []
+    if severity_counts["critical"]:
+        max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_findings] or [0])
+        notes.append(
+            f"{severity_counts['critical']} critical vulnerability(ies) found "
+            f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts['critical'] * 15, 45)})."
+        )
+    if severity_counts["high"]:
+        notes.append(
+            f"{severity_counts['high']} high severity issue(s) found "
+            f"(penalty: -{min(severity_counts['high'] * 10, 30)})."
+        )
+    if severity_counts["medium"]:
+        notes.append(
+            f"{severity_counts['medium']} medium severity issue(s) found "
+            f"(penalty: -{min(severity_counts['medium'] * 4, 20)})."
+        )
+
+    result.update({
+        "score": score,
+        "grade": grade,
+        "notes": notes,
+        "summary": (
+            f"Focused {family.upper()} Scan Grade: {grade} "
+            f"({score}/100) - {len(focused_findings)} in-scope issue(s) found"
+        ),
+        "focused_active_scope": True,
+        "focused_family": family,
+        "focused_context_findings": max(0, len(union_findings) - len(focused_findings)),
+        "grade_reliable": True,
+    })
+    for stale_key in ("grade_warning", "coverage_issues", "original_grade"):
+        result.pop(stale_key, None)
+    return score, grade
+
+
 async def _record_endpoint_telemetry_attempts(
     conn,
     *,
@@ -4944,6 +5078,7 @@ async def process_scan_merge_job(job_data: dict):
     target_url = parent['target_url']
     parent_job_id = parent['job_id'] or parent_id
     campaign_id = str(parent['campaign_id']) if parent['campaign_id'] else None
+    parent_options = _as_report_dict(parent['options']) or {}
 
     # Aggregate findings (union, deduped by canonical fingerprint) and pick the
     # richest completed child report as the base skeleton for the merged report.
@@ -4997,6 +5132,12 @@ async def process_scan_merge_job(job_data: dict):
             union.setdefault(fp, f)
 
     union_findings = list(union.values())
+    try:
+        from findings import apply_dast_precision_policy
+        host = urllib.parse.urlparse(target_url or "").hostname
+        union_findings = apply_dast_precision_policy(union_findings, target_host=host or None)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] precision policy skipped: {e}", flush=True)
 
     # Build merged report.
     merged = copy.deepcopy(base_result) if base_result else {'target': target_url, 'result': {}, 'findings': []}
@@ -5012,9 +5153,19 @@ async def process_scan_merge_job(job_data: dict):
     if agg_grade is not None:
         merged['result']['grade'] = agg_grade
 
+    focused_family = _focused_family_from_parent_options(parent_options)
+    focused_score, focused_grade = _recompute_focused_parent_result(
+        merged,
+        union_findings,
+        focused_family,
+    )
+    if focused_score is not None:
+        agg_score = focused_score
+    if focused_grade is not None:
+        agg_grade = focused_grade
+
     # Recompute attack chains over the full union (they need every finding).
     # attack_chains is a TOP-LEVEL report section, not part of the grade block.
-    parent_options = _as_report_dict(parent['options']) or {}
     try:
         from scanner_tools.attack_chains import analyze_attack_chains
         include_partial = bool(parent_options.get('include_partial_attack_chains'))

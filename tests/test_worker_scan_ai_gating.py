@@ -1751,3 +1751,50 @@ def test_run_scan_null_classification_option_uses_runtime_setting(monkeypatch):
     assert "--ai" in cmd
     assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
     assert env["AI_CLASSIFY_MIN_SEVERITY"] == "medium"
+
+
+def test_focused_parent_result_recomputed_from_merged_bola_findings():
+    merged = {
+        "result": {
+            "score": 100,
+            "grade": "A",
+            "summary": "Focused BOLA Scan Grade: A (100/100) - 0 in-scope issue(s) found",
+            "grade_warning": "Grade may be inaccurate - required scan modules did not complete",
+            "coverage_issues": ["Active checks requested but no results or errors recorded"],
+            "original_grade": "A",
+        }
+    }
+    findings = [
+        {
+            "tool": "smart_authz",
+            "title": "Broken object authorization: user2 can access user1 object",
+            "severity": "high",
+            "cvss_score": 8.0,
+            "cwe": "CWE-639",
+        },
+        {
+            "tool": "csp_evaluator",
+            "title": "CSP header missing",
+            "severity": "medium",
+        },
+    ]
+
+    score, grade = worker._recompute_focused_parent_result(merged, findings, "bola")
+
+    assert score == 90
+    assert grade == "C"
+    assert merged["result"]["summary"] == "Focused BOLA Scan Grade: C (90/100) - 1 in-scope issue(s) found"
+    assert merged["result"]["focused_context_findings"] == 1
+    assert merged["result"]["grade_reliable"] is True
+    assert "grade_warning" not in merged["result"]
+    assert "coverage_issues" not in merged["result"]
+    assert "original_grade" not in merged["result"]
+
+
+def test_focused_family_from_dynamic_coverage_family_options():
+    options = {
+        "parallel_strategy": "coverage_family",
+        "coverage_check_families": ["bola"],
+    }
+
+    assert worker._focused_family_from_parent_options(options) == "bola"
