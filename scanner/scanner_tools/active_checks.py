@@ -2621,22 +2621,6 @@ async def mass_assignment_test_json_body(
         "url": url,
         "method": method,
     }
-    if "json" not in (content_type or "").lower():
-        results["skipped"] = True
-        results["reason"] = "non_json_content_type"
-        return results
-
-    params = params or []
-    base_body: dict[str, Any] = {}
-    if isinstance(body_template, dict):
-        base_body = copy.deepcopy(body_template)
-    for name, value in (body_param_defaults or {}).items():
-        if not _has_nested_key(base_body, name):
-            _set_nested_value(base_body, name, value, overwrite=False)
-    for name in params[:12]:
-        if not _has_nested_key(base_body, name):
-            _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
-
     dangerous_fields: list[tuple[str, Any, str]] = [
         ("role", "admin", "role_escalation"),
         ("user_role", "admin", "role_escalation"),
@@ -2649,6 +2633,44 @@ async def mass_assignment_test_json_body(
         ("balance", 1000000, "business_logic"),
         ("discount", 100, "business_logic"),
     ]
+    parsed_url = urllib.parse.urlparse(url)
+    endpoint_path = parsed_url.path or "/"
+    custom_endpoint = f"{method.upper()} {endpoint_path}"
+    if parsed_url.query:
+        custom_endpoint = f"{custom_endpoint}?{parsed_url.query}"
+    attempt: dict[str, Any] = {
+        "custom_endpoint": custom_endpoint,
+        "family": "mass_assignment",
+        "method": method.upper(),
+        "url": url,
+        "param_count": min(max(1, int(max_fields or 1)), len(dangerous_fields)),
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+    results["endpoint_attempts"] = [attempt]
+    if "json" not in (content_type or "").lower():
+        results["skipped"] = True
+        results["reason"] = "non_json_content_type"
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = "non_json_content_type"
+        return results
+
+    params = params or []
+    base_body: dict[str, Any] = {}
+    if isinstance(body_template, dict):
+        base_body = copy.deepcopy(body_template)
+    for name, value in (body_param_defaults or {}).items():
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, value, overwrite=False)
+    for name in params[:12]:
+        if not _has_nested_key(base_body, name):
+            _set_nested_value(base_body, name, _fallback_value_for_param(name), overwrite=False)
+    if "json" in (content_type or "").lower() and base_body:
+        attempt["custom_endpoint"] = (
+            f"{method.upper()} {endpoint_path} json:"
+            + json.dumps(base_body, separators=(",", ":"))
+        )
 
     rejection_markers = (
         "not allowed", "forbidden", "unknown field", "invalid field",
@@ -2712,15 +2734,20 @@ async def mass_assignment_test_json_body(
     if baseline_rc != 0:
         results["skipped"] = True
         results["reason"] = "baseline_request_failed"
+        attempt["status"] = "partial"
+        attempt["skip_reason"] = "baseline_request_failed"
         return results
     if baseline_status in (405, 415, 501):
         results["skipped"] = True
         results["reason"] = "method_or_content_type_not_supported"
         results["baseline_status"] = baseline_status
+        attempt["status"] = "skipped"
+        attempt["skip_reason"] = "method_or_content_type_not_supported"
         return results
 
     for field, value, category in dangerous_fields[:max(1, max_fields)]:
         results["fields_tested"] += 1
+        attempt["attempted_params_count"] += 1
         test_body = copy.deepcopy(base_body)
         _set_nested_value(test_body, field, value, overwrite=True)
         test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
@@ -2733,6 +2760,7 @@ async def mass_assignment_test_json_body(
         test_raw, _, test_rc = await run(test_cmd, timeout=15)
         if test_rc != 0:
             continue
+        attempt["completed_params_count"] += 1
         test_out, test_status = _parse_meta(test_raw or "")
         test_lower = (test_out or "").lower()
         if test_status is None or test_status >= 300:
@@ -2755,6 +2783,11 @@ async def mass_assignment_test_json_body(
             "response_snippet": test_out[:500] if test_out else "",
         })
 
+    attempt["status"] = (
+        "completed"
+        if int(attempt.get("completed_params_count") or 0) >= int(attempt.get("attempted_params_count") or 0)
+        else "partial"
+    )
     return results
 
 

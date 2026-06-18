@@ -440,6 +440,18 @@ def test_json_mass_assignment_detects_reflected_privileged_field(monkeypatch):
     assert result["findings"][0]["parameter"] == "role"
     assert result["findings"][0]["value"] == "admin"
     assert result["findings"][0]["evidence_type"] == "privileged_field_reflected"
+    assert result["endpoint_attempts"] == [
+        {
+            "custom_endpoint": 'PATCH /api/profile json:{"email":"user@example.test"}',
+            "family": "mass_assignment",
+            "method": "PATCH",
+            "url": "https://example.test/api/profile",
+            "param_count": 1,
+            "attempted_params_count": 1,
+            "completed_params_count": 1,
+            "status": "completed",
+        }
+    ]
 
 
 def test_json_mass_assignment_ignores_baseline_privileged_field(monkeypatch):

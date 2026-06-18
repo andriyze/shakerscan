@@ -9009,6 +9009,10 @@ async def build_report(target: str,
                                 content_type=content_type,
                                 max_fields=max(4, min(10, aux_payload_limit + 2)),
                             )
+                            _append_endpoint_attempt_telemetry(
+                                active_block,
+                                mass_assignment_res.get("endpoint_attempts"),
+                            )
                             if mass_assignment_res.get("vulnerable"):
                                 mass_assignment_post["vulnerable"] = True
                                 mass_assignment_post["evidence"].extend(mass_assignment_res.get("findings", []))

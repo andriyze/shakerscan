@@ -1433,6 +1433,51 @@ def test_build_ai_finding_retest_options_focuses_original_probe():
     assert replay_plan["finding_id"] == str(finding_id)
 
 
+def test_enqueue_finding_retest_creates_campaign(monkeypatch):
+    class FakeConn:
+        def __init__(self):
+            self.executions = []
+
+        async def fetchrow(self, *args, **kwargs):
+            return None
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            return "INSERT 0 1"
+
+    campaign_id = uuid.uuid4()
+    calls = {}
+
+    async def fake_create_campaign(conn, target_id, **kwargs):
+        calls["campaign"] = {"target_id": target_id, **kwargs}
+        return str(campaign_id)
+
+    monkeypatch.setattr(api_module.asm_inventory, "create_campaign", fake_create_campaign)
+    conn = FakeConn()
+    finding_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+
+    retest_id, job_id = asyncio.run(api_module.enqueue_finding_retest(
+        conn,
+        {"id": finding_id, "target_id": target_id, "scan_id": None},
+        {
+            "finding_type": "sqli",
+            "target_url": "https://app.test",
+            "original_url": "https://app.test/login",
+            "method": "POST",
+            "param": "email",
+        },
+        requested_by="tester",
+    ))
+
+    assert retest_id
+    assert job_id
+    assert calls["campaign"]["target_id"] == str(target_id)
+    assert calls["campaign"]["mode"] == api_module.asm_inventory.CAMPAIGN_FINDING_RETEST
+    insert = next(args for query, args in conn.executions if "INSERT INTO finding_verifications" in query)
+    assert insert[-1] == campaign_id
+
+
 def test_deployment_decision_escalates_missing_ai_judging():
     decision = api_module.build_deployment_decision({
         "id": "scan-id",

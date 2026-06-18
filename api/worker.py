@@ -2073,6 +2073,45 @@ def _known_endpoint_count(options: dict[str, Any] | None) -> int:
     return len(endpoints) if isinstance(endpoints, list) else 0
 
 
+def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> int:
+    """Estimate active endpoint budget before a standalone scanner subprocess runs.
+
+    ASM and dynamic coverage batches already know their endpoint IDs before
+    execution. Standalone smart/full/aggressive scans discover active work
+    inside the scanner process, so reserve the resolved active endpoint budget
+    up front instead of fail-opening unlimited discovered requests.
+    """
+    opts = options or {}
+    known = _known_endpoint_count(opts)
+    if known > 0:
+        return known
+
+    scan_type = str(opts.get("scan_type") or "standard").strip().lower()
+    active_requested = bool(
+        opts.get("active")
+        or opts.get("sqli")
+        or opts.get("xss")
+        or opts.get("check_family")
+        or opts.get("asm_check_family")
+        or scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+    )
+    if not active_requested:
+        return 0
+
+    custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
+    profile = opts.get("budget_profile")
+    if opts.get("thorough_params") and not profile and not custom_budget:
+        profile = "thorough"
+    try:
+        resolved = resolve_scan_budget(scan_type, profile, custom_budget)
+    except Exception:
+        resolved = {}
+    try:
+        return max(0, int(resolved.get("active_max_endpoints") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def _reserve_target_domain_endpoint_budget(
     conn,
     r,
@@ -3189,6 +3228,16 @@ async def process_finding_retest_job(job_data: dict):
                 completed_at,
                 verification["finding_id"],
             )
+            campaign_status = (
+                'completed'
+                if result.get("verdict") == "exploited" or result.get("status") == "completed"
+                else 'failed'
+            )
+            await asm_inventory.finish_campaign(
+                conn,
+                str(_row_get(verification, "campaign_id")) if _row_get(verification, "campaign_id") else None,
+                status=campaign_status,
+            )
 
             # Optional policy: auto-close a finding when a retest concludes a
             # high-confidence false positive. OFF by default and intentionally
@@ -3766,6 +3815,51 @@ async def process_scan_job(job_data: dict):
         if row:
             target_id = str(row['target_id']) if row['target_id'] else None
             ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
+
+    reserve_amount = _standalone_scan_rate_reservation_amount(options)
+    if reserve_amount > 0 and target_id:
+        try:
+            async with db_pool.acquire() as conn:
+                rate = await _reserve_target_domain_endpoint_budget(
+                    conn,
+                    r,
+                    target_id=target_id,
+                    amount=reserve_amount,
+                    already_reserved=int(job_data.get('domain_rate_reserved') or 0),
+                    all_or_nothing=False,
+                )
+        except Exception as exc:
+            rate = {"granted": 0, "limited": True, "requested": reserve_amount, "reason": str(exc)}
+        granted = max(0, int(rate.get("granted") or 0))
+        if granted <= 0 and rate.get("limited"):
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE scans
+                       SET status='queued', current_phase='waiting_for_domain_rate',
+                           progress=5, started_at=NULL
+                       WHERE id=$1 AND status <> 'cancelled'""",
+                    uuid.UUID(scan_id),
+                )
+            await _requeue_for_domain_rate(
+                r,
+                job_data,
+                job_id=job_id,
+                scan_id=scan_id,
+                log_prefix=job_id[:8],
+                rate=rate,
+            )
+            return
+        if 0 < granted < reserve_amount:
+            options = dict(options or {})
+            budget = dict(options.get("custom_budget") or {})
+            budget["active_max_endpoints"] = granted
+            options["custom_budget"] = budget
+            options["domain_rate_active_endpoint_grant"] = granted
+            print(
+                f"[{job_id[:8]}] domain rate limited standalone scan active endpoint budget "
+                f"to {granted}/{reserve_amount} for {rate.get('root_domain') or 'unknown'}",
+                flush=True,
+            )
 
     # Initial progress
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)

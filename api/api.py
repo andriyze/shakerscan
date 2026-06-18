@@ -9566,15 +9566,36 @@ async def enqueue_finding_retest(
             auth_context = extract_auth_context(parse_json_field(scan_row["options"]))
 
     auth_ctx_json = json.dumps(auth_context) if auth_context else None
+    campaign_id = None
+    if finding.get("target_id"):
+        try:
+            campaign_id = await asm_inventory.create_campaign(
+                conn,
+                str(finding["target_id"]),
+                mode=asm_inventory.CAMPAIGN_FINDING_RETEST,
+                requested_by=requested_by or "api",
+                priority=90,
+                check_families=[str(inputs.get("finding_type") or "generic_http")],
+                metadata_json={
+                    "finding_id": str(finding["id"]),
+                    "source_scan_id": str(finding.get("scan_id") or ""),
+                    "target_url": str(inputs.get("target_url") or ""),
+                    "original_url": str(inputs.get("original_url") or ""),
+                    "method": str(inputs.get("method") or ""),
+                    "param": str(inputs.get("param") or ""),
+                },
+            )
+        except Exception:
+            campaign_id = None
 
     await conn.execute("""
         INSERT INTO finding_verifications (
             id, finding_id, scan_id, target_id, job_id, requested_by, status,
             finding_type, target_url, original_url, param, payload, method, request_body,
-            replay_commands, auth_context
+            replay_commands, auth_context, campaign_id
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'queued',
-            $7, $8, $9, $10, $11, $12, $13, $14, $15
+            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
         )
     """,
         retest_id,
@@ -9592,6 +9613,7 @@ async def enqueue_finding_retest(
         inputs.get("request_body"),
         json.dumps(replay_commands) if replay_commands else None,
         auth_ctx_json,
+        uuid.UUID(str(campaign_id)) if campaign_id else None,
     )
 
     await conn.execute("""

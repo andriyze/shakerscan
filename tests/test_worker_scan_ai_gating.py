@@ -678,6 +678,22 @@ def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--budget-active-worklist-max") + 1] == "50000"
 
 
+def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
+    assert worker._standalone_scan_rate_reservation_amount({"scan_type": "quick"}) == 0
+    assert worker._standalone_scan_rate_reservation_amount({
+        "scan_type": "smart",
+        "budget_profile": "thorough",
+    }) == 150
+    assert worker._standalone_scan_rate_reservation_amount({
+        "scan_type": "smart",
+        "custom_budget": {"active_max_endpoints": 1234},
+    }) == 1234
+    assert worker._standalone_scan_rate_reservation_amount({
+        "scan_type": "standard",
+        "custom_endpoints": ["GET /a", "POST /b json:{\"x\":1}"],
+    }) == 2
+
+
 def test_active_endpoint_attempts_from_report_filters_valid_entries():
     attempts = worker._active_endpoint_attempts_from_report(
         {
