@@ -107,3 +107,24 @@ Only build the ones the benchmark baseline shows as real misses.
 ## Success metric
 Benchmark deltas across runs (`compare_benchmark_summaries`): **confirmed High/Critical up**,
 `expected_family_misses` **down**, `proof_gaps` **down** — on both crAPI and Juice Shop.
+
+---
+
+## Validation findings — 2026-06-18 live loop (rebuilt engine)
+First end-to-end validation of the committed increments against the live honey targets.
+
+**Confirmed working on the rebuilt engine (no regression):**
+- Juice Shop: Grade D, **2 Critical SQLi** (`boolean_comment` + `auth_bypass_boolean` login bypass) — `66a91659`.
+- crAPI: Grade D, **13 High BOLA** (`smart_authz`, user2→user1 reads at `/workshop`, `/identity`) — `6127e7e5`.
+
+**Why the increments didn't yet *add* Highs (the real next-gap evidence):**
+1. **`smart_authz` BOLA replay is read-only by design** — it builds "read-safe candidate consumer URLs" and never sends `PUT`/`PATCH`/`DELETE`. So increments 1 (state-changing object routes win budget) and 3 (real-id propagation onto write routes) *feed* write routes that the BOLA verifier then declines to exercise. **All 13 crAPI Highs are GET reads.** → Highest-value next build: a **safe write-BOLA / BOPLA verifier** that, under `exploit_depth`, performs a non-destructive cross-principal write check (e.g. idempotent re-read proof, or PATCH of an owned-vs-foreign field) on the id-propagated routes.
+2. **Benchmark harness confirms `family_not_attempted`** dominates when a scan is focused (`check_family=sqli` ⇒ XSS never run). Default validation should run the **full active mix**, not a single family.
+
+**Evidence-ranked next work to raise crAPI/Juice Shop High/Critical counts:**
+- **W1 — Safe write-BOLA / BOPLA verifier** (biggest crAPI lift; unblocks increments 1+3).
+- **W2 — Mass-assignment depth on authenticated JSON endpoints** (crAPI BOPLA; array-body fix already helps the request reach the endpoint).
+- **W3 — JWT attacks** (`alg:none`, weak/secret key, kid traversal) — crAPI's canonical High, no detector today.
+- **W4 — Run full active mix by default** in validation; reserve focused scans for triage.
+
+**Operational caution (learned the hard way):** authenticated `exploit_depth` scans **mutate the test account** (our crAPI user creds were burned mid-loop — a write hit an account-update endpoint). So: (a) register fresh users per authenticated run, and (b) any new write-test (W1/W2) MUST be non-destructive / self-healing. See `[[crapi-juiceshop-validation-setup]]`.
