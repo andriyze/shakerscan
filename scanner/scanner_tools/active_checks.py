@@ -20,6 +20,7 @@ from .exposure_markers import (
     derive_markers,
     guess_confidence,
 )
+from .active_prioritization import active_endpoint_score
 
 PUBLIC_DISCOVERY_FILES = {"robots.txt", "sitemap.xml"}
 PUBLIC_DISCOVERY_SENSITIVE_REFERENCES = (
@@ -79,7 +80,7 @@ def _emit_scan_progress(phase: str, pct: int, message: str) -> None:
     print(f"[progress] phase={phase} pct={pct} message={safe_message}", file=sys.stderr, flush=True)
 
 
-def _coerce_telemetry_params(raw: Any) -> list[str]:
+def _coerce_param_names(raw: Any) -> list[str]:
     if isinstance(raw, dict):
         return [str(k) for k in raw.keys() if k]
     if isinstance(raw, (list, tuple, set)):
@@ -87,6 +88,10 @@ def _coerce_telemetry_params(raw: Any) -> list[str]:
     if isinstance(raw, str):
         return [raw] if raw else []
     return []
+
+
+def _coerce_telemetry_params(raw: Any) -> list[str]:
+    return _coerce_param_names(raw)
 
 
 def _active_endpoint_worklist_entry(
@@ -5855,8 +5860,13 @@ def _active_endpoint_priority(ep: dict[str, Any]) -> tuple:
     keyword_hits = sum(1 for k in _ACTIVE_HIGH_VALUE_KEYWORDS if k in path)
     has_body = 1 if (method in ("POST", "PUT", "PATCH") and body) else 0
     real_source = 1 if str(ep.get("source") or "").lower() in _ACTIVE_REAL_SOURCES else 0
-    # real observed source first, then request-body surface, then keyword relevance.
-    return (real_source, has_body, keyword_hits)
+    score = active_endpoint_score(ep)
+    non_low_value = 1 if score >= 8 else 0
+    # Real observed source first, then request-body surface, then keyword relevance,
+    # then the shared DAST score (source/path/parameter penalties). This keeps the
+    # active modules aligned with the upstream worklist scorer while preserving the
+    # old guard against parameter-fanout phantoms.
+    return (non_low_value, real_source, has_body, keyword_hits, score)
 
 
 def _prioritize_active_endpoints(endpoints: list) -> list:
@@ -5999,7 +6009,7 @@ async def smart_sqli_test(
             print("[sqli] GET phase reserve hit; reserving budget for POST-body endpoints", file=sys.stderr)
             break
         endpoint_url = endpoint.get("url", "")
-        params = endpoint.get("params", []) or endpoint.get("query_params", [])
+        params = _coerce_param_names(endpoint.get("params") or endpoint.get("query_params"))
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
         if not params:
@@ -6139,7 +6149,7 @@ async def smart_sqli_test(
             break
         endpoint_url = endpoint.get("url", "")
         method = endpoint.get("method", "POST").upper()
-        body_params = endpoint.get("body_params", [])
+        body_params = _coerce_param_names(endpoint.get("body_params") or endpoint.get("params"))
         content_type = endpoint.get("content_type") or "application/json"
 
         if not body_params:
@@ -7849,7 +7859,15 @@ async def run_smart_active_tests(
         sql_priority_params = ["id", "user", "uid", "account", "login", "query", "search", "filter"]
         prioritized_endpoints = sorted(
             endpoints,
-            key=lambda e: sum(1 for p in (e.get("params", []) + e.get("body_params", [])) if any(sp in p.lower() for sp in sql_priority_params)),
+            key=lambda e: sum(
+                1
+                for p in (
+                    _coerce_param_names(e.get("params"))
+                    + _coerce_param_names(e.get("query_params"))
+                    + _coerce_param_names(e.get("body_params"))
+                )
+                if any(sp in p.lower() for sp in sql_priority_params)
+            ),
             reverse=True
         )
 

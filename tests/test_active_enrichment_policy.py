@@ -1,8 +1,16 @@
-from scanner.scanner_tools.active_enrichment_policy import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools.active_enrichment_policy import (  # noqa: E402
     record_active_enrichment_skip,
     should_run_active_enrichment,
 )
-from scanner.scanner_tools.completion_status import build_scan_completion_status
+from scanner_tools.completion_status import build_scan_completion_status  # noqa: E402
 
 
 def test_enrichment_decision_uses_canonical_post_active_skip_reason():

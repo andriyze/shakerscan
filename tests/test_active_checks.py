@@ -370,5 +370,43 @@ def test_active_endpoint_prioritization_leads_with_real_injection_points():
     assert max(real_idx) < min(phantom_idx)
 
 
+def test_active_endpoint_prioritization_penalizes_static_discovery_surfaces():
+    security_txt_login = {
+        "method": "POST",
+        "url": "http://t/.well-known/security.txt/auth/login",
+        "body_params": ["email", "password", "token"],
+        "source": "options",
+    }
+    socket_token = {
+        "method": "GET",
+        "url": "http://t/socket.io/?token=abc",
+        "params": ["token"],
+        "source": "har_discovery",
+    }
+    real_login = {
+        "method": "POST",
+        "url": "http://t/rest/user/login",
+        "body_params": ["email", "password"],
+        "source": "options",
+    }
+    real_search = {
+        "method": "GET",
+        "url": "http://t/rest/products/search",
+        "params": ["q"],
+        "source": "har_discovery",
+    }
+
+    ordered = active_checks._prioritize_active_endpoints([
+        security_txt_login,
+        socket_token,
+        real_login,
+        real_search,
+    ])
+
+    assert ordered[:2] == [real_search, real_login]
+    assert security_txt_login in ordered[2:]
+    assert socket_token in ordered[2:]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

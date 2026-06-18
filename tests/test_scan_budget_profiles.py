@@ -1,4 +1,5 @@
 from scanner.constants import (
+    resolve_active_enrichment_limits,
     resolve_bola_deadline_seconds,
     resolve_phase4_max_seconds,
     resolve_scan_budget,
@@ -119,3 +120,24 @@ def test_invalid_budget_profile_falls_back_to_balanced():
 
     assert budget["budget_profile"] == "balanced"
     assert budget["scan_type"] == "standard"
+
+
+def test_active_enrichment_limits_scale_with_budget_profile():
+    balanced = resolve_active_enrichment_limits(resolve_scan_budget("smart", "balanced"))
+    thorough = resolve_active_enrichment_limits(resolve_scan_budget("smart", "thorough"))
+    exhaustive = resolve_active_enrichment_limits(resolve_scan_budget("smart", "exhaustive"))
+
+    assert balanced["profile"] == "balanced"
+    assert thorough["profile"] == "thorough"
+    assert exhaustive["profile"] == "exhaustive"
+    assert thorough["nosql_json_endpoints"] > balanced["nosql_json_endpoints"]
+    assert exhaustive["auxiliary_post_json_endpoints"] > thorough["auxiliary_post_json_endpoints"]
+    assert exhaustive["stored_xss_max_pages"] > thorough["stored_xss_max_pages"]
+
+
+def test_large_custom_active_budget_promotes_enrichment_depth():
+    budget = resolve_scan_budget("smart", "balanced", {"active_max_endpoints": 1000})
+    limits = resolve_active_enrichment_limits(budget)
+
+    assert limits["profile"] == "exhaustive"
+    assert limits["nosql_json_endpoints"] >= 100

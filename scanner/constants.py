@@ -209,6 +209,86 @@ def resolve_bola_deadline_seconds(scan_budget: dict[str, Any] | None, custom_bud
     return max(300, min(900, active_budget))
 
 
+ACTIVE_ENRICHMENT_LIMITS_BY_PROFILE: dict[str, dict[str, int]] = {
+    "fast": {
+        "auxiliary_get_endpoints": 4,
+        "auxiliary_post_json_endpoints": 3,
+        "auxiliary_params_per_endpoint": 2,
+        "auxiliary_payloads_per_param": 4,
+        "stored_xss_max_forms": 4,
+        "stored_xss_max_pages": 10,
+        "nosql_json_endpoints": 4,
+        "blind_ssrf_get_endpoints": 3,
+    },
+    "balanced": {
+        "auxiliary_get_endpoints": 8,
+        "auxiliary_post_json_endpoints": 6,
+        "auxiliary_params_per_endpoint": 3,
+        "auxiliary_payloads_per_param": 6,
+        "stored_xss_max_forms": 8,
+        "stored_xss_max_pages": 25,
+        "nosql_json_endpoints": 12,
+        "blind_ssrf_get_endpoints": 5,
+    },
+    "thorough": {
+        "auxiliary_get_endpoints": 24,
+        "auxiliary_post_json_endpoints": 18,
+        "auxiliary_params_per_endpoint": 5,
+        "auxiliary_payloads_per_param": 8,
+        "stored_xss_max_forms": 16,
+        "stored_xss_max_pages": 75,
+        "nosql_json_endpoints": 40,
+        "blind_ssrf_get_endpoints": 15,
+    },
+    "exhaustive": {
+        "auxiliary_get_endpoints": 80,
+        "auxiliary_post_json_endpoints": 60,
+        "auxiliary_params_per_endpoint": 8,
+        "auxiliary_payloads_per_param": 12,
+        "stored_xss_max_forms": 30,
+        "stored_xss_max_pages": 180,
+        "nosql_json_endpoints": 120,
+        "blind_ssrf_get_endpoints": 40,
+    },
+}
+
+
+def resolve_active_enrichment_limits(
+    scan_budget: dict[str, Any] | None,
+    *,
+    quick_mode: bool = False,
+    thorough_params: bool = False,
+) -> dict[str, Any]:
+    """Resolve depth for post-primary active modules from the scan budget.
+
+    These modules used to have hard-coded tiny caps (for example 3-8 JSON
+    endpoints), so Thorough/Exhaustive scans still behaved like shallow scans for
+    NoSQL, stored XSS, SSRF/XXE, LDAP/XPath, and similar follow-on checks.
+    """
+    budget = scan_budget if isinstance(scan_budget, dict) else {}
+    profile = normalize_budget_profile(budget.get("budget_profile"))
+    rank = {name: idx for idx, name in enumerate(SCAN_BUDGET_PROFILES)}
+
+    if thorough_params and rank[profile] < rank["thorough"]:
+        profile = "thorough"
+
+    active_max = _coerce_budget_value("active_max_endpoints", budget.get("active_max_endpoints"))
+    if active_max is not None:
+        if active_max >= 600 and rank[profile] < rank["exhaustive"]:
+            profile = "exhaustive"
+        elif active_max >= 150 and rank[profile] < rank["thorough"]:
+            profile = "thorough"
+        elif active_max >= 50 and rank[profile] < rank["balanced"]:
+            profile = "balanced"
+
+    if quick_mode and rank[profile] > rank["balanced"]:
+        profile = "balanced"
+
+    limits = dict(ACTIVE_ENRICHMENT_LIMITS_BY_PROFILE[profile])
+    limits["profile"] = profile
+    return limits
+
+
 def normalize_budget_profile(value: Any) -> str:
     profile = str(value or DEFAULT_SCAN_BUDGET_PROFILE).strip().lower()
     return profile if profile in SCAN_BUDGET_PROFILES else DEFAULT_SCAN_BUDGET_PROFILE

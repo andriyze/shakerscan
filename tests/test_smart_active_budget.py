@@ -172,6 +172,63 @@ def test_smart_sqli_emits_endpoint_attempt_telemetry(monkeypatch):
     ]
 
 
+def test_smart_sqli_accepts_query_param_maps(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/products/search",
+                    "method": "GET",
+                    "params": {"q": "apple", "limit": 10},
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["endpoints_tested"] == 1
+    assert result["params_tested"] == 2
+    assert result["endpoint_attempts"][0]["param_count"] == 2
+    assert result["endpoint_attempts"][0]["status"] == "completed"
+
+
+def test_smart_sqli_accepts_body_param_maps(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        return ("normal response", "", 0)
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/api/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": {"email": "a@example.test", "password": "pw"},
+                }
+            ],
+            dbms="mysql",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["endpoints_tested"] == 1
+    assert result["post_endpoints_tested"] == 1
+    assert result["params_tested"] == 2
+    assert result["endpoint_attempts"][0]["param_count"] == 2
+
+
 def test_smart_sqli_skips_documentation_endpoints(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("documentation endpoints should not be probed for SQLi")

@@ -22,9 +22,19 @@ from typing import Any, NamedTuple
 
 from scanner_tools.common import is_in_scope_url, run
 try:
-    from constants import resolve_bola_deadline_seconds, resolve_phase4_max_seconds, resolve_scan_budget
+    from constants import (
+        resolve_active_enrichment_limits,
+        resolve_bola_deadline_seconds,
+        resolve_phase4_max_seconds,
+        resolve_scan_budget,
+    )
 except ImportError:
-    from scanner.constants import resolve_bola_deadline_seconds, resolve_phase4_max_seconds, resolve_scan_budget
+    from scanner.constants import (
+        resolve_active_enrichment_limits,
+        resolve_bola_deadline_seconds,
+        resolve_phase4_max_seconds,
+        resolve_scan_budget,
+    )
 from scanner_tools.active_enrichment_policy import (
     record_active_enrichment_skip,
     should_run_active_enrichment,
@@ -2772,6 +2782,11 @@ async def build_report(target: str,
     dom_xss_max_files = int(scan_budget.get("dom_xss_max_files") or dom_xss_max_files)
     sqli_extract_max = int(scan_budget.get("sqli_extract_max") or sqli_extract_max)
     oob_max_findings = int(scan_budget.get("oob_max_findings") or oob_max_findings)
+    active_enrichment_limits = resolve_active_enrichment_limits(
+        scan_budget,
+        quick_mode=quick_mode,
+        thorough_params=thorough_params,
+    )
     # Runtime AI controls are injected by worker env and should drive scan behavior.
     scan_ai_classification_enabled = _is_truthy_env(
         os.environ.get("AI_SCAN_CLASSIFICATION_ENABLED"),
@@ -8365,24 +8380,28 @@ async def build_report(target: str,
 
                 active_block["active_endpoints_discovered_by_source"] = _endpoint_distribution(endpoints, "source")
                 active_block["active_endpoints_discovered_by_method"] = _endpoint_distribution(endpoints, "method")
-                endpoints = prioritize_active_endpoints(
-                    endpoints,
+                active_candidate_endpoints = list(endpoints)
+                active_budgeted_endpoints = prioritize_active_endpoints(
+                    active_candidate_endpoints,
                     budget=active_endpoint_budget,
                     source_priority=_SOURCE_PRIORITY,
                 )
                 active_block["active_endpoint_budget"] = active_endpoint_budget
                 active_block["active_endpoints_discovered"] = before_active_endpoints
-                active_block["active_endpoints_selected"] = len(endpoints)
-                active_block["active_endpoints_selected_by_source"] = _endpoint_distribution(endpoints, "source")
-                active_block["active_endpoints_selected_by_method"] = _endpoint_distribution(endpoints, "method")
+                active_block["active_endpoints_selected"] = len(active_budgeted_endpoints)
+                active_block["active_endpoints_selected_by_source"] = _endpoint_distribution(active_budgeted_endpoints, "source")
+                active_block["active_endpoints_selected_by_method"] = _endpoint_distribution(active_budgeted_endpoints, "method")
+                active_block["active_execution_scope"] = "full_worklist_with_family_internal_caps"
+                active_block["active_family_input_endpoints"] = len(active_candidate_endpoints)
                 active_block["active_endpoint_budget_capped"] = bool(
-                    active_endpoint_budget and before_active_endpoints > len(endpoints)
+                    active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints)
                 )
-                if active_endpoint_budget and before_active_endpoints > len(endpoints):
+                if active_endpoint_budget and before_active_endpoints > len(active_budgeted_endpoints):
                     print(
                         (
                             "[scanner] Active endpoint budget cap: "
-                            f"{before_active_endpoints} -> {len(endpoints)}"
+                            f"{before_active_endpoints} -> {len(active_budgeted_endpoints)} "
+                            "(primary preview; family checks use full worklist with internal caps)"
                         ),
                         file=sys.stderr,
                     )
@@ -8401,7 +8420,7 @@ async def build_report(target: str,
 
                 smart_results = await run_smart_active_tests(
                     url=base_url,
-                    endpoints=endpoints,
+                    endpoints=active_candidate_endpoints,
                     tech_stack=tech_stack,
                     dbms=early_dbms,  # P1-2 FIX: Use early-detected DBMS instead of auto-detect
                     signals=nuclei_signals,  # Pass signals from nuclei findings
@@ -8638,6 +8657,12 @@ async def build_report(target: str,
                         new_query = urllib.parse.urlencode(query_params, doseq=True)
                         return urllib.parse.urlunparse(parsed._replace(query=new_query))
 
+                    aux_get_limit = int(active_enrichment_limits.get("auxiliary_get_endpoints") or 4)
+                    aux_post_json_limit = int(active_enrichment_limits.get("auxiliary_post_json_endpoints") or 3)
+                    aux_param_limit = int(active_enrichment_limits.get("auxiliary_params_per_endpoint") or 3)
+                    aux_payload_limit = int(active_enrichment_limits.get("auxiliary_payloads_per_param") or 6)
+                    active_block["active_enrichment_limits"] = active_enrichment_limits
+
                     auxiliary_injection_enabled = not (run_sqli and not run_xss)
                     if not auxiliary_injection_enabled:
                         record_active_enrichment_skip(active_block, "auxiliary_injection", "sql_tests_only")
@@ -8667,7 +8692,7 @@ async def build_report(target: str,
                             if (ep.get("method") or "GET").upper() == "GET"
                             and _coerce_param_list(ep.get("params") or ep.get("query_params"))
                         ]
-                        param_endpoints = param_endpoints[: (8 if thorough_params else 4)]
+                        param_endpoints = param_endpoints[:aux_get_limit]
 
                     ssrf_param_keywords = {
                         "url", "uri", "path", "dest", "redirect", "link", "proxy",
@@ -8699,8 +8724,8 @@ async def build_report(target: str,
                                 params_to_test=params,
                                 auth_session=auth_session,
                                 param_defaults=defaults,
-                                max_params=3,
-                                max_payloads=6,
+                                max_params=aux_param_limit,
+                                max_payloads=aux_payload_limit,
                             )
                             if ldap_res.get("vulnerable"):
                                 ldap_param["vulnerable"] = True
@@ -8713,8 +8738,8 @@ async def build_report(target: str,
                                 params_to_test=params,
                                 auth_session=auth_session,
                                 param_defaults=defaults,
-                                max_params=3,
-                                max_payloads=6,
+                                max_params=aux_param_limit,
+                                max_payloads=aux_payload_limit,
                             )
                             if xpath_res.get("vulnerable"):
                                 xpath_param["vulnerable"] = True
@@ -8728,8 +8753,8 @@ async def build_report(target: str,
                                     params_to_test=params,
                                     auth_session=auth_session,
                                     param_defaults=defaults,
-                                    max_params=3,
-                                    max_payloads=6,
+                                    max_params=aux_param_limit,
+                                    max_payloads=aux_payload_limit,
                                 )
                                 if ssti_res.get("vulnerable"):
                                     ssti_param["vulnerable"] = True
@@ -8800,7 +8825,7 @@ async def build_report(target: str,
                             and _coerce_param_list(ep.get("body_params") or ep.get("params"))
                             and ("json" in (ep.get("content_type") or "application/json").lower())
                         ]
-                        post_json_endpoints = post_json_endpoints[: (6 if thorough_params else 3)]
+                        post_json_endpoints = post_json_endpoints[:aux_post_json_limit]
 
                     if post_json_endpoints:
                         ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
@@ -8827,8 +8852,8 @@ async def build_report(target: str,
                                 body_template=ep.get("body_template"),
                                 body_param_defaults=defaults,
                                 content_type=content_type,
-                                max_params=3,
-                                max_payloads=5,
+                                max_params=aux_param_limit,
+                                max_payloads=aux_payload_limit,
                             )
                             if ldap_res.get("vulnerable"):
                                 ldap_post["vulnerable"] = True
@@ -8844,8 +8869,8 @@ async def build_report(target: str,
                                 body_template=ep.get("body_template"),
                                 body_param_defaults=defaults,
                                 content_type=content_type,
-                                max_params=3,
-                                max_payloads=5,
+                                max_params=aux_param_limit,
+                                max_payloads=aux_payload_limit,
                             )
                             if xpath_res.get("vulnerable"):
                                 xpath_post["vulnerable"] = True
@@ -8863,8 +8888,8 @@ async def build_report(target: str,
                                     body_template=ep.get("body_template"),
                                     body_param_defaults=defaults,
                                     content_type=content_type,
-                                    max_params=2,
-                                    max_payloads=3,
+                                    max_params=min(3, aux_param_limit),
+                                    max_payloads=max(3, min(aux_payload_limit, 6)),
                                 )
                                 if ssrf_res.get("vulnerable"):
                                     ssrf_post["vulnerable"] = True
@@ -8882,8 +8907,8 @@ async def build_report(target: str,
                                     body_template=ep.get("body_template"),
                                     body_param_defaults=defaults,
                                     content_type=content_type,
-                                    max_params=2,
-                                    max_payloads=2,
+                                    max_params=min(3, aux_param_limit),
+                                    max_payloads=max(2, min(aux_payload_limit, 4)),
                                 )
                                 if xxe_res.get("vulnerable"):
                                     xxe_post["vulnerable"] = True
@@ -8966,7 +8991,8 @@ async def build_report(target: str,
                     # Blind SSRF (OOB) for smart mode when callback is provided
                     if oob_callback_url:
                         ssrf_results = []
-                        ssrf_candidates = param_endpoints[:5] if param_endpoints else []
+                        ssrf_get_limit = int(active_enrichment_limits.get("blind_ssrf_get_endpoints") or 5)
+                        ssrf_candidates = param_endpoints[:ssrf_get_limit] if param_endpoints else []
                         for ep in ssrf_candidates:
                             params = _coerce_param_list(ep.get("params") or ep.get("query_params"))
                             if not params:
@@ -9040,8 +9066,8 @@ async def build_report(target: str,
                                 endpoints=endpoints,
                                 discovered_urls=stored_urls,
                                 auth_session=auth_session,
-                                max_forms=8 if thorough_params else 5,
-                                max_pages=25 if thorough_params else 12,
+                                max_forms=int(active_enrichment_limits.get("stored_xss_max_forms") or 5),
+                                max_pages=int(active_enrichment_limits.get("stored_xss_max_pages") or 12),
                             )
                             active_block["stored_xss"] = stored_res
                             if stored_res.get("vulnerable"):
@@ -9479,7 +9505,7 @@ async def build_report(target: str,
 
                         if nosql_candidates:
                             active_block["nosql_injection"] = []
-                            nosql_limit = 3 if quick_mode else 8
+                            nosql_limit = int(active_enrichment_limits.get("nosql_json_endpoints") or (3 if quick_mode else 8))
                             emit_progress(
                                 "active_nosql",
                                 94,

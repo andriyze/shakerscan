@@ -69,6 +69,14 @@ HIGH_VALUE_PATH_WEIGHTS: tuple[tuple[str, int], ...] = (
 )
 
 LOW_VALUE_PATH_WEIGHTS: tuple[tuple[str, int], ...] = (
+    ("/.well-known/", 28),
+    ("security.txt", 26),
+    ("csaf", 22),
+    ("socket.io", 22),
+    ("/assets/", 20),
+    ("/static/", 18),
+    ("/images/", 16),
+    ("/i18n/", 16),
     ("ai-redteam", 30),
     ("ai-gate", 24),
     ("model-intake", 24),
@@ -92,10 +100,23 @@ LOW_VALUE_PATH_WEIGHTS: tuple[tuple[str, int], ...] = (
 )
 
 
+def _coerce_param_names(raw: Any) -> list[str]:
+    if isinstance(raw, dict):
+        return [str(key) for key in raw.keys() if key]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(value) for value in raw if value]
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    return []
+
+
 def _param_score(endpoint: dict[str, Any]) -> int:
     names = [
         str(p).lower()
-        for p in ((endpoint.get("params") or []) + (endpoint.get("body_params") or []))
+        for p in (
+            _coerce_param_names(endpoint.get("params"))
+            + _coerce_param_names(endpoint.get("body_params"))
+        )
     ]
     score = 0
     for name in names:
@@ -180,12 +201,21 @@ def prioritize_active_endpoints(
 
     selected = ordered[:budget]
     body_all = [e for e in ordered if _is_body_endpoint(e)]
+    non_body_all = [e for e in ordered if not _is_body_endpoint(e)]
     if body_all:
-        reserve = min(len(body_all), max(1, int(budget * BODY_ENDPOINT_BUDGET_FRACTION)))
+        # Keep at least one globally top-ranked non-body route when such routes exist.
+        # A one-slot budget should not evict a higher-scored hash/search route just
+        # because any POST body route is present.
+        max_body_slots = int(budget) if not non_body_all else max(0, int(budget) - 1)
+        reserve = min(
+            len(body_all),
+            max(1, int(budget * BODY_ENDPOINT_BUDGET_FRACTION)),
+            max_body_slots,
+        )
         if sum(1 for e in selected if _is_body_endpoint(e)) < reserve:
             # Guarantee the top-scoring body endpoints a place, then fill the rest
             # with the top-scoring non-body endpoints, keeping overall score order.
             reserved_body = body_all[:reserve]
-            non_body = [e for e in ordered if not _is_body_endpoint(e)][: budget - reserve]
+            non_body = non_body_all[: budget - reserve]
             selected = sorted(reserved_body + non_body, key=key)[:budget]
     return selected

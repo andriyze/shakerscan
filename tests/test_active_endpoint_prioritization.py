@@ -1,4 +1,12 @@
-from scanner.scanner_tools.active_prioritization import (
+import os
+import sys
+
+
+_SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+if _SCANNER_DIR not in sys.path:
+    sys.path.insert(0, _SCANNER_DIR)
+
+from scanner_tools.active_prioritization import (  # noqa: E402
     active_endpoint_score,
     prioritize_active_endpoints,
 )
@@ -103,6 +111,28 @@ def test_hash_routes_survive_tight_active_budget_for_dom_xss():
     assert selected[0]["url"] == "https://example.test/#/search?q=test"
 
 
+def test_one_slot_budget_keeps_top_endpoint_when_body_endpoint_exists():
+    endpoints = [
+        {
+            "url": "https://example.test/#/search?q=test",
+            "method": "GET",
+            "params": ["q"],
+            "source": "hash_route",
+        },
+        {
+            "url": "https://example.test/rest/user/login",
+            "method": "POST",
+            "body_params": ["email", "password"],
+            "source": "options",
+        },
+    ]
+
+    selected = prioritize_active_endpoints(endpoints, budget=1)
+
+    assert active_endpoint_score(endpoints[0]) > active_endpoint_score(endpoints[1])
+    assert selected == [endpoints[0]]
+
+
 def test_budget_reserves_slots_for_post_body_endpoints():
     # Many high-scoring observed GET routes + a real (synthetic-sourced) POST login
     # buried among POST phantoms. Pure top-by-score would select all GET; the
@@ -139,3 +169,61 @@ def test_budget_without_body_endpoints_is_unaffected():
     selected = prioritize_active_endpoints(endpoints, budget=3)
     assert len(selected) == 3
     assert all(e["method"] == "GET" for e in selected)
+
+
+def test_param_maps_are_scored_like_param_lists():
+    endpoints = [
+        {
+            "url": "https://example.test/rest/products/search",
+            "method": "GET",
+            "params": {"q": "apple", "limit": 10},
+            "source": "openapi",
+        },
+        {
+            "url": "https://example.test/rest/products",
+            "method": "GET",
+            "params": ["page"],
+            "source": "openapi",
+        },
+    ]
+
+    selected = prioritize_active_endpoints(endpoints, budget=1)
+
+    assert selected[0]["url"] == "https://example.test/rest/products/search"
+
+
+def test_static_discovery_paths_do_not_crowd_out_app_routes():
+    endpoints = [
+        {
+            "url": "https://example.test/.well-known/security.txt/auth/login",
+            "method": "POST",
+            "body_params": ["email", "password", "token"],
+            "source": "options",
+        },
+        {
+            "url": "https://example.test/rest/user/login",
+            "method": "POST",
+            "body_params": ["email", "password"],
+            "source": "options",
+        },
+        {
+            "url": "https://example.test/socket.io/?token=abc",
+            "method": "GET",
+            "params": ["token"],
+            "source": "har_discovery",
+        },
+        {
+            "url": "https://example.test/rest/products/search?q=test",
+            "method": "GET",
+            "params": ["q"],
+            "source": "har_discovery",
+        },
+    ]
+
+    selected = prioritize_active_endpoints(endpoints, budget=2)
+    selected_urls = [endpoint["url"] for endpoint in selected]
+
+    assert "https://example.test/rest/user/login" in selected_urls
+    assert "https://example.test/rest/products/search?q=test" in selected_urls
+    assert "https://example.test/.well-known/security.txt/auth/login" not in selected_urls
+    assert "https://example.test/socket.io/?token=abc" not in selected_urls
