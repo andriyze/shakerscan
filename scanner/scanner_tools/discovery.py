@@ -3102,6 +3102,61 @@ async def recursive_directory_discovery(
     }
 
 
+def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_bases: list[str] | None = None) -> list[str]:
+    """Expand SPA route fragments into likely backend API endpoints.
+
+    Some modern frontends store service-local routes such as `/v2/user/dashboard`
+    or `/shop/orders` in JS bundles while prepending the actual service prefix
+    at runtime through an HTTP client wrapper. The static analyzer usually sees
+    the route fragment but not the wrapper base, so active DAST ends up probing
+    root-relative 404s. These expansions are read-only candidates; reachability
+    filtering and active checks still decide whether they are useful.
+    """
+    discovered_api_bases = discovered_api_bases or []
+    expanded: set[str] = set()
+
+    def _clean(raw: str) -> str | None:
+        value = str(raw or "").strip("'\"` ")
+        if not value or value in {"/", "//"}:
+            return None
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        if not value.startswith("/"):
+            value = "/" + value
+        return value
+
+    for raw in endpoints or []:
+        endpoint = _clean(raw)
+        if not endpoint:
+            continue
+        expanded.add(endpoint)
+        lowered = endpoint.lower()
+
+        # Generic base composition for any API bases found in the same bundle.
+        for raw_base in discovered_api_bases:
+            base = _clean(raw_base)
+            if not base or base.startswith("http"):
+                continue
+            base = base.rstrip("/")
+            if endpoint.startswith("/") and not endpoint.startswith(base + "/"):
+                if endpoint.startswith(("/api/", "/v1/", "/v2/", "/v3/", "/v4/")):
+                    expanded.add(base + endpoint)
+
+        # crAPI-style microservice route fragments. This is intentionally based
+        # on route shape, not host or product name, so similar service-split
+        # SPAs benefit without hard-coding a target URL.
+        if lowered.startswith(("/v1/user/", "/v2/user/", "/v3/user/", "/v4/user/")):
+            expanded.add("/identity/api" + endpoint)
+        if lowered.startswith(("/v1/vehicle/", "/v2/vehicle/", "/v3/vehicle/", "/v4/vehicle/")):
+            expanded.add("/identity/api" + endpoint)
+        if lowered.startswith(("/v1/community/", "/v2/community/", "/v3/community/", "/v4/community/")):
+            expanded.add("/community/api" + endpoint)
+        if lowered.startswith(("/shop/", "/mechanic", "/merchant/")) or lowered in {"/shop", "/orders", "/past-orders"}:
+            expanded.add("/workshop/api" + endpoint)
+
+    return sorted(expanded)
+
+
 async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int = 20) -> dict:
     """
     Extract hidden endpoints and routes from JavaScript bundles.
@@ -3383,6 +3438,11 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
     findings["websocket_urls"] = list(set(findings["websocket_urls"]))
     findings["internal_urls"] = list(set(filter(None, map(normalize_path, findings["internal_urls"]))))
     findings["discovered_api_bases"] = list(set(filter(None, map(normalize_path, findings["discovered_api_bases"]))))
+
+    findings["api_endpoints"] = expand_frontend_route_api_candidates(
+        findings["api_endpoints"],
+        findings["discovered_api_bases"],
+    )
 
     # Prepend discovered API bases to relative endpoints to create combined paths
     # This helps find endpoints like /community/api/v2/... when JS only has /api/v2/...

@@ -1698,6 +1698,38 @@ def _rank_authz_producer_url(url: str) -> int:
     return score
 
 
+def _is_low_value_authz_producer_url(url: str) -> bool:
+    """Return True for read targets unlikely to produce owner-scoped IDs."""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        parsed = urlsplit(str(url or "/"))
+    segments = {segment.lower() for segment in (parsed.path or "/").split("/") if segment}
+    if not segments:
+        return True
+    if _is_operational_only_bola_endpoint(url):
+        return True
+    auth_flow_segments = {
+        "auth", "login", "logout", "signin", "signup", "register", "token",
+        "tokens", "session", "sessions", "oauth", "oauth2", "verify",
+        "reset-password", "reset", "password", "forgot-password", "mfa",
+        "2fa", "otp", "captcha",
+    }
+    if segments & auth_flow_segments:
+        return True
+    if segments & {"docs", "swagger", "openapi", "health", "status", "metrics"}:
+        return True
+    public_catalog_segments = {
+        "product", "products", "catalog", "category", "categories",
+        "popular", "recommended", "trending", "featured", "search",
+    }
+    if segments & public_catalog_segments and not (segments & {"order", "orders", "basket", "cart", "wallet"}):
+        return True
+    if any(ch in (parsed.path or "") for ch in "<>{}"):
+        return True
+    return False
+
+
 def _new_authz_endpoint_attempt(
     *,
     producer_endpoint: str,
@@ -2374,6 +2406,8 @@ async def authz_resource_replay_test(
         if any(excl in url.lower() for excl in COLLECTION_EXCLUSIONS):
             continue
         if _has_excluded_synth_path_segment(url):
+            continue
+        if _is_low_value_authz_producer_url(url):
             continue
         try:
             parsed = urlsplit(url)

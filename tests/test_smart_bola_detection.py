@@ -379,9 +379,37 @@ def test_authz_replay_prioritizes_owned_resource_producers_over_noise(monkeypatc
     )
 
     assert results["producer_selection_strategy"] == "owned_resource_path_rank_v1"
-    assert results["producer_candidate_count"] == 2
+    assert results["producer_candidate_count"] == 1
     assert fetched_paths[:2] == ["/api/orders", "/api/orders"]
     assert [f for f in results["findings"] if f.get("tool") == "smart_authz"]
+
+
+def test_authz_replay_skips_auth_flow_producers(monkeypatch):
+    async def should_not_fetch(*args, **kwargs):
+        raise AssertionError("auth/reset producers should be filtered before fetch")
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        should_not_fetch,
+    )
+
+    results = asyncio.run(
+        authz_resource_replay_test(
+            base_url="https://example.com",
+            discovered_urls=[
+                "https://example.com/api/v2/user/reset-password",
+                "https://example.com/api/auth/login",
+                "https://example.com/api/products",
+            ],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_producers=10,
+            timeout=1,
+        )
+    )
+
+    assert results["producer_candidate_count"] == 0
+    assert results["endpoint_attempts"] == []
 
 
 def test_smart_bola_authz_replay_skips_object_visible_in_both_listings(monkeypatch):
