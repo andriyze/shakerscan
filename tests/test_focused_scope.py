@@ -39,6 +39,16 @@ def test_scanner_zero_rediscovery_flag_guards_discovery_branches():
     assert "reason\": \"zero_rediscovery_child\"" in source
 
 
+def test_endpoint_focused_shards_do_not_apply_family_filter_or_grading():
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
+
+    assert "family_focused_active_scope = bool(focused_manual_active_scope and focused_active_family_name)" in source
+    assert "if family_focused_active_scope:\n        family = focused_active_family_name" in source
+    assert "coverage[\"focused_endpoint_scope\"] = True" in source
+
+
 def test_from_request_active_requires_smart_family_and_endpoints():
     scope = FocusedScope.from_request(
         smart_mode=True,

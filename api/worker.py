@@ -4293,7 +4293,14 @@ async def process_scan_plan_job(job_data: dict):
         # feed the shard plan and the ASM inventory. Filter recon-discovered only;
         # user-supplied custom_endpoints are always kept.
         _raw_harvested = len(harvested)
-        harvested = await asm_inventory.filter_reachable_worklist(target, harvested, options)
+        harvested = await asm_inventory.filter_reachable_worklist(
+            target,
+            harvested,
+            options,
+            max_probe=max(2000, min(harvest_limit, 6000)),
+            concurrency=48,
+            timeout=3,
+        )
         harvested = parallel_scan._normalize_endpoint_list(
             list(options.get('custom_endpoints') or []) + harvested
         )

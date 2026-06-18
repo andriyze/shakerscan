@@ -144,6 +144,30 @@ def test_filter_reachable_worklist_soft404_detect_off_keeps_soft404s(monkeypatch
     assert asyncio.run(a.filter_reachable_worklist("http://t.test", worklist, {})) == worklist
 
 
+def test_filter_reachable_worklist_honors_large_explicit_probe_limit(monkeypatch):
+    async def fake_status(base_url, path, auth_args, timeout):
+        if path == "/api/real":
+            return ("200", 1200)
+        return ("401", 42)
+
+    monkeypatch.setenv("ASM_VALIDATE_REACHABILITY", "1")
+    monkeypatch.delenv("ASM_SOFT404_DETECT", raising=False)
+    monkeypatch.setattr(a, "_probe_path_status", fake_status)
+    worklist = [f"GET /api/generated-{i}" for i in range(2005)] + ["GET /api/real"]
+
+    kept = asyncio.run(
+        a.filter_reachable_worklist(
+            "http://t.test",
+            worklist,
+            {},
+            max_probe=3000,
+            concurrency=64,
+        )
+    )
+
+    assert kept == ["GET /api/real"]
+
+
 def test_filter_reachable_worklist_keeps_on_probe_error(monkeypatch):
     # Inconclusive probes (transient error/timeout) never drop a real endpoint.
     async def fake_status(base_url, path, auth_args, timeout):

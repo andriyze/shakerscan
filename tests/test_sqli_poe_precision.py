@@ -1,4 +1,5 @@
 import asyncio
+import json
 import urllib.parse
 
 from scanner.scanner_tools.proof_of_exploit import (
@@ -128,6 +129,72 @@ def test_sqli_active_check_accepts_honey_postgresql_error_banner():
     assert vulnerable is True
     assert any("postgresql" in item.lower() for item in evidence)
     assert any("SQL error detected" in item for item in evidence)
+
+
+def test_sqli_active_check_accepts_login_auth_bypass():
+    body = json.dumps({
+        "authentication": {"token": "jwt-token"},
+        "user": {"email": "admin@juice-sh.op", "role": "admin"},
+    })
+
+    vulnerable, evidence = _check_sqli_response(
+        out=body,
+        baseline_len=len("Invalid email or password."),
+        elapsed=0.1,
+        technique="auth_bypass_boolean",
+        dbms_detected="sqlite",
+        status_code=200,
+        baseline_status=401,
+        baseline_body="Invalid email or password.",
+        payload="' OR 1=1--",
+    )
+
+    assert vulnerable is True
+    assert any("Authentication bypass via SQLi" in item for item in evidence)
+
+
+def test_smart_sqli_detects_json_login_auth_bypass(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" in cmd:
+            body = json.loads(cmd[cmd.index("-d") + 1])
+            if body.get("email") == "' OR 1=1--":
+                return (
+                    json.dumps({
+                        "authentication": {"token": "jwt-token"},
+                        "user": {"email": "admin@juice-sh.op", "role": "admin"},
+                    })
+                    + f"\n{marker}200",
+                    "",
+                    0,
+                )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/user/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_params": ["email", "password"],
+                }
+            ],
+            dbms="sqlite",
+            max_seconds=10,
+            max_params_per_endpoint=2,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["severity"] == "critical"
+    assert finding["payload"] == "' OR 1=1--"
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
 
 
 def test_detect_dbms_accepts_honey_postgresql_error(monkeypatch):
