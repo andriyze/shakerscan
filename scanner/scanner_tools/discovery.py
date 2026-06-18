@@ -3439,8 +3439,16 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
     findings["internal_urls"] = list(set(filter(None, map(normalize_path, findings["internal_urls"]))))
     findings["discovered_api_bases"] = list(set(filter(None, map(normalize_path, findings["discovered_api_bases"]))))
 
+    api_like_routes = [
+        route for route in findings["routes"]
+        if isinstance(route, str)
+        and (
+            route.startswith(("/v1/", "/v2/", "/v3/", "/v4/", "/shop", "/mechanic", "/merchant/"))
+            or route in {"/orders", "/past-orders"}
+        )
+    ]
     findings["api_endpoints"] = expand_frontend_route_api_candidates(
-        findings["api_endpoints"],
+        findings["api_endpoints"] + api_like_routes,
         findings["discovered_api_bases"],
     )
 

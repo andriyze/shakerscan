@@ -17,6 +17,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
                 "/v2/community/posts",
                 "/shop/orders",
                 "/mechanic/service_requests",
+                "/orders",
+                "/past-orders",
             ]
         )
     )
@@ -26,6 +28,8 @@ def test_expands_crapi_style_frontend_routes_to_service_api_candidates():
     assert "/community/api/v2/community/posts" in expanded
     assert "/workshop/api/shop/orders" in expanded
     assert "/workshop/api/mechanic/service_requests" in expanded
+    assert "/workshop/api/orders" in expanded
+    assert "/workshop/api/past-orders" in expanded
 
 
 def test_expands_discovered_api_bases_without_dropping_originals():
