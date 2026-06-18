@@ -3157,6 +3157,23 @@ def expand_frontend_route_api_candidates(endpoints: list[str], discovered_api_ba
     return sorted(expanded)
 
 
+def extract_frontend_route_fragments(content: str) -> list[str]:
+    """Extract app route fragments from SPA bundles that are later base-prefixed."""
+    route_fragment_patterns = [
+        r'''/(?:v[0-9]+/(?:user|vehicle|community)/[A-Za-z0-9_./<>{}$?-]+)''',
+        r'''/(?:shop|mechanic|merchant)/(?:[A-Za-z0-9_./<>{}$?-]+)''',
+        r'''/(?:orders|past-orders)(?:[A-Za-z0-9_./<>{}$?-]*)''',
+    ]
+    fragments: set[str] = set()
+    for pattern in route_fragment_patterns:
+        for match in re.findall(pattern, content or ""):
+            route = match if isinstance(match, str) else (match[0] if match else "")
+            route = route.strip("'\"` ,;)")
+            if route and route not in {"/", "//"}:
+                fragments.add(route)
+    return sorted(fragments)
+
+
 async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int = 20) -> dict:
     """
     Extract hidden endpoints and routes from JavaScript bundles.
@@ -3379,6 +3396,8 @@ async def analyze_js_bundles(base_url: str, js_urls: list[str], max_bundles: int
                     base_path = base_path.strip('`').rstrip('/')
                     if base_path and len(base_path) > 1:
                         findings["api_endpoints"].append(base_path)
+
+            findings["api_endpoints"].extend(extract_frontend_route_fragments(content))
 
             # Extract GraphQL operations
             for pattern in graphql_patterns:
