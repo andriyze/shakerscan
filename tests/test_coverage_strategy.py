@@ -264,15 +264,48 @@ def test_harvest_empty_result_is_safe():
     assert p.harvest_endpoints({"result": {"discovery": {}}}) == []
 
 
-def test_harvest_prefers_full_worklist_over_samples():
-    # The scanner emits the FULL worklist at report['active_checks']['active_worklist'];
-    # harvest must use it (not the lossy discovery samples) for true coverage.
+def test_harvest_keeps_worklist_priority_and_appends_discovery_routes():
+    # The scanner emits shaped active worklist entries, but that list can be
+    # narrower than the discovered API surface. Keep worklist priority while
+    # appending discovery routes so resource producers are not dropped.
     recon = {
         "active_checks": {"active_worklist": ["GET /a?x=1", "POST /b form:k=1", "GET /c"]},
-        "discovery": {"katana_sample": ["/should/not/be/used"]},
+        "discovery": {"katana_sample": ["/should/be/used", "/c"]},
     }
     eps = p.harvest_endpoints(recon)
-    assert eps == ["GET /a?x=1", "POST /b form:k=1", "GET /c"]
+    assert eps == ["GET /a?x=1", "POST /b form:k=1", "GET /c", "GET /should/be/used"]
+
+
+def test_harvest_appends_crapi_resource_producers_when_active_worklist_is_narrow():
+    recon = {
+        "active_checks": {
+            "active_worklist": [
+                "POST /api/shop/apply_coupon json:{\"code\":\"TEST123\",\"id\":1}",
+                "POST /merchant/contact_mechanic json:{\"email\":\"test@example.com\"}",
+            ]
+        },
+        "discovery": {
+            "js_bundle_analysis": {
+                "api_endpoints": [
+                    "http://crapi.test/workshop/api/shop/orders/all",
+                    "http://crapi.test/workshop/api/shop/orders/<orderId>",
+                ],
+            },
+            "katana_sample": [
+                "http://crapi.test/identity/api/v2/vehicle/vehicles?vehicle_id=1",
+            ],
+        },
+    }
+
+    eps = p.harvest_endpoints(recon)
+
+    assert eps[:2] == [
+        "POST /api/shop/apply_coupon json:{\"code\":\"TEST123\",\"id\":1}",
+        "POST /merchant/contact_mechanic json:{\"email\":\"test@example.com\"}",
+    ]
+    assert "GET /workshop/api/shop/orders/all" in eps
+    assert "GET /workshop/api/shop/orders/<orderId>" in eps
+    assert "GET /identity/api/v2/vehicle/vehicles?vehicle_id=1" in eps
 
 
 def test_harvest_filters_static_asset_worklist_entries():

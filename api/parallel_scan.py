@@ -604,14 +604,30 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
 
     rep = recon_result or {}
 
-    # Preferred source: the scanner's FULL emitted worklist (already
-    # custom-endpoint strings, pre-cap). Gives true ~100% coverage. Falls back
-    # to discovery samples for older scanners that don't emit it.
+    harvested: list[str] = []
+    seen: set[str] = set()
+
+    def add_endpoint(endpoint: str) -> None:
+        if not isinstance(endpoint, str):
+            return
+        value = endpoint.strip()
+        if not value or value in seen:
+            return
+        if _is_static_asset_endpoint(value):
+            return
+        seen.add(value)
+        harvested.append(value)
+
+    # Preferred first source: the scanner's emitted active worklist. It carries
+    # method/body shape and should keep priority, but it can be narrower than the
+    # discovered API surface because active endpoint selection is intentionally
+    # budgeted. Merge discovery below so coverage/family campaigns do not drop
+    # read-only resource producers such as crAPI's /workshop/api/shop/orders/all.
     worklist = ((rep.get("active_checks") or {}).get("active_worklist"))
     if isinstance(worklist, list) and worklist:
         full = _normalize_endpoint_list([w for w in worklist if isinstance(w, str)])
-        if full:
-            return [endpoint for endpoint in full if not _is_static_asset_endpoint(endpoint)][:max_endpoints]
+        for endpoint in full:
+            add_endpoint(endpoint)
 
     # `discovery` is a TOP-LEVEL report section (report['result'] is only the
     # grade block). Fall back to the nested location defensively.
@@ -620,7 +636,7 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
         disc = ((rep.get("result") or {}).get("discovery")) or {}
     with_params: list[str] = []
     without_params: list[str] = []
-    seen: set[str] = set()
+    discovery_seen: set[str] = set()
 
     def add(method: Any, url: Any) -> None:
         if not url or not isinstance(url, str):
@@ -637,11 +653,11 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
             return
         path = pu.path or "/"
         key = f"{(method or 'GET').upper()} {path}?{pu.query}" if pu.query else f"{(method or 'GET').upper()} {path}"
-        if key in seen:
+        if key in discovery_seen or key in seen:
             return
         if _is_static_asset_endpoint(key):
             return
-        seen.add(key)
+        discovery_seen.add(key)
         (with_params if pu.query else without_params).append(key)
 
     def add_list(items: Any, default_method: str = "GET") -> None:
@@ -667,7 +683,10 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
                   "all_urls_sample", "recursive_paths_sample"):
             add_list(sm.get(k))
 
-    return (with_params + without_params)[:max_endpoints]
+    for endpoint in with_params + without_params:
+        add_endpoint(endpoint)
+
+    return harvested[:max_endpoints]
 
 
 def plan_coverage_shards(
