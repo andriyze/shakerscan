@@ -2634,6 +2634,18 @@ def bola_enrichment_decision(
     )
 
 
+def resolve_focused_bola_poe_settings(max_endpoints: Any) -> dict[str, int]:
+    """Return bounded PoE request settings for explicit focused BOLA scans."""
+    try:
+        endpoints = max(1, int(max_endpoints or 0))
+    except (TypeError, ValueError):
+        endpoints = 1
+    return {
+        "bola_max_requests_per_target": max(800, min(10_000, endpoints * 30)),
+        "rate_limit_ms": 100,
+    }
+
+
 def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
     if not isinstance(attempts, list):
         return
@@ -10002,16 +10014,19 @@ async def build_report(target: str,
                         try:
                             from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
 
-                            focused_bola_request_budget = max(
-                                800,
-                                min(10_000, int(smart_bola_max_endpoints or 0) * 30),
-                            )
+                            focused_bola_poe_settings = resolve_focused_bola_poe_settings(smart_bola_max_endpoints)
                             focused_poe = PoEConfig.safe()
-                            focused_poe.bola_max_requests_per_target = focused_bola_request_budget
+                            focused_poe.bola_max_requests_per_target = focused_bola_poe_settings["bola_max_requests_per_target"]
+                            focused_poe.rate_limit_ms = focused_bola_poe_settings["rate_limit_ms"]
                             configure_poe(focused_poe)
-                            active_block["focused_bola_request_budget"] = focused_bola_request_budget
+                            active_block["focused_bola_request_budget"] = focused_poe.bola_max_requests_per_target
+                            active_block["focused_bola_rate_limit_ms"] = focused_poe.rate_limit_ms
                             print(
-                                f"[scanner] Focused BOLA PoE request budget: {focused_bola_request_budget}",
+                                (
+                                    "[scanner] Focused BOLA PoE request budget: "
+                                    f"{focused_poe.bola_max_requests_per_target}, "
+                                    f"rate_limit_ms={focused_poe.rate_limit_ms}"
+                                ),
                                 file=sys.stderr,
                             )
                         except Exception as e:

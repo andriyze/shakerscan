@@ -175,6 +175,17 @@ def test_broad_bola_still_respects_post_active_budget_gate():
     assert decision.reason == "active_time_budget_exhausted"
 
 
+def test_focused_bola_poe_settings_are_bounded_and_faster_than_global_safe_delay():
+    assert scanner_mod.resolve_focused_bola_poe_settings(1) == {
+        "bola_max_requests_per_target": 800,
+        "rate_limit_ms": 100,
+    }
+    assert scanner_mod.resolve_focused_bola_poe_settings(500) == {
+        "bola_max_requests_per_target": 10000,
+        "rate_limit_ms": 100,
+    }
+
+
 def test_broad_active_scan_allows_enrichment_modules():
     assert scanner_mod.focused_family_allows_active_module(None, "dom_xss") is True
     assert scanner_mod.focused_family_allows_active_module("all", "bola_idor") is True
