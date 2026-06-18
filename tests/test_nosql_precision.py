@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from scanner.scanner_tools import active_checks
 
@@ -51,3 +52,65 @@ def test_nosql_json_body_stops_on_unsupported_media_type(monkeypatch):
     assert result["skipped"] is True
     assert result["baseline_status"] == 415
     assert len(calls) == 1
+
+
+def test_nosql_json_body_detects_paired_credential_operator_bypass(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        email = body.get("email")
+        password = body.get("password")
+        if isinstance(email, dict) and isinstance(password, dict):
+            return (
+                json.dumps({
+                    "authentication": {"token": "jwt-token"},
+                    "user": {"email": "admin@juice-sh.op", "role": "admin"},
+                })
+                + "__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__",
+                "",
+                0,
+            )
+        return '{"error":"Invalid credentials"}__SHAKERSCAN_NOSQL__401__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/user/login",
+            method="POST",
+            params=["email", "password"],
+            body_template={"email": "test@example.com", "password": "wrong"},
+        )
+    )
+
+    assert result["vulnerable"] is True
+    assert result["findings"][0]["evidence_type"] == "credential_operator_bypass"
+    assert result["findings"][0]["parameter"] == "email,password"
+    assert result["findings"][0]["baseline_status"] == 401
+    assert result["findings"][0]["payload_status"] == 200
+    assert set(result["findings"][0]["success_signals"]) == {"auth_token_or_session", "user_identity_data"}
+    assert len(calls) == 2
+
+
+def test_nosql_json_body_does_not_flag_generic_200_without_auth_signals(monkeypatch):
+    async def fake_run(cmd, *args, **kwargs):
+        body = json.loads(cmd[cmd.index("-d") + 1])
+        if isinstance(body.get("email"), dict) and isinstance(body.get("password"), dict):
+            return '{"ok":true}__SHAKERSCAN_NOSQL__200__SHAKERSCAN_NOSQL__', "", 0
+        return '{"error":"Invalid credentials"}__SHAKERSCAN_NOSQL__401__SHAKERSCAN_NOSQL__', "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.nosql_injection_test_json_body(
+            "https://example.test/rest/user/login",
+            method="POST",
+            params=["email", "password"],
+            body_template={"email": "test@example.com", "password": "wrong"},
+        )
+    )
+
+    assert result["vulnerable"] is False
+    assert result["findings"] == []
