@@ -4396,6 +4396,18 @@ async def process_scan_plan_job(job_data: dict):
         recon_opts = parallel_scan._base_child_options(options)
         recon_opts['scan_type'] = 'smart'
         recon_opts.pop('custom_endpoints', None)
+        # Recon is only the discover-once harvest for coverage planning. Do
+        # not inherit focused active families from the parent, or planning can
+        # run the real BOLA/Auth/SQLi/XSS pass before fan-out.
+        for key in (
+            'check_family',
+            'asm_check_family',
+            'coverage_attempt_family',
+            'coverage_family_aware',
+            'sqli',
+            'xss',
+        ):
+            recon_opts.pop(key, None)
         # Lean enumeration budget so "planning" finishes fast (overrides any
         # heavy discovery knobs inherited from the parent/coverage payload).
         parallel_scan._merge_custom_budget(recon_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET))

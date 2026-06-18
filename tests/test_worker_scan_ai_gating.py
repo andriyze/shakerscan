@@ -1097,8 +1097,10 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     campaign_id = uuid.UUID("48484848-4848-4848-4848-484848484848")
     conn = _FakePlanConn(parent_id, target_id, campaign_id)
     redis = _FakeJobRedis()
+    recon_calls = []
 
     async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        recon_calls.append(dict(options))
         return {
             "target": target,
             "findings": [],
@@ -1139,6 +1141,13 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
         )
     )
 
+    assert len(recon_calls) == 1
+    assert "check_family" not in recon_calls[0]
+    assert "asm_check_family" not in recon_calls[0]
+    assert "coverage_attempt_family" not in recon_calls[0]
+    assert "coverage_family_aware" not in recon_calls[0]
+    assert "sqli" not in recon_calls[0]
+    assert "xss" not in recon_calls[0]
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
     assert len(child_jobs) == 2
     assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}

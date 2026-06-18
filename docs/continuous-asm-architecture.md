@@ -597,6 +597,8 @@ Implemented as default:
   `coverage_family` dynamic workers claim the same campaign inventory separately for `all`, `sqli`,
   and `xss` attempt families, or for one explicit focused family when requested, so one family lane
   cannot prematurely satisfy another.
+- The coverage recon pass is discovery-only: workers strip focused active-family flags from recon
+  options before calling the scanner, then restore the requested family only on child/batch jobs.
 - Worker execution enforces the target/root-domain endpoint cap through shared Redis token buckets
   before known endpoint batches run. Dispatcher-reserved ASM batches carry their reservation into the
   job payload to avoid double-counting; unreserved static shards wait, and dynamic batches can shrink
