@@ -9998,6 +9998,24 @@ async def build_report(target: str,
                     # own timeout. The internal graceful stop preserves partial
                     # findings that a hard cancel would discard.
                     bola_overall_deadline = resolve_bola_deadline_seconds(scan_budget, custom_budget)
+                    if bola_focused:
+                        try:
+                            from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
+
+                            focused_bola_request_budget = max(
+                                800,
+                                min(10_000, int(smart_bola_max_endpoints or 0) * 30),
+                            )
+                            focused_poe = PoEConfig.safe()
+                            focused_poe.bola_max_requests_per_target = focused_bola_request_budget
+                            configure_poe(focused_poe)
+                            active_block["focused_bola_request_budget"] = focused_bola_request_budget
+                            print(
+                                f"[scanner] Focused BOLA PoE request budget: {focused_bola_request_budget}",
+                                file=sys.stderr,
+                            )
+                        except Exception as e:
+                            print(f"[scanner] Failed to configure focused BOLA PoE budget: {e}", file=sys.stderr)
                     try:
                         bola_results = await asyncio.wait_for(
                             smart_bola_test(

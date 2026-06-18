@@ -220,7 +220,7 @@ def test_smart_bola_cross_user_equivalent_emits_suspected_lead(monkeypatch):
     assert finding["needs_verification"] is True
     assert finding["evidence"]["responses_equivalent"] is True
     assert finding["evidence"]["user_specific_signals"]
-    assert results["endpoint_attempts"][0]["family"] == "bola"
+    assert any(a.get("family") == "bola" for a in results["endpoint_attempts"])
 
 
 def test_smart_bola_cross_user_chrome_only_is_not_flagged(monkeypatch):
@@ -312,7 +312,10 @@ def test_smart_bola_authz_replay_confirms_user1_object_access_by_user2(monkeypat
     assert finding["evidence"]["attacker_principal"] == "user2"
     assert finding["evidence"]["object_id_absent_from_attacker_listing"] is True
     assert finding["evidence"]["authz_diff"]["replayed_owner_object_missing_from_attacker_listing"] is True
-    attempts = [a for a in results["endpoint_attempts"] if a.get("family") == "authz"]
+    attempts = [
+        a for a in results["endpoint_attempts"]
+        if a.get("family") == "authz" and a.get("proof_type") == "cross_principal_replay"
+    ]
     assert attempts
     assert attempts[0]["producer_endpoint"] == "GET /api/orders"
     assert attempts[0]["consumer_endpoint"] == "GET /api/orders/101"
@@ -349,7 +352,47 @@ def test_smart_bola_authz_replay_skips_object_visible_in_both_listings(monkeypat
     )
 
     assert [f for f in results["findings"] if f.get("tool") == "smart_authz"] == []
-    assert [a for a in results["endpoint_attempts"] if a.get("family") == "authz"] == []
+    producer_attempts = [
+        a for a in results["endpoint_attempts"]
+        if a.get("family") == "authz" and a.get("proof_type") == "resource_producer_discovery"
+    ]
+    replay_attempts = [
+        a for a in results["endpoint_attempts"]
+        if a.get("family") == "authz" and a.get("proof_type") == "cross_principal_replay"
+    ]
+    assert producer_attempts
+    assert producer_attempts[0]["resource_ids_found"] == 1
+    assert replay_attempts == []
+
+
+def test_smart_bola_authz_records_no_resource_id_producer_telemetry(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        return _fake_http_response(url, 200, json.dumps({"message": "ok", "status": "ready"}))
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/api/things"],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    attempts = [
+        a for a in results["endpoint_attempts"]
+        if a.get("family") == "authz" and a.get("proof_type") == "resource_producer_discovery"
+    ]
+    assert attempts
+    assert attempts[0]["status"] == "completed"
+    assert attempts[0]["resource_ids_found"] == 0
+    assert attempts[0]["skip_reason"] == "no_resource_ids_found"
 
 
 def test_smart_bola_respects_max_seconds_budget(monkeypatch):

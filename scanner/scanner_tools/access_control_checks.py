@@ -1663,6 +1663,27 @@ def _new_authz_endpoint_attempt(
     }
 
 
+def _new_authz_producer_attempt(producer_endpoint: str) -> dict[str, Any]:
+    return {
+        "custom_endpoint": producer_endpoint,
+        "family": "authz",
+        "method": "GET",
+        "auth_state": "user1,user2",
+        "principal_label": "user1,user2",
+        "source_principal": "user1",
+        "attacker_principal": "user2",
+        "producer_endpoint": producer_endpoint,
+        "consumer_endpoint": producer_endpoint,
+        "object_id_location": "producer_response",
+        "property_names_tested": [],
+        "proof_type": "resource_producer_discovery",
+        "param_count": 2,
+        "attempted_params_count": 0,
+        "completed_params_count": 0,
+        "status": "started",
+    }
+
+
 def _bola_path_segments(url_or_template: str) -> set[str]:
     try:
         path = urlsplit(url_or_template).path.lower()
@@ -2312,20 +2333,38 @@ async def authz_resource_replay_test(
             break
         results["producers_tested"] += 1
         producer_endpoint = _bola_custom_endpoint(producer_url, "GET") or f"GET {producer_url}"
+        producer_attempt = _new_authz_producer_attempt(producer_endpoint)
+        producer_attempt["attempted_params_count"] = 2
         try:
             user1_resp = await fetch_with_capture(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
             user2_listing_resp = await fetch_with_capture(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
-        except Exception:
+        except Exception as exc:
+            producer_attempt["status"] = "partial"
+            producer_attempt["error_summary"] = str(exc)[:200]
+            results["endpoint_attempts"].append(producer_attempt)
             continue
         user1_status = _auth_response_status(user1_resp)
         user2_listing_status = _auth_response_status(user2_listing_resp)
+        producer_attempt["completed_params_count"] = 2
+        producer_attempt["owner_status"] = user1_status
+        producer_attempt["attacker_listing_status"] = user2_listing_status
         if not (200 <= user1_status < 300) or not _is_json_like_response(user1_resp):
+            producer_attempt["status"] = "partial"
+            producer_attempt["skip_reason"] = "producer_not_json_or_not_accessible"
+            results["endpoint_attempts"].append(producer_attempt)
             continue
         user1_body = str(user1_resp.get("body") or "")
         user2_listing_body = str(user2_listing_resp.get("body") or "")
         user1_refs = _extract_resource_refs_from_json(user1_body)
         if not user1_refs:
+            producer_attempt["status"] = "completed"
+            producer_attempt["resource_ids_found"] = 0
+            producer_attempt["skip_reason"] = "no_resource_ids_found"
+            results["endpoint_attempts"].append(producer_attempt)
             continue
+        producer_attempt["status"] = "completed"
+        producer_attempt["resource_ids_found"] = len(user1_refs)
+        results["endpoint_attempts"].append(producer_attempt)
         user2_ids = (
             _resource_ids_from_response(user2_listing_body)
             if 200 <= user2_listing_status < 300 and _is_json_like_response(user2_listing_resp)
