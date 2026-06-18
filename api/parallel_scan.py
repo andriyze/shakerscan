@@ -193,6 +193,35 @@ FAMILY_FOCUSED_SPECS = check_registry.default_parallel_focus_families()
 FAMILY_SHARD_LABELS = ("broad",) + tuple(spec.name for spec in FAMILY_FOCUSED_SPECS)
 
 
+def _requested_focused_family(parent_options: dict[str, Any]) -> str | None:
+    """Return an explicit focused family from parent options, if present."""
+    return check_registry.normalize_check_family(
+        (parent_options or {}).get("coverage_attempt_family")
+        or (parent_options or {}).get("asm_check_family")
+        or (parent_options or {}).get("check_family"),
+        allow_all=True,
+    )
+
+
+def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    """Family lanes for coverage_family planning.
+
+    Default coverage_family is intentionally conservative: broad + low/medium
+    risk injection lanes. If the scan has already passed API policy for an
+    explicit focused family such as BOLA/Auth, keep the fan-out to that family
+    only so unrelated lanes cannot consume budget or overwrite focused report
+    context.
+    """
+    requested = _requested_focused_family(parent_options)
+    if requested and requested != "all":
+        spec = check_registry.get_check_family(requested)
+        if spec and spec.runnable and spec.scanner_options:
+            return [(spec.name, spec.name, dict(spec.scanner_options))]
+    lanes: list[tuple[str, str, dict[str, Any]]] = [("broad", "all", {})]
+    lanes.extend((spec.name, spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    return lanes
+
+
 def resolve_auto_strategy(parent_options: dict[str, Any], scan_type: str, strategy: str | None) -> str:
     """Resolve the user-facing ``auto`` strategy for the async plan worker.
 
@@ -797,11 +826,10 @@ def plan_coverage_family_shards(
         notes.append("coverage_family requested but no endpoints were harvested")
         return ParallelPlan(strategy="coverage_family", shards=[], notes=notes)
 
-    lanes: list[tuple[str, dict[str, Any]]] = [("broad", {})]
-    lanes.extend((spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    lanes = _coverage_family_lanes(parent_options)
     if max_total_shards < len(lanes):
         selected_lane_count = max(1, max_total_shards)
-        dropped = [name for name, _opts in lanes[selected_lane_count:]]
+        dropped = [name for name, _family, _opts in lanes[selected_lane_count:]]
         notes.append(
             f"coverage_family: shard cap leaves {selected_lane_count}/{len(lanes)} lane(s); "
             f"dropped {', '.join(dropped)}"
@@ -822,8 +850,10 @@ def plan_coverage_family_shards(
 
     shards: list[ShardSpec] = []
     for bucket_index, slice_eps in enumerate(buckets):
-        for lane_name, lane_options in lanes:
+        for lane_name, attempt_family, lane_options in lanes:
             opts = _coverage_child_options(parent_options, slice_eps)
+            opts["coverage_attempt_family"] = attempt_family
+            opts["coverage_family_aware"] = True
             if lane_options:
                 opts.update(lane_options)
                 opts["thorough_params"] = True
@@ -975,8 +1005,7 @@ def plan_dynamic_coverage_family_shards(
         notes.append("coverage_family dynamic allocation requested but no endpoints were harvested")
         return ParallelPlan(strategy="coverage_family", shards=[], notes=notes)
 
-    lanes: list[tuple[str, str, dict[str, Any]]] = [("broad", "all", {})]
-    lanes.extend((spec.name, spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    lanes = _coverage_family_lanes(parent_options)
     try:
         max_batches = int(parent_options.get("coverage_dynamic_max_batches") or COVERAGE_MAX_DYNAMIC_BATCHES)
     except (TypeError, ValueError):

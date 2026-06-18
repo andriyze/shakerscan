@@ -585,7 +585,8 @@ Implemented:
   multiply coverage by broad/SQLi/XSS lanes. Dynamic mode uses the campaign allocator with
   endpoint+family attempt identity; `coverage_allocation=static` keeps the static bucket fallback.
   BOLA is intentionally excluded from automatic `coverage_family` lanes and remains explicit ASM/API
-  focused work.
+  focused work. If an explicit `check_family` such as `bola` or `auth` is present, coverage-family
+  planning uses that single approved lane rather than broad/SQLi/XSS.
 
 Implemented as default:
 
@@ -594,7 +595,8 @@ Implemented as default:
 - Dynamic workers claim through `claim_test_batch(campaign_only=true)`, keep zero-rediscovery
   scanner execution, write parent-linked attempt rows, and let parent merge own final findings.
   `coverage_family` dynamic workers claim the same campaign inventory separately for `all`, `sqli`,
-  and `xss` attempt families, so one family lane cannot prematurely satisfy another.
+  and `xss` attempt families, or for one explicit focused family when requested, so one family lane
+  cannot prematurely satisfy another.
 - Worker execution enforces the target/root-domain endpoint cap through shared Redis token buckets
   before known endpoint batches run. Dispatcher-reserved ASM batches carry their reservation into the
   job payload to avoid double-counting; unreserved static shards wait, and dynamic batches can shrink
@@ -606,7 +608,7 @@ Remaining:
   partitioning available as fallback.
 - Add more automatic focused family lanes only after the scanner registry can route those modules
   cleanly and the family has its own safety gate. BOLA is currently explicit ASM/API only, not an
-  automatic parallel lane.
+  automatic parallel lane; explicit BOLA coverage-family runs stay BOLA-only.
 - Parent scan detail now shows per-shard endpoint contribution, aggregate auth/family rollups, and
   runtime-versus-active-cap budget view from child result summaries. Keep extending these rollups
   only when new scanner telemetry fields are added.

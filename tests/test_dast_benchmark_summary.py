@@ -104,6 +104,26 @@ def test_benchmark_summary_records_proof_and_severity_gaps():
     assert summary["misses"][0]["likely_root_cause"] == "family_not_attempted"
 
 
+def test_benchmark_summary_counts_smart_authz_as_authz():
+    summary = build_benchmark_summary(
+        {
+            "findings": [
+                {
+                    "tool": "smart_authz",
+                    "title": "Cross-principal replay",
+                    "severity": "high",
+                    "verified": True,
+                    "evidence": {"proof_type": "cross_principal_replay"},
+                }
+            ]
+        },
+        expected={"families": {"authz": {"min_severity": "high", "min_confirmed": 1}}},
+    )
+
+    assert summary["findings"]["confirmed_by_family_severity"]["authz|high"] == 1
+    assert summary["misses"] == []
+
+
 def test_benchmark_compare_reports_confirmed_delta():
     baseline = build_benchmark_summary({"findings": []})
     candidate = build_benchmark_summary({

@@ -25,6 +25,7 @@ FAMILY_BY_TOOL = {
     "hash_route_dom_xss": "xss",
     "stored_xss": "xss",
     "smart_bola": "bola",
+    "smart_authz": "authz",
     "bola_idor": "bola",
     "bola_check": "bola",
     "smart_auth": "authz",

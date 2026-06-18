@@ -365,7 +365,7 @@ Strategies (`options.shard_strategy`):
 | `scope` | partition `custom_endpoints` across shards — genuine speed-up for APIs |
 | `family` | broad + deeper SQLi-focused + XSS-focused shards (capped at 3) — more depth |
 | `coverage` | discover once, harvest the full endpoint worklist, partition it across auto-sized shards — maximum breadth (UI: **Full Coverage**) |
-| `coverage_family` | advanced: coverage × broad/SQLi/XSS lanes |
+| `coverage_family` | advanced: coverage × broad/SQLi/XSS lanes; explicit focused requests such as BOLA/Auth stay single-family |
 
 Full Coverage uses **dynamic pull-based allocation** by default (workers claim campaign-scoped
 endpoint batches from the allocator); `coverage_allocation=static` keeps the legacy round-robin

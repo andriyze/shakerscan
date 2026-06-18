@@ -1091,6 +1091,77 @@ def test_scan_plan_coverage_family_dynamic_uses_family_aware_batches(monkeypatch
     assert parent_options["campaign_id"] == str(campaign_id)
 
 
+def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypatch):
+    parent_id = "59595959-5959-5959-5959-595959595959"
+    target_id = uuid.UUID("37373737-3737-3737-3737-373737373737")
+    campaign_id = uuid.UUID("48484848-4848-4848-4848-484848484848")
+    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    redis = _FakeJobRedis()
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        return {
+            "target": target,
+            "findings": [],
+            "active_checks": {
+                "active_worklist": [
+                    "GET /api/a?id=1",
+                    "GET /api/b?id=1",
+                    "GET /api/c?id=1",
+                    "GET /api/d?id=1",
+                ]
+            },
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+
+    asyncio.run(
+        worker.process_scan_plan_job(
+            {
+                "job_id": "parent-job-coverage-family-dynamic-bola",
+                "scan_id": parent_id,
+                "target": "https://example.test",
+                "options": {
+                    "scan_type": "smart",
+                    "parallel": True,
+                    "shard_strategy": "coverage_family",
+                    "coverage_allocation": "dynamic",
+                    "coverage_dynamic_batch_size": 2,
+                    "coverage_dynamic_max_batches": 6,
+                    "check_family": "bola",
+                    "asm_check_family": "bola",
+                    "auth_header": "Bearer user1",
+                    "user2_header": "Bearer user2",
+                    "exploit_depth": True,
+                },
+            }
+        )
+    )
+
+    child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(child_jobs) == 2
+    assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
+    assert [job["shard_label"] for job in child_jobs] == [
+        "coverage-dynamic[0]:bola",
+        "coverage-dynamic[1]:bola",
+    ]
+    assert {job["check_family"] for job in child_jobs} == {"bola"}
+    assert {job["options"]["coverage_attempt_family"] for job in child_jobs} == {"bola"}
+    assert {job["options"]["asm_check_family"] for job in child_jobs} == {"bola"}
+    assert all(job["options"]["sqli"] is False and job["options"]["xss"] is False for job in child_jobs)
+    parent_update = [
+        args for query, args in conn.executions
+        if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
+    ][0]
+    parent_options = json.loads(parent_update[3])
+    assert parent_options["parallel_strategy"] == "coverage_family"
+    assert parent_options["coverage_allocation"] == "dynamic"
+    assert parent_options["coverage_check_families"] == ["bola"]
+    assert parent_options["coverage_expected_attempts"] == 4
+    assert parent_options["campaign_id"] == str(campaign_id)
+
+
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):
     endpoint_id = "11111111-1111-1111-1111-111111111111"
     calls = {"mark_partial": [], "record": []}

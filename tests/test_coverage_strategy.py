@@ -180,16 +180,22 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
         assert shard.options["custom_budget"]["phase4_max_seconds"] == 0
         if shard.label.endswith(":sqli"):
             lane_counts["sqli"] += 1
+            assert shard.options["coverage_attempt_family"] == "sqli"
+            assert shard.options["coverage_family_aware"] is True
             assert shard.options["asm_check_family"] == "sqli"
             assert shard.options["sqli"] is True
             assert shard.options["xss"] is False
         elif shard.label.endswith(":xss"):
             lane_counts["xss"] += 1
+            assert shard.options["coverage_attempt_family"] == "xss"
+            assert shard.options["coverage_family_aware"] is True
             assert shard.options["asm_check_family"] == "xss"
             assert shard.options["xss"] is True
             assert shard.options["sqli"] is False
         else:
             lane_counts["broad"] += 1
+            assert shard.options["coverage_attempt_family"] == "all"
+            assert shard.options["coverage_family_aware"] is True
             assert "asm_check_family" not in shard.options
     assert lane_counts == {"broad": 2, "sqli": 2, "xss": 2}
     assert sorted(set(endpoint_appearances)) == sorted(eps)
@@ -205,6 +211,33 @@ def test_coverage_family_total_shard_cap_limits_family_lanes():
     assert plan.shard_count == 2
     assert [s.label for s in plan.shards] == ["coverage[0]:broad", "coverage[0]:sqli"]
     assert any("dropped xss" in n for n in plan.notes)
+
+
+def test_coverage_family_respects_explicit_high_risk_focus():
+    eps = [f"GET /api/orders/{i}" for i in range(12)]
+    plan = p.plan_coverage_family_shards(
+        {
+            "scan_type": "smart",
+            "check_family": "bola",
+            "asm_check_family": "bola",
+            "exploit_depth": True,
+            "coverage_max_shards": 6,
+        },
+        eps,
+        per_shard_cap=5,
+    )
+
+    assert plan.strategy == "coverage_family"
+    assert [s.label for s in plan.shards] == [
+        "coverage[0]:bola",
+        "coverage[1]:bola",
+        "coverage[2]:bola",
+    ]
+    assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"bola"}
+    assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
+    assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
+    endpoint_appearances = [e for shard in plan.shards for e in shard.options["custom_endpoints"]]
+    assert sorted(endpoint_appearances) == sorted(eps)
 
 
 # --------------------------- harvest ---------------------------
@@ -561,3 +594,31 @@ def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     assert sqli.options["asm_check_family"] == "sqli"
     assert xss.options["asm_check_family"] == "xss"
     assert "asm_check_family" not in broad.options
+
+
+def test_dynamic_coverage_family_respects_explicit_focus():
+    plan = p.plan_dynamic_coverage_family_shards(
+        {
+            "scan_type": "smart",
+            "check_family": "bola",
+            "asm_check_family": "bola",
+            "exploit_depth": True,
+            "coverage_dynamic_batch_size": 25,
+            "coverage_dynamic_max_batches": 12,
+        },
+        endpoint_count=100,
+        auth_state_count=1,
+    )
+
+    assert plan.strategy == "coverage_family"
+    assert plan.shard_count == 4
+    assert [s.label for s in plan.shards] == [
+        "coverage-dynamic[0]:bola",
+        "coverage-dynamic[1]:bola",
+        "coverage-dynamic[2]:bola",
+        "coverage-dynamic[3]:bola",
+    ]
+    assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"bola"}
+    assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
+    assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
+    assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
