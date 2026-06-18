@@ -1607,6 +1607,57 @@ def validate_idor(
     )
 
 
+def validate_object_authorization(
+    finding: dict[str, Any],
+    response_body: str | None = None
+) -> ValidationResult:
+    """Validate deterministic object-authorization replay findings."""
+    evidence = finding.get("evidence", {}) if isinstance(finding.get("evidence"), dict) else {}
+    proof_type = str(evidence.get("proof_type") or finding.get("proof_type") or "").lower()
+    authz_diff = evidence.get("authz_diff") if isinstance(evidence.get("authz_diff"), dict) else {}
+    owner_status = evidence.get("owner_status")
+    attacker_status = evidence.get("attacker_status")
+
+    cross_principal_replay = proof_type == "cross_principal_replay"
+    replayed_missing_object = (
+        evidence.get("object_id_absent_from_attacker_listing") is True
+        or authz_diff.get("replayed_owner_object_missing_from_attacker_listing") is True
+    )
+    equivalent_resource = (
+        evidence.get("responses_equivalent") is True
+        or authz_diff.get("owner_resource_equivalent_to_attacker_resource") is True
+    )
+
+    if (
+        cross_principal_replay
+        and replayed_missing_object
+        and equivalent_resource
+        and owner_status == 200
+        and attacker_status == 200
+    ):
+        return ValidationResult(
+            verified=True,
+            confidence=0.95,
+            evidence=evidence.get("url") or evidence.get("consumer_endpoint"),
+            evidence_level="confirmed_exploit",
+            reason=(
+                "Confirmed object authorization bypass: attacker principal replayed "
+                "an owner object absent from its own listing and received equivalent data"
+            ),
+        )
+
+    if cross_principal_replay and owner_status == 200 and attacker_status == 200:
+        return ValidationResult(
+            verified=False,
+            confidence=0.75,
+            evidence=evidence.get("url") or evidence.get("consumer_endpoint"),
+            evidence_level="strong_indicator",
+            reason="Cross-principal object replay returned 200 but ownership differential was incomplete",
+        )
+
+    return validate_idor(finding, response_body)
+
+
 # =============================================================================
 # FILE UPLOAD VALIDATION
 # =============================================================================
@@ -2029,8 +2080,17 @@ def validate_finding(
     if any(x in title_lower for x in ["path traversal", "lfi", "local file", "directory traversal", "../"]):
         return validate_path_traversal(finding, response_body)
 
-    # IDOR validation
-    if "idor" in title_lower or "insecure direct object" in title_lower or "bola" in title_lower:
+    # Object authorization / IDOR validation
+    if (
+        tool == "smart_authz"
+        or "broken object authorization" in title_lower
+        or "object authorization" in title_lower
+        or "idor" in title_lower
+        or "insecure direct object" in title_lower
+        or "bola" in title_lower
+    ):
+        if tool == "smart_authz" or "object authorization" in title_lower:
+            return validate_object_authorization(finding, response_body)
         return validate_idor(finding, response_body)
 
     # CSRF validation

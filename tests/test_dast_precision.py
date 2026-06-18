@@ -848,6 +848,39 @@ def test_deterministic_hygiene_finding_is_not_suspected_lead():
     assert updated["confidence_tier"] == "high"
 
 
+def test_smart_authz_cross_principal_replay_is_verified():
+    finding = {
+        "tool": "smart_authz",
+        "title": "Broken object authorization: user2 can access user1 object",
+        "severity": "high",
+        "cvss_score": 8.0,
+        "evidence": {
+            "url": "https://example.test/workshop/api/shop/orders/15",
+            "proof_type": "cross_principal_replay",
+            "owner_status": 200,
+            "attacker_status": 200,
+            "responses_equivalent": True,
+            "object_id_absent_from_attacker_listing": True,
+            "authz_diff": {
+                "replayed_owner_object_missing_from_attacker_listing": True,
+                "owner_resource_equivalent_to_attacker_resource": True,
+            },
+            "producer_endpoint": "GET /workshop/api/shop/orders/all",
+            "consumer_endpoint": "GET /workshop/api/shop/orders/15",
+        },
+    }
+
+    validation = validate_finding(finding)
+    updated = apply_validation_to_finding(finding, validation)
+
+    assert validation.verified is True
+    assert validation.confidence == 0.95
+    assert validation.evidence_level == "confirmed_exploit"
+    assert updated["verified"] is True
+    assert updated["needs_verification"] is False
+    assert updated["confidence_tier"] == "verified"
+
+
 def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):
     async def fake_run(cmd, timeout=10):
         url = cmd[-1]
