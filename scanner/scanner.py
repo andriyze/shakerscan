@@ -8490,6 +8490,20 @@ async def build_report(target: str,
                     active_endpoint_budget = int(_budget_active_max)
                 before_active_endpoints = len(endpoints)
 
+                # Re-test consumer/write routes against REAL object ids observed
+                # across the discovered surface, not the static "/{id}"->"/1"
+                # placeholder, so SQLi/XSS/BOLA probes hit live objects instead of
+                # 404ing before reaching vulnerable code (e.g. crAPI vehicle/order).
+                try:
+                    from scanner_tools.resource_propagation import enrich_endpoints_with_resource_ids
+                    _enriched_endpoints = enrich_endpoints_with_resource_ids(endpoints)
+                    _propagated = len(_enriched_endpoints) - len(endpoints)
+                    endpoints = _enriched_endpoints
+                    if _propagated:
+                        active_block["active_endpoints_resource_id_propagated"] = _propagated
+                except Exception as _rp_err:
+                    print(f"[scanner] resource-id propagation skipped: {_rp_err}", file=sys.stderr)
+
                 # Emit the FULL discovered worklist (pre-cap) so parallel
                 # `coverage` scans can partition every endpoint, not just the
                 # budget-capped/sampled subset. Universal for any smart scan.
