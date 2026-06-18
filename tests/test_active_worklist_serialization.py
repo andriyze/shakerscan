@@ -26,6 +26,21 @@ def test_active_worklist_preserves_json_body_shape():
     assert worklist == ['POST /api/orders json:{"user":{"id":1},"qty":2}']
 
 
+def test_active_worklist_uses_safe_json_seeds_for_login_fields():
+    worklist = scanner_module._serialize_active_worklist([
+        {
+            "method": "POST",
+            "url": "/rest/user/login",
+            "body_params": ["email", "username", "password"],
+            "content_type": "application/json",
+        }
+    ])
+
+    assert worklist == [
+        'POST /rest/user/login json:{"email":"test@example.com","username":"testuser","password":"TestPass123!"}'
+    ]
+
+
 def test_active_worklist_preserves_form_body_shape():
     worklist = scanner_module._serialize_active_worklist([
         {

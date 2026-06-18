@@ -130,7 +130,10 @@ def _active_endpoint_worklist_entry(
         if "json" in content_type:
             if isinstance(body_template, dict) and body_template:
                 return f"{method} {path} json:" + json.dumps(body_template, separators=(",", ":"))
-            return f"{method} {path} json:" + json.dumps({b: 1 for b in body}, separators=(",", ":"))
+            return f"{method} {path} json:" + json.dumps(
+                _synthetic_json_template_from_params(body),
+                separators=(",", ":"),
+            )
         return f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
     return f"{method} {path}"
 
@@ -5904,6 +5907,49 @@ def _fallback_value_for_param(param: str) -> Any:
     return "test"
 
 
+def _get_nested_value(container: dict[str, Any], key: str) -> Any:
+    parts = _normalize_nested_key(key)
+    cursor: Any = container
+    for part in parts:
+        if not isinstance(cursor, dict) or part not in cursor:
+            return None
+        cursor = cursor[part]
+    return cursor
+
+
+def _param_prefers_string(param: str) -> bool:
+    fallback = _fallback_value_for_param(param)
+    return isinstance(fallback, str)
+
+
+def _normalize_synthetic_body_placeholders(body: Any, params: list[str]) -> None:
+    """Repair synthetic JSON templates that used numeric placeholders.
+
+    Coverage/ASM replay specs used to encode unknown JSON bodies as
+    ``{"field": 1}``. That is fine for IDs but breaks common login fields:
+    apps often throw before the injected email payload is evaluated because the
+    sibling password/user field is a number. Keep observed templates intact
+    except for obvious synthetic numeric placeholders on string-like params.
+    """
+    if isinstance(body, list):
+        if not body or not isinstance(body[0], dict):
+            return
+        target = body[0]
+    elif isinstance(body, dict):
+        target = body
+    else:
+        return
+
+    for param in params:
+        if not _param_prefers_string(param):
+            continue
+        current = _get_nested_value(target, param)
+        if isinstance(current, bool):
+            continue
+        if isinstance(current, (int, float)):
+            _set_nested_value(target, param, _fallback_value_for_param(param), overwrite=True)
+
+
 def _path_param_value(param_name: str) -> str:
     """Get appropriate value for a path parameter."""
     param_l = param_name.lower()
@@ -5951,6 +5997,16 @@ def _set_nested_value(container: dict[str, Any], key: str, value: Any, overwrite
         cursor = cursor[part]
     if overwrite or parts[-1] not in cursor:
         cursor[parts[-1]] = value
+
+
+def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
+    template: dict[str, Any] = {}
+    for raw in params:
+        parts = _normalize_nested_key(str(raw or ""))
+        if not parts:
+            continue
+        _set_nested_value(template, ".".join(parts), _fallback_value_for_param(str(raw)), overwrite=True)
+    return template
 
 
 def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> Any:
@@ -6002,6 +6058,10 @@ def _build_body_template(endpoint: dict[str, Any], param: str | None = None) -> 
                     _set_nested_value(target, param, defaults.get(param, _fallback_value_for_param(param)), overwrite=True)
             else:
                 target.setdefault(param, defaults.get(param, _fallback_value_for_param(param)))
+
+    if nested:
+        template_params = list(dict.fromkeys([*_coerce_param_names(base_params), *_coerce_param_names(body_params)]))
+        _normalize_synthetic_body_placeholders(body, template_params)
 
     return body
 

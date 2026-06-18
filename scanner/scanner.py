@@ -2271,6 +2271,46 @@ def _append_bola_finding(
 ACTIVE_WORKLIST_EMIT_LIMIT = 5000
 
 
+def _synthetic_json_value_for_param(param: str) -> Any:
+    """Generate a valid seed value for synthetic JSON replay specs."""
+    name = str(param or "").lower()
+    leaf = name.rsplit(".", 1)[-1]
+    if "email" in leaf:
+        return "test@example.com"
+    if "password" in leaf or "passwd" in leaf:
+        return "TestPass123!"
+    if leaf in ("username", "user", "login", "name", "uname") or "name" in leaf:
+        return "testuser"
+    if any(token in leaf for token in ("token", "apikey", "api_key")):
+        return "test_token_abc123"
+    if any(token in leaf for token in ("code", "coupon", "promo", "voucher", "discount")):
+        return "TEST123"
+    if any(token in leaf for token in ("id", "qty", "quantity", "count", "limit", "page", "offset", "amount", "price", "total", "rating")):
+        return 1
+    if leaf.startswith("is_") or leaf in ("enabled", "active", "verified", "confirmed"):
+        return False
+    if "url" in leaf or "link" in leaf or "redirect" in leaf:
+        return "https://example.com"
+    return "test"
+
+
+def _synthetic_json_template_from_params(params: list[str]) -> dict[str, Any]:
+    template: dict[str, Any] = {}
+    for raw in params:
+        parts = [p for p in str(raw or "").split(".") if p]
+        if not parts:
+            continue
+        cursor = template
+        for part in parts[:-1]:
+            existing = cursor.get(part)
+            if not isinstance(existing, dict):
+                existing = {}
+                cursor[part] = existing
+            cursor = existing
+        cursor[parts[-1]] = _synthetic_json_value_for_param(raw)
+    return template
+
+
 def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMIT_LIMIT) -> list[str]:
     """Convert the full discovered endpoint pool into custom-endpoint strings
     ("METHOD /path?query") so parallel coverage scans can re-feed and partition
@@ -2304,7 +2344,10 @@ def _serialize_active_worklist(endpoints: list, limit: int = ACTIVE_WORKLIST_EMI
                 if isinstance(body_template, dict) and body_template:
                     entry = f"{method} {path} json:" + json.dumps(body_template, separators=(",", ":"))
                 else:
-                    entry = f"{method} {path} json:" + json.dumps({b: 1 for b in body}, separators=(",", ":"))
+                    entry = f"{method} {path} json:" + json.dumps(
+                        _synthetic_json_template_from_params(body),
+                        separators=(",", ":"),
+                    )
             else:
                 entry = f"{method} {path} form:" + "&".join(f"{b}=1" for b in body)
         else:

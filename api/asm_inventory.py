@@ -270,8 +270,30 @@ def _json_template_from_names(names: list[str]) -> dict[str, Any]:
                 existing = {}
                 cursor[part] = existing
             cursor = existing
-        cursor[parts[-1]] = 1
+        cursor[parts[-1]] = _json_seed_value_for_param(raw_name)
     return root
+
+
+def _json_seed_value_for_param(param: str) -> Any:
+    name = str(param or "").lower()
+    leaf = name.rsplit(".", 1)[-1]
+    if "email" in leaf:
+        return "test@example.com"
+    if "password" in leaf or "passwd" in leaf:
+        return "TestPass123!"
+    if leaf in ("username", "user", "login", "name", "uname") or "name" in leaf:
+        return "testuser"
+    if any(token in leaf for token in ("token", "apikey", "api_key")):
+        return "test_token_abc123"
+    if any(token in leaf for token in ("code", "coupon", "promo", "voucher", "discount")):
+        return "TEST123"
+    if any(token in leaf for token in ("id", "qty", "quantity", "count", "limit", "page", "offset", "amount", "price", "total", "rating")):
+        return 1
+    if leaf.startswith("is_") or leaf in ("enabled", "active", "verified", "confirmed"):
+        return False
+    if "url" in leaf or "link" in leaf or "redirect" in leaf:
+        return "https://example.com"
+    return "test"
 
 
 def parse_worklist_entry_detail(entry: Any) -> ParsedEndpoint | None:

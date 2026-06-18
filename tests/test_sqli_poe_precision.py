@@ -197,6 +197,54 @@ def test_smart_sqli_detects_json_login_auth_bypass(monkeypatch):
     assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
 
 
+def test_smart_sqli_repairs_numeric_login_json_replay(monkeypatch):
+    marker = active_checks._CURL_STATUS_MARKER
+
+    async def fake_run(cmd, *args, **kwargs):
+        if "-d" in cmd:
+            body = json.loads(cmd[cmd.index("-d") + 1])
+            if not isinstance(body.get("password"), str):
+                return f"TypeError: password must be a string\n{marker}500", "", 0
+            if body.get("email") in {"' OR '1'='1'--", "' OR 1=1--"}:
+                return (
+                    json.dumps({
+                        "authentication": {"token": "jwt-token"},
+                        "bid": 1,
+                        "umail": "admin@juice-sh.op",
+                    })
+                    + f"\n{marker}200",
+                    "",
+                    0,
+                )
+        return f"Invalid email or password.\n{marker}401", "", 0
+
+    monkeypatch.setattr(active_checks, "run", fake_run)
+
+    result = asyncio.run(
+        active_checks.smart_sqli_test(
+            "https://example.test",
+            [
+                {
+                    "url": "https://example.test/rest/user/login",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "body_template": {"email": 1, "username": 1, "password": 1},
+                    "body_param_defaults": {"email": 1, "username": 1, "password": 1},
+                    "body_params": ["email", "username", "password"],
+                }
+            ],
+            max_seconds=10,
+            max_params_per_endpoint=3,
+        )
+    )
+
+    assert result["vulnerabilities_found"] == 1
+    finding = result["findings"][0]
+    assert finding["severity"] == "critical"
+    assert finding["param"] == "email"
+    assert any("Authentication bypass via SQLi" in item for item in finding["evidence"])
+
+
 def test_detect_dbms_accepts_honey_postgresql_error(monkeypatch):
     async def fake_run(cmd, *args, **kwargs):
         url = cmd[-1]

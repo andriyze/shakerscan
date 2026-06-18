@@ -415,7 +415,11 @@ def test_to_custom_endpoint_roundtrips_params():
     )
     assert (
         a.to_custom_endpoint("POST", "/api", "a,b", param_location="json")
-        == 'POST /api json:{"a":1,"b":1}'
+        == 'POST /api json:{"a":"test","b":"test"}'
+    )
+    assert (
+        a.to_custom_endpoint("POST", "/login", "email,password", param_location="json")
+        == 'POST /login json:{"email":"test@example.com","password":"TestPass123!"}'
     )
     assert (
         a.to_custom_endpoint("POST", "/api", "qty,user.id", param_location="json")
