@@ -328,6 +328,72 @@ def test_smart_bola_authz_replay_confirms_user1_object_access_by_user2(monkeypat
     assert attempts[0]["status"] == "completed"
 
 
+def test_authz_replay_maps_listing_suffix_to_item_endpoint(monkeypatch):
+    async def fake_fetch(url, **kwargs):
+        token = _auth_token(kwargs.get("headers"))
+        path = urlsplit(url).path
+        if path == "/workshop/api/shop/orders/all":
+            if token == "user1":
+                return _fake_http_response(
+                    url,
+                    200,
+                    json.dumps({
+                        "orders": [
+                            {
+                                "id": 15,
+                                "user": {"email": "alice@example.com"},
+                                "transaction_id": "txn-owner",
+                            }
+                        ]
+                    }),
+                )
+            if token == "user2":
+                return _fake_http_response(url, 200, json.dumps({"orders": []}))
+            return _fake_http_response(url, 401, json.dumps({"error": "unauthorized"}))
+        if path == "/workshop/api/shop/orders/all/15":
+            return _fake_http_response(url, 404, json.dumps({"error": "not found"}))
+        if path == "/workshop/api/shop/orders/15":
+            return _fake_http_response(
+                url,
+                200,
+                json.dumps({
+                    "order": {
+                        "id": 15,
+                        "user": {"email": "alice@example.com"},
+                        "transaction_id": "txn-owner",
+                    },
+                    "payment": {
+                        "order_id": 15,
+                        "card_owner_name": "Alice",
+                        "card_number": "XXXXXXXXXXXX5159",
+                    },
+                }),
+            )
+        return _fake_http_response(url, 404, json.dumps({"error": "not found"}))
+
+    monkeypatch.setattr(
+        "scanner_tools.proof_of_exploit.fetch_with_capture",
+        fake_fetch,
+    )
+
+    results = asyncio.run(
+        smart_bola_test(
+            base_url="https://example.com",
+            discovered_urls=["https://example.com/workshop/api/shop/orders/all"],
+            user1_session=_fake_session("user1"),
+            user2_session=_fake_session("user2"),
+            max_endpoints=10,
+            timeout=1,
+        )
+    )
+
+    authz = [f for f in results["findings"] if f.get("tool") == "smart_authz"]
+    assert authz, "expected listing producer to replay against item endpoint"
+    assert authz[0]["evidence"]["producer_endpoint"] == "GET /workshop/api/shop/orders/all"
+    assert authz[0]["evidence"]["consumer_endpoint"] == "GET /workshop/api/shop/orders/15"
+    assert authz[0]["severity"] == "high"
+
+
 def test_authz_replay_prioritizes_owned_resource_producers_over_noise(monkeypatch):
     fetched_paths = []
 

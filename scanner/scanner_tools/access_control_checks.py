@@ -1616,6 +1616,25 @@ def _path_with_resource_id(base_path: str, object_id: str) -> str:
     return f"{path}/{object_id}"
 
 
+def _collection_item_base_path(base_path: str) -> str | None:
+    """Infer an item endpoint from collection-listing routes such as /orders/all."""
+    path = (base_path or "/").rstrip("/")
+    if not path or path == "/":
+        return None
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) < 2:
+        return None
+    terminal = segments[-1].lower()
+    if terminal in {
+        "all", "list", "listing", "recent", "history", "past", "mine",
+        "my", "owned", "search", "results",
+    }:
+        parent = "/" + "/".join(segments[:-1])
+        if parent != path:
+            return parent
+    return None
+
+
 def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[dict[str, Any]]:
     """Build read-safe candidate consumer URLs from a producer response reference."""
     object_id = str(ref.get("object_id") or "").strip()
@@ -1640,6 +1659,19 @@ def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[
     })
     seen_urls.add(path_url)
 
+    item_base_path = _collection_item_base_path(base_path)
+    if item_base_path:
+        item_path = _path_with_resource_id(item_base_path, object_id)
+        item_url = host + item_path
+        if item_url not in seen_urls:
+            candidates.append({
+                "method": "GET",
+                "url": item_url,
+                "object_id_location": "path",
+                "custom_endpoint": f"GET {item_path}",
+            })
+            seen_urls.add(item_url)
+
     query_pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if not _is_probable_id_param(k)]
     query_key = object_key if _is_probable_id_param(object_key) else "id"
     query_pairs.append((query_key, object_id))
@@ -1652,7 +1684,7 @@ def _resource_replay_candidates(producer_url: str, ref: dict[str, Any]) -> list[
             "object_id_location": "query",
             "custom_endpoint": f"GET {base_path}?{query}",
         })
-    return candidates[:2]
+    return candidates[:3]
 
 
 def _rank_authz_producer_url(url: str) -> int:
