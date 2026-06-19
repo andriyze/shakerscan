@@ -848,14 +848,26 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
                         fragment_params=test_frag_params,
                     )
                     if proof and proof.proven:
+                        # A fired dialog / console execution (confidence >= 0.9) is
+                        # confirmed script execution -> High (session theft capable).
+                        # Pass an explicit High CVSS so the generic XSS base score
+                        # (6.1, medium) can't cap a browser-proven DOM XSS to medium.
+                        executed = proof.confidence >= 0.9
                         findings.append({
                             "type": "DOM XSS (Hash Route)",
                             "url": test_url,
                             "parameter": param_name,
                             "payload": payload,
                             "payload_type": payload_type,
-                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
-                            "severity": "high" if proof.confidence >= 0.9 else "medium",
+                            "evidence": [
+                                f"Browser proof: {proof.technique}",
+                                f"Confidence: {proof.confidence}",
+                                "payload executed in headless browser (dialog fired)" if executed
+                                else "payload landed in executable DOM context",
+                            ],
+                            "severity": "high" if executed else "medium",
+                            "cvss_score": 7.4 if executed else 6.1,
+                            "verified": executed,
                             "context": "hash_route",
                             "reflection_context": "dom_xss",
                             "proof": proof.to_dict() if hasattr(proof, "to_dict") else None,

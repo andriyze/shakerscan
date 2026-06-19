@@ -9365,10 +9365,13 @@ async def build_report(target: str,
                             {
                                 "type": "DOM XSS",
                                 "url": f.get("url"),
-                                "param": f.get("param"),
+                                "param": f.get("param") or f.get("parameter"),
                                 "payload": f.get("payload"),
                                 "evidence": f.get("evidence"),
                                 "verified": f.get("verified", False),
+                                # Browser-proven execution carries an explicit High CVSS so
+                                # the generic XSS base score can't cap it back to medium.
+                                "cvss_score": f.get("cvss_score"),
                             },
                             "CWE-79"
                         ))
