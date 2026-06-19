@@ -51,11 +51,17 @@ def utc_now_iso() -> str:
     return utc_now().isoformat()
 
 try:
-    from evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+    from evidence_triage import (
+        build_evidence_with_triage as _build_evidence_with_triage,
+        redact_finding_evidence as _redact_finding_evidence,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "evidence_triage":
         raise
-    from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+    from api.evidence_triage import (
+        build_evidence_with_triage as _build_evidence_with_triage,
+        redact_finding_evidence as _redact_finding_evidence,
+    )
 
 try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
@@ -1486,7 +1492,7 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
     saved_count = 0
     for finding in findings:
         fingerprint = generate_finding_fingerprint(finding)
-        evidence_with_triage = _build_evidence_with_triage(finding)
+        evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))
         evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
         ai_recommendations_json = json.dumps(finding.get('ai_recommendations')) if finding.get('ai_recommendations') else None
         ai_classification_source = finding.get('ai_classification_source')

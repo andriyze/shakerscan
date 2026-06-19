@@ -177,11 +177,17 @@ AI_CLASSIFY_MIN_SEVERITY = os.environ.get("AI_CLASSIFY_MIN_SEVERITY", AI_VERIFY_
 
 from retest_contract import SEVERITY_ORDER
 try:
-    from evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+    from evidence_triage import (
+        build_evidence_with_triage as _build_evidence_with_triage,
+        redact_finding_evidence as _redact_finding_evidence,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "evidence_triage":
         raise
-    from api.evidence_triage import build_evidence_with_triage as _build_evidence_with_triage
+    from api.evidence_triage import (
+        build_evidence_with_triage as _build_evidence_with_triage,
+        redact_finding_evidence as _redact_finding_evidence,
+    )
 
 try:
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields_dict
@@ -1263,41 +1269,6 @@ def generate_finding_fingerprint(finding: dict) -> str:
     ]
     key_string = '|'.join(str(p) for p in key_parts)
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
-
-
-_REDACT_SENSITIVE_KEY_RE = re.compile(
-    r'^(authorization|cookie|set[-_]?cookie|proxy-authorization|'
-    r'x[-_]api[-_]?key|x[-_]auth[-_]token|api[-_]?key|'
-    r'auth_header|auth_headers_json|auth_cookies|'
-    r'user2_header|user2_cookies|login_password|password)$',
-    re.IGNORECASE,
-)
-_REDACT_AUTH_VALUE_RE = re.compile(
-    r'(Bearer\s+[A-Za-z0-9._~+/-]{8,}=*'                               # bearer header value
-    r'|eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,})'    # JWT
-)
-
-
-def _redact_finding_evidence(value):
-    """Strip live auth material (bearer tokens, JWTs, auth headers/cookies, API
-    keys, second-user tokens) from finding evidence before DB persistence. We must
-    never store live credentials in the findings table — they leak via the API and
-    UI and outlive the engagement. Redacts by sensitive key name and by value
-    pattern, recursively, so request_headers.Authorization and tokens embedded in
-    request bodies / response snippets are both caught."""
-    if isinstance(value, dict):
-        out = {}
-        for k, v in value.items():
-            if isinstance(k, str) and _REDACT_SENSITIVE_KEY_RE.match(k) and v not in (None, "", {}, []):
-                out[k] = "[REDACTED]"
-            else:
-                out[k] = _redact_finding_evidence(v)
-        return out
-    if isinstance(value, list):
-        return [_redact_finding_evidence(v) for v in value]
-    if isinstance(value, str):
-        return _REDACT_AUTH_VALUE_RE.sub("[REDACTED]", value)
-    return value
 
 
 async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
