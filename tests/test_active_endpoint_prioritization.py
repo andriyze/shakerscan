@@ -264,3 +264,24 @@ def test_state_changing_method_on_object_route_scores_higher():
     # and an object route must outrank the same route without an id segment
     no_id = {"url": "https://t.test/api/orders", "method": "GET", "source": "openapi"}
     assert active_endpoint_score(read_obj) > active_endpoint_score(no_id)
+
+
+def test_family_route_boost_raises_family_relevant_routes():
+    login = {"url": "https://t/x/login", "method": "POST", "body_params": ["password"], "source": "options"}
+    review = {"url": "https://t/x/review", "method": "POST", "body_params": ["comment"], "source": "options"}
+    # SQLi lane boosts login (token + injectable body); XSS lane boosts review (sink + reflected param)
+    assert active_endpoint_score(login, family="sqli") > active_endpoint_score(login)
+    assert active_endpoint_score(review, family="xss") > active_endpoint_score(review)
+    # cross-family: login is not an XSS sink and password isn't reflected -> no XSS boost
+    assert active_endpoint_score(login, family="xss") == active_endpoint_score(login)
+    # family=None / "all" leaves the score unchanged (back-compat)
+    assert active_endpoint_score(review, family=None) == active_endpoint_score(review, family="all")
+
+
+def test_family_ordering_prefers_family_routes_under_budget():
+    search = {"url": "https://t/api/items/filter", "method": "GET", "params": ["sort"], "source": "options"}
+    comment = {"url": "https://t/api/items/comment", "method": "POST", "body_params": ["text"], "source": "options"}
+    sqli_first = prioritize_active_endpoints([comment, search], budget=1, family="sqli")[0]["url"]
+    xss_first = prioritize_active_endpoints([search, comment], budget=1, family="xss")[0]["url"]
+    assert sqli_first.endswith("/filter")    # SQLi favors filter/sort
+    assert xss_first.endswith("/comment")    # XSS favors comment/text

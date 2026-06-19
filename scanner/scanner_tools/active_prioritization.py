@@ -159,8 +159,51 @@ def _path_score(path: str) -> int:
     return score - penalty
 
 
-def active_endpoint_score(endpoint: dict[str, Any]) -> int:
-    """Return a higher-is-better score for active DAST endpoint selection."""
+# Per-family route relevance. When a focused lane knows it is hunting SQLi vs XSS
+# vs BOLA, the same endpoint graph should be ordered differently: SQLi wants
+# login/search/filter/order/track + injectable params; XSS wants reflected/stored
+# sinks (search/comment/review/profile) + SPA/form routes.
+_SQLI_ROUTE_TOKENS = (
+    "login", "signin", "authenticate", "search", "filter", "sort", "order",
+    "track", "lookup", "report", "query",
+)
+_XSS_ROUTE_TOKENS = (
+    "search", "comment", "review", "feedback", "message", "profile", "post",
+    "note", "reply", "chat", "greeting", "subject", "title", "description",
+)
+_XSS_REFLECTED_PARAM_TOKENS = (
+    "q", "query", "search", "keyword", "term", "name", "title", "comment",
+    "message", "text", "body", "content", "subject", "description", "greeting",
+)
+
+
+def _family_route_boost(family: str, path_l: str, endpoint: dict[str, Any]) -> int:
+    """Family-specific score boost so a focused lane tests its likely routes first."""
+    if family == "sqli":
+        boost = 12 if any(tok in path_l for tok in _SQLI_ROUTE_TOKENS) else 0
+        if endpoint.get("params") or endpoint.get("body_params"):
+            boost += 6  # query/body params are the injection surface
+        return boost
+    if family == "xss":
+        boost = 12 if any(tok in path_l for tok in _XSS_ROUTE_TOKENS) else 0
+        names = [
+            str(n).lower()
+            for n in (_coerce_param_names(endpoint.get("params")) + _coerce_param_names(endpoint.get("body_params")))
+        ]
+        if any(any(tok in n for tok in _XSS_REFLECTED_PARAM_TOKENS) for n in names):
+            boost += 8  # reflected-looking params
+        if str(endpoint.get("source") or "") in ("hash_route", "form"):
+            boost += 6  # SPA DOM-XSS routes + form-backed stored/reflected sinks
+        return boost
+    return 0
+
+
+def active_endpoint_score(endpoint: dict[str, Any], *, family: str | None = None) -> int:
+    """Return a higher-is-better score for active DAST endpoint selection.
+
+    ``family`` (e.g. ``"sqli"``/``"xss"``) adds a focused-lane relevance boost so a
+    single shared endpoint graph is ordered per the family currently hunting it.
+    """
     source = str(endpoint.get("source") or "")
     method = str(endpoint.get("method") or "GET").upper()
     path = urllib.parse.urlparse(str(endpoint.get("url") or "")).path or "/"
@@ -168,6 +211,8 @@ def active_endpoint_score(endpoint: dict[str, Any]) -> int:
     score = SOURCE_BONUS.get(source, 0)
     score += _param_score(endpoint)
     score += _path_score(path)
+    if family and family != "all":
+        score += _family_route_boost(family, path.lower(), endpoint)
 
     # Object-id-bearing consumer routes (/orders/42, /vehicle/{id}/location) are
     # prime IDOR/BOLA/SQLi-on-path targets even without a high-value keyword.
@@ -194,6 +239,8 @@ def active_endpoint_score(endpoint: dict[str, Any]) -> int:
 def active_endpoint_priority_key(
     endpoint: dict[str, Any],
     source_priority: dict[str, int] | None = None,
+    *,
+    family: str | None = None,
 ) -> tuple[int, int, str, str]:
     """Stable sort key where lower values should be tested first."""
     source_priority = source_priority or DEFAULT_SOURCE_PRIORITY
@@ -201,7 +248,7 @@ def active_endpoint_priority_key(
     source_rank = source_priority.get(source, DEFAULT_SOURCE_PRIORITY_VALUE)
     method = str(endpoint.get("method") or "GET").upper()
     url = str(endpoint.get("url") or "")
-    return (-active_endpoint_score(endpoint), source_rank, method, url)
+    return (-active_endpoint_score(endpoint, family=family), source_rank, method, url)
 
 
 def _is_body_endpoint(endpoint: dict[str, Any]) -> bool:
@@ -222,6 +269,7 @@ def prioritize_active_endpoints(
     *,
     budget: int | None = None,
     source_priority: dict[str, int] | None = None,
+    family: str | None = None,
 ) -> list[dict[str, Any]]:
     """Sort endpoints for active DAST and optionally apply an endpoint budget.
 
@@ -229,8 +277,9 @@ def prioritize_active_endpoints(
     Pure top-by-score selection can be 100% GET when observed GET routes outrank
     generated POST routes, which leaves request-body injection (e.g. a JSON login
     SQLi) entirely untested under a tight budget — the cause of shallow API scans.
+    ``family`` orders the same graph for the focused lane currently hunting it.
     """
-    key = lambda endpoint: active_endpoint_priority_key(endpoint, source_priority=source_priority)
+    key = lambda endpoint: active_endpoint_priority_key(endpoint, source_priority=source_priority, family=family)
     ordered = sorted(endpoints, key=key)
     if not (budget and budget > 0):
         return ordered

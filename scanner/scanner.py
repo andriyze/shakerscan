@@ -8535,6 +8535,9 @@ async def build_report(target: str,
                     active_candidate_endpoints,
                     budget=active_endpoint_budget,
                     source_priority=_SOURCE_PRIORITY,
+                    # Focused lanes order the shared endpoint graph for their family
+                    # (SQLi -> login/search/order; XSS -> reflected/stored/SPA sinks).
+                    family=focused_active_family_name,
                 )
                 active_block["active_endpoint_budget"] = active_endpoint_budget
                 active_block["active_endpoints_discovered"] = before_active_endpoints
