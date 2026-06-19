@@ -709,3 +709,15 @@ def test_harvest_preserves_spa_hash_routes_for_xss_lane():
     assert any("/api/users?id=1" in e for e in hv)
     # the injectable SPA route should not be collapsed to a bare "/"
     assert not all(e.endswith(" /") for e in hv)
+
+
+def test_harvest_reads_browser_crawl_sample_pages_for_hash_routes():
+    # The browser crawl is where SPA hash routes are discovered; harvest must read
+    # it so the coverage XSS lane receives #/search?q= to browser-prove.
+    recon = {"discovery": {"browser_crawl": {
+        "sample_pages": ["http://t/#/search?q=test", "http://t/#/score-board", "http://t/main.js"],
+    }}}
+    hv = p.harvest_endpoints(recon, max_endpoints=50)
+    assert any("#/search?q=test" in e for e in hv)
+    # static asset from the crawl sample is still dropped
+    assert not any("main.js" in e for e in hv)

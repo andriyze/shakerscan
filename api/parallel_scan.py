@@ -712,6 +712,14 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
         add_list(jb.get("routes"))
         add_list(jb.get("internal_urls"))
     add_list(disc.get("katana_sample"))
+    # Browser-crawled pages carry the SPA hash routes (#/search?q=) that the XSS lane
+    # needs to browser-prove DOM XSS. add() preserves their fragments (see above) and
+    # drops static assets, so feeding the crawl sample here is the link that gets DOM
+    # XSS onto the coverage worklist (was missing -> no XSS on coverage scans).
+    bcrawl = disc.get("browser_crawl") or {}
+    if isinstance(bcrawl, dict):
+        add_list(bcrawl.get("sample_pages"))
+        add_list(bcrawl.get("sampled_urls"))
     sm = disc.get("smart_discovery") or {}
     if isinstance(sm, dict):
         for k in ("api_endpoints_sample", "probed_endpoints_sample",
