@@ -8307,9 +8307,12 @@ def _response_matches_not_found(
 ) -> bool:
     """Pure: does this look like a not-found page (a phantom we should not fuzz)?
 
-    Conservative — only clear 404/410, or a 2xx/3xx that matches a known-missing
-    path's response (SPA catch-all). Never treats 401/403/405/5xx as missing,
-    since those imply the endpoint *exists* (and is a real target).
+    Clear 404/410 always counts. Otherwise it counts only when the response
+    matches a *sibling* decoy (a random path under the SAME parent): same status
+    and near-identical body length means the parent serves every child the same
+    way, i.e. the route does not exist. Only ever applied to synthetic-source
+    endpoints, so matching 401/403/5xx to a decoy is safe (a real observed route
+    is never gated). ``status is None`` (transient error) is kept.
     """
     if status is None:
         return False
@@ -8318,9 +8321,8 @@ def _response_matches_not_found(
     if (
         decoy_status is not None
         and status == decoy_status
-        and 200 <= status < 400
-        and decoy_len > 0
-        and abs(body_len - decoy_len) <= max(48, int(decoy_len * 0.05))
+        and decoy_len >= 0
+        and abs(body_len - decoy_len) <= max(48, int(decoy_len * 0.07))
     ):
         return True
     return False
@@ -8331,14 +8333,21 @@ async def _filter_reachable_active_endpoints(
     endpoints: list[dict],
     auth_session: Any | None = None,
     *,
-    max_probe: int = 150,
-    concurrency: int = 12,
+    max_probe: int = 220,
+    max_parents: int = 80,
+    concurrency: int = 16,
     timeout: float = 5.0,
 ) -> list[dict]:
-    """Drop *synthesized* endpoints whose baseline GET is a 404/soft-404 so the
-    active budget reaches real routes instead of hanging on guessed permutations
-    (e.g. blind ``/api/v2/oauth2/authorize``). Observed endpoints are never dropped.
-    Best-effort: on any error, returns ``endpoints`` unchanged.
+    """Drop *synthesized* endpoints that don't exist so the active budget reaches
+    real routes instead of hanging on guessed permutations (e.g. the blind
+    ``/api/v{n}/oauth2/authorize`` / ``/rest/v{n}/auth/register`` explosion).
+
+    Uses a *per-parent sibling decoy*: for each candidate path, a random leaf under
+    the same parent is probed; if the candidate responds the same as that decoy
+    (same status + near-identical body length), the parent serves all children
+    identically, so the route doesn't exist. This catches ``/rest`` and ``/api``
+    404/SPA signatures a single root decoy would miss. Observed endpoints are never
+    probed or dropped. Best-effort: on any error, returns ``endpoints`` unchanged.
     """
     synthetic = [e for e in endpoints if isinstance(e, dict) and _is_synthetic_active_source(e)]
     if len(synthetic) < 5:
@@ -8360,12 +8369,28 @@ async def _filter_reachable_active_endpoints(
         u = str(raw or "")
         return u if u.startswith("http") else urllib.parse.urljoin(base_url, u if u.startswith("/") else "/" + u)
 
-    path_first_url: dict[str, str] = {}
+    def _parent(path: str) -> str:
+        segs = [s for s in path.split("/") if s]
+        return "/" + "/".join(segs[:-1]) if segs else "/"
+
+    cand_paths: list[str] = []
+    seen: set[str] = set()
     for ep in synthetic:
-        full = _abs(ep.get("url") or ep.get("path"))
-        path = urllib.parse.urlparse(full).path or "/"
-        path_first_url.setdefault(path, full)
-    probe_paths = list(path_first_url.items())[:max_probe]
+        path = urllib.parse.urlparse(_abs(ep.get("url") or ep.get("path"))).path or "/"
+        if path not in seen:
+            seen.add(path)
+            cand_paths.append(path)
+    cand_paths = cand_paths[:max_probe]
+
+    parents: list[str] = []
+    pseen: set[str] = set()
+    for path in cand_paths:
+        par = _parent(path)
+        if par not in pseen:
+            pseen.add(par)
+            parents.append(par)
+    parents = parents[:max_parents]
+    _DECOY_LEAF = "shakerscan-not-real-zzqx7"
 
     sem = asyncio.Semaphore(concurrency)
 
@@ -8376,23 +8401,24 @@ async def _filter_reachable_active_endpoints(
                     full_url, timeout=aiohttp.ClientTimeout(total=timeout),
                     allow_redirects=True, ssl=False,
                 ) as resp:
-                    body = await resp.text()
-                    return resp.status, len(body)
+                    return resp.status, len(await resp.text())
             except Exception:
-                return None, 0
+                return None, -1
 
     try:
         async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
-            decoy_url = _abs("/shakerscan-not-real-" + ("z" * 14))
-            decoy_status, decoy_len = await _probe(session, decoy_url)
-            probe_results = await asyncio.gather(*[_probe(session, full) for (_p, full) in probe_paths])
+            decoy_targets = [(par, _abs(par.rstrip("/") + "/" + _DECOY_LEAF)) for par in parents]
+            decoy_results = await asyncio.gather(*[_probe(session, u) for (_par, u) in decoy_targets])
+            decoy_by_parent = {par: res for (par, _u), res in zip(decoy_targets, decoy_results)}
+            cand_results = await asyncio.gather(*[_probe(session, _abs(p)) for p in cand_paths])
     except Exception:
         return endpoints
 
-    unreachable = {
-        path for (path, _full), (status, blen) in zip(probe_paths, probe_results)
-        if _response_matches_not_found(status, blen, decoy_status, decoy_len)
-    }
+    unreachable: set[str] = set()
+    for path, (status, blen) in zip(cand_paths, cand_results):
+        d_status, d_len = decoy_by_parent.get(_parent(path), (None, -1))
+        if _response_matches_not_found(status, blen, d_status, d_len):
+            unreachable.add(path)
     if not unreachable:
         return endpoints
 
@@ -8408,7 +8434,8 @@ async def _filter_reachable_active_endpoints(
         return endpoints  # guard against a misfiring decoy
     print(
         f"[active] Reachability gate: dropped {dropped} phantom synthetic endpoint(s) "
-        f"({len(unreachable)}/{len(probe_paths)} probed paths unreachable); {len(kept)} remain",
+        f"({len(unreachable)} unreachable / {len(cand_paths)} probed across {len(parents)} parents); "
+        f"{len(kept)} remain",
         file=sys.stderr,
     )
     return kept

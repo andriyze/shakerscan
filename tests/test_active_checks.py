@@ -38,12 +38,18 @@ def test_reachability_gate_drops_only_clear_not_found():
         assert nf(code, 120, None, 0) is False
     # transient / no response -> keep
     assert nf(None, 0, None, 0) is False
-    # SPA catch-all: 200 matching a known-missing path's length -> drop
+    # SPA catch-all: 200 matching a known-missing sibling's length -> drop
     assert nf(200, 5000, 200, 5010) is True
     # 200 that differs from the decoy (a real page) -> keep
     assert nf(200, 900, 200, 5000) is False
     # 200 with no decoy signal -> keep (conservative)
     assert nf(200, 5000, None, 0) is False
+    # sibling-decoy match on a non-2xx status (parent 404s/500s all children
+    # the same way) -> phantom -> drop (only applied to synthetic sources)
+    assert nf(500, 100, 500, 103) is True
+    assert nf(403, 50, 403, 52) is True
+    # same status as decoy but very different body -> a real route -> keep
+    assert nf(500, 4000, 500, 100) is False
 
 
 def test_reachability_gate_only_targets_synthetic_sources():
