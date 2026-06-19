@@ -7974,7 +7974,11 @@ async def hash_route_dom_xss_test(
                         fragment_params=test_frag_params,
                     )
                     if proof and proof.proven:
-                        severity = "high" if proof.confidence >= 0.9 else "medium"
+                        # A fired dialog / console execution (confidence >= 0.9) is
+                        # confirmed script execution -> High. Pass an explicit High CVSS
+                        # so the generic XSS base score (6.1) can't cap it to medium.
+                        executed = proof.confidence >= 0.9
+                        severity = "high" if executed else "medium"
                         finding = {
                             "type": "XSS",
                             "subtype": "dom_xss_hash_route",
@@ -7984,10 +7988,16 @@ async def hash_route_dom_xss_test(
                             "payload": payload,
                             "technique": technique,
                             "description": description,
-                            "evidence": [f"Browser proof: {proof.technique}", f"Confidence: {proof.confidence}"],
+                            "evidence": [
+                                f"Browser proof: {proof.technique}",
+                                f"Confidence: {proof.confidence}",
+                                "payload executed in headless browser (dialog fired)" if executed
+                                else "payload landed in executable DOM context",
+                            ],
                             "confidence": proof.confidence,
                             "severity": severity,
-                            "verified": True,
+                            "cvss_score": 7.4 if executed else 6.1,
+                            "verified": executed,
                         }
                         if hasattr(proof, "to_dict"):
                             finding["browser_proof"] = proof.to_dict()
