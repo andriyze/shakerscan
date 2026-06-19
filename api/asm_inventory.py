@@ -1409,6 +1409,7 @@ async def claim_test_batch(
     campaign_only: bool = False,
     check_family: str | None = None,
     endpoint_filter: str | None = None,
+    auth_state: str | None = None,
 ) -> list[dict]:
     """Atomically claim the next batch of untested/stale endpoints (priority
     first) and mark them in_progress. Uses FOR UPDATE SKIP LOCKED so multiple
@@ -1423,8 +1424,12 @@ async def claim_test_batch(
         return []
     restrict_campaign = bool(campaign_only and cid)
     family = normalize_check_family(check_family)
+    requested_auth_state = normalize_auth_state(auth_state) if auth_state else None
     endpoint_filter = normalize_endpoint_filter(endpoint_filter)
     endpoint_clause = _endpoint_filter_clause("te", endpoint_filter)
+    first_auth_clause = ""
+    if requested_auth_state:
+        first_auth_clause = "AND te.auth_state = $5" if restrict_campaign else "AND te.auth_state = $3"
     order_clause = _claim_order_clause(family)
     owner = str(lease_owner or "asm-worker")
     lease_seconds = max(60, int(lease_ttl_seconds or DEFAULT_LEASE_TTL_SECONDS))
@@ -1446,12 +1451,21 @@ async def claim_test_batch(
                         AND COALESCE(aea.check_family, 'all') = $3
                         AND aea.status = ANY($4::text[])
                   )
+                  {first_auth_clause}
                   {endpoint_clause}
                 ORDER BY {order_clause}
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
-                tid, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES),
+                """.format(
+                    first_auth_clause=first_auth_clause,
+                    endpoint_clause=endpoint_clause,
+                    order_clause=order_clause,
+                ),
+                *(
+                    (tid, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES), requested_auth_state)
+                    if requested_auth_state
+                    else (tid, cid, family, list(ATTEMPT_CLAIM_BLOCKING_STATUSES))
+                ),
             )
         else:
             first = await conn.fetchrow(
@@ -1461,12 +1475,17 @@ async def claim_test_batch(
                 WHERE te.target_id = $1
                   AND (te.test_status IN ('untested', 'stale')
                        OR (te.test_status = 'tested' AND te.last_tested_at < NOW() - ($2 || ' days')::interval))
+                  {first_auth_clause}
                   {endpoint_clause}
                 ORDER BY {order_clause}
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-                """.format(endpoint_clause=endpoint_clause, order_clause=order_clause),
-                tid, str(stale_days),
+                """.format(
+                    first_auth_clause=first_auth_clause,
+                    endpoint_clause=endpoint_clause,
+                    order_clause=order_clause,
+                ),
+                *((tid, str(stale_days), requested_auth_state) if requested_auth_state else (tid, str(stale_days))),
             )
         if not first:
             return []

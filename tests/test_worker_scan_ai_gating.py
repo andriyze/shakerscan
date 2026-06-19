@@ -1614,6 +1614,54 @@ def test_dynamic_coverage_batch_parent_cancelled_before_claim_does_not_claim(mon
     assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
 
 
+def test_dynamic_coverage_batch_claim_is_scoped_to_shard_auth_state(monkeypatch):
+    calls = {"claim": None, "reconcile": None}
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn(child_status="running", parent_status="running")
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        calls["claim"] = {"target_id": target_id, **kwargs}
+        return []
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-user2-dynamic",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 10,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "options": {
+                    "scan_type": "smart",
+                    "coverage_dynamic_worker": True,
+                    "coverage_dynamic_campaign_only": True,
+                    "auth_state": "user2",
+                    "auth_header": "Bearer user2",
+                },
+            }
+        )
+    )
+
+    assert calls["claim"]["auth_state"] == "user2"
+    assert calls["claim"]["campaign_only"] is True
+    assert calls["claim"]["check_family"] == "all"
+    assert redis.hashes[-1][2]["current_phase"] == "no_untested_endpoints"
+    assert calls["reconcile"]["parent_id"] == "55555555-5555-5555-5555-555555555555"
+
+
 def test_dynamic_coverage_batch_cancelled_after_claim_releases_without_running(monkeypatch):
     endpoint_id = "11111111-1111-1111-1111-111111111111"
     calls = {"claim": None, "run": 0, "reconcile": None}

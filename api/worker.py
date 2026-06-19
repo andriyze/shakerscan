@@ -5661,6 +5661,7 @@ async def process_exploit_batch_job(job_data: dict):
                 campaign_only=campaign_only,
                 check_family=check_family,
                 endpoint_filter=endpoint_filter,
+                auth_state=options.get('auth_state'),
             )
     except Exception as e:
         print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)

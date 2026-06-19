@@ -793,6 +793,27 @@ def test_claim_test_batch_can_scope_to_campaign_inventory():
     assert "te.test_status NOT IN ('gone', 'in_progress')" not in first_query
 
 
+def test_claim_test_batch_can_scope_to_auth_state():
+    target_id = uuid.uuid4()
+    campaign_id = uuid.uuid4()
+    conn = _ClaimConn([])
+
+    asyncio.run(
+        a.claim_test_batch(
+            conn,
+            str(target_id),
+            campaign_id=str(campaign_id),
+            campaign_only=True,
+            check_family="sqli",
+            auth_state="user2",
+        )
+    )
+
+    first_query, first_args = conn.fetchrow_calls[0]
+    assert "AND te.auth_state = $5" in first_query
+    assert first_args[4] == "user2"
+
+
 def test_claim_test_batch_uses_bola_read_resource_ordering():
     target_id = uuid.uuid4()
     campaign_id = uuid.uuid4()
