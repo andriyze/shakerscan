@@ -2800,6 +2800,14 @@ def resolve_focused_bola_poe_settings(max_endpoints: Any) -> dict[str, int]:
     }
 
 
+def focused_mode_keeps_phase4_bola(focused_family: str | None, bola_testing: bool) -> bool:
+    """Focused BOLA still needs phase-4 check_bola; other focused families do not."""
+    family = normalize_scanner_check_family(focused_family)
+    if family:
+        return family == "bola"
+    return bool(bola_testing)
+
+
 def _append_endpoint_attempt_telemetry(active_block: dict[str, Any], attempts: Any) -> None:
     if not isinstance(attempts, list):
         return
@@ -3014,7 +3022,9 @@ async def build_report(target: str,
         websocket_testing = False
         forced_browsing_testing = False
         mass_assignment_testing = False
-        bola_testing = False
+        # Focused BOLA needs the phase-4 access-control checker so dynamic
+        # shards can feed claimed resource templates into check_bola().
+        bola_testing = focused_mode_keeps_phase4_bola(focused_active_family_name, bola_testing)
         ip_reputation = False
         typosquatting = False
         dkim_enumeration = False

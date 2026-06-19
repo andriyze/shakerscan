@@ -216,6 +216,18 @@ def test_focused_bola_poe_settings_are_bounded_and_faster_than_global_safe_delay
     }
 
 
+def test_focused_bola_keeps_phase4_bola_checker_enabled():
+    assert scanner_mod.focused_mode_keeps_phase4_bola("bola", False) is True
+    assert scanner_mod.focused_mode_keeps_phase4_bola("idor", False) is True
+
+
+def test_other_focused_families_disable_phase4_bola_checker():
+    assert scanner_mod.focused_mode_keeps_phase4_bola("sqli", True) is False
+    assert scanner_mod.focused_mode_keeps_phase4_bola("xss", True) is False
+    assert scanner_mod.focused_mode_keeps_phase4_bola(None, True) is True
+    assert scanner_mod.focused_mode_keeps_phase4_bola(None, False) is False
+
+
 def test_broad_active_scan_allows_enrichment_modules():
     assert scanner_mod.focused_family_allows_active_module(None, "dom_xss") is True
     assert scanner_mod.focused_family_allows_active_module("all", "bola_idor") is True
