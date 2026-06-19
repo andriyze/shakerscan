@@ -880,6 +880,36 @@ def test_claim_test_batch_default_ordering_stays_generic_priority():
 
     first_query, _first_args = conn.fetchrow_calls[0]
     rows_query, _rows_args = conn.fetch_calls[0]
+    assert "CASE" in first_query
+    assert "te.path ~*" in rows_query
+    assert "THEN -300" in rows_query
+    assert "te.priority_score DESC" in rows_query
+
+
+def test_claim_test_batch_auth_family_keeps_auth_flow_priority():
+    target_id = uuid.uuid4()
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([
+        {
+            "id": endpoint_id,
+            "method": "POST",
+            "path": "/api/auth/login",
+            "param_shape": "email,password",
+            "auth_state": "anonymous",
+            "param_location": "json",
+            "replay_spec": 'POST /api/auth/login json:{"email":"test@example.com","password":"TestPass123!"}',
+            "content_type": "application/json",
+            "campaign_id": None,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 0,
+        }
+    ])
+
+    asyncio.run(a.claim_test_batch(conn, str(target_id), check_family="auth"))
+
+    first_query, _first_args = conn.fetchrow_calls[0]
+    rows_query, _rows_args = conn.fetch_calls[0]
     assert "CASE" not in first_query
     assert "ORDER BY te.priority_score DESC, te.last_seen_at DESC" in rows_query
 

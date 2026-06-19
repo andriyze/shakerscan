@@ -92,6 +92,10 @@ _BOLA_COLLECTION_SQL_RE = (
     + "(/(all|list|listing|recent|history|past|mine|my|owned|search|results))?/?$"
 )
 _BOLA_DETAIL_SQL_RE = _BOLA_RESOURCE_SQL_RE + "/([^/]*\\{[^/]+\\}|<[^/]+>|[0-9]+|[0-9a-fA-F-]{24,36})/?$"
+_AUTH_FLOW_SQL_RE = (
+    "/(auth|oauth|session|sessions|login|signin|signup|register|registration|"
+    "password|reset-password|reset_password|change-password|change_password|token|tokens)(/|$)"
+)
 
 VALID_AUTH_STATES = frozenset({"anonymous", "user1", "user2"})
 ATTEMPT_TERMINAL_STATUSES = (
@@ -451,10 +455,26 @@ def _claim_order_clause(family: str) -> str:
     mutation guesses, which can burn focused BOLA batches before object replay
     sees owner-scoped list/detail routes.
     """
-    if normalize_check_family(family) != "bola":
+    normalized_family = normalize_check_family(family)
+    if normalized_family == "auth":
         return "te.priority_score DESC, te.last_seen_at DESC"
+    if normalized_family != "bola":
+        return f"""
+            CASE
+                WHEN te.path ~* '{_AUTH_FLOW_SQL_RE}' THEN -300
+                WHEN te.method = 'GET' AND te.path ~* '{_BOLA_DETAIL_SQL_RE}' THEN 260
+                WHEN te.method = 'GET' AND te.path ~* '{_BOLA_COLLECTION_SQL_RE}' THEN 230
+                WHEN te.method = 'GET' AND te.path ~* '{_BOLA_RESOURCE_SQL_RE}' THEN 180
+                WHEN te.method IN ('POST', 'PUT', 'PATCH', 'DELETE') AND te.path ~* '{_BOLA_RESOURCE_SQL_RE}' THEN 120
+                WHEN COALESCE(te.param_shape, '') <> '' THEN 40
+                ELSE 0
+            END DESC,
+            te.priority_score DESC,
+            te.last_seen_at DESC
+        """
     return f"""
         CASE
+            WHEN te.path ~* '{_AUTH_FLOW_SQL_RE}' THEN -300
             WHEN te.method = 'GET' AND te.path ~* '{_BOLA_DETAIL_SQL_RE}' THEN 500
             WHEN te.method = 'GET' AND te.path ~* '{_BOLA_COLLECTION_SQL_RE}' THEN 450
             WHEN te.method = 'GET' AND te.path ~* '{_BOLA_RESOURCE_SQL_RE}' THEN 300
