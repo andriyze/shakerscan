@@ -2584,7 +2584,22 @@ async def authz_resource_replay_test(
                 )
                 resource_like = _looks_like_bola_resource_response(candidate["url"], attacker_body)
                 user_signals = extract_user_specific_signals(attacker_body)
-                if equivalent and resource_like and (user_signals or sensitive_fields):
+                # CRITICAL authz-proof guard: confirm the attacker actually received the
+                # REQUESTED owner object, not their OWN object echoed back by an
+                # id-ignoring endpoint (e.g. Juice Shop /rest/saveLoginIp returns the
+                # caller's own profile regardless of ?id=). Such endpoints produce
+                # equivalent-looking responses that are NOT cross-principal access:
+                # the attacker's body carries their own id (686), not the owner's (685).
+                attacker_returned_ids = _resource_ids_from_response(attacker_body)
+                if not object_id:
+                    owner_object_received = True
+                elif attacker_returned_ids:
+                    owner_object_received = object_id in attacker_returned_ids
+                else:
+                    owner_object_received = object_id in attacker_body
+                if not owner_object_received:
+                    attempt["last_verdict"] = "id_ignored_returned_own_object"
+                if equivalent and resource_like and owner_object_received and (user_signals or sensitive_fields):
                     results["vulnerable"] = True
                     results["cross_principal_violations"] += 1
                     path_hash = hashlib.sha256(
@@ -2601,6 +2616,9 @@ async def authz_resource_replay_test(
                         "object_id_key": ref.get("object_id_key"),
                         "object_id_location": candidate["object_id_location"],
                         "object_id_absent_from_attacker_listing": True,
+                        # Proof that the attacker received the OWNER's object, not their own.
+                        "requested_object_id": object_id,
+                        "attacker_returned_object_ids": sorted(attacker_returned_ids)[:8],
                         "owner_status": owner_status,
                         "attacker_status": attacker_status,
                         "responses_equivalent": True,
