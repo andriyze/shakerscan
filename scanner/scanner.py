@@ -11003,6 +11003,20 @@ async def build_report(target: str,
     if coverage_tracker:
         report["smart_coverage"] = coverage_tracker.to_dict()
 
+    # Hunter-campaign self miss-analysis (backward-compatible report section): what
+    # was discovered/attempted/confirmed, what proof is missing, what is blocked by a
+    # missing prerequisite, and what to run next. Derived from existing report data.
+    try:
+        from scanner_tools.hunter_summary import build_hunter_summary
+        report["hunter_summary"] = build_hunter_summary(report, options={
+            "auth_header": auth_header, "auth_cookies": auth_cookies,
+            "auth_headers_json": auth_headers_json, "login_username": login_username,
+            "login_password": login_password, "user2_header": user2_header,
+            "user2_cookies": user2_cookies, "budget_profile": budget_profile,
+        })
+    except Exception as _hs_err:
+        print(f"[hunter] summary skipped: {_hs_err}", file=sys.stderr)
+
     report["scan_completion_status"] = build_scan_completion_status(
         coverage_status=coverage.get("status"),
         checks_skipped=checks_skipped,

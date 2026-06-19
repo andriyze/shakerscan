@@ -1,0 +1,10 @@
+{
+  "_note": "Expected vulnerability FAMILIES and auth states for miss-analysis. No challenge names, routes, or solutions are encoded — only what classes of bug a strong scan should confirm.",
+  "profile": "juice_shop",
+  "families": {
+    "sqli": {"min_severity": "critical", "min_confirmed": 1},
+    "xss":  {"min_severity": "high", "min_confirmed": 1},
+    "bola": {"min_severity": "high", "min_confirmed": 1}
+  },
+  "auth_states": ["anonymous", "user1"]
+}
