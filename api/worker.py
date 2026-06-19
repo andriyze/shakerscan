@@ -6126,11 +6126,50 @@ async def async_main():
         print("Worker shutdown complete", flush=True)
 
 
+def _worker_build_fingerprint() -> str | None:
+    """Source-tree checksum of this worker's runtime (keyed by basename so it
+    matches the API's host-checkout fingerprint when the code is current)."""
+    import hashlib
+    file_map = {
+        "scanner.py": "/app/scanner.py",
+        "active_checks.py": "/app/scanner_tools/active_checks.py",
+        "parallel_scan.py": "/app/parallel_scan.py",
+        "finding_validator.py": "/app/scanner_tools/finding_validator.py",
+    }
+    h = hashlib.sha256()
+    hashed = 0
+    for name in sorted(file_map):
+        try:
+            with open(file_map[name], "rb") as fh:
+                h.update(name.encode()); h.update(b"\0"); h.update(fh.read())
+            hashed += 1
+        except OSError:
+            continue
+    return h.hexdigest()[:16] if hashed else None
+
+
+def report_worker_build_fingerprint() -> None:
+    """Register this worker's build fingerprint in Redis so GET /workers can show
+    per-worker current/stale status without shelling into containers."""
+    try:
+        import socket as _socket
+        hostname = os.environ.get("HOSTNAME") or os.environ.get("WORKER_ID") or _socket.gethostname()
+        get_redis().hset("shakerscan:worker_build", hostname, json.dumps({
+            "build_fingerprint": _worker_build_fingerprint(),
+            "scanner_version": os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+            "reported_at": utc_now_iso(),
+        }))
+        print(f"[worker] registered build fingerprint for {hostname}", flush=True)
+    except Exception as e:
+        print(f"[worker] build fingerprint report failed: {e}", file=sys.stderr, flush=True)
+
+
 def main():
     """Entry point - runs async main in single event loop."""
     # Run blocking preflight subprocesses synchronously before entering the
     # event loop so they cannot stall asyncio tasks or healthchecks.
     run_worker_preflight()
+    report_worker_build_fingerprint()
     asyncio.run(async_main())
 
 

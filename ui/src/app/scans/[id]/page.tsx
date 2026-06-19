@@ -83,7 +83,7 @@ function CoverageMetric({ label, value, accent = 'text-white' }: { label: string
   )
 }
 
-function ScanVerdictCard({ scan, buildVersion }: { scan: any; buildVersion?: string | null }) {
+function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; buildVersion?: string | null; buildFingerprint?: string | null }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
     .map((severity) => [severity, severityCounts[severity]] as const)
@@ -94,9 +94,14 @@ function ScanVerdictCard({ scan, buildVersion }: { scan: any; buildVersion?: str
   const scanTypeLabel = formatScanTypeLabel(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
+  const scanFingerprint: string | null = scan?.result?.build_fingerprint || null
   // Red when the scan ran on a different build than the API currently serves
-  // (stale image/worker) — surfaces the version skew we keep hitting in ops.
-  const versionMismatch = Boolean(scanVersion && buildVersion && scanVersion !== buildVersion)
+  // (stale image/worker). Prefer the source-tree fingerprint — it catches stale
+  // 'dev' images that the version label can't — and fall back to the label.
+  const versionMismatch = Boolean(
+    (scanFingerprint && buildFingerprint && scanFingerprint !== buildFingerprint) ||
+    (!scanFingerprint && scanVersion && buildVersion && scanVersion !== buildVersion)
+  )
 
   return (
     <Card className="p-6 mb-6">
@@ -432,6 +437,7 @@ function ScanDetailContent() {
   const [logs, setLogs] = useState<string[]>([])
   const [logsError, setLogsError] = useState<string | null>(null)
   const [buildVersion, setBuildVersion] = useState<string | null>(null)
+  const [buildFingerprint, setBuildFingerprint] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
 
   // Build back URL with preserved filters
@@ -481,7 +487,10 @@ function ScanDetailContent() {
 
   useEffect(() => {
     getHealth()
-      .then((h) => setBuildVersion(h?.scanner_version || null))
+      .then((h) => {
+        setBuildVersion(h?.scanner_version || null)
+        setBuildFingerprint(h?.build_fingerprint || null)
+      })
       .catch(() => {})
   }, [])
 
@@ -651,7 +660,7 @@ function ScanDetailContent() {
         </Link>
         <span className="text-gray-500">Back to scans</span>
       </div>
-      {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} />}
+      {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
       <ReportView

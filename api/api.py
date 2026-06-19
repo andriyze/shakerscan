@@ -4953,6 +4953,48 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
     }
 
 
+def _hash_source_files(file_map: dict) -> Optional[str]:
+    """Hash runtime source files keyed by logical name (basename), stable order.
+
+    Immutable build identity that detects drift even when GIT_COMMIT is unset:
+    keyed by basename so the API (hashing the host checkout) and a worker (hashing
+    /app) yield the SAME checksum when the code matches, and differ when it doesn't.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    hashed = 0
+    for name in sorted(file_map):
+        try:
+            with open(file_map[name], "rb") as fh:
+                h.update(name.encode())
+                h.update(b"\0")
+                h.update(fh.read())
+            hashed += 1
+        except OSError:
+            continue
+    return h.hexdigest()[:16] if hashed else None
+
+
+def expected_build_fingerprint() -> Optional[str]:
+    """Source checksum of the CURRENT checkout (host bind-mount at /workspace),
+    falling back to the API's own /app runtime. This is the 'current build' the UI
+    compares each scan's / worker's reported fingerprint against."""
+    workspace = {
+        "scanner.py": "/workspace/scanner/scanner.py",
+        "active_checks.py": "/workspace/scanner/scanner_tools/active_checks.py",
+        "parallel_scan.py": "/workspace/api/parallel_scan.py",
+        "finding_validator.py": "/workspace/scanner/scanner_tools/finding_validator.py",
+    }
+    if all(os.path.exists(p) for p in workspace.values()):
+        return _hash_source_files(workspace)
+    return _hash_source_files({
+        "scanner.py": "/app/scanner.py",
+        "active_checks.py": "/app/scanner_tools/active_checks.py",
+        "parallel_scan.py": "/app/parallel_scan.py",
+        "finding_validator.py": "/app/scanner_tools/finding_validator.py",
+    })
+
+
 @app.get("/health")
 async def health():
     """Health check."""
@@ -4974,9 +5016,12 @@ async def health():
         "status": "healthy" if db_ok and redis_ok else "degraded",
         "database": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error",
-        # Current build version new scans are stamped with; the UI flags any scan
-        # whose result.scanner_version differs (ran on a stale image/worker).
+        # Current build identity. scanner_version is the human label (git short sha
+        # when set, else "dev"); build_fingerprint is a source-tree checksum that
+        # differs whenever the runtime code differs — so the UI can flag a scan or
+        # worker on a stale image even when scanner_version is "dev" on both.
         "scanner_version": os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+        "build_fingerprint": expected_build_fingerprint(),
     }
 
 
@@ -11329,6 +11374,31 @@ async def get_workers():
 
         containers = json_module.loads(body) if body.strip().startswith('[') else []
 
+        # Per-worker build identity: workers self-register their source fingerprint
+        # in Redis (keyed by container hostname == short container id) on startup.
+        # Match it here so the UI can show current/stale per worker WITHOUT shelling
+        # into containers.
+        expected_fp = expected_build_fingerprint()
+        try:
+            worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+        except Exception:
+            worker_build_raw = {}
+        worker_build: dict = {}
+        for host, raw in worker_build_raw.items():
+            host_s = host.decode() if isinstance(host, bytes) else str(host)
+            raw_s = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                worker_build[host_s.lower()] = json.loads(raw_s)
+            except Exception:
+                continue
+
+        def _build_for_container(container_id: str):
+            cid = (container_id or "").lower()
+            for host_s, info in worker_build.items():
+                if host_s and cid.startswith(host_s):
+                    return info
+            return None
+
         # Filter and format worker containers (only shakerscan workers)
         worker_list = []
         for c in containers:
@@ -11336,18 +11406,28 @@ async def get_workers():
             name = names[0].lstrip('/') if names else 'unknown'
             if _is_scan_worker_container_name(name):
                 state = c.get('State', 'unknown')
+                wb = _build_for_container(c.get('Id', '')) or {}
+                reported_fp = wb.get('build_fingerprint')
                 worker_list.append({
                     "name": name,
                     "status": state,
-                    "health": c.get('Status', '')
+                    "health": c.get('Status', ''),
+                    "build_fingerprint": reported_fp,
+                    "scanner_version": wb.get('scanner_version'),
+                    # True/False when the worker reported a fingerprint; null until it
+                    # has registered (e.g. just started, or not yet picked up a job).
+                    "build_current": (reported_fp == expected_fp) if (reported_fp and expected_fp) else None,
                 })
 
         running = len([w for w in worker_list if w.get("status") == "running"])
+        stale_workers = [w["name"] for w in worker_list if w.get("build_current") is False]
 
         return {
             "count": running,
             "workers": worker_list,
-            "max_allowed": WORKER_SCALE_MAX
+            "max_allowed": WORKER_SCALE_MAX,
+            "expected_build_fingerprint": expected_fp,
+            "stale_workers": stale_workers,
         }
     except FileNotFoundError:
         return {

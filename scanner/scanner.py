@@ -80,6 +80,39 @@ except ImportError:
 
 REPORT_SCHEMA_VERSION = "2026-01-28"
 SCANNER_VERSION = os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
+
+
+def _compute_source_fingerprint(file_map: dict[str, str]) -> str | None:
+    """Hash runtime source files keyed by logical name (basename), in stable order.
+
+    This is an immutable build identity that detects code drift even when
+    SCANNER_VERSION/GIT_COMMIT are unset (local dev). Any change to the hashed
+    files — a new commit, an uncommitted edit, or a stale baked image — yields a
+    different checksum. Keyed by basename so the API (hashing the host checkout)
+    and the worker (hashing /app) produce the SAME value when the code matches.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    hashed = 0
+    for name in sorted(file_map):
+        try:
+            with open(file_map[name], "rb") as fh:
+                h.update(name.encode())
+                h.update(b"\0")
+                h.update(fh.read())
+            hashed += 1
+        except OSError:
+            continue
+    return h.hexdigest()[:16] if hashed else None
+
+
+# The scanner subprocess runs inside the worker container; hash its /app runtime.
+SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint({
+    "scanner.py": "/app/scanner.py",
+    "active_checks.py": "/app/scanner_tools/active_checks.py",
+    "parallel_scan.py": "/app/parallel_scan.py",
+    "finding_validator.py": "/app/scanner_tools/finding_validator.py",
+})
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
 
 
@@ -10784,6 +10817,9 @@ async def build_report(target: str,
         "coverage_status": coverage["status"],
         "schema_version": REPORT_SCHEMA_VERSION,
         "scanner_version": SCANNER_VERSION,
+        # Source-tree checksum of the runtime that produced this scan — lets the UI
+        # flag a scan run on a stale image even when scanner_version is "dev".
+        "build_fingerprint": SCANNER_BUILD_FINGERPRINT,
         "options": {
             "public_only": public_only,
             "active_checks_requested": active_checks,
