@@ -692,3 +692,20 @@ def test_dynamic_coverage_family_is_worker_aware_not_endpoint_count():
     # lanes = broad,sqli,xss,bola,auth (5); ~3 pull workers/worker -> ~1 per lane
     assert 5 <= len(bounded.shards) <= 15
     assert len(unbounded.shards) > len(bounded.shards) * 3  # endpoint-based is far larger
+
+
+def test_harvest_preserves_spa_hash_routes_for_xss_lane():
+    # SPA client routes live in url fragments (#/search?q=). Harvest must keep them
+    # so the coverage XSS lane has hash routes to browser-prove (else DOM XSS is
+    # missing on every coverage scan).
+    recon = {"discovery": {"katana_sample": [
+        "http://t/#/search?q=test",
+        "http://t/#!/profile",
+        "http://t/api/users?id=1",
+    ]}}
+    hv = p.harvest_endpoints(recon, max_endpoints=50)
+    assert any("#/search?q=test" in e for e in hv)
+    assert any("#!/profile" in e for e in hv)
+    assert any("/api/users?id=1" in e for e in hv)
+    # the injectable SPA route should not be collapsed to a bare "/"
+    assert not all(e.endswith(" /") for e in hv)

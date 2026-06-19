@@ -676,13 +676,24 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
         except Exception:
             return
         path = pu.path or "/"
-        key = f"{(method or 'GET').upper()} {path}?{pu.query}" if pu.query else f"{(method or 'GET').upper()} {path}"
+        # Preserve SPA hash-route fragments (#/search?q=, #!/path). urlparse puts the
+        # route in `fragment`, so a path-only key collapses EVERY client route to "/"
+        # and the coverage worklist never carries them — the XSS lane then has no
+        # hash routes to prove (the cause of DOM XSS missing on coverage scans).
+        frag = (pu.fragment or "").strip()
+        is_spa_route = frag.startswith("/") or frag.startswith("!/")
+        if is_spa_route:
+            key = f"{(method or 'GET').upper()} {path}#{frag}"
+            injectable = "?" in frag
+        else:
+            key = f"{(method or 'GET').upper()} {path}?{pu.query}" if pu.query else f"{(method or 'GET').upper()} {path}"
+            injectable = bool(pu.query)
         if key in discovery_seen or key in seen:
             return
         if _is_static_asset_endpoint(key):
             return
         discovery_seen.add(key)
-        (with_params if pu.query else without_params).append(key)
+        (with_params if injectable else without_params).append(key)
 
     def add_list(items: Any, default_method: str = "GET") -> None:
         for e in items or []:
