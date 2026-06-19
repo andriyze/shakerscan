@@ -107,6 +107,82 @@ def test_worker_build_current_is_unknown_until_worker_registers():
     ) is None
 
 
+# ----- manual / session finding evidence redaction ------------------------
+
+def test_create_manual_finding_redacts_live_auth_material(monkeypatch):
+    """Regression: live auth material (bearer tokens / JWTs) in a manual finding's
+    evidence, request, and response must be redacted before DB persistence — the
+    same guarantee save_findings gives scanner findings. create_manual_finding and
+    create_session_finding share this redaction block, so driving the self-contained
+    manual endpoint covers both."""
+    import json as _json
+
+    captured = {}
+    target_uuid = uuid.uuid4()
+    finding_uuid = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            if "FROM targets WHERE url" in query:
+                return {"id": target_uuid}
+            # No pre-existing finding -> proceed to INSERT.
+            return None
+
+        async def fetchval(self, query, *args):
+            if "INSERT INTO findings" in query:
+                captured["args"] = args
+                return finding_uuid
+            return None
+
+        async def execute(self, query, *args):
+            return "UPDATE 1"
+
+    class _FakePool:
+        def acquire(self):
+            conn = _FakeConn()
+
+            class _Ctx:
+                async def __aenter__(self_inner):
+                    return conn
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool())
+
+    token = "eyJabc123.def456.ghi789"
+    request = types.SimpleNamespace(
+        target="example.com",
+        title="BOLA on basket",
+        description="cross-user read",
+        severity="critical",
+        cvss_score=9.1,
+        category="BOLA",
+        cwe="CWE-639",
+        url="https://example.com/rest/basket/9",
+        evidence=f"GET /rest/basket/9 with Authorization: Bearer {token} returns User1 data",
+        remediation=None,
+        request=f"GET /rest/basket/9 HTTP/1.1\nAuthorization: Bearer {token}",
+        response=f"200 OK\nx-token: {token}",
+        notes=None,
+    )
+
+    result = asyncio.run(api_module.create_manual_finding(request))
+    assert result["status"] == "created"
+
+    args = captured["args"]
+    evidence_arg, redacted_request, redacted_response = args[9], args[10], args[11]
+    # Evidence column is JSON; the proof string must be sanitised.
+    assert token not in evidence_arg
+    assert "[REDACTED]" in evidence_arg
+    assert "[REDACTED]" in _json.loads(evidence_arg)["proof"]
+    # Separate request/response columns must be sanitised too.
+    assert token not in redacted_request and "[REDACTED]" in redacted_request
+    assert token not in redacted_response and "[REDACTED]" in redacted_response
+
+
 # ----- _int_env -----------------------------------------------------------
 
 def test_int_env_returns_default_when_unset(monkeypatch):

@@ -11064,7 +11064,12 @@ async def create_manual_finding(request: ManualFindingCreate):
                     'message': 'Finding already exists'
                 }
 
-        # Build evidence JSON if provided
+        # Build evidence JSON if provided. Redact live auth material (bearer
+        # tokens, JWTs, auth headers/cookies) the same way scanner findings are
+        # sanitised in save_findings_from_partial — manual/session evidence
+        # captured during interactive testing routinely carries live credentials
+        # we must never persist (they leak via the API/UI and outlive the
+        # engagement).
         evidence_json = None
         if request.evidence or request.remediation:
             evidence_json = {}
@@ -11072,6 +11077,9 @@ async def create_manual_finding(request: ManualFindingCreate):
                 evidence_json['proof'] = request.evidence
             if request.remediation:
                 evidence_json['remediation'] = request.remediation
+            evidence_json = _redact_finding_evidence(evidence_json)
+        redacted_request = _redact_finding_evidence(request.request)
+        redacted_response = _redact_finding_evidence(request.response)
 
         # Create new finding
         finding_id = await conn.fetchval("""
@@ -11094,8 +11102,8 @@ async def create_manual_finding(request: ManualFindingCreate):
             request.cwe,
             request.url or normalized_target,
             json.dumps(evidence_json) if evidence_json else None,
-            request.request,
-            request.response,
+            redacted_request,
+            redacted_response,
             request.notes
         )
 
@@ -12340,7 +12348,12 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
                     'message': 'Finding already exists'
                 }
 
-        # Build evidence JSON if provided
+        # Build evidence JSON if provided. Redact live auth material (bearer
+        # tokens, JWTs, auth headers/cookies) the same way scanner findings are
+        # sanitised in save_findings_from_partial — manual/session evidence
+        # captured during interactive testing routinely carries live credentials
+        # we must never persist (they leak via the API/UI and outlive the
+        # engagement).
         evidence_json = None
         if request.evidence or request.remediation:
             evidence_json = {}
@@ -12348,6 +12361,9 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
                 evidence_json['proof'] = request.evidence
             if request.remediation:
                 evidence_json['remediation'] = request.remediation
+            evidence_json = _redact_finding_evidence(evidence_json)
+        redacted_request = _redact_finding_evidence(request.request)
+        redacted_response = _redact_finding_evidence(request.response)
 
         # Create new finding
         finding_id = await conn.fetchval("""
@@ -12371,8 +12387,8 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
             request.cwe,
             request.url or normalized_target,
             json.dumps(evidence_json) if evidence_json else None,
-            request.request,
-            request.response,
+            redacted_request,
+            redacted_response,
             request.notes,
             session_id
         )
