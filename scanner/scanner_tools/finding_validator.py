@@ -218,6 +218,21 @@ def validate_xss(
     tool = finding.get("tool", "").lower()
     payload = evidence.get("payload", "") or evidence.get("detail", {}).get("payload", "")
 
+    # Browser execution proof (a fired dialog / console execution) is the strongest
+    # possible evidence and is INDEPENDENT of any HTTP response body: a DOM / hash-route
+    # XSS executes client-side, so its payload never appears in the server response.
+    # Trust it FIRST — before the response-body context checks below — otherwise a
+    # proven DOM XSS is downgraded to medium just because the payload isn't echoed in
+    # the response (or because no response body was captured for a browser-side finding).
+    if finding.get("verified") is True and _finding_has_execution_proof(finding):
+        return ValidationResult(
+            verified=True,
+            confidence=max(0.85, float(finding.get("confidence") or 0.85)),
+            evidence=(payload[:100] if payload else "xss execution proof"),
+            reason="Browser execution proof (dialog/console) — confirmed XSS",
+            evidence_level="confirmed_exploit",
+        )
+
     # Trust dalfox findings - it does its own verification
     # Dalfox only reports confirmed XSS, not potential
     if tool == "dalfox":
