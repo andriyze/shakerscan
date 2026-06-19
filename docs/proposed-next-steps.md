@@ -1,14 +1,28 @@
 # Proposed Next Steps — DAST Engine Quality Plan
 
-**Status:** proposal, 2026-06-18 (rev. for hunter-campaign north star). Grounded against live scans of
-the crAPI + Juice Shop honey targets on the rebuilt engine, plus code audit. The headline problem is
-no longer "which detector to build" — it is **why scans find only the tip of the iceberg**. This plan
-leads with that, then ladders to the hunter-campaign architecture (see "North star" below).
+**Status:** proposal, 2026-06-18 (rev. 2026-06-19 for current lab evidence). Grounded against live
+scans of the crAPI + Juice Shop honey targets on the rebuilt engine, plus code audit. The headline
+problem is no longer "which detector to build" — it is **which families/workflows still fail to
+produce proof-quality findings**. This plan leads with that, then ladders to the hunter-campaign
+architecture (see "North star" below).
 
-## TL;DR — why we find so little
-On both targets the engine found a *fraction* of the known bugs (Juice Shop: 2 SQLi, 0 XSS, 0 IDOR;
-crAPI: 13 read-BOLA, 0 write-BOLA / mass-assignment / JWT). The audit shows the cause is **not weak
-detectors** — it is **discovery + scope + auth**:
+## TL;DR — what still misses
+Current lab evidence is mixed but materially better than the original baseline:
+
+- **Juice Shop SQLi works:** recent completed focused scans found two verified Critical
+  `smart_sqli` findings (`/rest/products/search`, `/rest/user/login`), both marked exploited with
+  high confidence.
+- **crAPI read-BOLA/Authz works:** repeated completed focused campaigns found 11-12 verified High
+  `smart_authz` findings per parent, with cross-principal replay evidence.
+- **XSS still fails:** no recent High/Critical XSS findings appear on Juice Shop.
+- **Workflow/write-depth still fails:** crAPI read-BOLA is proven, but write-BOLA/BFLA,
+  mass-assignment, JWT, and richer workflow hypotheses remain missing or under-fired.
+- **Broad all-family execution still needs sizing:** a recent Juice Shop broad `coverage_family`
+  campaign planned 140 shards on three workers; a crAPI broad campaign had heartbeat-failed shards.
+  That is an execution-quality problem, not a sign that more shards automatically means more
+  coverage.
+
+The audit shows the remaining misses come from **discovery + scope + auth + workflow/proof depth**:
 
 | Symptom (measured) | Evidence | Consequence |
 |---|---|---|
@@ -19,9 +33,10 @@ detectors** — it is **discovery + scope + auth**:
 | Anonymous-only | `auth_states_tested: ['anonymous']` (Juice Shop) | Every authenticated SQLi/XSS/IDOR is invisible — and that's most of them |
 | Wrong endpoints/methods selected | active set was `PUT/POST/PATCH`, **no GET**; `GET /rest/products/search?q=` (famous SQLi) not in the tested set | The single most famous Juice Shop SQLi is never sent a payload |
 
-**The detectors mostly work** (login auth-bypass SQLi ✅, cross-principal read-BOLA ✅, and a full
-JWT + mass-assignment suite already exists in code). They just never receive the right
-endpoints/params/auth. **Fix discovery + scope + auth first; it unlocks the existing detectors.**
+**Some detectors now clearly work** (login/search SQLi ✅, cross-principal read-BOLA ✅, and a full
+JWT + mass-assignment suite already exists in code). The remaining work is to feed every detector
+the right endpoints/params/auth/workflow state, and to make XSS/BOLA proof depth browser/stateful
+instead of just endpoint-attempt based.
 
 ## Where the real findings live (the target map)
 Use these as benchmark fixtures (expected families/routes, not hardcoded answers).

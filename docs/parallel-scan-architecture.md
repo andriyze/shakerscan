@@ -1,6 +1,6 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
-**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented; dynamic pull-based Full Coverage allocation is now the default for coverage parents, with explicit static slices kept as fallback. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md).
+**Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented; dynamic pull-based Full Coverage allocation is now the default for coverage parents, with explicit static slices kept as fallback. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md). Current DAST-quality lesson from Juice Shop/crAPI validation: parallelism is the execution substrate, not the goal. The scanner now proves real Critical SQLi and High BOLA/Authz on lab apps, but broad fan-out still needs worker-aware sizing, family-specific campaigns, and browser/stateful XSS/BOLA workflows to consistently raise true High/Critical coverage.
 **Date:** 2026-06-14 (implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
@@ -21,10 +21,12 @@
 
 ## Shared capability status matrix (agent quick read)
 
-This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
-one compact starting point before they choose an implementation increment. The docs describe intended
-architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
-Every implementation task must verify the current state with search/tests before editing.
+This matrix is duplicated only in the two canonical local-execution docs
+(`parallel-scan-architecture.md` and `continuous-asm-architecture.md`). It gives AI coding/review
+agents one compact starting point before they choose an implementation increment. The docs describe
+intended architecture; the current code, migrations, and tests remain the source of truth for
+shipped behavior. Every implementation task must verify the current state with search/tests before
+editing.
 
 | Capability | Status | Next implementation prompt |
 |---|---|---|
@@ -33,9 +35,10 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
+| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
+| DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -74,6 +77,41 @@ request-accurate budgets for internally discovered standalone scans; and more ru
 families beyond SQLi/XSS/Auth/BOLA.
 
 ---
+
+## Current DAST quality lessons (2026-06-19)
+
+Live Juice Shop and crAPI validation changed the interpretation of "parallel scanning":
+
+- **What is working:** focused runs now find real, verified issues: Juice Shop produces Critical
+  SQLi on `/rest/products/search` and `/rest/user/login`; crAPI produces High cross-principal
+  BOLA/Authz findings through `smart_authz`.
+- **What is not working yet:** XSS is still not reliably found on Juice Shop; broad all-family
+  runs can over-shard badly; crAPI broad runs have shown shard heartbeat failures; and BOLA depth is
+  still mostly read-side, not workflow/write-side.
+- **Bad pattern observed:** a broad `coverage_family` Juice Shop run planned 140 shards while only
+  three workers were available. That is not "more coverage"; it is queue/merge overhead and delayed
+  evidence. Shard count must be bounded by live workers, target size, and campaign class.
+- **Correct model:** run shared recon once, build a durable endpoint/app graph, then run focused
+  family campaigns over that graph: SQLi, XSS, BOLA/Auth, plus future families. Each family gets its
+  own prioritization and proof budget, and merge produces one logical scan report.
+
+Practical rules for new implementation work:
+
+1. **Worker-aware fan-out.** A parent should normally create at most a small multiple of available
+   workers for active family lanes. If more endpoints remain, use larger dynamic batches or repeated
+   campaign waves, not hundreds of pending shards.
+2. **Do not dilute focused families.** `check_family=sqli`, `xss`, `auth`, or `bola` must never be
+   silently converted into broad `coverage`. Parallelize the requested family with
+   `coverage_family`, or run direct when only one worker/batch is useful.
+3. **Shared recon, separate proof lanes.** SQLi, XSS, and BOLA should share browser/HAR/JS/OpenAPI
+   discovery, but their active probes should be separate lanes with separate budgets and evidence
+   contracts.
+4. **XSS needs browser-first proof.** Treat reflected/stored/DOM XSS as a Playwright-backed lane:
+   inject into browser-discovered params/forms/content fields, revisit affected views, and capture
+   console/screenshot/DOM evidence.
+5. **BOLA needs stateful workflows.** The engine should create or harvest fresh object IDs, preserve
+   producer->consumer links, replay as user1/user2/anonymous, and eventually support safe
+   non-destructive write/BFLA checks under Lab/deep intent.
 
 ## Product behavior
 
@@ -129,13 +167,25 @@ Performance expectations:
 - **Hybrid endpoint x family depth:** API/AI callers can set `shard_strategy=coverage_family`
   to run the same discover-once recon, then split work into broad, SQLi-focused, and XSS-focused
   lanes. With dynamic allocation, each lane claims campaign-scoped endpoint batches and records
-  endpoint+family attempt rows. `coverage_allocation=static` remains the rollback path.
+  endpoint+family attempt rows. When primary/second-user auth and Lab/deep intent are present,
+  Auth/BOLA lanes may be added explicitly or through the gated family-union path; without those
+  preconditions they remain fail-closed. `coverage_allocation=static` remains the rollback path.
 - **Auto mode today:** when enabled, API submission, batch scans, target scans, schedules,
   and Scans-page reruns all use the same policy. Active scans without explicit endpoints resolve
   to `coverage`, not `family`; explicit Normal/Parallel on New Scan overrides the global policy
   for that scan only.
 - **Zero-rediscovery child mode:** coverage children skip generic crawl/discovery/Nuclei work and
   run active checks only over assigned endpoint slices or dynamically claimed endpoint batches.
+
+Worker-aware sizing requirement:
+
+- Dynamic coverage should prefer **waves** over massive shard counts. Plan enough runnable work to
+  keep the current worker fleet busy, then let allocator claims continue until the campaign budget is
+  spent. A run with 3 workers should not create 140 active child scan rows just because the endpoint
+  graph is large.
+- `coverage_dynamic_batch_size`, `coverage_dynamic_max_batches`, and `shard_concurrency` are
+  internal pressure controls. They should be resolved from live worker count, target class, and
+  family depth unless the caller explicitly overrides them.
 
 API shape for the high-budget path:
 

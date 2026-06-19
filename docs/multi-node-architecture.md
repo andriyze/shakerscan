@@ -8,26 +8,16 @@ from many machines.
 **Related designs:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [continuous-asm-architecture.md](continuous-asm-architecture.md).
 
-## Shared capability status matrix (agent quick read)
+## Capability Status
 
-This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
-one compact starting point before they choose an implementation increment. The docs describe intended
-architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
-Every implementation task must verify the current state with search/tests before editing.
+Do not duplicate the shared status matrix here. It drifted across docs before and caused agents to
+act on stale capability states. For the current quick-read, use:
 
-| Capability | Status | Next implementation prompt |
-|---|---|---|
-| Parallel parent/plan/shard/merge | Shipped | Maintain, harden, and extend only through focused increments. |
-| Coverage full-worklist fan-out | Shipped | Keep zero-rediscovery child mode stable while dynamic allocation soaks. |
-| ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
-| ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
-| Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
-| Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
-| First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
-| Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
-| HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
+- [parallel-scan-architecture.md](parallel-scan-architecture.md) for parent/plan/shard/merge,
+  coverage, coverage-family, worker-aware sharding, and DAST execution lessons.
+- [continuous-asm-architecture.md](continuous-asm-architecture.md) for inventory, campaigns,
+  leases, attempt ledgers, quality gaps, and continuous retesting.
+- [proposed-next-steps.md](proposed-next-steps.md) for the DAST quality benchmark roadmap.
 
 The parallel-scan design answers: "How does one logical scan fan out into plan, shard,
 and merge jobs?" This document answers: "How can those worker jobs run on more than one

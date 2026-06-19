@@ -1,7 +1,13 @@
 # ASM + Parallel Scanning — Improvement Plan
 
-**Status:** living plan from a live validation run (Juice Shop / crAPI / honey.shakerscan.com,
-2026-06-17). Each item lists the **evidence** observed, the **root cause**, and the **fix**.
+**Status:** archived investigation log from a live validation run (Juice Shop / crAPI /
+honey.shakerscan.com, 2026-06-17). This is no longer a canonical roadmap. Keep it for historical
+evidence/root-cause detail only. Current implementation direction lives in
+[parallel-scan-architecture.md](parallel-scan-architecture.md),
+[continuous-asm-architecture.md](continuous-asm-architecture.md), and
+[proposed-next-steps.md](proposed-next-steps.md).
+
+Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
 planner bug), P3 (observability), P4 (re-classified as a stale-API skew + a misread, not a submit
 bug), A2, and P5 (batch granularity defaults) are **fixed & committed**; A4, P6, and the P1 follow-up

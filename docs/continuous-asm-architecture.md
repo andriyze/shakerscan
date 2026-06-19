@@ -10,6 +10,10 @@ using attempt facts for the top-level coverage when available. Full Coverage par
 overlay campaign attempt-ledger rollups when merge-time attempt rows exist. Dynamic pull-based Full
 Coverage allocation is now the default for one-shot Full Coverage parents; `coverage_allocation=static`
 and `COVERAGE_ALLOCATION_DEFAULT=static` keep the legacy round-robin path available as fallback.
+Current DAST-quality lesson from Juice Shop/crAPI validation: ASM must measure and schedule
+campaign quality, not just endpoint touch count. The engine now proves real Critical SQLi and High
+BOLA/Authz on lab apps, but XSS, workflow/write-BOLA, mass-assignment, and JWT remain quality gaps
+that ASM should expose as family/proof/workflow gaps.
 **Date:** 2026-06-16
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
@@ -18,10 +22,12 @@ and `COVERAGE_ALLOCATION_DEFAULT=static` keep the legacy round-robin path availa
 
 ## Shared capability status matrix (agent quick read)
 
-This matrix is duplicated across the architecture docs on purpose. It gives AI coding/review agents
-one compact starting point before they choose an implementation increment. The docs describe intended
-architecture; the current code, migrations, and tests remain the source of truth for shipped behavior.
-Every implementation task must verify the current state with search/tests before editing.
+This matrix is duplicated only in the two canonical local-execution docs
+(`parallel-scan-architecture.md` and `continuous-asm-architecture.md`). It gives AI coding/review
+agents one compact starting point before they choose an implementation increment. The docs describe
+intended architecture; the current code, migrations, and tests remain the source of truth for
+shipped behavior. Every implementation task must verify the current state with search/tests before
+editing.
 
 | Capability | Status | Next implementation prompt |
 |---|---|---|
@@ -30,9 +36,10 @@ Every implementation task must verify the current state with search/tests before
 | ASM endpoint inventory | Shipped | Keep replay/auth identity aligned with scanner telemetry. |
 | ASM campaign/lease/attempt foundation | Shipped | Broaden scanner telemetry schemas beyond smart active SQLi/XSS/hash-route DOM XSS and focused BOLA/Auth. |
 | Full Coverage dynamic allocation | Default shipped | Keep static fallback available and continue live parity/soak on large targets. |
-| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS | Continue soak; keep high-risk BOLA out of default fan-out until a separate automatic-lane gate exists. |
+| Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
+| DAST quality benchmark loop | Active workstream | Track missing family/proof/workflow coverage as first-class ASM gaps, especially XSS on Juice Shop and workflow/write-BOLA on crAPI. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
 | HTTPS broker for untrusted workers | Future | Do not build until owned-fleet primitives are stable. |
@@ -53,6 +60,29 @@ Parallel Full Coverage scans and Continuous ASM should become two views over the
 
 The user-facing model stays simple: "run Full Coverage now" and "keep this target covered" are
 different entry points, not separate engines.
+
+### Current DAST Quality Lessons
+
+Recent Juice Shop/crAPI validation proves the ASM loop must optimize for **campaign quality**:
+
+- **SQLi:** focused SQLi campaigns can produce verified Critical findings on Juice Shop. ASM should
+  prioritize login/search/filter/order/track endpoints with query and JSON/body parameters for SQLi
+  family passes.
+- **BOLA/Authz:** focused dual-user campaigns can produce verified High cross-principal findings on
+  crAPI. ASM should track producer endpoints, object IDs, owner fields, auth states, and
+  producer->consumer links, then retest those links as user1/user2/anonymous.
+- **XSS:** current lab evidence still shows no reliable High/Critical XSS on Juice Shop. ASM should
+  report this as a family/proof gap, not as "covered" just because endpoints were attempted.
+- **Broad fan-out:** a parent that creates hundreds of shards on a small worker fleet delays merged
+  evidence and can trigger shard timeouts. ASM/Full Coverage should prefer worker-aware campaign
+  waves over huge pending shard sets.
+
+Therefore ASM coverage should answer four questions:
+
+1. Which endpoints and parameters exist?
+2. Which auth states and object/workflow contexts have been exercised?
+3. Which vulnerability families have proof-quality attempts on those contexts?
+4. Which benchmark-relevant families are still missing verified evidence?
 
 ---
 
@@ -177,6 +207,9 @@ Still limited:
   on the target. BOLA requires `exploit_depth=true` plus primary and second-user credentials.
   Registered planned families such as `ssrf`, `lfi`, `rce`, and `business_logic` are rejected for
   ASM execution until their scanner integrations exist.
+- Coverage is still too endpoint-centric for DAST quality. A completed/partial endpoint attempt
+  does not mean the app has been meaningfully tested for SQLi, XSS, BOLA, workflow, or proof depth.
+  Gaps and rollups must remain family-aware and should increasingly become workflow/object-aware.
 
 ---
 
@@ -276,6 +309,24 @@ business_logic  -- AI/manual-assisted flows over discovered workflows
 Workers should be able to run one family against claimed endpoint IDs. That makes it possible to run
 wide passive recon during the day, deep SQLi/XSS during a maintenance window, BOLA only when two
 credential sets exist, and lightweight retests immediately after a fix.
+
+Family-specific quality contracts:
+
+- **SQLi:** prioritize endpoints with query/body parameters and auth/login/search/order semantics;
+  prove impact through auth bypass, DB error, timing, or extraction evidence. Do not let generic
+  endpoint breadth starve login/search routes.
+- **XSS:** use browser-backed reflected/stored/DOM proof. Candidate attempts are not enough; a
+  high-quality XSS result needs execution evidence such as DOM mutation, console callback, alert
+  equivalent, screenshot, or stored replay.
+- **BOLA/Authz:** require at least two principals or one principal plus anonymous context. Track
+  producer endpoints, object IDs, sensitive fields, owner/attacker listings, and replay equivalence.
+  Future write/BFLA checks must be non-destructive and Lab/deep-gated.
+- **Workflow/business logic:** record blocked hypotheses when required setup is missing: no primary
+  auth, no second principal, no created object, no writable test account, no resettable lab target.
+
+ASM should expose a campaign as successful only when it improves one of these quality contracts:
+new endpoint/param discovery, new auth/workflow context, new completed family attempts, verified
+findings, or an explicit blocked/proof gap.
 
 ### Inventory v2
 
@@ -612,11 +663,22 @@ Remaining:
 - Continue live parity/soak on large Juice Shop, crAPI, and Honey-style targets while keeping static
   partitioning available as fallback.
 - Add more automatic focused family lanes only after the scanner registry can route those modules
-  cleanly and the family has its own safety gate. BOLA is currently explicit ASM/API only, not an
-  automatic parallel lane; explicit BOLA coverage-family runs stay BOLA-only.
+  cleanly and the family has its own safety gate. Auth/BOLA may run in gated family-union campaigns
+  when primary/second-user auth and Lab/deep intent are present; otherwise they remain fail-closed.
 - Parent scan detail now shows per-shard endpoint contribution, aggregate auth/family rollups, and
   runtime-versus-active-cap budget view from child result summaries. Keep extending these rollups
   only when new scanner telemetry fields are added.
+
+New quality gaps to track:
+
+- **Worker-aware campaign waves:** avoid generating huge pending shard sets when the live worker
+  fleet is small. Use allocator waves and larger batches before creating hundreds of scan rows.
+- **XSS benchmark gap:** Juice Shop XSS remains a failing benchmark until browser-backed
+  reflected/stored/DOM evidence appears in findings.
+- **Workflow/write-BOLA gap:** crAPI read-BOLA is proven; safe non-destructive write/BFLA and
+  workflow/object creation remain future Lab/deep-gated work.
+- **Family/proof rollups:** `/asm/gaps` should distinguish "endpoint attempted" from "SQLi proof
+  attempted", "XSS browser proof attempted", and "BOLA cross-principal proof attempted".
 
 ### Phase D — UX/API/AI Simplification
 
