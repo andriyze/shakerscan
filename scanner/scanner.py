@@ -3886,12 +3886,16 @@ async def build_report(target: str,
         "max_pages": int(scan_budget.get("browser_max_pages") if scan_budget.get("browser_max_pages") is not None else crawl_limits["max_pages"]),
         "max_depth": int(scan_budget.get("browser_max_depth") if scan_budget.get("browser_max_depth") is not None else crawl_limits["max_depth"]),
     }
-    enable_browser_crawl = (smart_mode or complete_mode or bool(auth_session)) and not focused_manual_active_scope
+    # D1: discovery is decoupled from active focus. A focused check_family scan with
+    # NO explicit endpoints (e.g. check_family=xss) must still browser-crawl — that is
+    # where DOM/stored XSS and SPA routes are found. Only an explicit-endpoint or
+    # coverage-shard worklist (zero_rediscovery_scope) skips the crawl to stay fast.
+    enable_browser_crawl = (smart_mode or complete_mode or bool(auth_session)) and not zero_rediscovery_scope
 
     # For smart mode: Quick JS route discovery to seed browser crawl
     # This helps SPAs by finding routes before the browser crawl starts
     browser_seed_urls: list[str] = list(seed_entry_urls)
-    if smart_mode and not no_browser and not focused_manual_active_scope and not zero_rediscovery_scope:
+    if smart_mode and not no_browser and not zero_rediscovery_scope:
         try:
             import re
             import httpx as _httpx
@@ -9790,11 +9794,14 @@ async def build_report(target: str,
             focused_active_family_name,
             "dom_xss",
         )
+        # DOM XSS must run for a focused XSS lane (dom_xss_allowed_by_focus already
+        # gates by family: broad and focused-xss allow it, focused-sqli does not).
+        # Only skip it for explicit-worklist coverage shards (no browser data).
         dom_xss_eligible = (
             smart_mode
             and smart_succeeded
-            and not focused_manual_active_scope
             and dom_xss_allowed_by_focus
+            and not zero_rediscovery_scope
         )
         dom_xss_decision = (
             should_run_active_enrichment(
