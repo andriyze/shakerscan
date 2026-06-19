@@ -2277,6 +2277,11 @@ def _append_bola_finding(
 # Overridable per scan via custom_budget["active_worklist_max"] for huge runs.
 ACTIVE_WORKLIST_EMIT_LIMIT = 5000
 
+# Hard cap (seconds) for the smart-mode BOLA lane when it runs as one part of the
+# broad active mix (not a focused BOLA campaign). Keeps a rich app's BOLA pass from
+# dwarfing SQLi/XSS and blocking scan completion. Override via env for tuning.
+SMART_BOLA_LANE_MAX_SECONDS = int(os.environ.get("SMART_BOLA_LANE_MAX_SECONDS", "150"))
+
 
 def _synthetic_json_value_for_param(param: str) -> Any:
     """Generate a valid seed value for synthetic JSON replay specs."""
@@ -10067,6 +10072,13 @@ async def build_report(target: str,
                     # own timeout. The internal graceful stop preserves partial
                     # findings that a hard cancel would discard.
                     bola_overall_deadline = resolve_bola_deadline_seconds(scan_budget, custom_budget)
+                    # Smart-mode BOLA is one lane of the broad active mix, not the
+                    # whole scan. Its resolver carries a 5-min floor and can equal
+                    # the full active budget, so on a rich app it ran ~8-14 min
+                    # *on top of* SQLi/XSS and blocked the scan from completing.
+                    # Cap the non-focused lane hard; focused BOLA keeps its budget.
+                    if not bola_focused:
+                        bola_overall_deadline = min(bola_overall_deadline, SMART_BOLA_LANE_MAX_SECONDS)
                     if bola_focused:
                         try:
                             from scanner_tools.proof_of_exploit import PoEConfig, configure_poe
