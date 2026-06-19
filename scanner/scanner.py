@@ -6990,6 +6990,13 @@ async def build_report(target: str,
                             if report_severity != original_severity
                             else "dependency_advisory"
                         ),
+                        # Pin CVSS into the reported band so normalize_finding's
+                        # CVSS validation cannot re-promote a dependency-only advisory
+                        # back to high/critical off a generic CWE-829 base score.
+                        "cvss_score": {
+                            "critical": 9.0, "high": 7.5, "medium": 5.0,
+                            "low": 3.0, "info": 0.0,
+                        }.get(report_severity, 5.0),
                     },
                     "CWE-829"
                 ))
