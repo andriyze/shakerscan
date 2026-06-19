@@ -8333,10 +8333,10 @@ async def _filter_reachable_active_endpoints(
     endpoints: list[dict],
     auth_session: Any | None = None,
     *,
-    max_probe: int = 220,
-    max_parents: int = 80,
-    concurrency: int = 16,
-    timeout: float = 5.0,
+    max_probe: int = 1500,
+    max_parents: int = 250,
+    concurrency: int = 24,
+    timeout: float = 4.0,
 ) -> list[dict]:
     """Drop *synthesized* endpoints that don't exist so the active budget reaches
     real routes instead of hanging on guessed permutations (e.g. the blind
@@ -8410,12 +8410,16 @@ async def _filter_reachable_active_endpoints(
             decoy_targets = [(par, _abs(par.rstrip("/") + "/" + _DECOY_LEAF)) for par in parents]
             decoy_results = await asyncio.gather(*[_probe(session, u) for (_par, u) in decoy_targets])
             decoy_by_parent = {par: res for (par, _u), res in zip(decoy_targets, decoy_results)}
-            cand_results = await asyncio.gather(*[_probe(session, _abs(p)) for p in cand_paths])
+            # Fast path: a parent whose own random sibling hard-404s has nothing under
+            # it — drop all its synthetic children without probing each one.
+            hard_404_parents = {par for par, (st, _l) in decoy_by_parent.items() if st in (404, 410)}
+            unreachable: set[str] = {p for p in cand_paths if _parent(p) in hard_404_parents}
+            to_probe = [p for p in cand_paths if _parent(p) not in hard_404_parents][:max_probe]
+            cand_results = await asyncio.gather(*[_probe(session, _abs(p)) for p in to_probe])
     except Exception:
         return endpoints
 
-    unreachable: set[str] = set()
-    for path, (status, blen) in zip(cand_paths, cand_results):
+    for path, (status, blen) in zip(to_probe, cand_results):
         d_status, d_len = decoy_by_parent.get(_parent(path), (None, -1))
         if _response_matches_not_found(status, blen, d_status, d_len):
             unreachable.add(path)
