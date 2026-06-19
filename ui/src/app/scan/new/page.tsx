@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan, getScanExecutionSettings } from '@/lib/api'
+import { submitScan, getScanExecutionSettings, getTargets, type Target } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -59,6 +59,7 @@ export default function NewScanPage() {
   const toast = useToast()
   const [target, setTarget] = useState('')
   const [targetError, setTargetError] = useState<string | null>(null)
+  const [existingTargets, setExistingTargets] = useState<Target[]>([])
   const [scanType, setScanType] = useState<ScanType>('quick')
   const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
   const [loading, setLoading] = useState(false)
@@ -75,6 +76,13 @@ export default function NewScanPage() {
     getScanExecutionSettings()
       .then((s) => { if (!cancelled) setRunningWorkers(s.running_workers ?? null) })
       .catch(() => { /* worker count is advisory; ignore failures */ })
+    getTargets()
+      .then((rows) => {
+        if (cancelled) return
+        const list = Array.isArray(rows?.targets) ? rows.targets : Array.isArray(rows) ? rows : []
+        setExistingTargets(list)
+      })
+      .catch(() => { /* target suggestions are optional; ignore failures */ })
     return () => { cancelled = true }
   }, [])
   const [customEndpointsText, setCustomEndpointsText] = useState('')
@@ -255,10 +263,14 @@ export default function NewScanPage() {
         <Card className="p-4">
           <label htmlFor="scan-target" className="block text-sm font-medium text-gray-400 mb-2">
             Target URL
+            {existingTargets.length > 0 && (
+              <span className="text-gray-500 font-normal"> — type a new URL or pick an existing target</span>
+            )}
           </label>
           <input
             id="scan-target"
             type="text"
+            list="existing-targets"
             value={target}
             onChange={(e) => {
               setTarget(e.target.value)
@@ -271,6 +283,15 @@ export default function NewScanPage() {
               targetError ? 'border-red-500/50' : 'border-gray-700'
             }`}
           />
+          {existingTargets.length > 0 && (
+            <datalist id="existing-targets">
+              {existingTargets.map((t) => (
+                <option key={t.id} value={t.url}>
+                  {t.name ? `${t.name} — ${t.url}` : t.url}
+                </option>
+              ))}
+            </datalist>
+          )}
           {targetError && (
             <p id="scan-target-error" className="text-sm text-red-400 mt-2">
               {targetError}
