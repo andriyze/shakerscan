@@ -8592,7 +8592,14 @@ async def build_report(target: str,
                         file=sys.stderr,
                     )
 
-                if run_sqli or run_xss:
+                # A zero/non-positive active-seconds budget means discovery-only recon
+                # (the coverage-planning pass: active_max_seconds=0, active_max_endpoints=1).
+                # The active worklist is already emitted above for harvest, so SKIP the
+                # active probes entirely — otherwise the recon ignores its 0s cap and runs
+                # broad SQLi/XSS against the live target (unsafe + slow; observed on a
+                # planning pass that probed /admin/api/auth/login with UNION SELECT).
+                active_budget_zero = float(scan_budget.get("active_max_seconds") or 0) <= 0
+                if (run_sqli or run_xss) and not active_budget_zero:
                     smart_results = await run_smart_active_tests(
                         url=base_url,
                         endpoints=active_candidate_endpoints,
@@ -8609,7 +8616,10 @@ async def build_report(target: str,
                         max_findings_per_family=scan_budget.get("max_findings_per_family"),
                     )
                 else:
-                    reason = f"focused_family_{focused_active_family_name}" if focused_active_family_name else "no_primary_active_families"
+                    if active_budget_zero and (run_sqli or run_xss):
+                        reason = "zero_active_budget_discovery_only"
+                    else:
+                        reason = f"focused_family_{focused_active_family_name}" if focused_active_family_name else "no_primary_active_families"
                     active_block["primary_active_skipped"] = reason
                     print(
                         (
