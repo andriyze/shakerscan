@@ -5014,6 +5014,40 @@ def expected_build_fingerprint() -> Optional[str]:
     })
 
 
+def current_scanner_version() -> str:
+    """Human build label used by API/workers to detect mixed deployments."""
+    return os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
+
+
+def worker_build_current(
+    *,
+    reported_fingerprint: Optional[str],
+    reported_version: Optional[str],
+    expected_fingerprint: Optional[str],
+    expected_version: Optional[str],
+) -> Optional[bool]:
+    """Return whether a worker matches the API's current runtime identity.
+
+    The source fingerprint catches most code changes, but it is deliberately a
+    curated file set. The git/version label catches commits outside that set and
+    prevents old scaled-out workers from being reported current after rebuilds.
+    """
+    if not reported_fingerprint and not reported_version:
+        return None
+    fingerprint_ok = (
+        reported_fingerprint == expected_fingerprint
+        if reported_fingerprint and expected_fingerprint
+        else None
+    )
+    version_ok = (
+        reported_version == expected_version
+        if reported_version and expected_version
+        else None
+    )
+    checks = [v for v in (fingerprint_ok, version_ok) if v is not None]
+    return all(checks) if checks else None
+
+
 @app.get("/health")
 async def health():
     """Health check."""
@@ -5039,7 +5073,7 @@ async def health():
         # when set, else "dev"); build_fingerprint is a source-tree checksum that
         # differs whenever the runtime code differs — so the UI can flag a scan or
         # worker on a stale image even when scanner_version is "dev" on both.
-        "scanner_version": os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+        "scanner_version": current_scanner_version(),
         "build_fingerprint": expected_build_fingerprint(),
     }
 
@@ -11398,6 +11432,7 @@ async def get_workers():
         # Match it here so the UI can show current/stale per worker WITHOUT shelling
         # into containers.
         expected_fp = expected_build_fingerprint()
+        expected_version = current_scanner_version()
         try:
             worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
         except Exception:
@@ -11427,15 +11462,21 @@ async def get_workers():
                 state = c.get('State', 'unknown')
                 wb = _build_for_container(c.get('Id', '')) or {}
                 reported_fp = wb.get('build_fingerprint')
+                reported_version = wb.get('scanner_version')
                 worker_list.append({
                     "name": name,
                     "status": state,
                     "health": c.get('Status', ''),
                     "build_fingerprint": reported_fp,
-                    "scanner_version": wb.get('scanner_version'),
+                    "scanner_version": reported_version,
                     # True/False when the worker reported a fingerprint; null until it
                     # has registered (e.g. just started, or not yet picked up a job).
-                    "build_current": (reported_fp == expected_fp) if (reported_fp and expected_fp) else None,
+                    "build_current": worker_build_current(
+                        reported_fingerprint=reported_fp,
+                        reported_version=reported_version,
+                        expected_fingerprint=expected_fp,
+                        expected_version=expected_version,
+                    ),
                 })
 
         running = len([w for w in worker_list if w.get("status") == "running"])
@@ -11446,6 +11487,7 @@ async def get_workers():
             "workers": worker_list,
             "max_allowed": WORKER_SCALE_MAX,
             "expected_build_fingerprint": expected_fp,
+            "expected_scanner_version": expected_version,
             "stale_workers": stale_workers,
         }
     except FileNotFoundError:

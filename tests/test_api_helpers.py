@@ -80,6 +80,33 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
+def test_worker_build_current_requires_matching_version_when_fingerprint_matches():
+    assert api_module.worker_build_current(
+        reported_fingerprint="same",
+        reported_version="old",
+        expected_fingerprint="same",
+        expected_version="new",
+    ) is False
+
+
+def test_worker_build_current_accepts_matching_version_and_fingerprint():
+    assert api_module.worker_build_current(
+        reported_fingerprint="same",
+        reported_version="new",
+        expected_fingerprint="same",
+        expected_version="new",
+    ) is True
+
+
+def test_worker_build_current_is_unknown_until_worker_registers():
+    assert api_module.worker_build_current(
+        reported_fingerprint=None,
+        reported_version=None,
+        expected_fingerprint="same",
+        expected_version="new",
+    ) is None
+
+
 # ----- _int_env -----------------------------------------------------------
 
 def test_int_env_returns_default_when_unset(monkeypatch):
@@ -415,12 +442,13 @@ def test_explicit_parallel_true_forces_parent(monkeypatch):
 
 
 def test_explicit_parallel_true_defaults_shards_and_strategy(monkeypatch):
-    # parallel=true with no shards/strategy still becomes a parent (auto).
+    # parallel=true with no shards/strategy still becomes a parent. Active scans
+    # resolve to coverage so discovery is harvested once and workers pull batches.
     enabled, payload = _resolve_sharding(monkeypatch, scan_type="smart", parallel=True)
     assert enabled is True
     assert payload["parallel"] is True
     assert payload.get("shards") == "auto"
-    assert payload["shard_strategy"] == "auto"
+    assert payload["shard_strategy"] == "coverage"
 
 
 def test_explicit_parallel_false_stays_standalone(monkeypatch):
