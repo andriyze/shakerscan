@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getScan, getScanLogs, formatDuration } from '@/lib/api'
+import { getScan, getScanLogs, getHealth, formatDuration } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -83,7 +83,7 @@ function CoverageMetric({ label, value, accent = 'text-white' }: { label: string
   )
 }
 
-function ScanVerdictCard({ scan }: { scan: any }) {
+function ScanVerdictCard({ scan, buildVersion }: { scan: any; buildVersion?: string | null }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
     .map((severity) => [severity, severityCounts[severity]] as const)
@@ -93,6 +93,10 @@ function ScanVerdictCard({ scan }: { scan: any }) {
   const hasScore = typeof scan.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
+  const scanVersion: string | null = scan?.result?.scanner_version || null
+  // Red when the scan ran on a different build than the API currently serves
+  // (stale image/worker) — surfaces the version skew we keep hitting in ops.
+  const versionMismatch = Boolean(scanVersion && buildVersion && scanVersion !== buildVersion)
 
   return (
     <Card className="p-6 mb-6">
@@ -129,6 +133,19 @@ function ScanVerdictCard({ scan }: { scan: any }) {
           )}
           {duration && (
             <p className="text-xs text-gray-500 mt-0.5">Completed in {duration}</p>
+          )}
+          {scanVersion && (
+            <p
+              className={`text-xs mt-0.5 font-mono ${versionMismatch ? 'text-red-400 font-semibold' : 'text-gray-500'}`}
+              title={
+                versionMismatch
+                  ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan on the current build for up-to-date detection.`
+                  : `Scanner build ${scanVersion}`
+              }
+            >
+              {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
+              {versionMismatch ? ` ≠ ${buildVersion}` : ''}
+            </p>
           )}
         </div>
       </div>
@@ -414,6 +431,7 @@ function ScanDetailContent() {
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsError, setLogsError] = useState<string | null>(null)
+  const [buildVersion, setBuildVersion] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
 
   // Build back URL with preserved filters
@@ -460,6 +478,12 @@ function ScanDetailContent() {
     }, 5000)
     return () => clearInterval(interval)
   }, [scanId, scan?.status, retryNonce])
+
+  useEffect(() => {
+    getHealth()
+      .then((h) => setBuildVersion(h?.scanner_version || null))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (logsRef.current) {
@@ -627,7 +651,7 @@ function ScanDetailContent() {
         </Link>
         <span className="text-gray-500">Back to scans</span>
       </div>
-      {scan.status === 'completed' && <ScanVerdictCard scan={scan} />}
+      {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
       <ReportView

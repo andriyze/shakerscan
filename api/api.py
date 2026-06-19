@@ -4973,7 +4973,10 @@ async def health():
     return {
         "status": "healthy" if db_ok and redis_ok else "degraded",
         "database": "ok" if db_ok else "error",
-        "redis": "ok" if redis_ok else "error"
+        "redis": "ok" if redis_ok else "error",
+        # Current build version new scans are stamped with; the UI flags any scan
+        # whose result.scanner_version differs (ran on a stale image/worker).
+        "scanner_version": os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
     }
 
 
@@ -7971,6 +7974,12 @@ async def list_scans(
         scan = dict(row)
         if scan.get("options") is not None:
             scan["options"] = _sanitize_scan_options(scan["options"])
+        # Drop the heavy full report from list rows. The Scans page only needs
+        # summary columns (status/grade/score/findings_count); returning the full
+        # result for every row made this response ~9 MB for 50 scans (slow load +
+        # intermittent timeouts). The detail endpoint still returns the full result.
+        scan.pop("result", None)
+        scan.pop("result_partial", None)
         scans.append(scan)
 
     return {
