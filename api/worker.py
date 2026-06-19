@@ -5112,7 +5112,7 @@ async def process_scan_merge_job(job_data: dict):
             return
         children = await conn.fetch("""
             SELECT id, status, result, score, grade, findings_count, shard_index,
-                   options, started_at, completed_at, campaign_id
+                   options, started_at, completed_at, campaign_id, error_message
             FROM scans WHERE parent_scan_id = $1 ORDER BY shard_index
         """, uuid.UUID(parent_id))
 
@@ -5279,15 +5279,41 @@ async def process_scan_merge_job(job_data: dict):
 
     # Parent is failed only if every shard failed; otherwise it completed.
     parent_status = 'failed' if (children and completed_n == 0) else 'completed'
+
+    # When every shard failed, summarize the first shard's error onto the parent so
+    # the scan detail page shows WHY it failed instead of a bare 'failed' row with an
+    # empty error_message.
+    parent_error_message = None
+    if parent_status == 'failed':
+        failed_children = [c for c in children if c['status'] == 'failed']
+        first = failed_children[0] if failed_children else None
+        if first is not None:
+            shard_err = first.get('error_message')
+            if not shard_err:
+                res = first.get('result')
+                if isinstance(res, str):
+                    try:
+                        res = json.loads(res)
+                    except Exception:
+                        res = None
+                if isinstance(res, dict):
+                    shard_err = res.get('error')
+            parent_error_message = (
+                f"All {failed_n} shard(s) failed; merge had no completed shard. "
+                f"First failure (shard {first.get('shard_index')}): "
+                f"{shard_err or 'no diagnostics recorded'}"
+            )[:2000]
+
     async with db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE scans SET status = $1, result = $2, score = $3, grade = $4,
                 findings_count = $5, completed_at = $6, duration_seconds = $7,
-                progress = 100, current_phase = $8
-            WHERE id = $9
+                progress = 100, current_phase = $8, error_message = $9
+            WHERE id = $10
         """, parent_status, json.dumps(merged), agg_score, agg_grade,
              len(union_findings), completed_at, duration,
              'completed' if parent_status == 'completed' else 'failed',
+             parent_error_message,
              uuid.UUID(parent_id))
 
     # Continuous ASM: persist the UNION of every shard's discovered worklist
