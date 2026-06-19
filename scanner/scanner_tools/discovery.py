@@ -2013,8 +2013,10 @@ def extract_openapi_endpoints(spec: dict[str, Any]) -> list[dict[str, Any]]:
 async def fetch_openapi_schema(schema_url: str, auth_session: Any | None = None) -> dict[str, Any] | None:
     """Fetch and parse a schema from a specific OpenAPI/Swagger URL."""
     auth_args = get_auth_curl_args(auth_session)
-    cmd = ["curl", "-sS", "-L", "-k", "--max-time", "5"] + auth_args + [schema_url]
-    out, _, rc = await run(cmd, timeout=8)
+    # OpenAPI specs can be large (honey's is ~400KB; real apps often bigger); a 5s
+    # budget times out mid-download and silently yields zero ingested endpoints.
+    cmd = ["curl", "-sS", "-L", "-k", "--max-time", "20"] + auth_args + [schema_url]
+    out, _, rc = await run(cmd, timeout=25)
     if rc != 0 or not out:
         return None
 

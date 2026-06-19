@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type GungnirStatus } from '@/lib/api'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus } from '@/lib/api'
 import {
   Card,
   ErrorState,
@@ -40,6 +40,7 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [queue, setQueue] = useState<QueueStats | null>(null)
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
+  const [systemResources, setSystemResources] = useState<SystemResources | null>(null)
   const [gungnir, setGungnir] = useState<GungnirStatus | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(true)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
@@ -120,6 +121,14 @@ export default function Dashboard() {
     }
   }
 
+  const fetchSystemResources = async () => {
+    try {
+      setSystemResources(await getSystemResources())
+    } catch {
+      setSystemResources({ available: false, error: 'unavailable' })
+    }
+  }
+
   useEffect(() => {
     fetchDashboard(true)
     const interval = setInterval(() => fetchDashboard(false), DASHBOARD_REFRESH_MS)
@@ -135,6 +144,12 @@ export default function Dashboard() {
   useEffect(() => {
     fetchWorkers()
     const interval = setInterval(fetchWorkers, WORKERS_REFRESH_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    fetchSystemResources()
+    const interval = setInterval(fetchSystemResources, WORKERS_REFRESH_MS)
     return () => clearInterval(interval)
   }, [])
 
@@ -209,11 +224,21 @@ export default function Dashboard() {
   const queueFailed = queue ? queue.failed : '--'
   const workerCount = workers?.count
   const workersKnown = workerCount !== undefined && workerCount >= 0
+  const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
+  const staleCount = workers?.stale_workers?.length ?? 0
+  // Busy workers ~= jobs currently running; idle = running workers - busy.
+  const busyWorkers = typeof queue?.running === 'number' ? Math.min(queue.running, workerCount ?? 0) : null
+  const idleWorkers = workersKnown && busyWorkers !== null ? Math.max(0, (workerCount as number) - busyWorkers) : null
   const workerLabel = workersError
     ? workersError
     : workersKnown
-      ? `${workerCount} worker${workerCount !== 1 ? 's' : ''} running`
+      ? `${workerCount} running`
       : 'Workers unavailable'
+  // Docker resource ceiling (Docker Desktop VM allocation on mac/win; host on Linux).
+  const dockerGiB = systemResources?.available && systemResources.mem_total_bytes
+    ? systemResources.mem_total_bytes / 1024 ** 3
+    : null
+  const scaleOptions = Array.from(new Set([1, 2, 3, 5, 10, 15, 20, 25, 30, 40].filter(n => n <= maxWorkers)))
 
   return (
     <div className="space-y-6">
@@ -289,13 +314,23 @@ export default function Dashboard() {
           )}
         </Card>
 
-        {/* Worker Control */}
+        {/* Workers & Resources */}
         <Card className="p-4">
-          <h2 className="text-sm font-medium text-gray-400 mb-3">Worker Control</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-gray-400">Workers &amp; Resources</h2>
+            {staleCount > 0 && (
+              <span
+                title="Workers running an outdated build (version skew). Re-scale to refresh."
+                className="text-xs px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400 border border-amber-800/50"
+              >
+                ⚠ {staleCount} stale
+              </span>
+            )}
+          </div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <WorkerIcon />
-              <span className="text-sm">{workerLabel}</span>
+              <span className="text-sm">{workerLabel}{workersKnown ? <span className="text-gray-500"> / {maxWorkers} max</span> : null}</span>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -310,8 +345,8 @@ export default function Dashboard() {
               <span className="text-sm font-medium w-8 text-center">{workersKnown ? workerCount : '?'}</span>
               <button
                 type="button"
-                onClick={() => handleScale(Math.min(20, (workerCount || 1) + 1))}
-                disabled={scaling || !workersKnown || (workerCount || 0) >= 20}
+                onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
+                disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
                 aria-label="Increase worker count"
                 className={`px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm ${FOCUS_RING}`}
               >
@@ -325,11 +360,43 @@ export default function Dashboard() {
                 className={`ml-2 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm disabled:opacity-50 ${FOCUS_RING}`}
               >
                 <option value="">Scale to...</option>
-                {[1, 2, 3, 5, 10, 15, 20].map(n => (
+                {scaleOptions.map(n => (
                   <option key={n} value={n}>{n} workers</option>
                 ))}
               </select>
             </div>
+          </div>
+
+          {/* busy / idle / capacity */}
+          {workersKnown && (
+            <div className="mt-3 flex items-center gap-4 text-xs">
+              <span className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full bg-blue-500 ${busyWorkers ? 'animate-pulse' : ''}`}></span>
+                <span className="text-gray-400">{busyWorkers ?? '--'} busy</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-green-500"></span>
+                <span className="text-gray-400">{idleWorkers ?? '--'} idle</span>
+              </span>
+              <span className="text-gray-600">capacity {maxWorkers}</span>
+            </div>
+          )}
+
+          {/* Docker engine resources (Desktop VM allocation on mac/win, host on Linux) */}
+          <div className="mt-3 pt-3 border-t border-gray-800 text-xs text-gray-400">
+            {systemResources?.available ? (
+              <div className="flex items-center gap-4">
+                <span title="vCPUs available to the Docker engine">{systemResources.cpus ?? '--'} CPU</span>
+                <span title="RAM available to the Docker engine">{dockerGiB !== null ? `${dockerGiB.toFixed(1)} GiB` : '-- GiB'} RAM</span>
+                <span className="text-gray-600">
+                  {systemResources.is_desktop_vm
+                    ? `Docker Desktop VM${systemResources.operating_system ? ` · ${systemResources.operating_system}` : ''}`
+                    : (systemResources.operating_system || 'Docker host')}
+                </span>
+              </div>
+            ) : (
+              <span className="text-gray-600">Docker resource info unavailable</span>
+            )}
           </div>
           {scaling && (
             <p className="text-xs text-blue-400 mt-2">Scaling workers...</p>

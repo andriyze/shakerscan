@@ -1034,6 +1034,11 @@ def plan_dynamic_coverage_shards(
     )
 
     shards: list[ShardSpec] = []
+    # Run host-wide global/posture checks (CSP/headers/TLS/DNS/CORS/...) on
+    # exactly one shard per auth state; the rest skip them so the merged parent
+    # report isn't N copies of the same target-level finding. Mirrors the static
+    # coverage planners' global_checks_once convention.
+    global_checks_states: set[str] = set()
     for i in range(shard_count):
         state = states[i % len(states)]
         opts = _apply_auth_state(_base_child_options(parent_options), state)
@@ -1044,7 +1049,8 @@ def plan_dynamic_coverage_shards(
         opts["coverage_stale_days"] = 0
         opts["focused_endpoints_only"] = True
         opts["zero_rediscovery"] = True
-        opts["skip_global_checks"] = True
+        opts["skip_global_checks"] = state in global_checks_states
+        global_checks_states.add(state)
         opts["no_early_stop"] = True
         _merge_custom_budget_defaults(
             opts,
@@ -1144,6 +1150,10 @@ def plan_dynamic_coverage_family_shards(
     )
 
     shards: list[ShardSpec] = []
+    # Run host-wide global/posture checks on exactly one shard per auth state;
+    # the rest skip them so the merged report isn't N copies of the same
+    # target-level finding (mirrors the static planners' global_checks_once).
+    global_checks_states: set[str] = set()
     for batch_index in range(batches_per_lane):
         for auth_state, lane_name, attempt_family, lane_options in lanes:
             opts = _apply_auth_state(_base_child_options(parent_options), auth_state)
@@ -1164,7 +1174,8 @@ def plan_dynamic_coverage_family_shards(
             opts["coverage_family_aware"] = True
             opts["focused_endpoints_only"] = True
             opts["zero_rediscovery"] = True
-            opts["skip_global_checks"] = True
+            opts["skip_global_checks"] = auth_state in global_checks_states
+            global_checks_states.add(auth_state)
             opts["no_early_stop"] = True
             if lane_options:
                 opts.update(lane_options)

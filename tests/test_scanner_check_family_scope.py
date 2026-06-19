@@ -288,3 +288,45 @@ def test_family_requires_two_auth_states_is_registry_driven():
     assert scanner_mod.family_requires_two_auth_states("xss") is False
     assert scanner_mod.family_requires_two_auth_states("auth") is False
     assert scanner_mod.family_requires_two_auth_states("nope") is False
+
+
+def _load_reporting_module():
+    import importlib.util as _ilu
+    scanner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
+    spec = _ilu.spec_from_file_location(
+        "shaker_reporting_under_test", os.path.join(scanner_dir, "reporting.py")
+    )
+    module = _ilu.module_from_spec(spec)
+    added = scanner_dir not in sys.path
+    if added:
+        sys.path.insert(0, scanner_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if added:
+            sys.path.remove(scanner_dir)
+    return module
+
+
+def test_emit_config_findings_is_the_host_posture_funnel():
+    """emit_config_findings is the single source of host-level posture findings
+    (CSP/headers/TLS/DNS). build_report gates this call on skip_global_checks so
+    parallel coverage shards don't each re-emit them; if posture emission ever
+    moves elsewhere this test flags that the gate has become incomplete."""
+    reporting = _load_reporting_module()
+    report = {
+        "input": {"normalized_host": "example.com", "port": 443},
+        "http": {
+            "final_url": "https://example.com",
+            "security_headers": {},
+            "csp_evaluation": {"present": False},
+        },
+        "dns": {},
+        "tls": {},
+        "discovery": {},
+        "findings": [],
+    }
+    reporting.emit_config_findings(report)
+    titles = [f.get("title", "") for f in report["findings"]]
+    assert any("CSP header missing" in t for t in titles)
+    assert any("HSTS header missing" in t for t in titles)

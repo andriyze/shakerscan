@@ -11196,6 +11196,68 @@ async def get_discovery(discovery_id: str):
 # with more CPU/RAM can run larger fleets (each worker uses ~1-2 cores, 2-4GB).
 WORKER_SCALE_MAX = max(1, int(os.environ.get("SHAKERSCAN_MAX_WORKERS") or 30))
 
+# Hard per-worker memory cap applied to scaler-created worker containers. Without
+# it, a runaway/large scan can exhaust the whole Docker VM and OOM-thrash every
+# container; with it, a single worker is OOM-killed in isolation and its job is
+# requeued by the stale-scan checker. 0 disables the cap. (compose `deploy.resources`
+# is ignored outside Swarm, so we set HostConfig.Memory explicitly here.)
+try:
+    WORKER_MEM_LIMIT_BYTES = int(float(os.environ.get("SHAKERSCAN_WORKER_MEM_LIMIT_GB") or 4) * (1024 ** 3))
+except (TypeError, ValueError):
+    WORKER_MEM_LIMIT_BYTES = 4 * (1024 ** 3)
+
+
+def _worker_hostconfig(network: str, binds: list) -> dict:
+    """HostConfig for a scaler-created worker, incl. the hard memory cap."""
+    hc = {
+        "NetworkMode": network,
+        "RestartPolicy": {"Name": "unless-stopped"},
+        "Binds": binds,
+    }
+    if WORKER_MEM_LIMIT_BYTES > 0:
+        hc["Memory"] = WORKER_MEM_LIMIT_BYTES
+        # MemorySwap == Memory disables swap for the container (no swap thrash);
+        # the worker is OOM-killed cleanly at the limit instead.
+        hc["MemorySwap"] = WORKER_MEM_LIMIT_BYTES
+    return hc
+
+
+def _compute_max_active_scans() -> int:
+    """Fleet-wide concurrent active-scan cap derived from Docker RAM.
+
+    Idle workers are cheap (~37MB); the cost is concurrent ACTIVE scans
+    (~2-4GB each). So we bound CONCURRENCY (not container count): usable Docker
+    RAM x fraction / per-scan estimate. Workers enforce it via a Redis semaphore."""
+    try:
+        status, info = docker_socket_request("GET", "/info")
+        mem_gb = (info.get("MemTotal") or 0) / 1024 ** 3 if (status == 200 and isinstance(info, dict)) else 0
+    except Exception:
+        mem_gb = 0
+    try:
+        per_scan_gb = float(os.environ.get("SHAKERSCAN_PER_SCAN_MEM_GB") or 3)
+    except (TypeError, ValueError):
+        per_scan_gb = 3.0
+    try:
+        fraction = float(os.environ.get("SHAKERSCAN_SCAN_MEM_FRACTION") or 0.8)
+    except (TypeError, ValueError):
+        fraction = 0.8
+    if mem_gb <= 0 or per_scan_gb <= 0:
+        try:
+            return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 8))
+        except (TypeError, ValueError):
+            return 8
+    return max(1, int((mem_gb * fraction) / per_scan_gb))
+
+
+def _publish_max_active_scans() -> int:
+    """Compute + publish the active-scan concurrency cap to Redis for workers."""
+    n = _compute_max_active_scans()
+    try:
+        get_redis().set("shakerscan:max_active_scans", n, ex=120)
+    except Exception:
+        pass
+    return n
+
 
 class WorkerScaleRequest(BaseModel):
     # Hard ceiling here is a sanity bound; the effective cap is WORKER_SCALE_MAX,
@@ -11385,6 +11447,35 @@ def _running_scan_worker_count_best_effort() -> int | None:
         return None
 
 
+@app.get("/system/resources")
+async def get_system_resources():
+    """CPU/RAM the Docker engine can give containers (i.e. the worker fleet).
+
+    IMPORTANT platform nuance: on macOS/Windows Docker runs inside a Linux VM
+    (Docker Desktop), so these numbers are the **VM allocation you set in Docker
+    Desktop**, not the physical machine. On native Linux they are the real host.
+    Either way this is the correct capacity ceiling for workers — read it from the
+    Docker engine (/info), never from os/psutil inside the API container (that
+    reports the cgroup/VM view and is misleading)."""
+    try:
+        status_code, info = docker_socket_request("GET", "/info")
+        if status_code != 200 or not isinstance(info, dict):
+            return {"available": False, "error": f"docker /info status {status_code}"}
+        os_name = str(info.get("OperatingSystem") or "")
+        return {
+            "available": True,
+            "cpus": info.get("NCPU"),
+            "mem_total_bytes": info.get("MemTotal"),
+            "operating_system": os_name,
+            "os_type": info.get("OSType"),
+            "server_version": info.get("ServerVersion"),
+            # Docker Desktop (mac/win) reports a tunable VM allocation, not host HW.
+            "is_desktop_vm": "desktop" in os_name.lower(),
+        }
+    except Exception as e:  # pragma: no cover - docker socket optional
+        return {"available": False, "error": str(e)}
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
@@ -11489,11 +11580,14 @@ async def get_workers():
 
         running = len([w for w in worker_list if w.get("status") == "running"])
         stale_workers = [w["name"] for w in worker_list if w.get("build_current") is False]
+        # Refresh the memory-aware active-scan concurrency cap for workers.
+        max_active_scans = _publish_max_active_scans()
 
         return {
             "count": running,
             "workers": worker_list,
             "max_allowed": WORKER_SCALE_MAX,
+            "max_active_scans": max_active_scans,
             "expected_build_fingerprint": expected_fp,
             "expected_scanner_version": expected_version,
             "stale_workers": stale_workers,
@@ -11647,11 +11741,7 @@ async def scale_workers(request: WorkerScaleRequest):
                             "Cmd": ["python3", "/app/worker.py"],
                             "Env": existing_env,
                             "Labels": labels,
-                            "HostConfig": {
-                                "NetworkMode": network,
-                                "RestartPolicy": {"Name": "unless-stopped"},
-                                "Binds": existing_binds
-                            }
+                            "HostConfig": _worker_hostconfig(network, existing_binds),
                         }
 
                         create_path = f"/containers/create?name={urllib.parse.quote(name)}"

@@ -540,12 +540,26 @@ export interface WorkerInfo {
   name: string
   status: string
   health?: string
+  build_current?: boolean | null
 }
 
 export interface WorkerStats {
   count: number
   workers: WorkerInfo[]
   max_allowed: number
+  stale_workers?: string[]
+  expected_scanner_version?: string
+  error?: string
+}
+
+export interface SystemResources {
+  available: boolean
+  cpus?: number
+  mem_total_bytes?: number
+  operating_system?: string
+  os_type?: string
+  server_version?: string
+  is_desktop_vm?: boolean
   error?: string
 }
 
@@ -1953,6 +1967,12 @@ export async function scaleWorkers(count: number): Promise<{ status: string; tar
     body: JSON.stringify({ count })
   })
   if (!res.ok) throw new Error('Failed to scale workers')
+  return res.json()
+}
+
+export async function getSystemResources(): Promise<SystemResources> {
+  const res = await fetch(`${API_URL}/system/resources`)
+  if (!res.ok) throw new Error('Failed to fetch system resources')
   return res.json()
 }
 

@@ -7073,7 +7073,11 @@ async def build_report(target: str,
                 "CWE-307"
             ))
 
-    emit_http_method_findings(report, http_methods_results)
+    if not skip_global_checks:
+        # Host-level advertised-HTTP-methods posture; centralized on the
+        # global-checks shard so coverage shards don't each re-report the same
+        # target-wide risky methods.
+        emit_http_method_findings(report, http_methods_results)
 
     # Phase 3a Client-Side Security Findings
     if js_deps_results.get("vulnerable"):
@@ -8311,6 +8315,24 @@ async def build_report(target: str,
                                             "source": "openapi",
                                         }):
                                             get_count += 1
+                                    else:
+                                        # Parameter-less (or path-param-only) OpenAPI endpoint.
+                                        # Still ingest it as a probe/crawl target so unauth
+                                        # sensitive-data exposure, IDOR, and access-control
+                                        # detectors can reach it. These are exactly the
+                                        # high-severity GET /api/.../token | /api/admin/api-keys
+                                        # | /api/.../{id} routes that carry no query string —
+                                        # previously dropped, so they were never tested.
+                                        if _merge_endpoint({
+                                            "url": full_url,
+                                            "method": method,
+                                            "params": ep.get("query_params", []),
+                                            "source": "openapi",
+                                        }):
+                                            if method in ("POST", "PUT", "PATCH"):
+                                                post_count += 1
+                                            else:
+                                                get_count += 1
                             if post_count or get_count:
                                 print(f"[scanner] Added {get_count} GET and {post_count} POST endpoints from OpenAPI", file=sys.stderr)
 
@@ -10482,11 +10504,103 @@ async def build_report(target: str,
     # Emit configuration/metadata findings (CSP/Headers/Cookies/TLS/DNS/CORS/etc.).
     # Focused active scans still keep passive context; only unrelated active
     # modules are scoped out.
-    try:
-        emit_config_findings(report)
-    except Exception:
-        # Do not fail the whole scan if emitter has a bug
-        pass
+    if skip_global_checks:
+        # Parallel coverage child shards skip the host-wide posture/config
+        # findings (CSP/headers/cookies/TLS/DNS/CORS/WAF/security.txt). Exactly
+        # one designated shard per auth state emits them, so the merged parent
+        # report carries one copy of each target-level finding instead of one
+        # per shard. The result sections (tls/http/dns) are still populated, so
+        # the merge skeleton is unaffected.
+        print(
+            "[scanner] Parallel child shard: skipping duplicate posture/config findings",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            emit_config_findings(report)
+        except Exception:
+            # Do not fail the whole scan if emitter has a bug
+            pass
+
+    # Endpoint-scoped active checks over the discovered API surface:
+    # unauthenticated sensitive-data exposure + CORS, webhook signature bypass,
+    # and broken-authorization/approval bypass. These are TARGET-WIDE and cheap,
+    # so — like host posture — they run on exactly ONE shard per auth state (the
+    # global-checks shard, skip_global_checks=False) over the FULL OpenAPI
+    # surface, giving complete route coverage without N-fold duplicate probing.
+    if not public_only and not skip_global_checks:
+        import re as _id_re
+        _ep_candidates: list[Any] = []
+        _ac = report.get("active_checks") if isinstance(report.get("active_checks"), dict) else {}
+        _ep_candidates.extend(_ac.get("active_worklist") or [])
+        _disc = report.get("discovery") if isinstance(report.get("discovery"), dict) else {}
+        _ep_candidates.extend(_disc.get("browser_api_endpoints") or [])
+        _sd = _disc.get("smart_discovery") if isinstance(_disc.get("smart_discovery"), dict) else {}
+        for _k in ("api_endpoints_sample", "probed_endpoints_sample"):
+            _ep_candidates.extend(_sd.get(_k) or [])
+        for _ep in (manual_endpoints_norm or []):
+            if isinstance(_ep, dict) and _ep.get("url"):
+                _ep_candidates.append(_ep["url"])
+        # Pull the FULL API surface from the OpenAPI/Swagger spec so coverage is
+        # not limited to this shard's worklist slice (path templates -> "1").
+        try:
+            _oas = await discover_openapi_schema(base_url, auth_session=auth_session)
+            for _e in ((_oas or {}).get("endpoints") or []):
+                _m, _p = _e.get("method"), _e.get("path")
+                if _m and _p:
+                    _ep_candidates.append(f"{_m} {_id_re.sub(r'[{][^}]+[}]', '1', _p)}")
+        except Exception as _oas_err:
+            print(f"[scanner] api-active-checks openapi expand failed: {_oas_err}", file=sys.stderr)
+
+        if _ep_candidates:
+            try:
+                from scanner_tools.data_exposure import check_api_data_exposure
+                _exp_findings = await check_api_data_exposure(base_url, _ep_candidates, max_endpoints=400)
+                for _ef in _exp_findings:
+                    report["findings"].append(normalize_finding(
+                        _ef.get("tool", "data_exposure"), _ef["title"], _ef["severity"],
+                        _ef.get("evidence", {}), _ef.get("cwe"),
+                    ))
+                if _exp_findings:
+                    print(
+                        f"[scanner] data_exposure: {len(_exp_findings)} sensitive-data/CORS exposure finding(s)",
+                        file=sys.stderr,
+                    )
+            except Exception as _exp_err:
+                print(f"[scanner] data_exposure check failed: {_exp_err}", file=sys.stderr)
+
+            # Active write probes (POST) — only on active scans.
+            if active_checks:
+                try:
+                    from scanner_tools.webhook_checks import check_webhook_signature_bypass
+                    _wh_findings = await check_webhook_signature_bypass(base_url, _ep_candidates)
+                    for _wf in _wh_findings:
+                        report["findings"].append(normalize_finding(
+                            _wf.get("tool", "webhook_checks"), _wf["title"], _wf["severity"],
+                            _wf.get("evidence", {}), _wf.get("cwe"),
+                        ))
+                    if _wh_findings:
+                        print(
+                            f"[scanner] webhook_checks: {len(_wh_findings)} signature-bypass finding(s)",
+                            file=sys.stderr,
+                        )
+                except Exception as _wh_err:
+                    print(f"[scanner] webhook check failed: {_wh_err}", file=sys.stderr)
+                try:
+                    from scanner_tools.approval_checks import check_approval_authz_bypass
+                    _ap_findings = await check_approval_authz_bypass(base_url, _ep_candidates)
+                    for _af in _ap_findings:
+                        report["findings"].append(normalize_finding(
+                            _af.get("tool", "approval_checks"), _af["title"], _af["severity"],
+                            _af.get("evidence", {}), _af.get("cwe"),
+                        ))
+                    if _ap_findings:
+                        print(
+                            f"[scanner] approval_checks: {len(_ap_findings)} approval/authz-bypass finding(s)",
+                            file=sys.stderr,
+                        )
+                except Exception as _ap_err:
+                    print(f"[scanner] approval check failed: {_ap_err}", file=sys.stderr)
 
     if family_focused_active_scope:
         family = focused_active_family_name or ("xss" if active_xss else "sqli")

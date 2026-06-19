@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -661,6 +662,113 @@ async def _terminate_scanner_process(proc: Any) -> None:
         pass
 
 
+# High-signal scanner stderr lines to mirror to the worker's stdout (so
+# `docker compose logs worker -f` shows live scan progress). The full stderr is
+# still buffered to Redis (the /scans/{id}/logs API) and dumped on completion;
+# this only adds REAL-TIME visibility for the lines that matter when debugging a
+# scan: phase markers, discovery/ingestion, the endpoint-scoped detectors, and
+# errors. Set SHAKERSCAN_STREAM_SCANNER_LOGS=1 to mirror EVERY stderr line.
+_SCANNER_LOG_FORWARD_RE = re.compile(
+    r"\[(scanner|smart|discovery|bola|asm|nuclei)\]"
+    r"|from OpenAPI|Auto-discovered OpenAPI|data_exposure|webhook_checks"
+    r"|\bERROR\b|Traceback|\bWARN(?:ING)?\b|timed out|Exceeded max"
+    r"|signature[- ]?bypass|exposure finding",
+    re.IGNORECASE,
+)
+_STREAM_ALL_SCANNER_LOGS = str(os.environ.get("SHAKERSCAN_STREAM_SCANNER_LOGS", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+# --- Memory-aware scan admission control -----------------------------------
+# Bound how many memory-heavy scanner subprocesses run AT ONCE across the whole
+# fleet, so scaling to a large worker count (good for queue throughput) cannot
+# OOM the Docker VM. Idle workers are cheap (~37MB); the real cost is concurrent
+# ACTIVE scans (2-4GB each). A lease-based Redis semaphore caps concurrency to a
+# value the API derives from Docker RAM and publishes to MAX_ACTIVE_SCANS_KEY.
+# Best-effort: bounded wait + fail-open so it can never deadlock or starve the
+# queue, and lease expiry frees a crashed worker's slot. Pairs with the hard
+# per-worker memory cap (HostConfig.Memory) as defense in depth.
+ACTIVE_SCAN_SLOTS_KEY = "shakerscan:active_scan_slots"
+MAX_ACTIVE_SCANS_KEY = "shakerscan:max_active_scans"
+_SCAN_SLOT_TTL_SECONDS = max(300, int(os.environ.get("SHAKERSCAN_SCAN_SLOT_TTL_SECONDS", "5400")))
+_SCAN_SLOT_MAX_WAIT_SECONDS = max(0, int(os.environ.get("SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS", "1800")))
+_SCAN_SLOT_POLL_SECONDS = 3.0
+_SCAN_SLOT_LUA = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[1]))
+if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[3]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[4])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]) + 600)
+  return 1
+end
+return 0
+"""
+
+
+def _max_active_scans(r) -> int:
+    """Fleet-wide concurrent active-scan cap (published by the API from Docker RAM)."""
+    try:
+        v = r.get(MAX_ACTIVE_SCANS_KEY)
+        if v:
+            return max(1, int(v))
+    except Exception:
+        pass
+    try:
+        return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 8))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _take_scan_slot(r, slot_id: str) -> bool:
+    """Atomically take an active-scan slot if under the cap. Fail-open on error."""
+    try:
+        got = r.eval(
+            _SCAN_SLOT_LUA, 1, ACTIVE_SCAN_SLOTS_KEY,
+            time.time(), _SCAN_SLOT_TTL_SECONDS, _max_active_scans(r), slot_id,
+        )
+        return bool(got)
+    except Exception:
+        return True  # never block scanning on a Redis hiccup
+
+
+def _release_scan_slot(r, slot_id: str) -> None:
+    try:
+        r.zrem(ACTIVE_SCAN_SLOTS_KEY, slot_id)
+    except Exception:
+        pass
+
+
+async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any, str | None, bool]:
+    """Wait (bounded, heartbeating) for a fleet-wide active-scan slot.
+
+    Returns (redis_or_None, slot_id_or_None, held). Fail-open after the wait so a
+    saturated fleet still drains rather than starving the queue."""
+    try:
+        r = get_redis()
+    except Exception:
+        return None, None, False
+    slot_id = f"{job_id or scan_id or 'scan'}:{uuid.uuid4().hex[:8]}"
+    deadline = time.time() + _SCAN_SLOT_MAX_WAIT_SECONDS
+    waited = False
+    while True:
+        if _take_scan_slot(r, slot_id):
+            if waited:
+                print(f"[{(job_id or scan_id or '')[:8]}] acquired active-scan slot", file=sys.stderr, flush=True)
+            return r, slot_id, True
+        if time.time() >= deadline:
+            print(
+                f"[{(job_id or scan_id or '')[:8]}] active-scan slot wait exceeded "
+                f"({_SCAN_SLOT_MAX_WAIT_SECONDS}s); proceeding (best-effort throttle)",
+                file=sys.stderr, flush=True,
+            )
+            return r, slot_id, False
+        waited = True
+        # Heartbeat so the stale-scan checker doesn't reap the job while it waits.
+        if job_id:
+            try:
+                r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
+            except Exception:
+                pass
+        await asyncio.sleep(_SCAN_SLOT_POLL_SECONDS)
+
+
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
@@ -980,6 +1088,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
             if clean:
                 scan_env[env_key] = "\n".join(clean[:2000])
 
+    # Memory-aware admission control: wait (bounded, heartbeating) for a fleet-wide
+    # active-scan slot before launching the heavy scanner subprocess, so a large
+    # worker fleet can't run too many scans at once and OOM the Docker VM.
+    _slot_r, _slot_id, _slot_held = await _await_scan_slot(job_id, scan_id)
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -1080,6 +1193,13 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         if len(stderr_lines) > 2000:
             stderr_lines.pop(0)
 
+        # Live-mirror high-signal lines to stdout so `docker compose logs worker`
+        # shows scan progress in real time (otherwise stderr is only dumped once
+        # the scan finishes — invisible while a long scan runs).
+        if _STREAM_ALL_SCANNER_LOGS or _SCANNER_LOG_FORWARD_RE.search(text):
+            _jid = (job_id or scan_id or "")[:8]
+            print(f"[scan {_jid}] {text}", flush=True)
+
         if log_key:
             try:
                 r = get_redis()
@@ -1143,6 +1263,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     stderr_task = asyncio.create_task(_read_stream_lines(proc.stderr, _handle_stderr))
 
     await proc.wait()
+    # Scanner subprocess (the memory hog) has exited — free the active-scan slot
+    # immediately so a waiting worker can start; the rest of run_scan is light.
+    if _slot_held and _slot_r is not None:
+        _release_scan_slot(_slot_r, _slot_id)
+        _slot_held = False
     for task in (watchdog_task, cancel_task):
         task.cancel()
         try:
@@ -5829,7 +5954,12 @@ async def process_exploit_batch_job(job_data: dict):
     if coverage_dynamic_worker:
         scan_opts['focused_endpoints_only'] = True
         scan_opts['zero_rediscovery'] = True
-        scan_opts['skip_global_checks'] = True
+        # Honor the planner's per-shard designation: exactly one coverage shard
+        # per auth state runs host-wide global/posture checks
+        # (skip_global_checks=False); the rest skip them so we don't re-emit the
+        # same CSP/TLS/DNS findings per shard. Default to skipping when the
+        # planner didn't say.
+        scan_opts['skip_global_checks'] = bool(options.get('skip_global_checks', True))
     _active_secs = min(2400, max(120, 8 * len(endpoints)))
     lean = {
         'max_urls': 200, 'browser_max_pages': 5, 'browser_max_depth': 1,

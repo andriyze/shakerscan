@@ -627,6 +627,50 @@ def test_dynamic_coverage_plan_auth_state_workers_are_scoped():
     assert "user2_header" not in by_state["user2"]
 
 
+def test_dynamic_coverage_runs_global_checks_once_per_plan():
+    # Exactly one pull worker runs host-wide posture/config checks; the rest skip
+    # so the merged report isn't N copies of the same CSP/TLS/DNS finding.
+    plan = p.plan_dynamic_coverage_shards(
+        {"scan_type": "smart", "coverage_dynamic_batch_size": 25},
+        endpoint_count=400,
+    )
+    flags = [s.options["skip_global_checks"] for s in plan.shards]
+    assert flags.count(False) == 1
+    assert flags[0] is False
+    assert all(flags[1:])
+
+
+def test_dynamic_coverage_runs_global_checks_once_per_auth_state():
+    plan = p.plan_dynamic_coverage_shards(
+        {
+            "scan_type": "smart",
+            "coverage_dynamic_batch_size": 25,
+            "auth_state_shards": True,
+            "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2",
+        },
+        endpoint_count=400,
+        auth_states=["anonymous", "user1", "user2"],
+    )
+    by_state: dict[str, list[bool]] = {}
+    for s in plan.shards:
+        by_state.setdefault(s.options["auth_state"], []).append(s.options["skip_global_checks"])
+    assert set(by_state) == {"anonymous", "user1", "user2"}
+    for state, flags in by_state.items():
+        assert flags.count(False) == 1, f"{state} must run global checks on exactly one shard"
+
+
+def test_dynamic_coverage_family_runs_global_checks_once_per_auth_state():
+    plan = p.plan_dynamic_coverage_family_shards(
+        {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
+        endpoint_count=400,
+    )
+    flags = [s.options["skip_global_checks"] for s in plan.shards]
+    assert flags.count(False) == 1
+    assert flags[0] is False
+    assert all(flags[1:])
+
+
 def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     plan = p.plan_dynamic_coverage_family_shards(
         {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
