@@ -5849,6 +5849,11 @@ async def process_exploit_batch_job(job_data: dict):
             'nuclei_max_targets': 0,
             'phase4_max_seconds': 0,
         })
+        if check_family == 'bola':
+            # Dynamic workers normally disable Phase 4 to keep SQLi/XSS lanes
+            # lean. BOLA/IDOR is implemented in Phase 4, so a focused BOLA lane
+            # must preserve a bounded Phase 4 window or it never executes.
+            lean['phase4_max_seconds'] = parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
     if exploit_depth:
         scan_opts['no_early_stop'] = True
         lean.update({'sqli_extract_max': 8, 'oob_max_findings': 8, 'max_findings_per_family': None})

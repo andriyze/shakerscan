@@ -1493,6 +1493,112 @@ def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypat
     assert worker._parallel_shard_slot_key("55555555-5555-5555-5555-555555555555") not in redis.values
 
 
+def test_dynamic_bola_batch_preserves_phase4_budget_and_comparator(monkeypatch):
+    endpoint_id = "11111111-1111-1111-1111-111111111111"
+    calls = {"claim": None, "run": None, "record": None, "mark_tested": None, "reconcile": None}
+    redis = _FakeJobRedis()
+
+    async def fake_claim_test_batch(conn, target_id, **kwargs):
+        calls["claim"] = {"target_id": target_id, **kwargs}
+        return [
+            {
+                "id": endpoint_id,
+                "method": "GET",
+                "path": "/api/orders",
+                "param_shape": "id",
+                "auth_state": "user1",
+                "param_location": "query",
+                "replay_spec": None,
+            }
+        ]
+
+    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
+        calls["run"] = dict(options)
+        assert options["custom_endpoints"] == ["GET /api/orders?id=1"]
+        return {
+            "target": target,
+            "findings": [{"title": "BOLA proof", "severity": "critical", "tool": "bola"}],
+            "result": {"score": 50, "grade": "F"},
+            "active_checks": {
+                "per_endpoint_telemetry": True,
+                "endpoint_attempts": [
+                    {
+                        "custom_endpoint": "GET /api/orders?id=1",
+                        "status": "completed",
+                        "attempted_params_count": 1,
+                        "completed_params_count": 1,
+                    }
+                ],
+            },
+        }
+
+    async def fake_record_endpoint_telemetry_attempts(conn, **kwargs):
+        calls["record"] = kwargs
+        return {"written": 1, "completed_ids": [endpoint_id], "partial_ids": [], "error_ids": []}
+
+    async def fake_mark_tested(conn, endpoint_ids, *, verdict):
+        calls["mark_tested"] = {"endpoint_ids": endpoint_ids, "verdict": verdict}
+
+    async def fake_reconcile(conn, parent_id, r, queue_name):
+        calls["reconcile"] = {"parent_id": parent_id, "queue_name": queue_name}
+        return True
+
+    async def fake_upsert_endpoints(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
+    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "save_findings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("parent merge owns findings")))
+    monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
+    monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
+    monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
+    monkeypatch.setattr(worker.asm_inventory, "upsert_endpoints", fake_upsert_endpoints)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", fake_reconcile)
+
+    asyncio.run(
+        worker.process_exploit_batch_job(
+            {
+                "job_id": "job-dynamic-bola",
+                "scan_id": "22222222-2222-2222-2222-222222222222",
+                "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+                "target_id": "33333333-3333-3333-3333-333333333333",
+                "target": "https://example.test",
+                "campaign_id": "44444444-4444-4444-4444-444444444444",
+                "batch_size": 1,
+                "stale_days": 0,
+                "campaign_only": True,
+                "finish_campaign_on_complete": False,
+                "exploit_depth": True,
+                "options": {
+                    "scan_type": "smart",
+                    "coverage_dynamic_worker": True,
+                    "coverage_dynamic_campaign_only": True,
+                    "coverage_dynamic_batch_size": 1,
+                    "coverage_attempt_family": "bola",
+                    "asm_check_family": "bola",
+                    "auth_state": "user1",
+                    "auth_header": "Bearer user1",
+                    "user2_header": "Bearer user2",
+                    "xss": False,
+                    "sqli": False,
+                },
+            }
+        )
+    )
+
+    assert calls["claim"]["check_family"] == "bola"
+    assert calls["claim"]["auth_state"] == "user1"
+    assert calls["run"]["asm_check_family"] == "bola"
+    assert calls["run"]["auth_header"] == "Bearer user1"
+    assert calls["run"]["user2_header"] == "Bearer user2"
+    assert calls["run"]["custom_budget"]["phase4_max_seconds"] == worker.parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
+    assert calls["run"]["custom_budget"]["nuclei_max_targets"] == 0
+    assert calls["record"]["check_family"] == "bola"
+    assert calls["mark_tested"] == {"endpoint_ids": [endpoint_id], "verdict": "findings"}
+
+
 def test_exploit_batch_partial_domain_rate_grant_releases_ungranted_endpoints(monkeypatch):
     first_id = "11111111-1111-1111-1111-111111111111"
     second_id = "22222222-2222-2222-2222-222222222222"
