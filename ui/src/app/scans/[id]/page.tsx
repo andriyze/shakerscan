@@ -121,12 +121,14 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
         {severityEntries.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
             {severityEntries.map(([severity, count]) => (
-              <span
+              <Link
                 key={severity}
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded uppercase ${SEVERITY_BADGE_STYLES[severity]}`}
+                href={`/findings?scan_id=${scan.id}&severity=${severity}`}
+                title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} for this scan`}
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded uppercase cursor-pointer transition hover:opacity-90 hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
                 {count} {severity}
-              </span>
+              </Link>
             ))}
           </div>
         ) : totalCounted === 0 && (scan.findings_count || 0) === 0 ? (
