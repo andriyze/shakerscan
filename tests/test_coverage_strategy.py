@@ -656,3 +656,27 @@ def test_dynamic_coverage_family_respects_explicit_focus():
     assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
     assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
     assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
+
+
+# --------------------------- D5: hunter union lanes ---------------------------
+
+def test_coverage_family_lanes_exclude_gated_families_without_creds():
+    lanes = [l[1] for l in p._coverage_family_lanes({})]
+    assert "bola" not in lanes and "auth" not in lanes
+    assert set(lanes) >= {"all", "sqli", "xss"}
+
+
+def test_coverage_family_lanes_add_bola_auth_when_preconditions_met():
+    lanes = p._coverage_family_lanes(
+        {"auth_header": "Bearer u1", "user2_header": "Bearer u2", "exploit_depth": True}
+    )
+    names = [l[1] for l in lanes]
+    assert "bola" in names and "auth" in names  # full union in one scan
+    bola = [l for l in lanes if l[1] == "bola"][0]
+    assert bola[2].get("exploit_depth") is True  # bola lane carries its precondition
+
+
+def test_coverage_family_lanes_bola_needs_second_principal():
+    # primary creds only -> auth lane allowed, bola still gated out (no user2)
+    lanes = [l[1] for l in p._coverage_family_lanes({"auth_header": "Bearer u1", "exploit_depth": True})]
+    assert "auth" in lanes and "bola" not in lanes

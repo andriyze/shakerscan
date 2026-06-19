@@ -220,6 +220,26 @@ def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, st
             return [(spec.name, spec.name, dict(spec.scanner_options))]
     lanes: list[tuple[str, str, dict[str, Any]]] = [("broad", "all", {})]
     lanes.extend((spec.name, spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+
+    # D5 (hunter union): the broad/sqli/xss lanes above intentionally exclude the
+    # high-risk, credential-gated authz families. But when the operator HAS
+    # supplied the required preconditions (primary creds, a second principal,
+    # exploit_depth), add those focused lanes so a single coverage_family run
+    # also unions BOLA/Auth findings — instead of forcing a separate focused scan.
+    # This stays fail-closed: no precondition, no lane (never auto-run on a bare
+    # target).
+    opts = parent_options or {}
+    existing = {lane[1] for lane in lanes}
+    has_primary = check_registry.has_primary_auth_context(opts)
+    has_second = check_registry.has_second_user_auth_context(opts)
+    if "bola" not in existing and bool(opts.get("exploit_depth")) and has_primary and has_second:
+        bspec = check_registry.get_check_family("bola")
+        if bspec and bspec.runnable and bspec.scanner_options:
+            lanes.append(("bola", "bola", {**dict(bspec.scanner_options), "exploit_depth": True}))
+    if "auth" not in existing and has_primary:
+        aspec = check_registry.get_check_family("auth")
+        if aspec and aspec.runnable and aspec.scanner_options:
+            lanes.append(("auth", "auth", dict(aspec.scanner_options)))
     return lanes
 
 
