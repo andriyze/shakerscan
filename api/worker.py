@@ -1184,7 +1184,17 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                 or f"Scanner produced no output (exit code {proc.returncode})"
             ),
             'target': target,
-            'exit_code': proc.returncode
+            'exit_code': proc.returncode,
+            # Persist enough to diagnose a silent no-output failure after the fact
+            # (the failing runtime is usually gone by the time it's noticed): the
+            # masked command, output sizes, and a head of whatever did come back.
+            'failure_diagnostics': {
+                'masked_command': ' '.join(cmd_masked),
+                'stdout_len': len(stdout_text or ''),
+                'stderr_len': len(stderr_text or ''),
+                'stdout_head': (stdout_text or '')[:1000],
+                'scanner_version': os.environ.get('SCANNER_VERSION') or os.environ.get('GIT_COMMIT') or 'dev',
+            },
         }
 
     if stderr_text:
@@ -4558,7 +4568,10 @@ async def process_scan_plan_job(job_data: dict):
         parallel_scan._merge_custom_budget(recon_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET))
         print(f"[{parent_id[:8]}] coverage: running discover-once recon", flush=True)
         try:
-            recon_result = await run_scan(target, recon_opts, scan_id=parent_id, job_id=parent_job_id)
+            # Use the DB-normalized target_url (scheme-full), not the raw queued
+            # target which can be scheme-less when the user submitted without a
+            # scheme — a scheme-less target makes the scanner exit with no JSON.
+            recon_result = await run_scan(target_url, recon_opts, scan_id=parent_id, job_id=parent_job_id)
         except Exception as e:
             recon_result = {}
             print(f"[{parent_id[:8]}] coverage recon error: {e}", flush=True)
@@ -4704,7 +4717,7 @@ async def process_scan_plan_job(job_data: dict):
         r.rpush(QUEUE_NAME, json.dumps({
             'job_id': parent_job_id,
             'scan_id': parent_id,
-            'target': target,
+            'target': target_url,
             'options': single_opts,
             'submitted_at': utc_now_iso(),
         }))
@@ -4792,7 +4805,10 @@ async def process_scan_plan_job(job_data: dict):
                 'parent_scan_id': parent_id,
                 'campaign_id': campaign_id,
                 'target_id': target_id,
-                'target': target,
+                # Children must scan the DB-normalized target_url (scheme-full), not
+                # the raw queued target — a scheme-less target makes every shard's
+                # scanner exit with no JSON, failing the whole parent merge.
+                'target': target_url,
                 'options': shard.options,
                 'shard_label': shard.label,
                 'shard_index': shard.index,
