@@ -9358,7 +9358,7 @@ async def build_report(target: str,
                     active_block["hash_route_dom_xss"] = hash_route_findings
                     active_block["hash_route_endpoints_tested"] = hash_route_dom_xss.get("endpoints_tested", 0)
                     for f in hash_route_findings:
-                        report["findings"].append(normalize_finding(
+                        nf = normalize_finding(
                             "hash_route_dom_xss",
                             f"DOM XSS in Hash Route ({f.get('technique', 'unknown')})",
                             f.get("severity", "high"),
@@ -9374,7 +9374,16 @@ async def build_report(target: str,
                                 "cvss_score": f.get("cvss_score"),
                             },
                             "CWE-79"
-                        ))
+                        )
+                        # Preserve the headless browser execution proof at top level so the
+                        # finding validator's execution-proof fast-path keeps a dialog-fired
+                        # DOM XSS verified. It cannot do HTTP-response context verification on
+                        # a browser-side finding and would otherwise downgrade it to medium.
+                        if f.get("browser_proof"):
+                            nf["browser_proof"] = f["browser_proof"]
+                        if f.get("verified"):
+                            nf["poe_result"] = {"proven": True, "confidence": f.get("confidence", 0.99)}
+                        report["findings"].append(nf)
 
                 # Record coverage for smart active tests
                 if coverage_tracker:
