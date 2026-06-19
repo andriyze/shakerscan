@@ -985,6 +985,7 @@ def plan_dynamic_coverage_shards(
     endpoint_count: int,
     *,
     auth_state_count: int = 1,
+    auth_states: list[str] | None = None,
     notes: list[str] | None = None,
 ) -> ParallelPlan:
     """Plan pull-based Full Coverage workers over a campaign-scoped inventory.
@@ -996,7 +997,15 @@ def plan_dynamic_coverage_shards(
     """
     notes = notes if notes is not None else []
     batch_size = _coverage_dynamic_batch_size(parent_options)
-    total = max(0, int(endpoint_count or 0)) * max(1, int(auth_state_count or 1))
+    states = list(auth_states or [])
+    if not states:
+        if parent_options.get("auth_state_shards"):
+            states = available_auth_states(parent_options)
+        else:
+            states = [str(parent_options.get("auth_state") or "anonymous")]
+    if not states:
+        states = ["anonymous"]
+    total = max(0, int(endpoint_count or 0)) * max(1, len(states), int(auth_state_count or 1))
     if total < 1:
         notes.append("coverage dynamic allocation requested but no endpoints were harvested")
         return ParallelPlan(strategy="coverage", shards=[], notes=notes)
@@ -1021,7 +1030,8 @@ def plan_dynamic_coverage_shards(
 
     shards: list[ShardSpec] = []
     for i in range(shard_count):
-        opts = _base_child_options(parent_options)
+        state = states[i % len(states)]
+        opts = _apply_auth_state(_base_child_options(parent_options), state)
         opts["coverage_allocation"] = "dynamic"
         opts["coverage_dynamic_worker"] = True
         opts["coverage_dynamic_batch_size"] = batch_size
@@ -1049,7 +1059,7 @@ def plan_dynamic_coverage_shards(
                 "smart_bola_max_endpoints": batch_size,
             },
         )
-        shards.append(ShardSpec(index=i, label=f"coverage-dynamic[{i}]", options=opts))
+        shards.append(ShardSpec(index=i, label=f"coverage-dynamic[{i}]:{state}", options=opts))
     return ParallelPlan(strategy="coverage", shards=shards, notes=notes)
 
 
@@ -1058,18 +1068,31 @@ def plan_dynamic_coverage_family_shards(
     endpoint_count: int,
     *,
     auth_state_count: int = 1,
+    auth_states: list[str] | None = None,
     worker_count: int = 0,
     notes: list[str] | None = None,
 ) -> ParallelPlan:
     """Plan pull-based coverage workers for broad plus focused family lanes."""
     notes = notes if notes is not None else []
     batch_size = _coverage_dynamic_batch_size(parent_options)
-    auth_scoped_total = max(0, int(endpoint_count or 0)) * max(1, int(auth_state_count or 1))
+    states = list(auth_states or [])
+    if not states:
+        if parent_options.get("auth_state_shards"):
+            states = available_auth_states(parent_options)
+        else:
+            states = [str(parent_options.get("auth_state") or "anonymous")]
+    if not states:
+        states = ["anonymous"]
+    auth_scoped_total = max(0, int(endpoint_count or 0)) * max(1, len(states), int(auth_state_count or 1))
     if auth_scoped_total < 1:
         notes.append("coverage_family dynamic allocation requested but no endpoints were harvested")
         return ParallelPlan(strategy="coverage_family", shards=[], notes=notes)
 
-    lanes = _coverage_family_lanes(parent_options)
+    family_lanes = _coverage_family_lanes(parent_options)
+    lanes: list[tuple[str, str, str, dict[str, Any]]] = []
+    for auth_state in states:
+        for lane_name, attempt_family, lane_options in family_lanes:
+            lanes.append((auth_state, lane_name, attempt_family, lane_options))
     try:
         max_batches = int(parent_options.get("coverage_dynamic_max_batches") or COVERAGE_MAX_DYNAMIC_BATCHES)
     except (TypeError, ValueError):
@@ -1077,7 +1100,7 @@ def plan_dynamic_coverage_family_shards(
     max_batches = max(1, min(COVERAGE_MAX_DYNAMIC_BATCHES, max_batches))
     if max_batches < len(lanes):
         selected_lane_count = max(1, max_batches)
-        dropped = [name for name, _family, _opts in lanes[selected_lane_count:]]
+        dropped = [f"{state}:{name}" for state, name, _family, _opts in lanes[selected_lane_count:]]
         notes.append(
             f"coverage_family dynamic: shard cap leaves {selected_lane_count}/{len(lanes)} lane(s); "
             f"dropped {', '.join(dropped)}"
@@ -1117,8 +1140,8 @@ def plan_dynamic_coverage_family_shards(
 
     shards: list[ShardSpec] = []
     for batch_index in range(batches_per_lane):
-        for lane_name, attempt_family, lane_options in lanes:
-            opts = _base_child_options(parent_options)
+        for auth_state, lane_name, attempt_family, lane_options in lanes:
+            opts = _apply_auth_state(_base_child_options(parent_options), auth_state)
             opts["coverage_allocation"] = "dynamic"
             opts["coverage_dynamic_worker"] = True
             opts["coverage_dynamic_batch_size"] = batch_size
@@ -1156,7 +1179,7 @@ def plan_dynamic_coverage_family_shards(
             shards.append(
                 ShardSpec(
                     index=len(shards),
-                    label=f"coverage-dynamic[{batch_index}]:{lane_name}",
+                    label=f"coverage-dynamic[{batch_index}]:{auth_state}:{lane_name}",
                     options=opts,
                 )
             )

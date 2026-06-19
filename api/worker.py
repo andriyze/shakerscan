@@ -4636,6 +4636,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    auth_states=coverage_auth_states,
                     worker_count=int(job_data.get('parallel_worker_count') or 0),
                 )
                 if requested_strategy == 'coverage_family'
@@ -4643,6 +4644,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    auth_states=coverage_auth_states,
                 )
             )
             planned_families = sorted({
@@ -4694,6 +4696,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    auth_states=coverage_auth_states,
                     worker_count=int(job_data.get('parallel_worker_count') or 0),
                 )
                 if requested_strategy == 'coverage_family'
@@ -4701,6 +4704,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    auth_states=coverage_auth_states,
                 )
             )
         elif requested_strategy == 'coverage_family':

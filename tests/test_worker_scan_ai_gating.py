@@ -1171,12 +1171,12 @@ def test_scan_plan_coverage_family_dynamic_uses_family_aware_batches(monkeypatch
     assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
     assert {job["campaign_id"] for job in child_jobs} == {str(campaign_id)}
     assert [job["shard_label"] for job in child_jobs] == [
-        "coverage-dynamic[0]:broad",
-        "coverage-dynamic[0]:sqli",
-        "coverage-dynamic[0]:xss",
-        "coverage-dynamic[1]:broad",
-        "coverage-dynamic[1]:sqli",
-        "coverage-dynamic[1]:xss",
+        "coverage-dynamic[0]:anonymous:broad",
+        "coverage-dynamic[0]:anonymous:sqli",
+        "coverage-dynamic[0]:anonymous:xss",
+        "coverage-dynamic[1]:anonymous:broad",
+        "coverage-dynamic[1]:anonymous:sqli",
+        "coverage-dynamic[1]:anonymous:xss",
     ]
     assert [job["check_family"] for job in child_jobs[:3]] == ["all", "sqli", "xss"]
     assert child_jobs[1]["options"]["coverage_attempt_family"] == "sqli"
@@ -1259,8 +1259,8 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     assert len(child_jobs) == 2
     assert {job["type"] for job in child_jobs} == {worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE}
     assert [job["shard_label"] for job in child_jobs] == [
-        "coverage-dynamic[0]:bola",
-        "coverage-dynamic[1]:bola",
+        "coverage-dynamic[0]:user1:bola",
+        "coverage-dynamic[1]:user1:bola",
     ]
     assert {job["check_family"] for job in child_jobs} == {"bola"}
     assert {job["options"]["coverage_attempt_family"] for job in child_jobs} == {"bola"}

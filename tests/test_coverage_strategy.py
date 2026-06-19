@@ -590,6 +590,7 @@ def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
 
     assert plan.strategy == "coverage"
     assert plan.shard_count == 8
+    assert {s.options["auth_state"] for s in plan.shards} == {"anonymous"}
     assert any("dynamic campaign allocation" in n for n in plan.notes)
     for shard in plan.shards:
         assert shard.options["coverage_dynamic_worker"] is True
@@ -603,6 +604,29 @@ def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
         assert shard.options["custom_budget"]["phase4_max_seconds"] == 0
 
 
+def test_dynamic_coverage_plan_auth_state_workers_are_scoped():
+    plan = p.plan_dynamic_coverage_shards(
+        {
+            "scan_type": "smart",
+            "coverage_dynamic_batch_size": 25,
+            "auth_state_shards": True,
+            "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2",
+        },
+        endpoint_count=25,
+        auth_states=["anonymous", "user1", "user2"],
+    )
+
+    assert plan.shard_count == 3
+    by_state = {s.options["auth_state"]: s.options for s in plan.shards}
+    assert set(by_state) == {"anonymous", "user1", "user2"}
+    assert "auth_header" not in by_state["anonymous"]
+    assert by_state["user1"]["auth_header"] == "Bearer u1"
+    assert by_state["user2"]["auth_header"] == "Bearer u2"
+    assert "user2_header" not in by_state["user1"]
+    assert "user2_header" not in by_state["user2"]
+
+
 def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     plan = p.plan_dynamic_coverage_family_shards(
         {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
@@ -613,10 +637,11 @@ def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     assert plan.strategy == "coverage_family"
     assert plan.shard_count == 12
     assert [s.label for s in plan.shards[:3]] == [
-        "coverage-dynamic[0]:broad",
-        "coverage-dynamic[0]:sqli",
-        "coverage-dynamic[0]:xss",
+        "coverage-dynamic[0]:anonymous:broad",
+        "coverage-dynamic[0]:anonymous:sqli",
+        "coverage-dynamic[0]:anonymous:xss",
     ]
+    assert {s.options["auth_state"] for s in plan.shards} == {"anonymous"}
     assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"all", "sqli", "xss"}
     assert all(s.options["coverage_dynamic_worker"] is True for s in plan.shards)
     assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
@@ -628,6 +653,39 @@ def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     assert sqli.options["asm_check_family"] == "sqli"
     assert xss.options["asm_check_family"] == "xss"
     assert "asm_check_family" not in broad.options
+
+
+def test_dynamic_coverage_family_auth_state_workers_are_scoped():
+    plan = p.plan_dynamic_coverage_family_shards(
+        {
+            "scan_type": "smart",
+            "coverage_dynamic_batch_size": 25,
+            "coverage_dynamic_max_batches": 20,
+            "auth_state_shards": True,
+            "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2",
+            "exploit_depth": True,
+        },
+        endpoint_count=25,
+        auth_states=["anonymous", "user1", "user2"],
+    )
+
+    expected_states = {"anonymous", "user1", "user2"}
+    expected_families = {"all", "sqli", "xss", "auth", "bola"}
+    assert {s.options["auth_state"] for s in plan.shards} == expected_states
+    assert {s.options["coverage_attempt_family"] for s in plan.shards} == expected_families
+    assert len({
+        (s.options["auth_state"], s.options["coverage_attempt_family"])
+        for s in plan.shards
+    }) == len(expected_states) * len(expected_families)
+    anon = next(s.options for s in plan.shards if s.options["auth_state"] == "anonymous")
+    user1 = next(s.options for s in plan.shards if s.options["auth_state"] == "user1")
+    user2 = next(s.options for s in plan.shards if s.options["auth_state"] == "user2")
+    assert "auth_header" not in anon
+    assert user1["auth_header"] == "Bearer u1"
+    assert user2["auth_header"] == "Bearer u2"
+    assert "user2_header" not in user1
+    assert "user2_header" not in user2
 
 
 def test_dynamic_coverage_family_respects_explicit_focus():
@@ -647,10 +705,10 @@ def test_dynamic_coverage_family_respects_explicit_focus():
     assert plan.strategy == "coverage_family"
     assert plan.shard_count == 4
     assert [s.label for s in plan.shards] == [
-        "coverage-dynamic[0]:bola",
-        "coverage-dynamic[1]:bola",
-        "coverage-dynamic[2]:bola",
-        "coverage-dynamic[3]:bola",
+        "coverage-dynamic[0]:anonymous:bola",
+        "coverage-dynamic[1]:anonymous:bola",
+        "coverage-dynamic[2]:anonymous:bola",
+        "coverage-dynamic[3]:anonymous:bola",
     ]
     assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"bola"}
     assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
