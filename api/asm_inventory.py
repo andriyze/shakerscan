@@ -629,6 +629,11 @@ async def _probe_path_status(base_url: str, path: str, auth_args: list[str], tim
     transient error/timeout so callers keep the endpoint when the probe is
     inconclusive — reachability filtering must never drop a real endpoint on a
     flaky probe."""
+    # Universal guard: a scheme-less base ("example.com") yields an invalid curl URL
+    # ("example.com/path") that always errors -> inconclusive -> phantom endpoints
+    # kept. Covers every prober (filter, sweep, decoy learning) in one place.
+    if "://" not in base_url:
+        base_url = "https://" + base_url.lstrip("/")
     url = base_url.rstrip("/") + (path if path.startswith("/") else "/" + path)
     cmd = [
         "curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
@@ -752,6 +757,11 @@ async def filter_reachable_worklist(
     entries = [e for e in (worklist or []) if isinstance(e, str) and e.strip()]
     if not entries or not base_url:
         return entries
+    # Defensive: a scheme-less base (caller passed a raw "example.com") makes every
+    # probe build an invalid curl URL -> all-inconclusive -> phantom endpoints kept,
+    # inflating coverage/shard work. Normalize so the filter actually does its job.
+    if "://" not in str(base_url):
+        base_url = f"https://{str(base_url).lstrip('/')}"
     if str(os.environ.get("ASM_VALIDATE_REACHABILITY", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return entries
 

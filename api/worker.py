@@ -4623,7 +4623,7 @@ async def process_scan_plan_job(job_data: dict):
         # user-supplied custom_endpoints are always kept.
         _raw_harvested = len(harvested)
         harvested = await asm_inventory.filter_reachable_worklist(
-            target,
+            target_url,  # DB-normalized (scheme-full); raw target may be scheme-less
             harvested,
             options,
             max_probe=max(2000, min(harvest_limit, 6000)),
