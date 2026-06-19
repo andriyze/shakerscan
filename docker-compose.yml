@@ -103,6 +103,10 @@ services:
       - ./scanner/reporting.py:/app/reporting.py:ro
       - ./scanner/signals.py:/app/signals.py:ro
       - ./scanner/target_context.py:/app/target_context.py:ro
+      # Bind-mount scanner.py into the API too (mirrors the worker) so dev deploys are
+      # deterministic — the API doesn't import it today, but this keeps /app/scanner.py
+      # from drifting stale against the checkout and the workers.
+      - ./scanner/scanner.py:/app/scanner.py:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
