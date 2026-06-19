@@ -922,6 +922,14 @@ def _auto_shard_eligibility(scan_type: str, options_payload: dict[str, Any]) -> 
     endpoint_count = _custom_endpoint_count(options_payload)
     if endpoint_count >= 2:
         return True, f"{endpoint_count} explicit endpoints can be split by scope"
+    # A focused check_family scan (sqli/xss/bola/auth) is a deep single-family
+    # pass. Auto-sharding it into broad `coverage` dilutes that family's budget
+    # and adds the slow recon+merge path (observed: a focused SQLi scan hung in
+    # coverage and found nothing, while the direct pass found the login SQLi).
+    # Focused scans therefore run DIRECT; only broad scans fan out.
+    family = check_registry.normalize_check_family(_scan_check_family_value(options_payload))
+    if family and family != "all":
+        return False, f"focused {family} scan runs direct (auto-sharding would dilute the family pass)"
     if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
         return True, f"{scan_type} scan can fan out endpoint coverage across workers"
     return False, f"{scan_type} scan has no endpoint list and no active families to shard"
