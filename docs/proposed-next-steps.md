@@ -43,9 +43,14 @@ Use these as benchmark fixtures (expected families/routes, not hardcoded answers
   (`discovery.py:377/2704`) generates a combinatorial blowup of unverified auth/oauth/version paths.
   Hard-cap synthetic/inferred endpoints, and rank **observed** (har/browser/crawl/openapi) endpoints
   strictly above synthesized ones in active selection (extends `active_prioritization.py`).
-- **D0c — Enforce a real active time budget.** With `no_early_stop` + `thorough`, the SQLi phase
-  ground for 10+ min with no cap. The per-family deadline (`_split_active_family_budget`) must be a
-  hard ceiling even under `no_early_stop`, and the loop must honor cooperative cancel.
+- **D0c — Per-request hard timeout (the real hang).** *Refined diagnosis (live):* the loop deadline
+  is correct — `smart_sqli_test` breaks on `_budget_exhausted()` at endpoint/param/payload level —
+  yet a `SQLi <= 269s` budget overran to ~11 min testing only 31 endpoints (~21s each). Cause: a
+  single slow/phantom endpoint (e.g. `/api/Addresss/auth/`) where every curl rides its `--max-time`,
+  so the loop is stuck *inside one `await run(cmd)`* and never re-checks the clock. Fix: wrap each
+  per-endpoint test (or each subprocess) in `asyncio.wait_for(..., remaining_deadline)` so one slow
+  route can't blow the budget; and widen the D0a gate to catch near-miss synthetic variants
+  (`Addresss`, doubled segments). D0a v2 already drops 385 phantoms (was 2) via per-parent decoys.
 
 ## P0 — Discovery & scope (the second unlock)
 - **D1 — Decouple discovery from active focus.** A focused or coverage scan must still run full
