@@ -28,6 +28,33 @@ from scanner_tools.active_checks import (
 )
 
 
+def test_reachability_gate_drops_only_clear_not_found():
+    nf = active_checks._response_matches_not_found
+    # clear not-found -> drop
+    assert nf(404, 120, None, 0) is True
+    assert nf(410, 80, None, 0) is True
+    # auth-protected / method / server errors EXIST -> never dropped
+    for code in (401, 403, 405, 429, 500, 502):
+        assert nf(code, 120, None, 0) is False
+    # transient / no response -> keep
+    assert nf(None, 0, None, 0) is False
+    # SPA catch-all: 200 matching a known-missing path's length -> drop
+    assert nf(200, 5000, 200, 5010) is True
+    # 200 that differs from the decoy (a real page) -> keep
+    assert nf(200, 900, 200, 5000) is False
+    # 200 with no decoy signal -> keep (conservative)
+    assert nf(200, 5000, None, 0) is False
+
+
+def test_reachability_gate_only_targets_synthetic_sources():
+    syn = active_checks._is_synthetic_active_source
+    for observed in ("har_discovery", "browser", "openapi", "manual", "form",
+                     "hash_route", "resource_id_propagation", "js_bundle_analysis"):
+        assert syn({"source": observed}) is False
+    for guessed in ("options", "common", "inferred", "wordlist", "", None):
+        assert syn({"source": guessed}) is True
+
+
 def test_active_checks_synthetic_body_reconstructs_arrays():
     template = active_checks._synthetic_json_template_from_params(
         ["items", "items.id", "items.price", "shipping.zip"]

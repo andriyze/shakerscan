@@ -8282,6 +8282,138 @@ def _enabled_active_family_names(*, run_sqli: bool, run_xss: bool) -> tuple[str,
     return tuple(name for name in ACTIVE_FAMILY_DISPATCH_ORDER if enabled.get(name))
 
 
+# Endpoint sources that were actually observed (crawl / spec / browser / HAR /
+# manual). These are never reachability-dropped. Everything else is a
+# synthesized/guessed path (blind wordlist + API-version permutations) which can
+# explode into phantom 404s that drown the active budget and hang the scan, so
+# those are probed first and dropped if they don't exist.
+_ACTIVE_OBSERVED_SOURCES = frozenset({
+    "har_discovery", "har", "har_network_capture", "browser", "browser_api",
+    "browser_api_endpoints", "crawl", "url_crawl", "openapi", "swagger",
+    "graphql", "manual", "manual_endpoints", "form", "hash_route",
+    "resource_id_propagation", "js_bundle_analysis", "katana",
+})
+
+
+def _is_synthetic_active_source(endpoint: dict[str, Any]) -> bool:
+    return str(endpoint.get("source") or "").strip().lower() not in _ACTIVE_OBSERVED_SOURCES
+
+
+def _response_matches_not_found(
+    status: int | None,
+    body_len: int,
+    decoy_status: int | None,
+    decoy_len: int,
+) -> bool:
+    """Pure: does this look like a not-found page (a phantom we should not fuzz)?
+
+    Conservative — only clear 404/410, or a 2xx/3xx that matches a known-missing
+    path's response (SPA catch-all). Never treats 401/403/405/5xx as missing,
+    since those imply the endpoint *exists* (and is a real target).
+    """
+    if status is None:
+        return False
+    if status in (404, 410):
+        return True
+    if (
+        decoy_status is not None
+        and status == decoy_status
+        and 200 <= status < 400
+        and decoy_len > 0
+        and abs(body_len - decoy_len) <= max(48, int(decoy_len * 0.05))
+    ):
+        return True
+    return False
+
+
+async def _filter_reachable_active_endpoints(
+    base_url: str,
+    endpoints: list[dict],
+    auth_session: Any | None = None,
+    *,
+    max_probe: int = 150,
+    concurrency: int = 12,
+    timeout: float = 5.0,
+) -> list[dict]:
+    """Drop *synthesized* endpoints whose baseline GET is a 404/soft-404 so the
+    active budget reaches real routes instead of hanging on guessed permutations
+    (e.g. blind ``/api/v2/oauth2/authorize``). Observed endpoints are never dropped.
+    Best-effort: on any error, returns ``endpoints`` unchanged.
+    """
+    synthetic = [e for e in endpoints if isinstance(e, dict) and _is_synthetic_active_source(e)]
+    if len(synthetic) < 5:
+        return endpoints
+    try:
+        import aiohttp
+    except Exception:
+        return endpoints
+
+    headers, cookies = {}, {}
+    try:
+        if auth_session and getattr(auth_session, "config", None):
+            headers = dict(getattr(auth_session.config, "headers", {}) or {})
+            cookies = dict(getattr(auth_session.config, "cookies", {}) or {})
+    except Exception:
+        headers, cookies = {}, {}
+
+    def _abs(raw: Any) -> str:
+        u = str(raw or "")
+        return u if u.startswith("http") else urllib.parse.urljoin(base_url, u if u.startswith("/") else "/" + u)
+
+    path_first_url: dict[str, str] = {}
+    for ep in synthetic:
+        full = _abs(ep.get("url") or ep.get("path"))
+        path = urllib.parse.urlparse(full).path or "/"
+        path_first_url.setdefault(path, full)
+    probe_paths = list(path_first_url.items())[:max_probe]
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _probe(session, full_url):
+        async with sem:
+            try:
+                async with session.get(
+                    full_url, timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=True, ssl=False,
+                ) as resp:
+                    body = await resp.text()
+                    return resp.status, len(body)
+            except Exception:
+                return None, 0
+
+    try:
+        async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
+            decoy_url = _abs("/shakerscan-not-real-" + ("z" * 14))
+            decoy_status, decoy_len = await _probe(session, decoy_url)
+            probe_results = await asyncio.gather(*[_probe(session, full) for (_p, full) in probe_paths])
+    except Exception:
+        return endpoints
+
+    unreachable = {
+        path for (path, _full), (status, blen) in zip(probe_paths, probe_results)
+        if _response_matches_not_found(status, blen, decoy_status, decoy_len)
+    }
+    if not unreachable:
+        return endpoints
+
+    kept, dropped = [], 0
+    for ep in endpoints:
+        if isinstance(ep, dict) and _is_synthetic_active_source(ep):
+            path = urllib.parse.urlparse(_abs(ep.get("url") or ep.get("path"))).path or "/"
+            if path in unreachable:
+                dropped += 1
+                continue
+        kept.append(ep)
+    if not kept:
+        return endpoints  # guard against a misfiring decoy
+    print(
+        f"[active] Reachability gate: dropped {dropped} phantom synthetic endpoint(s) "
+        f"({len(unreachable)}/{len(probe_paths)} probed paths unreachable); {len(kept)} remain",
+        file=sys.stderr,
+    )
+    return kept
+
+
 async def run_smart_active_tests(
     url: str,
     endpoints: list[dict],
@@ -8389,6 +8521,16 @@ async def run_smart_active_tests(
             ),
             reverse=True
         )
+
+    # Drop synthesized phantom endpoints (404/soft-404) BEFORE fuzzing so the
+    # active budget reaches real routes instead of hanging on guessed permutations
+    # (e.g. blind /api/v{n}/oauth2/authorize). Observed routes are never dropped.
+    try:
+        prioritized_endpoints = await _filter_reachable_active_endpoints(
+            url, prioritized_endpoints, auth_session,
+        )
+    except Exception as _reach_err:
+        print(f"[active] reachability gate skipped: {_reach_err}", file=sys.stderr)
 
     # Run SQLi and XSS tests with signal awareness. Smart scans should remain
     # adaptive, but they still need an overall active probing budget so one
