@@ -94,7 +94,8 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
   const scanTypeLabel = formatScanTypeLabel(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
-  const scanFingerprint: string | null = scan?.result?.build_fingerprint || null
+  const scanFingerprint: string | null =
+    scan?.result?.build_fingerprint || scan?.result?.scan_metadata?.build_fingerprint || null
   // Red when the scan ran on a different build than the API currently serves
   // (stale image/worker). Prefer the source-tree fingerprint — it catches stale
   // 'dev' images that the version label can't — and fall back to the label.

@@ -4979,11 +4979,19 @@ def expected_build_fingerprint() -> Optional[str]:
     """Source checksum of the CURRENT checkout (host bind-mount at /workspace),
     falling back to the API's own /app runtime. This is the 'current build' the UI
     compares each scan's / worker's reported fingerprint against."""
+    # Must match (by basename) scanner.SCANNER_FINGERPRINT_FILES and the worker's
+    # report set, including worker.py and the output-shaping modules, so a worker
+    # running stale orchestration/output code is not reported as build_current.
     workspace = {
         "scanner.py": "/workspace/scanner/scanner.py",
         "active_checks.py": "/workspace/scanner/scanner_tools/active_checks.py",
         "parallel_scan.py": "/workspace/api/parallel_scan.py",
         "finding_validator.py": "/workspace/scanner/scanner_tools/finding_validator.py",
+        "worker.py": "/workspace/api/worker.py",
+        "constants.py": "/workspace/scanner/constants.py",
+        "findings.py": "/workspace/scanner/findings.py",
+        "grading.py": "/workspace/scanner/grading.py",
+        "reporting.py": "/workspace/scanner/reporting.py",
     }
     if all(os.path.exists(p) for p in workspace.values()):
         return _hash_source_files(workspace)
@@ -4992,6 +5000,11 @@ def expected_build_fingerprint() -> Optional[str]:
         "active_checks.py": "/app/scanner_tools/active_checks.py",
         "parallel_scan.py": "/app/parallel_scan.py",
         "finding_validator.py": "/app/scanner_tools/finding_validator.py",
+        "worker.py": "/app/worker.py",
+        "constants.py": "/app/constants.py",
+        "findings.py": "/app/findings.py",
+        "grading.py": "/app/grading.py",
+        "reporting.py": "/app/reporting.py",
     })
 
 

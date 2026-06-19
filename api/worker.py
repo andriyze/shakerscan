@@ -6130,11 +6130,19 @@ def _worker_build_fingerprint() -> str | None:
     """Source-tree checksum of this worker's runtime (keyed by basename so it
     matches the API's host-checkout fingerprint when the code is current)."""
     import hashlib
+    # Keep this set identical (by basename) to scanner.SCANNER_FINGERPRINT_FILES and
+    # api.expected_build_fingerprint so worker/scanner/API agree when current — and
+    # so a stale worker.py (orchestration: reaper/merge/queue/cancel/shard) is caught.
     file_map = {
         "scanner.py": "/app/scanner.py",
         "active_checks.py": "/app/scanner_tools/active_checks.py",
         "parallel_scan.py": "/app/parallel_scan.py",
         "finding_validator.py": "/app/scanner_tools/finding_validator.py",
+        "worker.py": "/app/worker.py",
+        "constants.py": "/app/constants.py",
+        "findings.py": "/app/findings.py",
+        "grading.py": "/app/grading.py",
+        "reporting.py": "/app/reporting.py",
     }
     h = hashlib.sha256()
     hashed = 0

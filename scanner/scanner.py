@@ -107,12 +107,21 @@ def _compute_source_fingerprint(file_map: dict[str, str]) -> str | None:
 
 
 # The scanner subprocess runs inside the worker container; hash its /app runtime.
-SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint({
+# Includes orchestration (worker.py, parallel_scan.py) and output-shaping modules
+# (constants/findings/grading/reporting) so a stale worker image is flagged for the
+# whole class of bugs that change scan behavior or output, not just the detectors.
+SCANNER_FINGERPRINT_FILES = {
     "scanner.py": "/app/scanner.py",
     "active_checks.py": "/app/scanner_tools/active_checks.py",
     "parallel_scan.py": "/app/parallel_scan.py",
     "finding_validator.py": "/app/scanner_tools/finding_validator.py",
-})
+    "worker.py": "/app/worker.py",
+    "constants.py": "/app/constants.py",
+    "findings.py": "/app/findings.py",
+    "grading.py": "/app/grading.py",
+    "reporting.py": "/app/reporting.py",
+}
+SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
 
 
@@ -5794,6 +5803,9 @@ async def build_report(target: str,
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "scanner_version": SCANNER_VERSION,
+        # Top-level (mirrors scan_metadata) so the UI can read result.build_fingerprint
+        # directly — a source-tree checksum that flags scans run on a stale image.
+        "build_fingerprint": SCANNER_BUILD_FINGERPRINT,
         "input": {"target": target, "normalized_host": target_host, "port": target_port, "scheme": target_scheme},
         "scan_mode": "smart" if smart_mode else ("complete" if complete_mode else ("quick" if quick_mode else "standard")),
         "scan_config": {
