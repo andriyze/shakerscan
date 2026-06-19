@@ -224,7 +224,10 @@ def validate_xss(
     # Trust it FIRST — before the response-body context checks below — otherwise a
     # proven DOM XSS is downgraded to medium just because the payload isn't echoed in
     # the response (or because no response body was captured for a browser-side finding).
-    if finding.get("verified") is True and _finding_has_execution_proof(finding):
+    # Execution proof is sufficient on its own — do NOT also require a top-level
+    # `verified` flag (normalize_finding does not promote it, so a proven DOM XSS
+    # often has browser_proof/poe_result but no top-level verified=True).
+    if _finding_has_execution_proof(finding):
         return ValidationResult(
             verified=True,
             confidence=max(0.85, float(finding.get("confidence") or 0.85)),
