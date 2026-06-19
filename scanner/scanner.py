@@ -702,6 +702,91 @@ def normalize_manual_endpoints(base_url: str, manual_endpoints: list[dict[str, A
     return normalized
 
 
+BOLA_ID_PARAM_HINTS = {
+    "id", "user_id", "uid", "order_id", "oid", "post_id", "comment_id",
+    "vehicle_id", "vehicleid", "car_id", "service_id", "mechanic_id",
+    "report_id", "file_id", "account_id", "invoice_id", "document_id",
+}
+
+
+def bola_resource_endpoints_from_manual_endpoints(
+    manual_endpoints: list[dict[str, Any]] | None,
+    *,
+    max_endpoints: int = 100,
+) -> list[dict[str, Any]]:
+    """Build Phase-4 BOLA resource templates from injected/manual endpoints.
+
+    Dynamic ASM shards already claim the highest-value inventory endpoints.
+    Passing those into check_bola avoids falling back to generic /api/users/{id}
+    probes that miss real app-specific routes such as crAPI workshop orders.
+    """
+    resources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    fallback_ids = ["1", "2", "100", "999"]
+
+    def _ids_from_values(values: list[str]) -> list[str]:
+        ids: list[str] = []
+        for value in values:
+            v = str(value).strip()
+            if v and v not in ids:
+                ids.append(v)
+        for v in fallback_ids:
+            if v not in ids:
+                ids.append(v)
+        return ids[:8]
+
+    for endpoint in manual_endpoints or []:
+        if str(endpoint.get("method") or "GET").upper() != "GET":
+            continue
+        raw_url = str(endpoint.get("url") or "").strip()
+        if not raw_url:
+            continue
+        parsed = urllib.parse.urlparse(raw_url)
+        path = parsed.path or raw_url
+        query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+
+        template_path = re.sub(r"<[^/?#]+>", "{id}", path)
+        ids: list[str] = []
+        if template_path != path:
+            ids.extend(v for _k, v in query_pairs if v)
+
+        params = endpoint.get("params") or []
+        param_defaults = endpoint.get("param_defaults") or {}
+        query_param_names = {k for k, _v in query_pairs}
+        candidate_param_names = set(str(p) for p in params) | set(str(k) for k in param_defaults.keys()) | query_param_names
+        id_param = next((p for p in candidate_param_names if p.lower() in BOLA_ID_PARAM_HINTS), None)
+        if id_param:
+            rebuilt_pairs: list[tuple[str, str]] = []
+            for key, value in query_pairs:
+                if key == id_param:
+                    ids.append(value)
+                    rebuilt_pairs.append((key, "{id}"))
+                else:
+                    rebuilt_pairs.append((key, value))
+            if not any(key == id_param for key, _value in rebuilt_pairs):
+                default_value = str(param_defaults.get(id_param) or "1")
+                ids.append(default_value)
+                rebuilt_pairs.append((id_param, "{id}"))
+            query = "&".join(
+                f"{urllib.parse.quote(str(k), safe='')}={urllib.parse.quote(str(v), safe='{}')}"
+                for k, v in rebuilt_pairs
+            )
+            template_path = f"{template_path}?{query}"
+
+        if "{id}" not in template_path:
+            continue
+
+        key = template_path
+        if key in seen:
+            continue
+        seen.add(key)
+        resources.append({"path": template_path, "ids": _ids_from_values(ids)})
+        if len(resources) >= max_endpoints:
+            break
+
+    return resources
+
+
 SCOPE_RULE_TYPES = {"path", "subdomain", "domain", "method", "header", "parameter"}
 
 
@@ -5230,7 +5315,22 @@ async def build_report(target: str,
     # BOLA/IDOR Check (requires auth for best results, user2_session enables true multi-user comparison)
     if bola_testing and not public_only:
         from scanner_tools.access_control_checks import check_bola
-        bola_task = asyncio.create_task(check_bola(base_url, user1_session=auth_session, user2_session=user2_session))
+        phase4_bola_resources = bola_resource_endpoints_from_manual_endpoints(
+            manual_endpoints_norm,
+            max_endpoints=smart_bola_max_endpoints,
+        )
+        if phase4_bola_resources:
+            print(
+                f"[bola] Phase 4 using {len(phase4_bola_resources)} manual resource endpoint templates",
+                file=sys.stderr,
+                flush=True,
+            )
+        bola_task = asyncio.create_task(check_bola(
+            base_url,
+            resource_endpoints=phase4_bola_resources or None,
+            user1_session=auth_session,
+            user2_session=user2_session,
+        ))
     else:
         async def dummy_bola(): return {"vulnerable": False, "findings": [], "endpoints_tested": 0, "access_violations": 0}
         bola_task = asyncio.create_task(dummy_bola())

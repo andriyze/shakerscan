@@ -71,6 +71,36 @@ def test_check_family_scope_marks_focused_auth():
     assert scope["legacy_flags"] == {"xss": False, "sqli": False}
 
 
+def test_bola_resource_mapper_uses_manual_path_placeholders():
+    endpoints = scanner_mod.normalize_manual_endpoints(
+        "https://crapi.test",
+        scanner_mod.parse_manual_endpoints([
+            "GET /workshop/api/shop/orders/<orderId>?order_id=42&limit=1",
+        ]),
+    )
+
+    resources = scanner_mod.bola_resource_endpoints_from_manual_endpoints(endpoints)
+
+    assert resources[0]["path"] == "/workshop/api/shop/orders/{id}?order_id={id}&limit=1"
+    assert resources[0]["ids"][:2] == ["42", "1"]
+
+
+def test_bola_resource_mapper_uses_id_query_params_and_skips_posts():
+    endpoints = scanner_mod.normalize_manual_endpoints(
+        "https://api.test",
+        scanner_mod.parse_manual_endpoints([
+            "GET /api/orders?order_id=7&limit=1",
+            "POST /api/orders json:{\"order_id\":7}",
+        ]),
+    )
+
+    resources = scanner_mod.bola_resource_endpoints_from_manual_endpoints(endpoints)
+
+    assert resources == [
+        {"path": "/api/orders?order_id={id}&limit=1", "ids": ["7", "1", "2", "100", "999"]}
+    ]
+
+
 def test_check_family_scope_marks_normal_active_mix():
     scope = scanner_mod.build_check_family_scope(True, active_xss=True, active_sqli=True)
 
