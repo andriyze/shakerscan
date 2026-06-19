@@ -644,6 +644,40 @@ def test_xss_payload_without_response_is_not_verified():
     assert updated["severity"] == "medium"
 
 
+def test_failed_browser_proof_is_not_trusted_as_verified_xss():
+    # A FAILED browser proof attempt (proven=false) must NOT be treated as
+    # confirmed XSS — otherwise a low-confidence non-execution blob becomes a
+    # trusted high-confidence finding.
+    finding = {
+        "tool": "hash_route_dom_xss",
+        "title": "DOM XSS in Hash Route",
+        "severity": "high",
+        "cvss_score": 7.4,
+        "browser_proof": {"proven": False, "confidence": 0.2},
+        "evidence": {"payload": "<img src=x onerror=alert(1)>"},
+    }
+    validation = validate_xss(finding, response_body="<html>no execution here</html>")
+    assert validation.verified is False
+    assert validation.evidence_level != "confirmed_exploit"
+
+
+def test_proven_browser_proof_is_trusted_as_verified_xss():
+    # The positive case still works: a proven dialog-fired DOM XSS is confirmed
+    # even though its payload never appears in the server response (client-side).
+    finding = {
+        "tool": "hash_route_dom_xss",
+        "title": "DOM XSS in Hash Route",
+        "severity": "high",
+        "cvss_score": 7.4,
+        "browser_proof": {"proven": True, "technique": "headless_xss_dialog", "confidence": 0.99},
+        "poe_result": {"proven": True, "confidence": 0.99},
+        "evidence": {"payload": "<img src=x onerror=alert(1)>"},
+    }
+    validation = validate_xss(finding, response_body="<html>search results</html>")
+    assert validation.verified is True
+    assert getattr(validation, "downgrade_to", None) is None
+
+
 def test_sqli_error_indicator_is_strong_but_not_verified():
     finding = {
         "tool": "active_sqli",

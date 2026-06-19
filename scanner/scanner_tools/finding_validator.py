@@ -182,17 +182,26 @@ EXECUTABLE_CONTEXTS = [
 
 
 def _finding_has_execution_proof(finding: dict[str, Any]) -> bool:
-    """Return True when XSS evidence includes execution proof, not just reflection."""
-    if finding.get("poe_result", {}).get("proven") is True:
+    """Return True only when XSS evidence shows actual execution.
+
+    A non-empty browser_proof/poe_result blob is NOT sufficient: a FAILED proof
+    attempt (``proven: false``) must never be trusted as confirmed XSS. Require
+    ``proven is True`` on the proof structures, or an execution-positive marker in
+    the evidence text (a bare "browser proof"/"dialog" substring is ambiguous —
+    a failed attempt logs those too — so only execution-confirming phrases count).
+    """
+    poe = finding.get("poe_result")
+    if isinstance(poe, dict) and poe.get("proven") is True:
         return True
-    if finding.get("browser_proof"):
+    bp = finding.get("browser_proof")
+    if isinstance(bp, dict) and bp.get("proven") is True:
         return True
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     evidence_text = str(evidence).lower()
     proof_markers = (
-        "browser proof",
         "payload executed",
-        "dialog",
+        "dialog fired",
+        "dialog triggered",
         "console proof",
         "dom proof",
         "execution proof",
