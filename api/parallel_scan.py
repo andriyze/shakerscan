@@ -182,6 +182,10 @@ COVERAGE_MAX_TOTAL_SHARDS = _env_int("SHAKERSCAN_COVERAGE_MAX_TOTAL_SHARDS", 256
 # endpoint slices. It shares the same broad cap family so queue fan-out stays
 # bounded by default.
 COVERAGE_DYNAMIC_BATCH_SIZE = _env_int("SHAKERSCAN_COVERAGE_DYNAMIC_BATCH_SIZE", COVERAGE_PER_SHARD_CAP)
+# Dynamic pull workers drain the campaign queue, so the count of pull-worker shards
+# tracks the live fleet, not the endpoint count. ~3 per worker keeps every worker
+# busy without flooding the queue with near-idle rows.
+DYNAMIC_PULL_WORKERS_PER_WORKER = _env_int("SHAKERSCAN_COVERAGE_PULL_WORKERS_PER_WORKER", 3)
 COVERAGE_MAX_DYNAMIC_BATCHES = _env_int("SHAKERSCAN_COVERAGE_MAX_DYNAMIC_BATCHES", COVERAGE_MAX_TOTAL_SHARDS)
 
 # Per-shard active-endpoint ceiling (mirrors SCAN_BUDGET_CEILINGS["active_max_endpoints"]
@@ -1035,6 +1039,7 @@ def plan_dynamic_coverage_family_shards(
     endpoint_count: int,
     *,
     auth_state_count: int = 1,
+    worker_count: int = 0,
     notes: list[str] | None = None,
 ) -> ParallelPlan:
     """Plan pull-based coverage workers for broad plus focused family lanes."""
@@ -1062,7 +1067,22 @@ def plan_dynamic_coverage_family_shards(
 
     import math
 
-    batches_per_lane = max(1, min(math.ceil(auth_scoped_total / batch_size), max_batches // len(lanes)))
+    # Dynamic pull workers DRAIN the lane campaign (each repeatedly claims a batch
+    # until the lane is exhausted), so the shard count is a concurrency knob, not a
+    # coverage knob — sizing it off the endpoint count spawns 100+ near-idle queue
+    # rows on a rich app (observed: ~130 shards for 3 workers). Size to the live
+    # fleet instead: ~DYNAMIC_PULL_WORKERS_PER_WORKER pull workers per worker,
+    # spread across lanes (>=1 per lane). Coverage is unaffected — fewer workers
+    # just claim more batches each.
+    if worker_count and worker_count > 0:
+        total_pull = min(max_batches, max(len(lanes), worker_count * DYNAMIC_PULL_WORKERS_PER_WORKER))
+        batches_per_lane = max(1, total_pull // len(lanes))
+        notes.append(
+            f"coverage_family dynamic: worker-aware sizing -> {batches_per_lane} pull worker(s)/lane "
+            f"({worker_count} live worker(s) x {DYNAMIC_PULL_WORKERS_PER_WORKER})"
+        )
+    else:
+        batches_per_lane = max(1, min(math.ceil(auth_scoped_total / batch_size), max_batches // len(lanes)))
     planned_attempts = batches_per_lane * len(lanes) * batch_size
     expected_attempts = auth_scoped_total * len(lanes)
     if planned_attempts < expected_attempts:

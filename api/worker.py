@@ -4599,6 +4599,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    worker_count=int(job_data.get('parallel_worker_count') or 0),
                 )
                 if requested_strategy == 'coverage_family'
                 else parallel_scan.plan_dynamic_coverage_shards(
@@ -4656,6 +4657,7 @@ async def process_scan_plan_job(job_data: dict):
                     options,
                     len(harvested),
                     auth_state_count=len(coverage_auth_states),
+                    worker_count=int(job_data.get('parallel_worker_count') or 0),
                 )
                 if requested_strategy == 'coverage_family'
                 else parallel_scan.plan_dynamic_coverage_shards(

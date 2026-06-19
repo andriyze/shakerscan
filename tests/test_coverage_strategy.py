@@ -680,3 +680,15 @@ def test_coverage_family_lanes_bola_needs_second_principal():
     # primary creds only -> auth lane allowed, bola still gated out (no user2)
     lanes = [l[1] for l in p._coverage_family_lanes({"auth_header": "Bearer u1", "exploit_depth": True})]
     assert "auth" in lanes and "bola" not in lanes
+
+
+def test_dynamic_coverage_family_is_worker_aware_not_endpoint_count():
+    # A rich app (1000 endpoints x 3 auth states) must NOT spawn ~100 pull-worker
+    # shards on a 3-worker fleet; the count tracks the fleet, not the endpoint count.
+    opts = {"scan_type": "smart", "auth_header": "Bearer u1",
+            "user2_header": "Bearer u2", "exploit_depth": True}
+    bounded = p.plan_dynamic_coverage_family_shards(opts, 1000, auth_state_count=3, worker_count=3)
+    unbounded = p.plan_dynamic_coverage_family_shards(opts, 1000, auth_state_count=3, worker_count=0)
+    # lanes = broad,sqli,xss,bola,auth (5); ~3 pull workers/worker -> ~1 per lane
+    assert 5 <= len(bounded.shards) <= 15
+    assert len(unbounded.shards) > len(bounded.shards) * 3  # endpoint-based is far larger
