@@ -842,6 +842,94 @@ def test_apply_campaign_coverage_rollup_ignores_empty_attempts():
     assert merged["smart_coverage"]["endpoints"]["basis"] == "assigned_custom_endpoints"
 
 
+def test_scan_merge_all_failed_shards_sets_parent_error_message(monkeypatch):
+    parent_id = "55555555-5555-5555-5555-555555555555"
+    target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FakeMergeConn:
+        def __init__(self):
+            self.executions = []
+
+        async def fetchrow(self, query, *args):
+            assert args == (uuid.UUID(parent_id),)
+            return {
+                "target_id": target_id,
+                "target_url": "https://example.test",
+                "options": {"parallel_strategy": "coverage"},
+                "scan_type": "smart",
+                "created_at": now,
+                "started_at": now,
+                "job_id": "parent-job",
+                "status": "running",
+                "campaign_id": None,
+            }
+
+        async def fetch(self, query, *args):
+            assert args == (uuid.UUID(parent_id),)
+            return [
+                {
+                    "id": uuid.UUID("11111111-1111-1111-1111-111111111111"),
+                    "status": "failed",
+                    "result": {
+                        "target": "https://example.test",
+                        "error": "Scanner produced no output (exit code 0)",
+                        "failure_diagnostics": {"scanner_version": "test-build"},
+                    },
+                    "score": None,
+                    "grade": None,
+                    "findings_count": 0,
+                    "shard_index": 0,
+                    "options": {},
+                    "started_at": now,
+                    "completed_at": now,
+                    "campaign_id": None,
+                    "error_message": None,
+                },
+                {
+                    "id": uuid.UUID("22222222-2222-2222-2222-222222222222"),
+                    "status": "failed",
+                    "result": {},
+                    "score": None,
+                    "grade": None,
+                    "findings_count": 0,
+                    "shard_index": 1,
+                    "options": {},
+                    "started_at": now,
+                    "completed_at": now,
+                    "campaign_id": None,
+                    "error_message": "secondary failure",
+                },
+            ]
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            return "UPDATE 1"
+
+    conn = FakeMergeConn()
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
+
+    asyncio.run(worker.process_scan_merge_job({"parent_scan_id": parent_id}))
+
+    parent_updates = [
+        args for query, args in conn.executions
+        if "UPDATE scans SET status = $1" in query and "error_message = $9" in query
+    ]
+    assert len(parent_updates) == 1
+    args = parent_updates[0]
+    assert args[0] == "failed"
+    assert args[7] == "failed"
+    assert args[8] == (
+        "All 2 shard(s) failed; merge had no completed shard. "
+        "First failure (shard 0): Scanner produced no output (exit code 0)"
+    )
+    assert redis.hashes[-1][2]["status"] == "failed"
+    assert redis.deleted == [worker.parallel_scan.shards_remaining_key(parent_id)]
+
+
 def test_scan_plan_dynamic_coverage_enqueues_campaign_batch_children(monkeypatch):
     parent_id = "55555555-5555-5555-5555-555555555555"
     target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
