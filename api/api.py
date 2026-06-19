@@ -159,6 +159,10 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
     os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "15")
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
+# A parent row runs no scanner subprocess; it is finalized by the merge job once
+# all shards are terminal. If a shard is lost from the queue it never goes terminal
+# and the parent hangs forever. Reap parents running past this generous threshold.
+PARENT_STALE_TIMEOUT_MINUTES = int(os.environ.get("PARENT_STALE_TIMEOUT_MINUTES", "90"))
 SCHEDULE_CHECK_INTERVAL_SECONDS = 60  # How often to check for due schedules
 try:
     ASM_DISPATCH_INTERVAL_SECONDS = int(os.environ.get("SHAKERSCAN_ASM_DISPATCH_INTERVAL", "60"))
@@ -1817,6 +1821,73 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                         print(f"[cleanup] parent reconcile error for {str(parent_id)[:8]}: {e}", flush=True)
 
 
+async def cleanup_stale_parents(pool: asyncpg.Pool):
+    """Finalize parent scans that would otherwise hang forever.
+
+    A parent waits on its shards and is finalized by the merge job. If a shard is
+    lost from the queue (``pending`` in the DB but never queued/dequeued in Redis)
+    it never reaches a terminal state, the merge never enqueues, and the parent
+    stays ``running`` indefinitely (observed: a 9h parent with 21 orphaned pending
+    shards on an empty queue). For parents running past a generous threshold, fail
+    the orphaned (queue-missing) pending shards, then reconcile so the parent
+    merges/finalizes instead of hanging.
+    """
+    r = get_redis()
+    now = utc_now()
+    async with pool.acquire() as conn:
+        parents = await conn.fetch(
+            """
+            SELECT id FROM scans
+            WHERE status = 'running' AND scan_role = 'parent' AND started_at IS NOT NULL
+              AND started_at < $1
+            """,
+            now - timedelta(minutes=PARENT_STALE_TIMEOUT_MINUTES),
+        )
+        if not parents:
+            return
+        # Snapshot queued job_ids once for orphan detection. If the queue can't be
+        # read, leave pending children alone (conservative — never fail a child we
+        # can't prove is orphaned).
+        queued_job_ids: set[str] | None = set()
+        try:
+            for raw in r.lrange(QUEUE_NAME, 0, -1):
+                try:
+                    jid = json.loads(raw).get("job_id")
+                except Exception:
+                    continue
+                if jid:
+                    queued_job_ids.add(str(jid))
+        except Exception:
+            queued_job_ids = None
+
+        for parent in parents:
+            parent_id = str(parent["id"])
+            pending = await conn.fetch(
+                "SELECT id, job_id FROM scans WHERE parent_scan_id = $1 AND status = 'pending'",
+                parent["id"],
+            )
+            failed = 0
+            for child in pending:
+                jid = str(child["job_id"]) if child["job_id"] else None
+                if queued_job_ids is not None and jid not in queued_job_ids:
+                    await conn.execute(
+                        """
+                        UPDATE scans SET status = 'failed', current_phase = 'terminated',
+                               completed_at = $1,
+                               error_message = 'orphaned shard: pending but not in scan queue (stale-parent reaper)'
+                        WHERE id = $2 AND status = 'pending'
+                        """,
+                        now, child["id"],
+                    )
+                    failed += 1
+            if failed:
+                print(f"[cleanup] stale parent {parent_id[:8]}: failed {failed} orphaned pending shard(s)", flush=True)
+            try:
+                await parallel_scan.reconcile_parallel_parent(conn, parent_id, r, QUEUE_NAME)
+            except Exception as e:
+                print(f"[cleanup] stale-parent reconcile error for {parent_id[:8]}: {e}", flush=True)
+
+
 async def stale_scan_checker(pool: asyncpg.Pool):
     """Background task to periodically check for stale scans."""
     print("[cleanup] Stale scan checker started", flush=True)
@@ -1824,6 +1895,7 @@ async def stale_scan_checker(pool: asyncpg.Pool):
         try:
             await asyncio.sleep(STALE_CHECK_INTERVAL_SECONDS)
             await cleanup_stale_scans(pool)
+            await cleanup_stale_parents(pool)
         except asyncio.CancelledError:
             print("[cleanup] Stale scan checker stopped", flush=True)
             break
