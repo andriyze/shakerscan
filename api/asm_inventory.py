@@ -786,6 +786,14 @@ async def filter_reachable_worklist(
         if path == "__unparsed__":
             kept.extend(group)
             continue
+        # SPA client routes (#/search, #!/path) are resolved in the browser — the
+        # server returns the same app shell for every fragment, so they match their
+        # prefix's soft-404 signature and would be wrongly dropped. They are reachable
+        # by definition (the route lives client-side); keep them so the XSS lane can
+        # browser-prove DOM XSS on them.
+        if "#/" in path or "#!" in path:
+            kept.extend(group)
+            continue
         verdict = _reachability_verdict(status.get(path, ("ERR", -1)), not_found.get(_path_prefix(path), []))
         if verdict == "hard_404":
             # GET-specific evidence: a method-specific API route may return 404
