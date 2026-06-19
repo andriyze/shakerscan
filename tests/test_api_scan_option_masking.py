@@ -1801,3 +1801,55 @@ def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
     assert enriched.expected_sha256 == "a" * 64
     assert enriched.model_card_url == "https://huggingface.co/acme/ranker"
     assert enriched.metadata_json["license"] == "apache-2.0"
+
+
+# --- Focused check_family auto-sharding policy (locked: this path has regressed) ---
+
+def test_focused_family_runs_direct_without_explicit_parallel(monkeypatch):
+    # check_family=sqli, parallel omitted -> NOT auto-sharded into coverage; runs direct.
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    _, payload, enabled, _ = _resolve_auto_shard_policy(
+        api_module.ScanOptions(scan_type="smart", check_family="sqli")
+    )
+    assert enabled is False
+    assert payload["parallel"] is False
+
+
+def test_focused_family_explicit_parallel_uses_coverage_family_not_coverage(monkeypatch):
+    # parallel:true + check_family=sqli must fan out as coverage_family (single-family
+    # lanes), never broad coverage which dilutes/skips the requested family.
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    _, payload, enabled, _ = _resolve_auto_shard_policy(
+        api_module.ScanOptions(scan_type="smart", check_family="sqli", parallel=True)
+    )
+    assert enabled is True
+    assert payload["parallel"] is True
+    assert payload["shard_strategy"] == "coverage_family"
+
+
+def test_focused_family_explicit_coverage_strategy_redirected_to_coverage_family(monkeypatch):
+    # Explicit shard_strategy=coverage + a focused family is redirected so the
+    # focused family is not diluted by broad lanes.
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    _, payload, _, _ = _resolve_auto_shard_policy(
+        api_module.ScanOptions(scan_type="smart", check_family="sqli", parallel=True, shard_strategy="coverage")
+    )
+    assert payload["shard_strategy"] == "coverage_family"
+
+
+def test_focused_family_with_endpoint_list_uses_scope_not_coverage(monkeypatch):
+    # custom_endpoints partition by scope; each shard still runs the focused family,
+    # so this is fine (no dilution) — but it must be scope, not broad coverage.
+    monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    _, payload, enabled, _ = _resolve_auto_shard_policy(
+        api_module.ScanOptions(
+            scan_type="smart", check_family="sqli",
+            custom_endpoints=["GET /a?id=1", "GET /b?id=2", "GET /c?id=3"],
+        )
+    )
+    assert enabled is True
+    assert payload["shard_strategy"] == "scope"

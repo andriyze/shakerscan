@@ -25,11 +25,14 @@ FAMILY_BY_TOOL = {
     "hash_route_dom_xss": "xss",
     "stored_xss": "xss",
     "smart_bola": "bola",
-    "smart_authz": "authz",
+    # smart_authz emits "Broken object authorization" (cross-principal BOLA/IDOR);
+    # it belongs to the bola family so benchmark/hunter counts match the
+    # `check_family=bola` taxonomy instead of a separate "authz" bucket.
+    "smart_authz": "bola",
     "bola_idor": "bola",
     "bola_check": "bola",
-    "smart_auth": "authz",
-    "mass_assignment": "authz",
+    "smart_auth": "auth",
+    "mass_assignment": "mass_assignment",
     "api_security": "api_security",
     "csp_evaluator": "headers",
     "http_headers": "headers",

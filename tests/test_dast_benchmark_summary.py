@@ -104,7 +104,7 @@ def test_benchmark_summary_records_proof_and_severity_gaps():
     assert summary["misses"][0]["likely_root_cause"] == "family_not_attempted"
 
 
-def test_benchmark_summary_counts_smart_authz_as_authz():
+def test_benchmark_summary_counts_smart_authz_as_bola():
     summary = build_benchmark_summary(
         {
             "findings": [
@@ -117,10 +117,12 @@ def test_benchmark_summary_counts_smart_authz_as_authz():
                 }
             ]
         },
-        expected={"families": {"authz": {"min_severity": "high", "min_confirmed": 1}}},
+        expected={"families": {"bola": {"min_severity": "high", "min_confirmed": 1}}},
     )
 
-    assert summary["findings"]["confirmed_by_family_severity"]["authz|high"] == 1
+    # smart_authz emits cross-principal BOLA findings -> counted under the bola
+    # family so it matches a `check_family=bola` run's expectations.
+    assert summary["findings"]["confirmed_by_family_severity"]["bola|high"] == 1
     assert summary["misses"] == []
 
 
