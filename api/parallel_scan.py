@@ -188,6 +188,11 @@ COVERAGE_DYNAMIC_BATCH_SIZE = _env_int("SHAKERSCAN_COVERAGE_DYNAMIC_BATCH_SIZE",
 DYNAMIC_PULL_WORKERS_PER_WORKER = _env_int("SHAKERSCAN_COVERAGE_PULL_WORKERS_PER_WORKER", 3)
 COVERAGE_MAX_DYNAMIC_BATCHES = _env_int("SHAKERSCAN_COVERAGE_MAX_DYNAMIC_BATCHES", COVERAGE_MAX_TOTAL_SHARDS)
 
+# BOLA/IDOR currently runs in Phase 4. Dynamic coverage shards usually disable
+# Phase 4 to keep SQLi/XSS lanes lean, but dedicated BOLA lanes need a bounded
+# window or they never execute the detector.
+BOLA_DYNAMIC_PHASE4_SECONDS = _env_int("SHAKERSCAN_BOLA_DYNAMIC_PHASE4_SECONDS", 360)
+
 # Per-shard active-endpoint ceiling (mirrors SCAN_BUDGET_CEILINGS["active_max_endpoints"]
 # in scanner/constants.py). Used only to warn when capped slices grow past it.
 ACTIVE_ENDPOINTS_CEILING = 10000
@@ -1184,6 +1189,8 @@ def plan_dynamic_coverage_family_shards(
                     "smart_bola_max_endpoints": batch_size,
                 },
             )
+            if attempt_family == "bola":
+                _merge_custom_budget(opts, {"phase4_max_seconds": BOLA_DYNAMIC_PHASE4_SECONDS})
             shards.append(
                 ShardSpec(
                     index=len(shards),

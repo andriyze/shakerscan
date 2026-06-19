@@ -696,6 +696,8 @@ def test_dynamic_coverage_family_auth_state_workers_are_scoped():
     assert "user2_header" not in user1
     assert user1_bola["auth_header"] == "Bearer u1"
     assert user1_bola["user2_header"] == "Bearer u2"
+    assert user1_bola["custom_budget"]["phase4_max_seconds"] == p.BOLA_DYNAMIC_PHASE4_SECONDS
+    assert user1["custom_budget"]["phase4_max_seconds"] == 0
     assert "user2_header" not in user2
 
 
@@ -725,6 +727,10 @@ def test_dynamic_coverage_family_respects_explicit_focus():
     assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
     assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
     assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
+    assert all(
+        s.options["custom_budget"]["phase4_max_seconds"] == p.BOLA_DYNAMIC_PHASE4_SECONDS
+        for s in plan.shards
+    )
 
 
 # --------------------------- D5: hunter union lanes ---------------------------

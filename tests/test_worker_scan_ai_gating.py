@@ -1282,6 +1282,11 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     assert all(job["options"]["auth_header"] == "Bearer user1" for job in child_jobs)
     assert all(job["options"]["user2_header"] == "Bearer user2" for job in child_jobs)
     assert all(job["options"]["sqli"] is False and job["options"]["xss"] is False for job in child_jobs)
+    assert all(
+        job["options"]["custom_budget"]["phase4_max_seconds"]
+        == worker.parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
+        for job in child_jobs
+    )
     parent_update = [
         args for query, args in conn.executions
         if "UPDATE scans SET status = 'running'" in query and "shard_count" in query
