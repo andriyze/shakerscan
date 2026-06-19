@@ -8410,15 +8410,18 @@ async def _filter_reachable_active_endpoints(
             decoy_targets = [(par, _abs(par.rstrip("/") + "/" + _DECOY_LEAF)) for par in parents]
             decoy_results = await asyncio.gather(*[_probe(session, u) for (_par, u) in decoy_targets])
             decoy_by_parent = {par: res for (par, _u), res in zip(decoy_targets, decoy_results)}
-            # Fast path: a parent whose own random sibling hard-404s has nothing under
-            # it — drop all its synthetic children without probing each one.
-            hard_404_parents = {par for par, (st, _l) in decoy_by_parent.items() if st in (404, 410)}
-            unreachable: set[str] = {p for p in cand_paths if _parent(p) in hard_404_parents}
-            to_probe = [p for p in cand_paths if _parent(p) not in hard_404_parents][:max_probe]
+            # ALWAYS probe each candidate, then compare it to its parent's sibling
+            # decoy. A parent's random sibling returning 404 does NOT imply the
+            # parent is empty — a real route (/rest/products/search) can coexist
+            # with /rest/products/<random> -> 404. Inferring "parent 404 => all
+            # children gone" without probing would drop real routes and make a
+            # vulnerable app look clean, so no such fast-path is used.
+            to_probe = cand_paths[:max_probe]
             cand_results = await asyncio.gather(*[_probe(session, _abs(p)) for p in to_probe])
     except Exception:
         return endpoints
 
+    unreachable: set[str] = set()
     for path, (status, blen) in zip(to_probe, cand_results):
         d_status, d_len = decoy_by_parent.get(_parent(path), (None, -1))
         if _response_matches_not_found(status, blen, d_status, d_len):

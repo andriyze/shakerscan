@@ -942,13 +942,25 @@ def _resolve_auto_parallel_strategy(
 ) -> str:
     """Resolve auto-sharding to the concrete strategy we will store/execute."""
     normalized = _normalize_parallel_strategy(strategy, default="auto")
+    # A focused check_family scan must never run the broad `coverage` strategy:
+    # that fans out broad/sqli/xss lanes and dilutes (or skips) the requested
+    # family. `coverage_family` with a single requested family runs ONLY that
+    # family across endpoint slices, so it parallelizes without diluting. This
+    # holds for both explicit `coverage` and the auto path below.
+    focused = bool(
+        (lambda fam: fam and fam != "all")(
+            check_registry.normalize_check_family(_scan_check_family_value(options_payload))
+        )
+    )
+    if focused and normalized == "coverage":
+        return "coverage_family"
     if normalized != "auto":
         return normalized
     endpoint_count = _custom_endpoint_count(options_payload)
     if endpoint_count >= 2:
         return "scope"
     if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
-        return "coverage"
+        return "coverage_family" if focused else "coverage"
     return "family"
 
 

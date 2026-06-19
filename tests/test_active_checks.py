@@ -52,6 +52,18 @@ def test_reachability_gate_drops_only_clear_not_found():
     assert nf(500, 4000, 500, 100) is False
 
 
+def test_reachability_gate_keeps_real_route_under_404_sibling_parent():
+    # Regression for the removed hard-404 fast-path: a real route (200/2xx) must
+    # NOT be dropped just because a random sibling under the same parent 404s.
+    nf = active_checks._response_matches_not_found
+    assert nf(200, 900, 404, 120) is False   # real /rest/products/search vs 404 sibling decoy -> keep
+    assert nf(204, 0, 404, 0) is False        # real 204 vs 404 decoy -> keep
+    assert nf(500, 3000, 404, 120) is False   # different status from decoy -> keep
+    # a genuinely-missing sibling (its own 404, or matching the decoy) IS dropped
+    assert nf(404, 120, 404, 118) is True
+    assert nf(200, 5000, 200, 5010) is True   # SPA catch-all matching the decoy
+
+
 def test_reachability_gate_only_targets_synthetic_sources():
     syn = active_checks._is_synthetic_active_source
     for observed in ("har_discovery", "browser", "openapi", "manual", "form",
