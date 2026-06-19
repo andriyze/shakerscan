@@ -3999,16 +3999,34 @@ async def process_scan_job(job_data: dict):
                 return
 
             if error:
+                # A no-output (exit-0, no JSON) failure must not be a bare 'failed'
+                # row with nothing to debug. Surface the structured failure
+                # diagnostics (masked command, stdout/stderr sizes, scanner version)
+                # both in error_message and persisted result so the shard is
+                # diagnosable after the runtime is gone.
+                diag = result.get('failure_diagnostics') if isinstance(result, dict) else None
+                error_detail = str(error)
+                if isinstance(diag, dict):
+                    error_detail = (
+                        f"{error} | scanner_version={diag.get('scanner_version')} "
+                        f"stdout_len={diag.get('stdout_len')} stderr_len={diag.get('stderr_len')}"
+                    )
+                failure_result = {
+                    "error": error,
+                    "failure_diagnostics": diag,
+                    "scan_metadata": {"status": "failed", "failure_diagnostics": diag},
+                }
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'failed',
                         error_message = $1,
-                        completed_at = $2,
-                        duration_seconds = $3,
+                        result = $2,
+                        completed_at = $3,
+                        duration_seconds = $4,
                         progress = 100,
                         current_phase = 'failed'
-                    WHERE id = $4
-                """, error, completed_at, duration, uuid.UUID(scan_id))
+                    WHERE id = $5
+                """, error_detail[:2000], json.dumps(failure_result), completed_at, duration, uuid.UUID(scan_id))
                 await asm_inventory.finish_campaign(conn, campaign_id, status='failed')
             else:
                 await conn.execute("""
