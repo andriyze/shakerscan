@@ -38,6 +38,20 @@ def test_asm_bola_user1_scope_preserves_second_user_comparator():
     assert sqli["auth_state"] == "user1"
 
 
+def test_asm_user2_prescoped_child_keeps_auth_header():
+    opts = {
+        "auth_state": "user2",
+        "auth_header": "Bearer user2",
+        "coverage_dynamic_worker": True,
+    }
+
+    scoped = worker._asm_scan_options_for_auth_state(opts, "user2", check_family="sqli")
+
+    assert scoped is not None
+    assert scoped["auth_state"] == "user2"
+    assert scoped["auth_header"] == "Bearer user2"
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()

@@ -4228,6 +4228,11 @@ def _asm_scan_options_for_auth_state(
     """
     state = asm_inventory.normalize_auth_state(auth_state)
     base = dict(options or {})
+    if asm_inventory.normalize_auth_state(base.get("auth_state")) == state:
+        if state == "anonymous":
+            return parallel_scan._apply_auth_state(base, state)
+        if any(base.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS):
+            return base
     if state not in parallel_scan.available_auth_states(base):
         return None
     if state == "user1" and asm_inventory.normalize_check_family(check_family) == "bola":
