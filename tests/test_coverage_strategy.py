@@ -679,12 +679,23 @@ def test_dynamic_coverage_family_auth_state_workers_are_scoped():
         for s in plan.shards
     }) == len(expected_states) * len(expected_families)
     anon = next(s.options for s in plan.shards if s.options["auth_state"] == "anonymous")
-    user1 = next(s.options for s in plan.shards if s.options["auth_state"] == "user1")
+    user1 = next(
+        s.options
+        for s in plan.shards
+        if s.options["auth_state"] == "user1" and s.options["coverage_attempt_family"] != "bola"
+    )
+    user1_bola = next(
+        s.options
+        for s in plan.shards
+        if s.options["auth_state"] == "user1" and s.options["coverage_attempt_family"] == "bola"
+    )
     user2 = next(s.options for s in plan.shards if s.options["auth_state"] == "user2")
     assert "auth_header" not in anon
     assert user1["auth_header"] == "Bearer u1"
     assert user2["auth_header"] == "Bearer u2"
     assert "user2_header" not in user1
+    assert user1_bola["auth_header"] == "Bearer u1"
+    assert user1_bola["user2_header"] == "Bearer u2"
     assert "user2_header" not in user2
 
 

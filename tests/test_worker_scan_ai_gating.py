@@ -1279,6 +1279,8 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     assert {job["check_family"] for job in child_jobs} == {"bola"}
     assert {job["options"]["coverage_attempt_family"] for job in child_jobs} == {"bola"}
     assert {job["options"]["asm_check_family"] for job in child_jobs} == {"bola"}
+    assert all(job["options"]["auth_header"] == "Bearer user1" for job in child_jobs)
+    assert all(job["options"]["user2_header"] == "Bearer user2" for job in child_jobs)
     assert all(job["options"]["sqli"] is False and job["options"]["xss"] is False for job in child_jobs)
     parent_update = [
         args for query, args in conn.executions

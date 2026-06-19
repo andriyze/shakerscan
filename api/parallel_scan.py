@@ -1142,6 +1142,14 @@ def plan_dynamic_coverage_family_shards(
     for batch_index in range(batches_per_lane):
         for auth_state, lane_name, attempt_family, lane_options in lanes:
             opts = _apply_auth_state(_base_child_options(parent_options), auth_state)
+            if auth_state == "user1" and attempt_family == "bola":
+                # BOLA is a cross-principal proof. The shard executes as user1
+                # but must retain the second identity so the scanner can replay
+                # owner resources as the attacker. Other user1 lanes stay scoped
+                # to one principal.
+                for key in _SECONDARY_AUTH_KEYS:
+                    if parent_options.get(key):
+                        opts[key] = parent_options[key]
             opts["coverage_allocation"] = "dynamic"
             opts["coverage_dynamic_worker"] = True
             opts["coverage_dynamic_batch_size"] = batch_size
