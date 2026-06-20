@@ -8009,6 +8009,23 @@ async def hash_route_dom_xss_test(
         if not params:
             continue
 
+        # §4 DOM-sink prioritization: when the per-endpoint param budget caps how
+        # many params we test, test the ones that most commonly flow into dangerous
+        # DOM sinks first (search/query/redirect/url/hash/...), plus any params the
+        # endpoint's JS analysis flagged as sink sources. Generic, app-agnostic.
+        sink_params = {str(s).lower() for s in (endpoint.get("dom_sink_params") or [])}
+        def _dom_sink_rank(p: str) -> int:
+            pl = str(p).lower()
+            if pl in sink_params:
+                return 0
+            if any(k in pl for k in (
+                "search", "query", "q", "redirect", "return", "url", "uri", "next",
+                "hash", "fragment", "html", "content", "msg", "message", "text",
+                "name", "title", "lang", "page", "view", "ref", "callback")):
+                return 1
+            return 2
+        params = sorted(params, key=_dom_sink_rank)
+
         attempt = _new_endpoint_attempt(
             endpoint,
             "dom_xss",
