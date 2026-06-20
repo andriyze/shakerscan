@@ -115,8 +115,13 @@ COVERAGE_PER_SHARD_CAP = 150
 # Broad coverage shards run both SQLi and XSS before enrichment. Keep their
 # automatic batches smaller so primary probes do not starve SQLMap/NoSQL/stored
 # XSS. Explicit per-scan caps still win.
-COVERAGE_ACTIVE_MIX_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_ACTIVE_MIX_PER_SHARD_CAP", 50)
-COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP", 35)
+# Sized so a shard can actually FINISH its slice within the per-endpoint active
+# budget (SQLi+XSS+NoSQL cost ~25-35s each). 50-endpoint slices left ~2/3 of the
+# slice untested before the time budget cut SQLi off; smaller slices + more shards
+# (COVERAGE_MAX_SHARDS=128) cover the same worklist via parallelism without
+# ballooning any single shard's wall-clock.
+COVERAGE_ACTIVE_MIX_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_ACTIVE_MIX_PER_SHARD_CAP", 28)
+COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP", 20)
 
 # Default harvested worklist size. The scanner also emits 5000 by default, but
 # callers can raise this with custom_budget.active_worklist_max.
