@@ -4889,6 +4889,24 @@ async def process_scan_plan_job(job_data: dict):
         )
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon "
               f"({_raw_harvested} pre-reachability-filter)", flush=True)
+        # The coverage shards run zero-rediscovery with no browser crawl and only a
+        # single global-checks pass, so the recon's browser/DOM-XSS findings and
+        # global findings (exposure, BFLA, etc.) — and any the recon already
+        # browser-PROVED — would otherwise be thrown away (we only harvest its
+        # endpoints). Stash them so the merge can union them: this is what keeps
+        # parallel coverage on par with a single smart scan's detection.
+        try:
+            recon_findings = (recon_result or {}).get('findings') or []
+            if recon_findings:
+                r.set(
+                    f"coverage:recon_findings:{parent_id}",
+                    json.dumps(recon_findings, default=str),
+                    ex=86400,
+                )
+                print(f"[{parent_id[:8]}] coverage: stashed {len(recon_findings)} recon "
+                      f"findings for merge", flush=True)
+        except Exception as e:
+            print(f"[{parent_id[:8]}] coverage: recon-findings stash error: {e}", flush=True)
         coverage_allocation = parallel_scan.coverage_allocation_mode(options)
         coverage_auth_states = (
             parallel_scan.available_auth_states(options)
@@ -5441,6 +5459,27 @@ async def process_scan_merge_job(job_data: dict):
                 except Exception:
                     fp = json.dumps(f, sort_keys=True, default=str)[:256]
             union.setdefault(fp, f)
+
+    # Union the coverage recon pass's findings (browser/DOM-XSS + global checks the
+    # zero-rediscovery shards don't run, already verified by the recon's own smart
+    # verification phase). Without this, parallel coverage misses whole classes a
+    # single scan finds (DOM-XSS, /metrics exposure, BFLA).
+    try:
+        _recon_raw = r.get(f"coverage:recon_findings:{parent_id}")
+        if _recon_raw:
+            _recon_findings = json.loads(_recon_raw) or []
+            for f in _recon_findings:
+                fp = parallel_scan.finding_merge_key(f)
+                if not fp:
+                    try:
+                        fp = generate_finding_fingerprint(f)
+                    except Exception:
+                        fp = json.dumps(f, sort_keys=True, default=str)[:256]
+                union.setdefault(fp, f)
+            r.delete(f"coverage:recon_findings:{parent_id}")
+            print(f"[merge {parent_id[:8]}] unioned {len(_recon_findings)} recon findings", flush=True)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] recon-findings union error: {e}", flush=True)
 
     union_findings = list(union.values())
     try:
