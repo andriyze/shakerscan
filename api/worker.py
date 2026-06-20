@@ -772,6 +772,48 @@ async def _await_scan_slot(job_id: str | None, scan_id: str | None) -> tuple[Any
         await asyncio.sleep(_SCAN_SLOT_POLL_SECONDS)
 
 
+_SCANNER_MAIN_MARKERS = ('if __name__ == "__main__"', "if __name__ == '__main__'")
+_scanner_preflight_cache: dict[str, tuple[tuple[int, float], str | None]] = {}
+
+
+def _scanner_preflight(scanner_path: str) -> str | None:
+    """Return a clear error if the scanner entrypoint is missing / stale / truncated
+    (e.g. macOS single-file bind-mount inode-pinning), else None. Turns the silent
+    'Scanner produced no output (exit code 0)' failure — caused by a truncated
+    scanner.py losing its `if __name__ == "__main__"` block — into a diagnosable
+    error before we even spawn the subprocess. Cached by (size, mtime)."""
+    try:
+        st = os.stat(scanner_path)
+    except OSError:
+        # A missing path is handled by the normal subprocess spawn (and keeps unit
+        # tests that mock the subprocess working); we only guard against a
+        # PRESENT-but-stale/truncated entrypoint, which is the silent-failure mode.
+        return None
+    key = (st.st_size, st.st_mtime)
+    cached = _scanner_preflight_cache.get(scanner_path)
+    if cached and cached[0] == key:
+        return cached[1]
+    err: str | None = None
+    try:
+        with open(scanner_path, "r", errors="replace") as fh:
+            src = fh.read()
+    except OSError:
+        return None
+    if not src or not any(m in src for m in _SCANNER_MAIN_MARKERS):
+        lines = src.count("\n") + 1 if src else 0
+        err = (f"scanner entrypoint {scanner_path} is missing its __main__ block "
+               f"({len(src)} bytes / {lines} lines) — almost certainly a stale/truncated "
+               f"bind mount. Restart this worker to re-sync the source mount.")
+    else:
+        try:
+            compile(src, scanner_path, "exec")
+        except SyntaxError as e:
+            err = (f"scanner entrypoint {scanner_path} has a syntax error at line "
+                   f"{e.lineno} — likely a stale/truncated bind mount; restart this worker.")
+    _scanner_preflight_cache[scanner_path] = (key, err)
+    return err
+
+
 async def run_scan(target: str, options: dict, scan_id: str | None = None, job_id: str | None = None) -> dict:
     """Execute scanner and return results."""
     if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
@@ -1090,6 +1132,20 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                      if isinstance(v, str) and v.strip() and "\n" not in v and "\r" not in v]
             if clean:
                 scan_env[env_key] = "\n".join(clean[:2000])
+
+    # Preflight the scanner entrypoint: a stale/truncated bind mount (the macOS
+    # single-file-mount inode-pinning) silently yields no output + exit 0. Fail
+    # loudly with a diagnosable error instead of spawning a doomed subprocess.
+    _pf_err = _scanner_preflight(SCANNER_PATH)
+    if _pf_err:
+        print(f"[worker] SCANNER PREFLIGHT FAILED: {_pf_err}", file=sys.stderr, flush=True)
+        return {
+            "target": target,
+            "error": _pf_err,
+            "findings": [],
+            "result": {"score": None, "grade": None},
+            "scan_metadata": {"status": "failed", "preflight_failed": True},
+        }
 
     # Memory-aware admission control: wait (bounded, heartbeating) for a fleet-wide
     # active-scan slot before launching the heavy scanner subprocess, so a large

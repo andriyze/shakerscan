@@ -58,5 +58,27 @@ configure_dns
 # Set Playwright environment variables
 export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# Dev source consistency: when the host source trees are bind-mounted as
+# DIRECTORIES (/app/_src/{scanner,api}), COPY their files over the baked /app
+# copies so the running code uses the live host source. We COPY (not symlink)
+# because Python resolves a symlinked entrypoint's path, putting sys.path[0] in the
+# wrong tree (ModuleNotFoundError); real files at /app keep imports native for both
+# worker.py and the scanner subprocess. Directory mounts avoid the macOS single-file
+# bind-mount inode-pinning that served stale/truncated files (silent "no output,
+# exit 0" scans). No-op in baked/prod mode (no _src). Edit + restart the container
+# to pick up changes.
+sync_dev_sources() {
+    for d in /app/_src/scanner /app/_src/api; do
+        [ -d "$d" ] || continue
+        echo "[entrypoint] syncing live source from $d"
+        cp -f "$d"/*.py /app/ 2>/dev/null || true
+    done
+    [ -d /app/_src/scanner/scanner_tools ] && cp -rf /app/_src/scanner/scanner_tools/. /app/scanner_tools/ 2>/dev/null || true
+    [ -d /app/_src/scanner/wordlists ] && cp -rf /app/_src/scanner/wordlists/. /app/wordlists/ 2>/dev/null || true
+    [ -d /app/_src/api/ai_gate ] && cp -rf /app/_src/api/ai_gate/. /app/ai_gate/ 2>/dev/null || true
+}
+sync_dev_sources
+
 # Execute command passed to container
 exec "$@"

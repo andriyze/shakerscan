@@ -88,28 +88,12 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/api.py:/app/api.py:ro
-      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
-      - ./api/session_manager.py:/app/session_manager.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/parallel_scan.py:/app/parallel_scan.py:ro
-      - ./api/asm_inventory.py:/app/asm_inventory.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_demo_scenarios.py:/app/ai_demo_scenarios.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_assurance.py:/app/ai_assurance.py:ro
-      - ./scanner/constants.py:/app/constants.py:ro
-      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
-      - ./scanner/grading.py:/app/grading.py:ro
-      - ./scanner/findings.py:/app/findings.py:ro
-      - ./scanner/reporting.py:/app/reporting.py:ro
-      - ./scanner/signals.py:/app/signals.py:ro
-      - ./scanner/target_context.py:/app/target_context.py:ro
-      # Bind-mount scanner.py into the API too (mirrors the worker) so dev deploys are
-      # deterministic — the API doesn't import it today, but this keeps /app/scanner.py
-      # from drifting stale against the checkout and the workers.
-      - ./scanner/scanner.py:/app/scanner.py:ro
+      # Live source as DIRECTORY mounts (NOT single-file): directory mounts avoid
+      # the macOS Docker single-file bind-mount inode-pinning that served stale/
+      # truncated files (silent "no output, exit 0" scans). entrypoint.sh symlinks
+      # the individual files from /app/_src/* over the baked /app copies.
+      - ./scanner:/app/_src/scanner:ro
+      - ./api:/app/_src/api:ro
       - ./results:/results
       - ./:/workspace
       # Docker socket for worker scaling
@@ -167,25 +151,12 @@ services:
       - RETEST_STALE_BATCH_SIZE=${RETEST_STALE_BATCH_SIZE:-25}
       - RETEST_STALE_REQUEUE_LIMIT=${RETEST_STALE_REQUEUE_LIMIT:-1}
     volumes:
-      - ./api/worker.py:/app/worker.py:ro
-      - ./api/evidence_triage.py:/app/evidence_triage.py:ro
-      - ./api/retest_contract.py:/app/retest_contract.py:ro
-      - ./api/parallel_scan.py:/app/parallel_scan.py:ro
-      - ./api/asm_inventory.py:/app/asm_inventory.py:ro
-      - ./api/ai_verifier.py:/app/ai_verifier.py:ro
-      - ./api/ai_control_requirements.py:/app/ai_control_requirements.py:ro
-      - ./api/ai_redteam_artifacts.py:/app/ai_redteam_artifacts.py:ro
-      - ./api/ai_gate_scan.py:/app/ai_gate_scan.py:ro
-      - ./api/ai_gate:/app/ai_gate:ro
-      - ./scanner/constants.py:/app/constants.py:ro
-      - ./scanner/ai_verdict_policy.py:/app/ai_verdict_policy.py:ro
-      - ./scanner/grading.py:/app/grading.py:ro
-      - ./scanner/findings.py:/app/findings.py:ro
-      - ./scanner/reporting.py:/app/reporting.py:ro
-      - ./scanner/signals.py:/app/signals.py:ro
-      - ./scanner/target_context.py:/app/target_context.py:ro
-      - ./scanner/scanner.py:/app/scanner.py:ro
-      - ./scanner/scanner_tools:/app/scanner_tools:ro
+      # Live source as DIRECTORY mounts (NOT single-file) — directory mounts avoid
+      # the macOS Docker single-file bind-mount inode-pinning that served stale/
+      # truncated scanner.py (silent "no output, exit 0" scans). entrypoint.sh
+      # symlinks the individual files from /app/_src/* over the baked /app copies.
+      - ./scanner:/app/_src/scanner:ro
+      - ./api:/app/_src/api:ro
       - ./results:/results
     command: ["python3", "/app/worker.py"]
     deploy:
@@ -214,7 +185,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
     volumes:
-      - ./api/gungnir_worker.py:/app/gungnir_worker.py:ro
+      # Directory mount (see api/worker note); entrypoint.sh symlinks the files.
+      - ./api:/app/_src/api:ro
     command: ["python3", "/app/gungnir_worker.py"]
     profiles:
       - gungnir
