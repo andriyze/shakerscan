@@ -317,6 +317,19 @@ def get_redis():
     return redis.from_url(REDIS_URL)
 
 
+def _published_scanner_version() -> str | None:
+    """Real deployed build label published by the API from the live checkout
+    (/workspace git). Prefer it over this worker's baked SCANNER_VERSION env, which
+    is frozen at image build and goes stale under volume-mount-restart deploys."""
+    try:
+        v = get_redis().get("shakerscan:scanner_version")
+        if v:
+            return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+    except Exception:
+        pass
+    return None
+
+
 def _is_truthy(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -1089,6 +1102,11 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
+    # Stamp the real deployed commit (published by the API from the live checkout)
+    # so scan results record the running build, not the stale baked SCANNER_VERSION.
+    _real_version = _published_scanner_version()
+    if _real_version:
+        scan_env["SCANNER_VERSION"] = _real_version
     # Scan-time AI classification is opt-in and severity-gated.
     scan_env["AI_SCAN_CLASSIFICATION_ENABLED"] = "true" if scan_ai_enabled else "false"
     scan_env["AI_CLASSIFY_MIN_SEVERITY"] = ai_classify_min_severity
@@ -6447,7 +6465,7 @@ def report_worker_build_fingerprint() -> None:
         hostname = os.environ.get("HOSTNAME") or os.environ.get("WORKER_ID") or _socket.gethostname()
         get_redis().hset("shakerscan:worker_build", hostname, json.dumps({
             "build_fingerprint": _worker_build_fingerprint(),
-            "scanner_version": os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
+            "scanner_version": _published_scanner_version() or os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev",
             "reported_at": utc_now_iso(),
         }))
         print(f"[worker] registered build fingerprint for {hostname}", flush=True)

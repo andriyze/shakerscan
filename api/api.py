@@ -2287,6 +2287,7 @@ async def lifespan(app: FastAPI):
     # deployment doesn't run on the worker fallback until /workers is first hit.
     try:
         _publish_max_active_scans()
+        _publish_scanner_version()
     except Exception:
         pass
 
@@ -5031,9 +5032,52 @@ def expected_build_fingerprint() -> Optional[str]:
     })
 
 
+def _git_head_short(repo: str = "/workspace") -> Optional[str]:
+    """Resolve the real short commit of the mounted checkout (the API bind-mounts
+    the repo at /workspace). Pure-file resolution so it works without a git binary;
+    handles symbolic HEAD, packed-refs, and detached HEAD."""
+    try:
+        git_dir = os.path.join(repo, ".git")
+        head = open(os.path.join(git_dir, "HEAD")).read().strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1].strip()
+            loose = os.path.join(git_dir, ref)
+            if os.path.exists(loose):
+                return open(loose).read().strip()[:7]
+            packed = os.path.join(git_dir, "packed-refs")
+            if os.path.exists(packed):
+                for line in open(packed):
+                    line = line.strip()
+                    if line and not line.startswith(("#", "^")) and line.endswith(ref):
+                        return line.split()[0][:7]
+            return None
+        return head[:7] if len(head) >= 7 else None
+    except Exception:
+        return None
+
+
 def current_scanner_version() -> str:
-    """Human build label used by API/workers to detect mixed deployments."""
-    return os.environ.get("SCANNER_VERSION") or os.environ.get("GIT_COMMIT") or "dev"
+    """Human build label used by API/workers to detect mixed deployments. Prefer
+    the live checkout's real commit (the API bind-mounts the repo at /workspace) so
+    the label reflects code deployed via volume-mount restarts, not the commit baked
+    into SCANNER_VERSION/GIT_COMMIT env when the container image was built."""
+    return (
+        _git_head_short()
+        or os.environ.get("SCANNER_VERSION")
+        or os.environ.get("GIT_COMMIT")
+        or "dev"
+    )
+
+
+def _publish_scanner_version() -> str:
+    """Publish the real current build label to Redis so workers stamp/report the
+    deployed commit (their baked SCANNER_VERSION env is frozen at image build)."""
+    v = current_scanner_version()
+    try:
+        get_redis().set("shakerscan:scanner_version", v, ex=120)
+    except Exception:
+        pass
+    return v
 
 
 def worker_build_current(
@@ -11620,6 +11664,8 @@ async def get_workers():
         max_allowed_workers = _compute_max_allowed_workers()
         # Refresh the per-scan active-scan concurrency cap for workers.
         max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
+        # Refresh the real build label so workers stamp/report the deployed commit.
+        _publish_scanner_version()
 
         return {
             "count": running,
