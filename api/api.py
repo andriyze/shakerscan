@@ -169,6 +169,10 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
     os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "30")
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
+# §9: when an ASM-policy schedule's enqueue fails, retry after this short backoff
+# instead of advancing a full cadence (so a transient failure doesn't silently skip
+# a coverage wave). Kept well above the checker interval to avoid tight retries.
+ASM_SCHEDULE_RETRY_MINUTES = int(os.environ.get("ASM_SCHEDULE_RETRY_MINUTES", "15"))
 # A parent row runs no scanner subprocess; it is finalized by the merge job once
 # all shards are terminal. If a shard is lost from the queue it never goes terminal
 # and the parent hangs forever. Reap parents running past this generous threshold.
@@ -2031,6 +2035,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # in scan_options so no schema migration is needed.
             if str(scan_options.get('kind') or '').lower() == 'asm_improve':
                 asm_opts = {k: v for k, v in scan_options.items() if k != 'kind'}
+                _asm_ok = False
                 try:
                     cfg_row = await conn.fetchrow(
                         "SELECT asm_config FROM targets WHERE id = $1", target_id)
@@ -2053,17 +2058,28 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         await conn.execute(
                             "UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", target_id)
                         _asm_kind = "recon"
+                    _asm_ok = True
                     print(f"[scheduler] ASM improve ({_asm_kind}) queued for schedule "
                           f"{str(schedule_id)[:8]} -> {str(enq.get('scan_id', ''))[:8]}", flush=True)
                 except Exception as exc:
                     print(f"[scheduler] ASM improve failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
-                next_run = calculate_next_run(
-                    schedule["frequency"], schedule["day_of_week"],
-                    schedule["time_of_day"] or "02:00", schedule["timezone"] or "UTC",
-                    schedule["jitter_minutes"] or 0)
-                await conn.execute(
-                    "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                    next_run, schedule_id)
+                if _asm_ok:
+                    # Wave queued: advance to the normal cadence and stamp last_run_at.
+                    next_run = calculate_next_run(
+                        schedule["frequency"], schedule["day_of_week"],
+                        schedule["time_of_day"] or "02:00", schedule["timezone"] or "UTC",
+                        schedule["jitter_minutes"] or 0)
+                    await conn.execute(
+                        "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
+                        next_run, schedule_id)
+                else:
+                    # Enqueue failed (no silent skip): retry on the next checker tick
+                    # via a short backoff, and do NOT stamp last_run_at so the missed
+                    # wave is visible and re-attempted instead of waiting a full cycle.
+                    retry_at = now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES)
+                    await conn.execute(
+                        "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
+                        retry_at, schedule_id)
                 continue
 
             scan_options['scan_type'] = scan_type
@@ -9318,12 +9334,17 @@ def _asm_recommended_campaigns(
     def _completed(fam: str) -> int:
         return int((fams.get(fam) or {}).get("completed") or 0)
 
+    # Recommend a family wave whenever THAT family has no proof-quality (completed)
+    # attempt — generic 'all' endpoint coverage is NOT family proof, so it must not
+    # suppress focused waves (a 'all' pass touching an endpoint doesn't prove SQLi/
+    # XSS/BOLA on it).
     for fam, label, prio in (("sqli", "Run SQLi wave", "high"),
                              ("xss", "Run XSS wave", "medium"),
                              ("bola", "Run BOLA wave (needs 2 users + Lab/deep)", "medium")):
-        if _completed(fam) == 0 and _completed("all") == 0:
+        if _completed(fam) == 0:
             recs.append({"campaign": f"{fam}_wave", "label": label,
-                         "reason": f"No proof-quality {fam.upper()} attempt recorded yet.",
+                         "reason": f"No proof-quality {fam.upper()} attempt recorded yet "
+                                   f"(generic endpoint coverage is not {fam.upper()} proof).",
                          "priority": prio})
     if stale > 0:
         recs.append({"campaign": "retest_stale", "label": "Retest stale endpoints",

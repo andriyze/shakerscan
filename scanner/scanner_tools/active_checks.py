@@ -6758,6 +6758,10 @@ async def smart_sqli_test(
             for payload, technique, description in payloads:
                 if _budget_exhausted():
                     break
+                # §5: record SQLi techniques attempted for POST/body params too (not
+                # just GET) so per-endpoint technique telemetry is complete.
+                if attempt is not None:
+                    attempt.setdefault("techniques_attempted", set()).add(technique)
                 test_body = _apply_body_param(baseline_body, param, payload)
                 test_body_args, test_header_args = _build_curl_body_args(test_body, content_type)
 

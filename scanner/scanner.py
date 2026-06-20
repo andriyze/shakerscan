@@ -9271,12 +9271,16 @@ async def build_report(target: str,
                         ]
                         post_json_endpoints = post_json_endpoints[:aux_post_json_limit]
 
-                        if post_json_endpoints:
-                            ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                            xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                            ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                            xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
-                            mass_assignment_post = {"vulnerable": False, "tested_fields": set(), "evidence": []}
+                        # Always initialize: the post-loop reads (ldap_post["vulnerable"]
+                        # etc.) run unconditionally, so guarding the init behind
+                        # `if post_json_endpoints:` raised 'cannot access local variable
+                        # ldap_post' and aborted ALL param-injection checks on shards
+                        # with no POST/JSON endpoints. Empty loop is a harmless no-op.
+                        ldap_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        xpath_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        ssrf_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        xxe_post = {"vulnerable": False, "payloads_tested": set(), "tested_params": set(), "evidence": []}
+                        mass_assignment_post = {"vulnerable": False, "tested_fields": set(), "evidence": []}
 
                         for ep in post_json_endpoints:
                             params = _coerce_param_list(ep.get("body_params") or ep.get("params"))
