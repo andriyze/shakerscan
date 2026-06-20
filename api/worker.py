@@ -143,7 +143,7 @@ AI_SETTINGS_KEY = os.environ.get("AI_SETTINGS_KEY", "settings:ai")
 PARALLEL_SHARD_MAX_PER_PARENT = max(1, int(os.environ.get("PARALLEL_SHARD_MAX_PER_PARENT", "4")))
 PARALLEL_SHARD_CONCURRENCY_HARD_MAX = max(
     PARALLEL_SHARD_MAX_PER_PARENT,
-    int(os.environ.get("PARALLEL_SHARD_CONCURRENCY_HARD_MAX", "20")),
+    int(os.environ.get("PARALLEL_SHARD_CONCURRENCY_HARD_MAX", "64")),
 )
 PARALLEL_SHARD_SLOT_TTL_SECONDS = max(
     300,
@@ -2238,7 +2238,7 @@ def _parallel_shard_slot_key(parent_id: str) -> str:
     return f"scan:{parent_id}:active_shards"
 
 
-def _parallel_shard_concurrency_limit(options: dict[str, Any] | None = None) -> int:
+def _parallel_shard_concurrency_limit(r=None, options: dict[str, Any] | None = None) -> int:
     raw = None
     if isinstance(options, dict):
         if options.get("shard_concurrency") is not None:
@@ -2246,7 +2246,18 @@ def _parallel_shard_concurrency_limit(options: dict[str, Any] | None = None) -> 
         elif options.get("parallel_shard_concurrency") is not None:
             raw = options.get("parallel_shard_concurrency")
     if raw is None:
-        raw = PARALLEL_SHARD_MAX_PER_PARENT
+        # No explicit per-scan override: let a single parent fill the fleet rather
+        # than capping it at the legacy flat 4. The fleet-wide active-scan semaphore
+        # (_await_scan_slot / _max_active_scans) still arbitrates total concurrent
+        # scanner subprocesses across all parents, so this is bounded by real RAM-
+        # derived fleet capacity. PARALLEL_SHARD_MAX_PER_PARENT is now just a floor.
+        fleet = 0
+        if r is not None:
+            try:
+                fleet = _max_active_scans(r)
+            except Exception:
+                fleet = 0
+        raw = max(PARALLEL_SHARD_MAX_PER_PARENT, fleet)
     try:
         limit = int(raw)
     except (TypeError, ValueError):
@@ -2257,7 +2268,7 @@ def _parallel_shard_concurrency_limit(options: dict[str, Any] | None = None) -> 
 def _try_acquire_parallel_shard_slot(r, parent_id: str | None, options: dict[str, Any] | None = None) -> tuple[bool, int]:
     if not parent_id:
         return True, 0
-    limit = _parallel_shard_concurrency_limit(options)
+    limit = _parallel_shard_concurrency_limit(r, options)
     key = _parallel_shard_slot_key(parent_id)
     active = r.incr(key)
     if active <= limit:

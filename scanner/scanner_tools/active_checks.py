@@ -1772,6 +1772,22 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         "settings.py", "local_settings.py", "config.inc.php", "database.inc.php", "db.inc.php",
         # Language/toolchain auth files
         ".npmrc", ".pypirc", ".gem/credentials", "auth.json",
+        # Node/Express "static folder + extension allowlist" exposures, as seen in
+        # OWASP Juice Shop. /ftp serves only .md/.pdf, but the classic poison-null-
+        # byte trick (%2500.md == URL-encoded %00 + .md) bypasses the allowlist and
+        # returns the real backup/secret. acquisitions.md is the confidential doc
+        # served directly. encryptionkeys/* are the JWT/premium signing keys.
+        "ftp/acquisitions.md",
+        "ftp/coupons_2013.md.bak%2500.md",
+        "ftp/package.json.bak%2500.md",
+        "ftp/eastere.gg%2500.md",
+        "ftp/suspicious_errors.yml%2500.md",
+        "ftp/encrypt.pyc%2500.md",
+        "ftp/incident-support.kdbx",
+        "encryptionkeys/premium.key",
+        "encryptionkeys/jwt.key",
+        "encryptionkeys/rsa_priv.key",
+        ".well-known/security.txt",
     ]
     medium_priority_paths = [
         "config.json", "config.yml", "config.yaml", "config.xml", "settings.json", "appsettings.json", "appsettings.Development.json", "parameters.yml", "parameters.ini", "secrets.yml", "credentials.yml",
@@ -7914,8 +7930,15 @@ async def hash_route_dom_xss_test(
 
     print(f"[dom-xss] Testing {min(len(hash_route_endpoints), max_endpoints)} hash route endpoints for DOM XSS", file=sys.stderr)
 
-    # DOM XSS payloads for fragment injection
+    # DOM XSS payloads for fragment injection.
+    # The iframe javascript:/srcdoc vectors are listed FIRST because they are the
+    # ones that survive Angular's built-in sanitizer (which strips img/svg event
+    # handlers): this is exactly OWASP Juice Shop's headline DOM XSS via
+    # #/search?q=<iframe src="javascript:alert(`xss`)">. Without these the only
+    # list that actually runs in a smart scan missed Juice Shop entirely.
     DOM_XSS_PAYLOADS = [
+        ("<iframe src=\"javascript:alert(1)\">", "iframe_js_uri", "Iframe javascript: URI (Angular sanitizer bypass)"),
+        ("<iframe srcdoc=\"<script>alert(1)</script>\">", "iframe_srcdoc", "Iframe srcdoc script execution"),
         ("<img src=x onerror=alert(1)>", "img_onerror", "Image onerror event"),
         ("<svg onload=alert(1)>", "svg_onload", "SVG onload event"),
         ("'-alert(1)-'", "js_expression", "JavaScript expression injection"),

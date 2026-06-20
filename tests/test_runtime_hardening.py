@@ -4,15 +4,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_local_compose_mounts_all_scanner_top_level_modules():
+def test_local_compose_mounts_live_source_as_directories():
+    # Commit 24adaa6 replaced the fragile single-file bind mounts
+    # (./scanner/constants.py:/app/constants.py:ro) with DIRECTORY mounts under
+    # /app/_src plus an entrypoint copy step. Single-file mounts inode-pinned on
+    # macOS Docker and served stale/truncated files (silent "no output, exit 0"
+    # scans). The live invariant: the whole scanner/ and api/ trees are mounted as
+    # directories into both API and worker, and entrypoint.sh copies them over the
+    # baked /app copies so the runtime uses live host source.
     compose = (ROOT / "docker-compose.yml").read_text()
 
-    # target_context.py is imported by grading/findings/reporting and must be
-    # mounted alongside them into both API and worker, or the worker preflight
-    # crash-loops with ModuleNotFoundError.
-    for module in ("constants.py", "grading.py", "findings.py", "reporting.py", "signals.py", "target_context.py"):
-        mount = f"./scanner/{module}:/app/{module}:ro"
+    for mount in ("./scanner:/app/_src/scanner:ro", "./api:/app/_src/api:ro"):
         assert compose.count(mount) >= 2, f"{mount} should be mounted into API and worker"
+
+    # The legacy single-file mounts must not creep back in.
+    for module in ("constants.py", "grading.py", "target_context.py"):
+        legacy = f"./scanner/{module}:/app/{module}:ro"
+        assert legacy not in compose, f"legacy single-file mount {legacy} reintroduced"
+
+    # entrypoint.sh must copy top-level .py plus the scanner_tools, wordlists, and
+    # ai_gate package dirs from /app/_src/* over the baked /app copies (copy, not
+    # symlink — a symlinked entrypoint puts sys.path[0] in the wrong tree).
+    entrypoint = (ROOT / "scanner" / "entrypoint.sh").read_text()
+    assert 'cp -f "$d"/*.py /app/' in entrypoint
+    assert "scanner_tools" in entrypoint and "wordlists" in entrypoint and "ai_gate" in entrypoint
+    assert "ln -s" not in entrypoint, "entrypoint must copy live source, not symlink it"
 
 
 def test_dockerfile_copies_all_scanner_modules_without_drift():

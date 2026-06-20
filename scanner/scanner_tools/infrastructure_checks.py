@@ -530,6 +530,8 @@ async def test_directory_listing(
     common_dirs = {
         "/uploads/", "/files/", "/static/", "/assets/", "/backup/",
         "/backups/", "/data/", "/logs/", "/images/", "/downloads/",
+        # Node serve-index style listings (e.g. OWASP Juice Shop /ftp, /support/logs)
+        "/ftp/", "/encryptionkeys/", "/support/logs/",
     }
 
     if discovered_urls:
@@ -562,6 +564,10 @@ async def test_directory_listing(
             "parent directory",
             "directory listing for",
             "<title>index of",
+            # Node.js serve-index middleware (Express) renders this, not "Index of"
+            "listing directory",
+            "<title>listing directory",
+            'id="files"',
         ]
         if any(marker in body_lower for marker in listing_markers):
             results["vulnerable"] = True

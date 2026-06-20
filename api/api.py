@@ -11262,14 +11262,22 @@ def _worker_hostconfig(network: str, binds: list) -> dict:
 def _compute_max_active_scans(max_allowed: int | None = None) -> int:
     """Max concurrent ACTIVE scans across the fleet (workers enforce it via a Redis
     semaphore). Memory safety primarily comes from the RAM-derived fleet cap
-    (_compute_max_allowed_workers, ~1.2GB/worker); this is the per-scan/burst
-    concurrency knob, default 10, clamped to the fleet cap."""
-    try:
-        n = max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 10))
-    except (TypeError, ValueError):
-        n = 10
+    (_compute_max_allowed_workers, ~1.2GB/worker) plus the per-worker hard memory
+    cap (each worker is OOM-isolated and its job requeued). With no explicit
+    override this defaults to the full RAM-derived fleet capacity so a busy fleet —
+    and single large Full Coverage parents — can actually use every worker instead
+    of leaving most idle behind a flat cap. Set SHAKERSCAN_MAX_ACTIVE_SCANS to pin
+    a lower burst ceiling; it is always clamped to the RAM-derived fleet cap."""
     if max_allowed is None:
         max_allowed = _compute_max_allowed_workers()
+    env_override = os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS")
+    if env_override:
+        try:
+            n = max(1, int(env_override))
+        except (TypeError, ValueError):
+            n = max_allowed
+    else:
+        n = max_allowed
     return max(1, min(n, max_allowed))
 
 

@@ -90,7 +90,7 @@ services:
     volumes:
       # Live source as DIRECTORY mounts (NOT single-file): directory mounts avoid
       # the macOS Docker single-file bind-mount inode-pinning that served stale/
-      # truncated files (silent "no output, exit 0" scans). entrypoint.sh symlinks
+      # truncated files (silent "no output, exit 0" scans). entrypoint.sh copies
       # the individual files from /app/_src/* over the baked /app copies.
       - ./scanner:/app/_src/scanner:ro
       - ./api:/app/_src/api:ro
@@ -154,7 +154,7 @@ services:
       # Live source as DIRECTORY mounts (NOT single-file) — directory mounts avoid
       # the macOS Docker single-file bind-mount inode-pinning that served stale/
       # truncated scanner.py (silent "no output, exit 0" scans). entrypoint.sh
-      # symlinks the individual files from /app/_src/* over the baked /app copies.
+      # copies the individual files from /app/_src/* over the baked /app copies.
       - ./scanner:/app/_src/scanner:ro
       - ./api:/app/_src/api:ro
       - ./results:/results
@@ -185,7 +185,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://scanner:scanner@postgres:5432/scanner
     volumes:
-      # Directory mount (see api/worker note); entrypoint.sh symlinks the files.
+      # Directory mount (see api/worker note); entrypoint.sh copies the files.
       - ./api:/app/_src/api:ro
     command: ["python3", "/app/gungnir_worker.py"]
     profiles:

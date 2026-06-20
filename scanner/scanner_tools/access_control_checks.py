@@ -490,6 +490,20 @@ PRIVILEGED_PATHS = {
         "/.aws/credentials", "/.aws/config",
         "/aws-credentials", "/aws.json",
     ],
+    # REST/JSON-API forced-browsing targets, case-sensitive. Express/loopback-style
+    # auto-exposed model routes (OWASP Juice Shop and similar) are case-sensitive,
+    # so the lowercase /api/users above never matches /api/Users. A 200 JSON list
+    # here = anonymous access to admin-only data (BFLA / function-level access).
+    "rest_api_models": [
+        "/api/Users", "/api/Users/1",
+        "/api/Cards", "/api/Addresss", "/api/Deliverys",
+        "/api/Feedbacks", "/api/Complaints", "/api/Recycles",
+        "/api/Quantitys", "/api/SecurityQuestions",
+        "/rest/admin/application-configuration",
+        "/rest/admin/application-version",
+        "/rest/user/authentication-details",
+        "/ftp", "/ftp/",
+    ],
 }
 
 
@@ -515,7 +529,7 @@ def determine_severity(status_code: int, category: str, path: str) -> str:
     if status_code == 200:
         if category in ["admin_panels", "sensitive_files"]:
             return "critical"
-        elif category in ["api_endpoints", "user_management", "management_consoles", "debug_dev"] or category in ["backup_files", "logs_monitoring"]:
+        elif category in ["api_endpoints", "user_management", "management_consoles", "debug_dev"] or category in ["backup_files", "logs_monitoring", "rest_api_models"]:
             return "high"
         else:
             return "medium"
