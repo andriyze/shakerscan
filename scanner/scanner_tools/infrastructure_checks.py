@@ -595,9 +595,22 @@ async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int =
         if status != 200 or not body:
             continue
         markers = derive_markers(name, body)
-        # Report when the bypass itself succeeded (that IS the vuln), when the
-        # file is inherently sensitive by extension, or when content markers fire.
-        if not (bypass_used or sensitive_ext or markers):
+        # Confidential/secret CONTENT keywords catch sensitive files that have no
+        # sensitive extension and no structured marker (e.g. a confidential business
+        # memo named acquisitions.md sitting in a browsable dir). Generic, not
+        # app-specific.
+        body_head = body[:4000].lower()
+        sensitive_content = any(kw in body_head for kw in (
+            "confidential", "classified", "restricted", "internal use only",
+            "internal only", "do not distribute", "not for distribution",
+            "proprietary", "private key", "begin rsa", "begin openssh",
+            "begin private key", "password", "secret", "api key", "api_key",
+            "access token", "bearer ",
+        ))
+        # Report when the bypass itself succeeded (that IS the vuln), when the file
+        # is inherently sensitive by extension, when content markers fire, or when
+        # the content reads as confidential/secret.
+        if not (bypass_used or sensitive_ext or markers or sensitive_content):
             continue
         found.append({
             "file": name,
