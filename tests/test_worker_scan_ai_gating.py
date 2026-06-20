@@ -337,8 +337,12 @@ class _FakePlanPool:
 
 
 def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
-    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 2)
+    # Default per-parent shard concurrency now derives from the FLEET active-scan
+    # cap (so one parent can fill the fleet); PARALLEL_SHARD_MAX_PER_PARENT is only
+    # a floor. The fleet-wide active-scan semaphore still arbitrates across parents.
+    monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 1)
     monkeypatch.setattr(worker, "PARALLEL_SHARD_CONCURRENCY_HARD_MAX", 5)
+    monkeypatch.setattr(worker, "_max_active_scans", lambda r: 2)
     r = _FakeSlotRedis()
     parent_id = "parent-1"
 
@@ -348,7 +352,7 @@ def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
 
     assert first is True
     assert second is True
-    assert third is False
+    assert third is False  # capped at the fleet cap (2)
     assert limit == 2
     assert r.values[worker._parallel_shard_slot_key(parent_id)] == 2
 
@@ -361,11 +365,21 @@ def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
 def test_parallel_shard_concurrency_override_is_clamped(monkeypatch):
     monkeypatch.setattr(worker, "PARALLEL_SHARD_MAX_PER_PARENT", 4)
     monkeypatch.setattr(worker, "PARALLEL_SHARD_CONCURRENCY_HARD_MAX", 8)
+    monkeypatch.setattr(worker, "_max_active_scans", lambda r: 6)
+    sentinel_r = object()  # non-None so the fleet-derived default path runs
 
-    assert worker._parallel_shard_concurrency_limit({}) == 4
-    assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 6}) == 6
-    assert worker._parallel_shard_concurrency_limit({"parallel_shard_concurrency": 99}) == 8
-    assert worker._parallel_shard_concurrency_limit({"shard_concurrency": 0}) == 1
+    # No explicit override: default to the fleet cap (6), bounded by floor/hard max.
+    assert worker._parallel_shard_concurrency_limit(sentinel_r, {}) == 6
+    # Explicit override wins and is clamped to the hard max.
+    assert worker._parallel_shard_concurrency_limit(sentinel_r, {"shard_concurrency": 6}) == 6
+    assert worker._parallel_shard_concurrency_limit(sentinel_r, {"parallel_shard_concurrency": 99}) == 8
+    # Override is floored at 1.
+    assert worker._parallel_shard_concurrency_limit(sentinel_r, {"shard_concurrency": 0}) == 1
+    # When the fleet cap is below the floor, the floor (PARALLEL_SHARD_MAX_PER_PARENT) wins.
+    monkeypatch.setattr(worker, "_max_active_scans", lambda r: 1)
+    assert worker._parallel_shard_concurrency_limit(sentinel_r, {}) == 4
+    # With no redis handle (r=None), fall back to the floor (no fleet info).
+    assert worker._parallel_shard_concurrency_limit(None, {}) == 4
 
 
 def test_domain_endpoint_budget_reservation_accounts_for_db_and_redis_usage():

@@ -5008,6 +5008,8 @@ def expected_build_fingerprint() -> Optional[str]:
         "data_exposure.py": "/workspace/scanner/scanner_tools/data_exposure.py",
         "webhook_checks.py": "/workspace/scanner/scanner_tools/webhook_checks.py",
         "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
+        "access_control_checks.py": "/workspace/scanner/scanner_tools/access_control_checks.py",
+        "infrastructure_checks.py": "/workspace/scanner/scanner_tools/infrastructure_checks.py",
     }
     if all(os.path.exists(p) for p in workspace.values()):
         return _hash_source_files(workspace)
@@ -5024,6 +5026,8 @@ def expected_build_fingerprint() -> Optional[str]:
         "data_exposure.py": "/app/scanner_tools/data_exposure.py",
         "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
+        "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
+        "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
     })
 
 

@@ -711,12 +711,18 @@ def _max_active_scans(r) -> int:
     except Exception:
         pass
     # Fallback when the API hasn't published the cap yet (fresh/headless start).
-    # Keep this default identical to the API's SHAKERSCAN_MAX_ACTIVE_SCANS default
-    # (10) so a worker doesn't silently run a different cap before the first poll.
+    # The API's authoritative value is RAM-derived (_compute_max_active_scans) and
+    # is published within ~120s of startup. Until then, prefer an explicit override,
+    # else use a CPU-count proxy (~1-2 cores per active scan) instead of a flat 10
+    # so a fresh start doesn't underuse the fleet. The published RAM-derived value
+    # supersedes this on the next poll.
     try:
-        return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 10))
+        env = os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS")
+        if env:
+            return max(1, int(env))
     except (TypeError, ValueError):
-        return 10
+        pass
+    return max(1, min(32, os.cpu_count() or 10))
 
 
 def _take_scan_slot(r, slot_id: str) -> bool:
@@ -6418,6 +6424,8 @@ def _worker_build_fingerprint() -> str | None:
         "data_exposure.py": "/app/scanner_tools/data_exposure.py",
         "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
+        "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
+        "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
     }
     h = hashlib.sha256()
     hashed = 0
