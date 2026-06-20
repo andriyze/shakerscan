@@ -612,13 +612,17 @@ async def test_directory_listing(
         "cwe": "CWE-548",
     }
 
-    common_dirs = {
+    # Curated high-signal dirs are ALWAYS tested (order preserved). Node serve-index
+    # listings like /ftp, /support/logs, /encryptionkeys are common exposure points
+    # and must not be dropped by the safe_mode cap below — which previously sliced an
+    # unordered set([curated] + [discovered]) and could discard the curated entries.
+    curated_dirs = [
         "/uploads/", "/files/", "/static/", "/assets/", "/backup/",
         "/backups/", "/data/", "/logs/", "/images/", "/downloads/",
-        # Node serve-index style listings (e.g. OWASP Juice Shop /ftp, /support/logs)
-        "/ftp/", "/encryptionkeys/", "/support/logs/",
-    }
-
+        "/ftp/", "/encryptionkeys/", "/support/logs/", "/.git/", "/admin/",
+    ]
+    discovered_dirs: list[str] = []
+    seen = set(curated_dirs)
     if discovered_urls:
         for u in discovered_urls:
             try:
@@ -627,14 +631,15 @@ async def test_directory_listing(
                     continue
                 if not path.endswith("/"):
                     path = path.rsplit("/", 1)[0] + "/"
-                if path and path != "/":
-                    common_dirs.add(path)
+                if path and path != "/" and path not in seen:
+                    seen.add(path)
+                    discovered_dirs.append(path)
             except Exception:
                 continue
 
-    dirs_to_test = list(common_dirs)
-    if safe_mode and len(dirs_to_test) > 25:
-        dirs_to_test = dirs_to_test[:25]
+    # Always test every curated dir; cap only the crawl-discovered tail.
+    discovered_budget = max(0, 40 - len(curated_dirs)) if safe_mode else len(discovered_dirs)
+    dirs_to_test = curated_dirs + discovered_dirs[:discovered_budget]
 
     for directory in dirs_to_test:
         results["directories_tested"] += 1

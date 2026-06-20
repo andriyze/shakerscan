@@ -7247,14 +7247,20 @@ async def build_report(target: str,
 
     if directory_listing_results.get("vulnerable"):
         for directory in directory_listing_results.get("exposed_directories", []):
+            _sensitive = directory.get("sensitive_files") or []
+            # A listing that actually exposes readable sensitive files (backups,
+            # keys, confidential docs) is a high-severity exposure, not a mere
+            # "listing enabled" misconfig.
             report["findings"].append(normalize_finding(
                 "directory_listing",
-                f"Directory listing enabled: {directory.get('directory')}",
-                "medium",
+                (f"Directory listing exposes {len(_sensitive)} sensitive file(s): {directory.get('directory')}"
+                 if _sensitive else f"Directory listing enabled: {directory.get('directory')}"),
+                "high" if _sensitive else "medium",
                 {
                     "directory": directory.get("directory"),
                     "url": directory.get("url"),
                     "content_preview": directory.get("content_preview"),
+                    "sensitive_file_count": len(_sensitive),
                 },
                 "CWE-548"
             ))
