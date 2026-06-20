@@ -69,6 +69,12 @@ When users ask about security scanning, you should:
 
 **Important**: After submitting a scan, report the scan ID and UI link, then stop. Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
 
+**DAST-quality / benchmarking notes:**
+- **Never measure on a build-stale fleet.** Check `GET /workers` `build_current` (fingerprint-authoritative) and restart workers before validation scans. Scans stamp `expected_build_fingerprint_at_submit`/`stale_worker_count_at_submit`; pass `require_current_workers: true` to fail-closed on a stale fleet.
+- **For DAST-quality benchmarking use a single Smart scan, not parallel `coverage`.** Coverage mode detects fewer crit/high (zero-rediscovery children skip the browser/DOM-XSS + global posture checks where many crit/highs live). Coverage is for breadth.
+- **Benchmark scorecards:** `python3 scripts/benchmark_targets.py <juice_shop|crapi|honey> --auth` (submits, polls, scores verified-vs-suspected, coverage, gates). Fixtures in `tests/fixtures/benchmarks/*.yaml`. Score an existing scan with `--scan-id`.
+- **ASM gaps** (`GET /targets/{id}/asm/gaps`) returns `family_coverage` (completed vs attempts) and `recommended_campaigns` (recon / add_credentials / sqli_wave / xss_wave / bola_wave / retest_stale). Reports carry `verification_summary` (verified vs suspected, unproven crit/high).
+
 For commands you run on the same machine as ShakerScan, use `http://localhost:8080` for the API. For browser-facing links on a remote VPS, use the UI URL printed by `./scanner.sh status` or `./scanner.sh start --remote` instead of hardcoding `localhost:3000`.
 
 1. **Check if scanner is running** first:

@@ -71,8 +71,11 @@ Recent Juice Shop/crAPI validation proves the ASM loop must optimize for **campa
 - **BOLA/Authz:** focused dual-user campaigns can produce verified High cross-principal findings on
   crAPI. ASM should track producer endpoints, object IDs, owner fields, auth states, and
   producer->consumer links, then retest those links as user1/user2/anonymous.
-- **XSS:** current lab evidence still shows no reliable High/Critical XSS on Juice Shop. ASM should
-  report this as a family/proof gap, not as "covered" just because endpoints were attempted.
+- **XSS:** Juice Shop hash-route DOM XSS is now browser-proven High (the iframe `javascript:`/
+  `srcdoc` vector). Stored XSS (store-then-render proof) and broad reflected XSS remain family/proof
+  gaps — ASM should report those as gaps, not "covered" just because endpoints were attempted. The
+  attempt ledger now distinguishes endpoint-attempted from family-proved via `/asm/gaps`
+  `family_coverage` (completed vs attempts).
 - **Broad fan-out:** a parent that creates hundreds of shards on a small worker fleet delays merged
   evidence and can trigger shard timeouts. ASM/Full Coverage should prefer worker-aware campaign
   waves over huge pending shard sets.
@@ -673,11 +676,18 @@ New quality gaps to track:
 
 - **Worker-aware campaign waves:** avoid generating huge pending shard sets when the live worker
   fleet is small. Use allocator waves and larger batches before creating hundreds of scan rows.
-- **XSS benchmark gap:** Juice Shop XSS remains a failing benchmark until browser-backed
-  reflected/stored/DOM evidence appears in findings.
+- **XSS benchmark gap (partly closed):** Juice Shop hash-route DOM XSS is now browser-proven High;
+  stored/reflected XSS beyond the hash route remain the open benchmark gap.
+- **Stale workers invalidate benchmarks:** never measure on a build-stale fleet. `/workers` reports
+  `build_current` (fingerprint-authoritative); scans stamp `*_at_submit` freshness metadata and can
+  fail-closed with `require_current_workers=true`.
+- **Coverage mode loses global checks:** parallel `coverage` detects fewer crit/high than a single
+  Smart scan (zero-rediscovery children + fragmented global posture checks). Prefer single Smart for
+  DAST-quality benchmarking; coverage is for breadth.
 - **Workflow/write-BOLA gap:** crAPI read-BOLA is proven; safe non-destructive write/BFLA and
   workflow/object creation remain future Lab/deep-gated work.
-- **Family/proof rollups:** `/asm/gaps` should distinguish "endpoint attempted" from "SQLi proof
+- **Family/proof rollups:** `/asm/gaps` now returns `family_coverage` (completed vs attempts) and
+  `recommended_campaigns`; it should keep distinguishing "endpoint attempted" from "SQLi proof
   attempted", "XSS browser proof attempted", and "BOLA cross-principal proof attempted".
 
 ### Phase D — UX/API/AI Simplification

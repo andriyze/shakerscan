@@ -83,11 +83,17 @@ families beyond SQLi/XSS/Auth/BOLA.
 Live Juice Shop and crAPI validation changed the interpretation of "parallel scanning":
 
 - **What is working:** focused runs now find real, verified issues: Juice Shop produces Critical
-  SQLi on `/rest/products/search` and `/rest/user/login`; crAPI produces High cross-principal
-  BOLA/Authz findings through `smart_authz`.
-- **What is not working yet:** XSS is still not reliably found on Juice Shop; broad all-family
-  runs can over-shard badly; crAPI broad runs have shown shard heartbeat failures; and BOLA depth is
-  still mostly read-side, not workflow/write-side.
+  SQLi on `/rest/products/search` and `/rest/user/login`; **browser-proven High DOM XSS on the
+  `#/search` hash route** (the iframe `javascript:`/`srcdoc` vector that survives Angular's
+  sanitizer — previously missed); BFLA on `/api/Users` and `/metrics`; and crAPI produces High
+  cross-principal BOLA/Authz findings through `smart_authz`. Benchmark scorecards live under
+  `scripts/benchmark_targets.py` + `tests/fixtures/benchmarks/*.yaml` (verified vs suspected, coverage,
+  per-target gates) so regressions are visible.
+- **What is not working yet:** stored XSS (store-then-render proof) and reflected XSS beyond the hash
+  route are still partial; NoSQLi on discovered GET endpoints is limited; broad all-family runs can
+  over-shard badly; and BOLA depth is still mostly read-side, not workflow/write-side. Note: **parallel
+  `coverage` mode detects FEWER crit/high than a single Smart scan** on apps like Juice Shop because
+  coverage children run zero-rediscovery (no browser/DOM-XSS) and fragment the global posture checks.
 - **Bad pattern observed:** a broad `coverage_family` Juice Shop run planned 140 shards while only
   three workers were available. That is not "more coverage"; it is queue/merge overhead and delayed
   evidence. Shard count must be bounded by live workers, target size, and campaign class.
