@@ -3983,12 +3983,25 @@ def send_heartbeats(job_id: str, stop_event: threading.Event):
     This avoids heartbeat starvation when the asyncio event loop is busy with
     synchronous CPU/JSON work.
     """
-    r = get_redis()
+    # Dedicated client with socket timeouts so a stalled connection cannot block
+    # the hset forever — otherwise the heartbeat silently stops and the stale-scan
+    # checker reaps a still-running scan, discarding all its findings (observed on
+    # long finalize/verification phases of large scans). Reconnect on failure.
+    def _hb_client():
+        try:
+            return redis.from_url(REDIS_URL, socket_timeout=10, socket_connect_timeout=10)
+        except Exception:
+            return None
+    r = _hb_client()
     while not stop_event.is_set():
         try:
-            r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
+            if r is None:
+                r = _hb_client()
+            if r is not None:
+                r.hset(f"job:{job_id}", 'heartbeat', utc_now_iso())
         except Exception as e:
-            print(f"[{job_id[:8]}] Heartbeat error: {e}", flush=True)
+            print(f"[{job_id[:8]}] Heartbeat error (reconnecting): {e}", flush=True)
+            r = None  # force reconnect next tick instead of reusing a wedged socket
         stop_event.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
 
 

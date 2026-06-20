@@ -162,7 +162,11 @@ RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 HEARTBEAT_TIMEOUT_MINUTES = 5  # Mark scan stale if no heartbeat for this long
 RETEST_RUNNING_TIMEOUT_MINUTES = int(os.environ.get("RETEST_RUNNING_TIMEOUT_MINUTES", "30"))
 FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
-    os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "15")
+    # Post-active phases (validation/attack-chains/grading) are CPU-heavy and emit
+    # few heartbeats; on large (raised-budget §3) scans they legitimately run long.
+    # 15 min reaped completed work; 30 gives margin while the resilient heartbeat
+    # thread (worker) keeps writing.
+    os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "30")
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
 # A parent row runs no scanner subprocess; it is finalized by the merge job once
