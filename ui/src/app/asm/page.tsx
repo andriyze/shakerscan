@@ -784,11 +784,12 @@ function CoverageAdvisorCard({
               <div className="text-[11px] uppercase text-gray-500">Family proof coverage</div>
               <div className="flex flex-wrap gap-1.5 text-xs">
                 {Object.entries(gaps.family_coverage).map(([fam, c]) => (
-                  <Badge key={fam}
-                    className={c.completed > 0 ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-400'}
-                    title={`${c.completed} proof-quality of ${c.attempts} attempts`}>
-                    {fam}: {c.completed}/{c.attempts}
-                  </Badge>
+                  <span key={fam} title={`${c.completed} proof-quality of ${c.attempts} attempts`}>
+                    <Badge
+                      className={c.completed > 0 ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-400'}>
+                      {fam}: {c.completed}/{c.attempts}
+                    </Badge>
+                  </span>
                 ))}
               </div>
             </div>
