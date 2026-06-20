@@ -128,16 +128,21 @@ STATIC_ASSET_EXTENSIONS = frozenset({
     ".woff", ".woff2",
 })
 
-# Lean discovery budget for the coverage "discover-once" recon pass. The recon
-# only needs to ENUMERATE the endpoint worklist quickly (the shards do the real
-# active testing), so we cap browser crawl, skip parameter discovery, disable
-# active and Nuclei, and hard-bound the runtime. Without this the recon inherits
-# heavy scan work and "planning" can run for minutes before fan-out.
+# Budget for the coverage "discover-once" recon pass. The recon enumerates the
+# endpoint worklist for the shards AND serves as the GLOBAL-CHECK backbone: the
+# zero-rediscovery shards run no browser crawl and only a fragmented global pass,
+# so detections that DON'T scale with endpoint count — DOM-XSS (browser), exposure
+# (/metrics, /ftp), and forced-browsing/BFLA (phase-4) — must run here once and be
+# unioned into the merge (see process_scan_plan_job recon-findings stash). Per-
+# endpoint SQLi/XSS depth stays on the shards (bounded active_max_endpoints here),
+# so this stays a bounded one-time cost, not a full re-scan before fan-out.
 RECON_DISCOVERY_BUDGET = {
-    # Keep one selected endpoint so the scanner still reaches the active block
-    # and emits the full pre-cap active_worklist, but give active probes no time.
-    "active_max_endpoints": 1,
-    "active_max_seconds": 0,
+    # Bounded active budget: enough to run DOM-XSS on hash routes + active checks on
+    # the highest-priority handful of endpoints, NOT the full per-endpoint sweep
+    # (that is the shards' job). Keeps recon's one-time global detections without
+    # turning planning into a second full scan.
+    "active_max_endpoints": 20,
+    "active_max_seconds": 150,
     "nuclei_max_targets": 0,
     "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
     "api_probe_limit": 250,       # keep speculative API fan-out bounded in planning
@@ -146,8 +151,8 @@ RECON_DISCOVERY_BUDGET = {
     "discovery_depth": 3,
     "param_discovery_url_limit": 0,   # skip per-URL param discovery in recon
     "param_discovery_max_params": 0,
-    "phase4_max_seconds": 0,
-    "max_duration_minutes": 10,       # hard bound so planning can't run away
+    "phase4_max_seconds": 180,        # run global phase-4 web checks once (exposure/BFLA/...)
+    "max_duration_minutes": 15,       # hard bound so planning can't run away
 }
 
 # Auth fields that establish the primary (user1) authenticated identity.
