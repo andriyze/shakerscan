@@ -161,6 +161,21 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
                 : ''}
             </p>
           )}
+          {(() => {
+            // §2: warn when this scan was submitted against a build-stale fleet —
+            // its results may have come from older detector code.
+            const staleAtSubmit = Number((scan?.options as any)?.stale_worker_count_at_submit || 0)
+            const fleetAtSubmit = Number((scan?.options as any)?.worker_fleet_size_at_submit || 0)
+            if (staleAtSubmit > 0) {
+              return (
+                <p className="text-xs mt-0.5 font-mono text-amber-400"
+                   title="Some workers were running older code than the current checkout when this scan was submitted; results may be from stale detectors. Restart workers and re-scan.">
+                  ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
+                </p>
+              )
+            }
+            return null
+          })()}
         </div>
       </div>
     </Card>
