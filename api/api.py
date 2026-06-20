@@ -5105,8 +5105,15 @@ def worker_build_current(
         if reported_version and expected_version
         else None
     )
-    checks = [v for v in (fingerprint_ok, version_ok) if v is not None]
-    return all(checks) if checks else None
+    # The source fingerprint is the authoritative currency signal — it now covers
+    # every detection/orchestration module. The git version label is volatile (it
+    # is the real commit, and workers snapshot the published value once at startup),
+    # so a current worker that snapshotted a slightly older label would look falsely
+    # stale if version had to match too. Trust the fingerprint when we have it; fall
+    # back to the version label only when no fingerprint is reported.
+    if fingerprint_ok is not None:
+        return fingerprint_ok
+    return version_ok
 
 
 @app.get("/health")
