@@ -10922,6 +10922,10 @@ async def build_report(target: str,
                     max_verification_attempts=3,
                     min_severity=verify_min_severity,
                     include_summary=True,
+                    # Bound scan-time proof so finalize can't run for many minutes and
+                    # get reaped as stale on large scans; deferred findings stay
+                    # suspected and are re-verified by the worker's async auto-retest.
+                    max_findings=int(os.environ.get("SCAN_VERIFICATION_MAX", "40")),
                 )
                 if isinstance(verification_result, tuple):
                     verified_findings, phase_summary = verification_result

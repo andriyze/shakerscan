@@ -100,6 +100,7 @@ async def verify_high_severity_findings(
     max_verification_attempts: int = 3,
     min_severity: str = "high",
     include_summary: bool = False,
+    max_findings: int | None = None,
 ) -> list[dict] | tuple[list[dict], dict]:
     """
     Attempt to verify findings at/above the configured severity before final report.
@@ -166,6 +167,12 @@ async def verify_high_severity_findings(
     eligible_count = 0
     attempted_count = 0
     skipped_count = 0
+    # Bound how many findings get the EXPENSIVE per-finding proof (browser/timing)
+    # at scan time. Without this, a large scan with many high/critical findings runs
+    # verification for tens of minutes with no progress, and the finalize phase gets
+    # reaped as stale (losing all results). Deferred findings keep suspected/
+    # needs_verification status and are picked up by the worker's async auto-retest.
+    verify_budget_used = 0
 
     for finding in findings:
         severity = finding.get("severity", "info").lower()
@@ -186,6 +193,19 @@ async def verify_high_severity_findings(
                 skipped_count += 1
             verified_findings.append(finding)
             continue
+
+        # Scan-time verification budget: once exhausted, defer remaining eligible
+        # findings (keep them suspected + needs_verification for async auto-retest)
+        # instead of blocking finalize for many more minutes.
+        if max_findings is not None and verify_budget_used >= max_findings:
+            finding["needs_verification"] = True
+            finding["suspected"] = True
+            finding["verification_skipped"] = True
+            finding.setdefault("verification_reason", "scan_verification_budget_exhausted")
+            skipped_count += 1
+            verified_findings.append(finding)
+            continue
+        verify_budget_used += 1
 
         # Determine finding type and attempt ladder via shared engine
         finding_type = normalize_finding_type(vuln_type)
