@@ -354,14 +354,24 @@ export interface AsmRecommendation {
   blockers: Array<{ kind: string; count: number; message: string }>
 }
 
+export interface AsmFamilyCoverage { completed: number; attempts: number }
+export interface AsmRecommendedCampaign {
+  campaign: string
+  label?: string
+  reason: string
+  priority: 'high' | 'medium' | 'low' | string
+}
 export interface AsmGaps {
   coverage: AsmCoverage
   claimable: number
   active_scans: number
   recommendation: AsmRecommendation
+  recommended_campaigns?: AsmRecommendedCampaign[]
   by_auth_state: Record<string, Record<string, number>>
   by_param_location: Record<string, number>
+  family_coverage?: Record<string, AsmFamilyCoverage>
   last_attempt_status: Record<string, number>
+  attempt_ledger_status?: Record<string, number>
   sample_gaps: AsmEndpoint[]
 }
 

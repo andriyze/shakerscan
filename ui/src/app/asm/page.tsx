@@ -779,6 +779,36 @@ function CoverageAdvisorCard({
               ))}
             </div>
           )}
+          {gaps?.family_coverage && Object.keys(gaps.family_coverage).length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[11px] uppercase text-gray-500">Family proof coverage</div>
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                {Object.entries(gaps.family_coverage).map(([fam, c]) => (
+                  <Badge key={fam}
+                    className={c.completed > 0 ? 'bg-green-500/15 text-green-300' : 'bg-gray-800 text-gray-400'}
+                    title={`${c.completed} proof-quality of ${c.attempts} attempts`}>
+                    {fam}: {c.completed}/{c.attempts}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+          {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[11px] uppercase text-gray-500">Recommended next campaigns</div>
+              {gaps.recommended_campaigns.slice(0, 5).map((c) => (
+                <div key={c.campaign} className="flex items-start gap-2 text-xs">
+                  <Badge className={
+                    c.priority === 'high' ? 'bg-red-500/15 text-red-300'
+                    : c.priority === 'medium' ? 'bg-yellow-500/15 text-yellow-300'
+                    : 'bg-gray-800 text-gray-400'}>
+                    {c.label || c.campaign}
+                  </Badge>
+                  <span className="text-gray-500">{c.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 sm:min-w-48">
