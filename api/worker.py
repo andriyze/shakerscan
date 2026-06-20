@@ -1479,6 +1479,22 @@ def generate_finding_fingerprint(finding: dict) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
+def _strip_null_bytes(value):
+    """Recursively remove NUL (\\x00) from strings. PostgreSQL text/JSONB cannot
+    store \\u0000 — asyncpg raises UntranslatableCharacterError, which crashed
+    finding persistence and left the scan stuck mid-finalize (until the stale
+    checker reaped it, discarding ALL results). NUL bytes reach findings via binary
+    content harvested through the encoded-null-byte file-exposure bypass and other
+    raw response captures. Stripping at the DB-write boundary fixes it universally."""
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    return value
+
+
 async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     """Save findings to database with deduplication. Returns count of saved findings."""
     if not findings:
@@ -1490,6 +1506,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
 
     async with db_pool.acquire() as conn:
         for finding in findings:
+            # PostgreSQL cannot store NUL bytes; strip them from every string field
+            # before any INSERT/UPDATE so binary/bypass content can't crash persistence.
+            finding = _strip_null_bytes(finding)
             fingerprint = generate_finding_fingerprint(finding)
             evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))
             evidence_json = json.dumps(evidence_with_triage) if evidence_with_triage else None
