@@ -10328,6 +10328,25 @@ async def build_report(target: str,
                 # Deduplicate and cap
                 bola_urls = list(dict.fromkeys(bola_urls))[:500]
 
+                # §6: record WHY cross-principal BOLA could/couldn't run, so low
+                # coverage reads as an explainable blocked state, not silent absence.
+                _bola_blocked: list[str] = []
+                if not auth_session:
+                    _bola_blocked.append("no_primary_auth")
+                if not user2_session:
+                    _bola_blocked.append("no_second_user")
+                if not bola_urls:
+                    _bola_blocked.append("no_endpoints")
+                active_block["bola_status"] = {
+                    "cross_user_enabled": bool(user2_session and auth_session),
+                    "primary_auth": bool(auth_session),
+                    "second_user": bool(user2_session),
+                    "endpoints_available": len(bola_urls) if bola_urls else 0,
+                    # read-only multi-user replay today; write/BFLA is Lab/deep future work
+                    "mode": "cross_principal_read" if (user2_session and auth_session) else (
+                        "anonymous_vs_user1" if auth_session else "anonymous_only"),
+                    "blocked_reasons": _bola_blocked,
+                }
                 if bola_urls:
                     print(f"[scanner] Smart mode: Running BOLA/IDOR testing on {len(bola_urls)} discovered URLs", file=sys.stderr)
                     if user2_session:
