@@ -2498,6 +2498,7 @@ class ScanOptions(BaseModel):
         description="auto (default), scope (partition custom_endpoints), family (broad + deep sqli/xss), coverage (discover-once, partition all endpoints), or coverage_family (coverage buckets x broad/sqli/xss lanes).",
     )
     exploit_depth: bool = False                      # Raise exploitation caps + no early stop on shards
+    require_current_workers: bool = False            # Reject active scans if any worker is build-stale (§2)
     auth_state_shards: bool = False                  # Fan shards out per auth identity (anon/user1/user2)
     coverage_per_shard_cap: Optional[int] = None     # Endpoints per coverage shard (smaller -> more shards)
     coverage_max_shards: Optional[int] = Field(
@@ -5114,6 +5115,73 @@ def worker_build_current(
     if fingerprint_ok is not None:
         return fingerprint_ok
     return version_ok
+
+
+def _worker_freshness_snapshot() -> dict:
+    """Fleet build-freshness snapshot for scan-submit guards/metadata (§2).
+
+    Returns fleet_size, running, stale_count, stale_names, and the expected build
+    fingerprint. Best-effort: when Docker/Redis are unavailable, returns
+    available=False so callers fail open (never block a scan on missing telemetry).
+    """
+    snap = {
+        "available": False,
+        "fleet_size": 0,
+        "running": 0,
+        "stale_count": 0,
+        "stale_names": [],
+        "expected_build_fingerprint": expected_build_fingerprint(),
+    }
+    try:
+        filters = urllib.parse.quote('{"name":["worker"]}')
+        status, containers = docker_socket_request(
+            "GET", f"/containers/json?all=true&filters={filters}")
+        if status != 200 or not isinstance(containers, list):
+            return snap
+        expected_fp = snap["expected_build_fingerprint"]
+        expected_version = current_scanner_version()
+        try:
+            wb_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+        except Exception:
+            wb_raw = {}
+        wb: dict = {}
+        for host, raw in wb_raw.items():
+            hs = host.decode() if isinstance(host, bytes) else str(host)
+            rs = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                wb[hs.lower()] = json.loads(rs)
+            except Exception:
+                continue
+
+        def _bfc(cid: str):
+            cid = (cid or "").lower()
+            for hs, info in wb.items():
+                if hs and cid.startswith(hs):
+                    return info
+            return None
+
+        snap["available"] = True
+        for c in containers:
+            names = c.get("Names", [])
+            name = names[0].lstrip("/") if names else ""
+            if not _is_scan_worker_container_name(name):
+                continue
+            snap["fleet_size"] += 1
+            if c.get("State") == "running":
+                snap["running"] += 1
+            info = _bfc(c.get("Id", "")) or {}
+            cur = worker_build_current(
+                reported_fingerprint=info.get("build_fingerprint"),
+                reported_version=info.get("scanner_version"),
+                expected_fingerprint=expected_fp,
+                expected_version=expected_version,
+            )
+            if cur is False:
+                snap["stale_count"] += 1
+                snap["stale_names"].append(name)
+    except Exception:
+        pass
+    return snap
 
 
 @app.get("/health")
@@ -7960,6 +8028,30 @@ async def submit_scan(request: ScanRequest):
         )
 
     options_payload = _build_scan_options_payload(request.options, scan_type)
+
+    # §2 Operational freshness: record which build the fleet was on at submit, and
+    # optionally refuse active scans on a stale fleet (opt-in, fail-open).
+    _freshness = _worker_freshness_snapshot()
+    if _freshness.get("available"):
+        options_payload["expected_build_fingerprint_at_submit"] = _freshness.get("expected_build_fingerprint")
+        options_payload["stale_worker_count_at_submit"] = _freshness.get("stale_count")
+        options_payload["worker_fleet_size_at_submit"] = _freshness.get("fleet_size")
+        if (getattr(request.options, "require_current_workers", False)
+                and scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+                and _freshness.get("stale_count", 0) > 0):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "stale_workers",
+                    "message": (
+                        f"{_freshness['stale_count']} of {_freshness['fleet_size']} workers are "
+                        f"build-stale; refusing '{scan_type}' scan with require_current_workers=true. "
+                        "Restart workers to deploy current code, then re-submit."
+                    ),
+                    "stale_workers": _freshness.get("stale_names", []),
+                },
+            )
+
     parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
         request.options,
         options_payload,
