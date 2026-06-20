@@ -2020,6 +2020,48 @@ async def run_due_schedules(pool: asyncpg.Pool):
             if not isinstance(decoded_options, dict):
                 decoded_options = {}
             scan_options = dict(decoded_options)
+
+            # §9: ASM-aware schedule. kind='asm_improve' queues a bounded coverage
+            # wave (test if claimable, else recon) instead of a full scan — the
+            # "keep this target covered" cadence, spread across the schedule. Stored
+            # in scan_options so no schema migration is needed.
+            if str(scan_options.get('kind') or '').lower() == 'asm_improve':
+                asm_opts = {k: v for k, v in scan_options.items() if k != 'kind'}
+                try:
+                    cfg_row = await conn.fetchrow(
+                        "SELECT asm_config FROM targets WHERE id = $1", target_id)
+                    cfg = asm_inventory.merge_asm_config(
+                        _decode_asm_config(cfg_row["asm_config"]) if cfg_row else {})
+                    claimable = await asm_inventory.claimable_count(
+                        conn, str(target_id), stale_days=cfg["stale_days"])
+                    if claimable > 0:
+                        enq = await _enqueue_asm_exploit_batch(
+                            conn, r, str(target_id), target_url, asm_opts,
+                            batch_size=min(cfg["batch_size"], claimable),
+                            stale_days=cfg["stale_days"], exploit_depth=cfg["exploit_depth"],
+                            triggered_by="schedule")
+                        await conn.execute(
+                            "UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", target_id)
+                        _asm_kind = "test"
+                    else:
+                        enq = await _enqueue_asm_recon(
+                            conn, r, str(target_id), target_url, asm_opts, triggered_by="schedule")
+                        await conn.execute(
+                            "UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", target_id)
+                        _asm_kind = "recon"
+                    print(f"[scheduler] ASM improve ({_asm_kind}) queued for schedule "
+                          f"{str(schedule_id)[:8]} -> {str(enq.get('scan_id', ''))[:8]}", flush=True)
+                except Exception as exc:
+                    print(f"[scheduler] ASM improve failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                next_run = calculate_next_run(
+                    schedule["frequency"], schedule["day_of_week"],
+                    schedule["time_of_day"] or "02:00", schedule["timezone"] or "UTC",
+                    schedule["jitter_minutes"] or 0)
+                await conn.execute(
+                    "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
+                    next_run, schedule_id)
+                continue
+
             scan_options['scan_type'] = scan_type
             scan_options_model = ScanOptions(**scan_options)
             scan_type = normalize_dast_scan_options(scan_options_model)
