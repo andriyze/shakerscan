@@ -23,6 +23,7 @@ MITRE ATT&CK:
 """
 
 import asyncio
+import http.client
 import re
 import socket
 import ssl
@@ -56,11 +57,25 @@ async def _fetch_url(url: str, method: str = "GET", timeout: int = 10, headers: 
             req = urllib.request.Request(url, method=method, headers=headers or {})
             with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                 status_code = response.getcode()
-                body = response.read().decode('utf-8', errors='ignore')
+                try:
+                    body = response.read().decode('utf-8', errors='ignore')
+                except http.client.IncompleteRead as ire:
+                    # Some servers (Node serve-index, chunked responses) send a body
+                    # that trips urllib's strict Content-Length check. The bytes that
+                    # WERE read are still valid and usually complete enough to classify
+                    # (e.g. a directory listing); use them instead of dropping the
+                    # whole response. Universal robustness, not target-specific.
+                    body = ire.partial.decode('utf-8', errors='ignore')
                 response_headers = dict(response.headers)
                 return (status_code, body, response_headers)
         except urllib.error.HTTPError as e:
-            return (e.code, "", {})
+            try:
+                body = e.read().decode('utf-8', errors='ignore')
+            except Exception:
+                body = ""
+            return (e.code, body, dict(getattr(e, "headers", {}) or {}))
+        except http.client.IncompleteRead as ire:
+            return (200, ire.partial.decode('utf-8', errors='ignore'), {})
         except Exception:
             return (0, "", {})
 
