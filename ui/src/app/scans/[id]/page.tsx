@@ -152,7 +152,13 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               }
             >
               {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
-              {versionMismatch ? ` ≠ ${buildVersion}` : ''}
+              {versionMismatch
+                ? (scanVersion === buildVersion && scanFingerprint && buildFingerprint
+                    // Same git label but different source fingerprint: show the
+                    // fingerprints, else the UI prints a confusing "X ≠ X".
+                    ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
+                    : ` ≠ ${buildVersion}`)
+                : ''}
             </p>
           )}
         </div>
