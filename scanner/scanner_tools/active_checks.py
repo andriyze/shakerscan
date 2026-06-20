@@ -203,6 +203,10 @@ def _finish_endpoint_attempt(
     if budget_exhausted:
         attempt["budget_exhausted"] = True
         attempt["budget_exhausted_reason"] = budget_exhausted_reason
+    # §5: serialize the per-endpoint technique set (JSON-safe, stable order).
+    techniques = attempt.get("techniques_attempted")
+    if isinstance(techniques, set):
+        attempt["techniques_attempted"] = sorted(techniques)
     return attempt
 
 
@@ -6578,6 +6582,11 @@ async def smart_sqli_test(
             for payload, technique, description in payloads:
                 if _budget_exhausted():
                     break
+                # §5: record which SQLi techniques were attempted per endpoint
+                # (boolean/error/union/auth-bypass/extraction/OOB) so coverage shows
+                # depth, not just "tested".
+                if attempt is not None:
+                    attempt.setdefault("techniques_attempted", set()).add(technique)
                 # Inject payload
                 test_params = dict(baseline_params)
                 test_params[param] = payload
