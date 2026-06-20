@@ -9235,6 +9235,62 @@ async def _asm_active_scan_count(conn, target_id: str) -> int:
     ) or 0)
 
 
+def _asm_recommended_campaigns(
+    *,
+    coverage: dict[str, Any],
+    family_coverage: dict[str, Any] | None = None,
+    by_auth: dict[str, Any] | None = None,
+    last_attempt_counts: dict[str, int] | None = None,
+    active_scans: int = 0,
+) -> list[dict[str, Any]]:
+    """§7: prioritized next-campaign suggestions for UI/AI.
+
+    Maps current coverage/family/blocker state to concrete campaign types:
+    recon, add_credentials, sqli_wave, xss_wave, bola_wave, retest_stale, test.
+    Family waves are suggested when no PROOF-quality (completed) attempt exists for
+    that family — endpoint-attempted is not family-proved.
+    """
+    attempts = last_attempt_counts or {}
+    fams = family_coverage or {}
+    total = int(coverage.get("total") or 0)
+    untested = int(coverage.get("untested") or 0)
+    stale = int(coverage.get("stale") or 0)
+    auth_missing = int(attempts.get("auth_missing") or 0) + int(attempts.get("auth_failed") or 0)
+
+    if active_scans > 0:
+        return [{"campaign": "wait", "label": "Wait for current work",
+                 "reason": "A scan is already active for this target.", "priority": "low"}]
+    if total == 0:
+        return [{"campaign": "recon", "label": "Discover endpoints",
+                 "reason": "No persistent endpoint inventory exists yet.", "priority": "high"}]
+
+    recs: list[dict[str, Any]] = []
+    if auth_missing > 0:
+        recs.append({"campaign": "add_credentials", "label": "Add credentials",
+                     "reason": f"{auth_missing} endpoints need auth to replay.", "priority": "high"})
+
+    def _completed(fam: str) -> int:
+        return int((fams.get(fam) or {}).get("completed") or 0)
+
+    for fam, label, prio in (("sqli", "Run SQLi wave", "high"),
+                             ("xss", "Run XSS wave", "medium"),
+                             ("bola", "Run BOLA wave (needs 2 users + Lab/deep)", "medium")):
+        if _completed(fam) == 0 and _completed("all") == 0:
+            recs.append({"campaign": f"{fam}_wave", "label": label,
+                         "reason": f"No proof-quality {fam.upper()} attempt recorded yet.",
+                         "priority": prio})
+    if stale > 0:
+        recs.append({"campaign": "retest_stale", "label": "Retest stale endpoints",
+                     "reason": f"{stale} endpoints are stale and may have changed.", "priority": "medium"})
+    if untested > 0 and not any(r["campaign"].endswith("_wave") for r in recs):
+        recs.append({"campaign": "test", "label": "Test untested endpoints",
+                     "reason": f"{untested} endpoints have never been tested.", "priority": "medium"})
+    if not recs:
+        recs.append({"campaign": "recon", "label": "Refresh discovery",
+                     "reason": "Inventory looks covered; refresh to catch new surface.", "priority": "low"})
+    return recs
+
+
 def _asm_recommendation(
     coverage: dict[str, Any],
     *,
@@ -9750,13 +9806,37 @@ async def asm_gaps(target_id: str):
             """,
             uuid.UUID(target_id),
         )
+        # §7: family-level coverage — which vuln families have PROOF-quality attempts
+        # (completed) vs only touched. "endpoint attempted" != "family proved".
+        family_rows = await conn.fetch(
+            """
+            SELECT COALESCE(check_family, 'all') AS family,
+                   COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                   COUNT(*) AS attempts
+            FROM asm_endpoint_attempts
+            WHERE endpoint_id IN (SELECT id FROM target_endpoints WHERE target_id = $1)
+            GROUP BY COALESCE(check_family, 'all')
+            """,
+            uuid.UUID(target_id),
+        )
 
     attempt_counts = {str(r["status"]): int(r["count"] or 0) for r in attempt_rows}
+    family_coverage = {
+        str(r["family"]): {"completed": int(r["completed"] or 0), "attempts": int(r["attempts"] or 0)}
+        for r in family_rows
+    }
     recommendation = _asm_recommendation(
         coverage,
         claimable=claimable,
         active_scans=active,
         last_attempt_counts=attempt_counts,
+    )
+    recommended_campaigns = _asm_recommended_campaigns(
+        coverage=coverage,
+        family_coverage=family_coverage,
+        by_auth=None,
+        last_attempt_counts=attempt_counts,
+        active_scans=active,
     )
     by_auth: dict[str, dict[str, int]] = {}
     for row in by_auth_rows:
@@ -9767,8 +9847,10 @@ async def asm_gaps(target_id: str):
         "claimable": claimable,
         "active_scans": active,
         "recommendation": recommendation,
+        "recommended_campaigns": recommended_campaigns,
         "by_auth_state": by_auth,
         "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},
+        "family_coverage": family_coverage,
         "last_attempt_status": attempt_counts,
         "attempt_ledger_status": {str(r["status"]): int(r["count"] or 0) for r in ledger_rows},
         "sample_gaps": [row_to_dict(r) for r in samples],

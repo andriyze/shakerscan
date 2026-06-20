@@ -562,3 +562,25 @@ def test_omitted_parallel_with_auto_sharding_off_sets_false_key(monkeypatch):
     assert enabled is False
     assert "parallel" in payload
     assert payload["parallel"] is False
+
+
+# ----- §7 ASM recommended campaigns -------------------------------------------
+def test_asm_recommended_campaigns_suggests_family_waves_and_credentials():
+    # Inventory exists, SQLi never proved, some stale, some auth-missing.
+    recs = api_module._asm_recommended_campaigns(
+        coverage={"total": 100, "untested": 10, "stale": 5},
+        family_coverage={"all": {"completed": 0, "attempts": 20},
+                         "xss": {"completed": 3, "attempts": 5}},
+        last_attempt_counts={"auth_missing": 4},
+        active_scans=0,
+    )
+    camps = {r["campaign"] for r in recs}
+    assert "add_credentials" in camps          # auth_missing > 0
+    assert "sqli_wave" in camps                # no completed SQLi
+    assert "xss_wave" not in camps             # XSS has completed attempts
+    assert "retest_stale" in camps             # stale > 0
+
+
+def test_asm_recommended_campaigns_recon_when_empty_and_wait_when_active():
+    assert api_module._asm_recommended_campaigns(coverage={"total": 0})[0]["campaign"] == "recon"
+    assert api_module._asm_recommended_campaigns(coverage={"total": 9}, active_scans=2)[0]["campaign"] == "wait"
