@@ -1384,7 +1384,7 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
                     meta["partial"] = True
                     meta["timed_out"] = True
                     meta["terminated_reason"] = timeout_reason
-                    return partial
+                    return _strip_null_bytes(partial) if isinstance(partial, dict) else partial
             except Exception:
                 pass
         # Always surface a non-empty error: the caller marks a scan failed only
@@ -1428,6 +1428,13 @@ async def run_scan(target: str, options: dict, scan_id: str | None = None, job_i
         except Exception:
             pass
 
+    # Strip NUL bytes from the whole result before any caller persists it: the report
+    # is written to the scans.result JSONB column (and findings rows), and PostgreSQL
+    # cannot store \x00 (asyncpg UntranslatableCharacterError). NUL reaches the report
+    # via harvested binary content (e.g. the %2500 file-bypass). Doing it here covers
+    # every caller (standalone/shard/ASM-batch/recon) in one place.
+    if isinstance(result, dict):
+        result = _strip_null_bytes(result)
     return result
 
 
@@ -4180,7 +4187,9 @@ async def process_scan_job(job_data: dict):
         result['job_id'] = job_id
         result['scan_id'] = scan_id
 
-        # Extract results
+        # Extract results (run_scan already strips NUL bytes from the whole result so
+        # the scans.result write and findings rows can't crash on \x00; save_findings
+        # strips again as a defense-in-depth guard for findings from other sources.)
         score = result.get('result', {}).get('score')
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
