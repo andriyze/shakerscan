@@ -446,17 +446,24 @@ def finding_merge_key(finding: dict[str, Any]) -> str | None:
 
 
 def _coverage_active_seconds(parent_options: dict[str, Any], endpoint_count: int) -> int:
-    """Size per-shard active time so deep coverage shards can finish both families."""
+    """Size per-shard active time so deep coverage shards can finish their slice.
+
+    The active mix runs SQLi + XSS (+ NoSQL/SQLMap) per endpoint, which costs ~25-35s
+    each in practice — the previous 8-15s/endpoint budget cut SQLi off after ~1/3 of an
+    assigned slice (e.g. 18 of 50), so deep coverage was budget-starved. These match
+    the observed per-endpoint cost so a shard actually finishes its assigned endpoints;
+    ceilings keep a single shard bounded.
+    """
     profile = str(parent_options.get("budget_profile") or "").strip().lower()
     if parent_options.get("exploit_depth") or parent_options.get("no_early_stop") or profile == "exhaustive":
-        seconds_per_endpoint = 15
-        ceiling = 3600
+        seconds_per_endpoint = 32
+        ceiling = 5400
     elif profile == "thorough":
-        seconds_per_endpoint = 12
-        ceiling = 3000
+        seconds_per_endpoint = 28
+        ceiling = 4200
     else:
-        seconds_per_endpoint = 8
-        ceiling = 2400
+        seconds_per_endpoint = 20
+        ceiling = 3000
     return min(ceiling, max(300, seconds_per_endpoint * max(1, endpoint_count)))
 
 

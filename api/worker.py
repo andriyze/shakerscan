@@ -5495,13 +5495,37 @@ async def process_scan_merge_job(job_data: dict):
     if not isinstance(merged.get('result'), dict):
         merged['result'] = {}
 
-    # Conservative aggregate: the parent is at least as bad as its worst shard.
-    agg_score = min_score if min_score is not None else merged['result'].get('score')
-    agg_grade = min_score_grade if min_score is not None else merged['result'].get('grade')
+    # Recompute the parent score/grade from the FINAL union (shards + recon findings)
+    # rather than copying the worst shard's score. The union strictly contains more
+    # findings than any single shard, so a worst-shard grade can be optimistic and
+    # ignores recon-only verified SQLi/DOM-XSS. Floor at the worst shard so the parent
+    # is never graded better than any shard.
+    agg_score = min_score
+    agg_grade = min_score_grade
+    try:
+        from grading import grade as _grade_report
+        _graded = _grade_report(merged)
+        _gs = _graded.get('score')
+        if _gs is not None and (min_score is None or _gs <= min_score):
+            agg_score = _gs
+            agg_grade = _graded.get('grade')
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] parent grade recompute skipped: {e}", flush=True)
+    if agg_score is None:
+        agg_score = merged['result'].get('score')
+        agg_grade = merged['result'].get('grade')
     if agg_score is not None:
         merged['result']['score'] = agg_score
     if agg_grade is not None:
         merged['result']['grade'] = agg_grade
+
+    # Recompute the verification/triage summary from the final union so the parent's
+    # counts reflect recon + every shard, not a single shard's stale view.
+    try:
+        from findings import summarize_verification
+        merged['verification_summary'] = summarize_verification(union_findings)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] verification summary recompute skipped: {e}", flush=True)
 
     focused_family = _focused_family_from_parent_options(parent_options)
     focused_score, focused_grade = _recompute_focused_parent_result(
