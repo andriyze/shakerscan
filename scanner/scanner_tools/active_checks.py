@@ -7656,8 +7656,13 @@ async def smart_xss_test(
                     verified = False
                     proof_data = None
 
-                    # Attempt browser proof for high-severity findings
-                    if severity == "high" and HAS_XSS_PROOF and prove_xss_headless:
+                    # A browser proof of execution is the real arbiter of XSS
+                    # severity, regardless of WHERE the payload reflected. Attempt
+                    # proof for EVERY reflected context (HTML/JSON/attribute/script),
+                    # not just in_script/in_angular — reflected payloads that execute
+                    # in a real browser are High wherever they landed. Proven ->
+                    # High; an unproven reflection that context-guessed High -> medium.
+                    if HAS_XSS_PROOF and prove_xss_headless:
                         try:
                             proof = await prove_xss_headless(
                                 url=endpoint_url,
@@ -7667,13 +7672,14 @@ async def smart_xss_test(
                             )
                             if proof and proof.proven:
                                 verified = True
-                                confidence = proof.confidence  # 0.99 for dialog, 0.90 for console, 0.85 for DOM
+                                severity = "high"
+                                confidence = proof.confidence  # 0.99 dialog / 0.90 console / 0.85 DOM
                                 evidence.append(f"Browser proof: {proof.technique}")
                                 if proof.extracted_data:
                                     evidence.append(f"Proof data: {proof.extracted_data}")
                                 proof_data = proof.to_dict()
-                            else:
-                                # Downgrade unverified high findings to medium
+                            elif severity == "high":
+                                # context guessed high but no execution confirmed
                                 severity = "medium"
                                 confidence = 0.65
                                 evidence.append("Browser verification attempted but no execution confirmed")
@@ -7695,6 +7701,10 @@ async def smart_xss_test(
                         "severity": severity,
                         "verified": verified,
                     }
+                    if verified:
+                        # Browser-proven execution: pass an explicit High CVSS so the
+                        # generic 6.1 reflected-XSS base score can't cap it to medium.
+                        finding["cvss_score"] = 7.4
                     if proof_data:
                         finding["browser_proof"] = proof_data
                     request_headers = _headers_from_curl_args(auth_args)
