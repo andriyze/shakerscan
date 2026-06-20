@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { submitScan, getScanExecutionSettings, getTargets, type Target } from '@/lib/api'
+import { submitScan, getScanExecutionSettings, getTargets, getWorkers, type Target } from '@/lib/api'
 import {
   BUDGET_PROFILES,
   PARALLEL_STRATEGIES,
@@ -70,12 +70,17 @@ export default function NewScanPage() {
   const [coverageMaxShards, setCoverageMaxShards] = useState<CoverageMaxShardSelection>('128')
   const [coverageDepth, setCoverageDepth] = useState<CoverageDepth>('standard')
   const [runningWorkers, setRunningWorkers] = useState<number | null>(null)
+  const [staleWorkers, setStaleWorkers] = useState<number>(0)
 
   useEffect(() => {
     let cancelled = false
     getScanExecutionSettings()
       .then((s) => { if (!cancelled) setRunningWorkers(s.running_workers ?? null) })
       .catch(() => { /* worker count is advisory; ignore failures */ })
+    // §2: warn before launching active scans on a build-stale fleet.
+    getWorkers()
+      .then((w) => { if (!cancelled) setStaleWorkers(w.stale_workers?.length ?? 0) })
+      .catch(() => { /* freshness is advisory; ignore failures */ })
     getTargets()
       .then((rows) => {
         if (cancelled) return
@@ -257,6 +262,14 @@ export default function NewScanPage() {
         <h1 className="text-2xl font-bold text-white">New Scan</h1>
         <p className="text-gray-400 mt-1">Start a security scan on a target</p>
       </div>
+
+      {staleWorkers > 0 && (
+        <div className="rounded border border-amber-600/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+          ⚠ {staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are running older code than the
+          current build. Active scans may use stale detectors — restart workers before validating
+          (Dashboard → Workers), or results may not reflect the latest scanner.
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Target Input */}
