@@ -675,6 +675,40 @@ def count_findings_by_severity(findings: list[dict]) -> dict[str, int]:
     return {sev: len(f_list) for sev, f_list in groups.items()}
 
 
+def summarize_verification(findings: list[dict]) -> dict[str, Any]:
+    """§10: confidence/verification distribution so reports distinguish verified
+    exploitable bugs from review-needed signals. Surfaces unproven High/Critical
+    explicitly so suspected findings aren't mistaken for proven exploitation.
+    """
+    by_tier: dict[str, int] = {}
+    verified = suspected = 0
+    unproven_high = unproven_critical = 0
+    for f in findings:
+        sev = str(f.get("severity") or "").lower()
+        is_verified = bool(f.get("verified"))
+        if is_verified:
+            verified += 1
+        # "suspected" = explicitly flagged, or a High/Critical without verification.
+        is_suspected = bool(f.get("suspected")) or (sev in ("high", "critical") and not is_verified)
+        if is_suspected:
+            suspected += 1
+        tier = str(f.get("confidence_tier") or "unknown")
+        by_tier[tier] = by_tier.get(tier, 0) + 1
+        if not is_verified:
+            if sev == "critical":
+                unproven_critical += 1
+            elif sev == "high":
+                unproven_high += 1
+    return {
+        "verified": verified,
+        "suspected": suspected,
+        "by_confidence_tier": by_tier,
+        "unproven_high": unproven_high,
+        "unproven_critical": unproven_critical,
+        "total": len(findings),
+    }
+
+
 def get_unique_cwes(findings: list[dict]) -> list[str]:
     """Get unique CWE IDs from findings.
 

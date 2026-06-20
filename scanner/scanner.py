@@ -11523,6 +11523,14 @@ def apply_post_ai_precision_policy(
     target_host = str((report.get("input") or {}).get("normalized_host") or "") or None
     report["findings"] = apply_dast_precision_policy(findings, target_host=target_host)
 
+    # §10: confidence/verification distribution so the report distinguishes verified
+    # exploitable bugs from review-needed (suspected) signals at a glance.
+    try:
+        from findings import summarize_verification as _summarize_verification
+        report["verification_summary"] = _summarize_verification(report["findings"])
+    except Exception:
+        pass
+
     if analyze_attack_chains:
         try:
             report["attack_chains"] = analyze_attack_chains(
