@@ -5544,30 +5544,50 @@ SQLI_CROSS_DBMS_FALLBACK_PAYLOADS = [
 ]
 
 
-def _load_custom_payloads(category: str) -> list[str]:
-    """Load user-supplied payloads for a category (additive; empty by default).
+def _payload_pack_cap() -> int:
+    """Max payloads pulled from bundled packs per category. Bounded because active
+    checks are budget-time-limited: more payloads = fewer endpoints/params covered
+    in the same window, so we add pack QUALITY (waf-bypass, polyglots, technique
+    packs) not unbounded quantity. Env-overridable; 0 disables packs."""
+    try:
+        return max(0, int(os.environ.get("SHAKERSCAN_PAYLOAD_PACK_MAX", "24")))
+    except (TypeError, ValueError):
+        return 24
 
-    Two sources, merged: a drop-in file ``payloads/<category>/custom.txt`` and an
-    inline list via the ``SHAKERSCAN_CUSTOM_<CATEGORY>_PAYLOADS`` env var
-    (newline-joined; set by the worker from the scan's custom_*_payloads option).
-    Both default to nothing, so a scan with neither behaves exactly as before.
+
+def _load_custom_payloads(category: str, include_packs: bool = False) -> list[str]:
+    """Load extra payloads for a category (additive).
+
+    Sources, merged in priority order:
+    1. user drop-in ``payloads/<category>/custom.txt`` and the inline env var
+       ``SHAKERSCAN_CUSTOM_<CATEGORY>_PAYLOADS`` (set by the worker from the scan's
+       custom_*_payloads option) — always loaded, unbounded.
+    2. bundled named packs ``payloads/<category>/*.txt`` (polyglots, waf-bypass,
+       auth-bypass, error-based, time-based, ...) — loaded when ``include_packs``,
+       capped at ``_payload_pack_cap()`` so curated hardcoded payloads stay primary
+       and budget isn't blown. §4/§5: prefer payload packs over hardcoded-only.
     """
     out: list[str] = []
     seen: set[str] = set()
 
-    def _add(line: str) -> None:
+    def _add(line: str) -> bool:
         s = line.strip()
         if s and not s.startswith("#") and s not in seen:
             seen.add(s)
             out.append(s)
+            return True
+        return False
 
-    for path in (
-        os.path.join(os.path.dirname(__file__), "..", "payloads", category, "custom.txt"),
-        f"/app/payloads/{category}/custom.txt",
-    ):
-        if os.path.exists(path):
+    pack_dirs = [
+        os.path.join(os.path.dirname(__file__), "..", "payloads", category),
+        f"/app/payloads/{category}",
+    ]
+    # 1. custom.txt (user drop-in) — unbounded
+    for d in pack_dirs:
+        p = os.path.join(d, "custom.txt")
+        if os.path.exists(p):
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
                         _add(line)
             except OSError:
@@ -5576,6 +5596,25 @@ def _load_custom_payloads(category: str) -> list[str]:
     if env_raw:
         for line in env_raw.splitlines():
             _add(line)
+    # 2. bundled named packs — capped
+    if include_packs:
+        cap = _payload_pack_cap()
+        added = 0
+        for d in pack_dirs:
+            if added >= cap or not os.path.isdir(d):
+                continue
+            for fname in sorted(os.listdir(d)):
+                if added >= cap or not fname.endswith(".txt") or fname == "custom.txt":
+                    continue
+                try:
+                    with open(os.path.join(d, fname), "r", encoding="utf-8", errors="ignore") as fh:
+                        for line in fh:
+                            if added >= cap:
+                                break
+                            if _add(line):
+                                added += 1
+                except OSError:
+                    pass
     return out
 
 
@@ -5587,7 +5626,7 @@ def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
         if (payload, technique) not in seen:
             payloads.append((payload, technique, description))
             seen.add((payload, technique))
-    for custom in _load_custom_payloads("sqli"):
+    for custom in _load_custom_payloads("sqli", include_packs=True):
         if (custom, "custom") not in seen:
             payloads.append((custom, "custom", "User-supplied SQLi payload"))
             seen.add((custom, "custom"))
@@ -7404,7 +7443,7 @@ def _select_xss_payloads(context: str) -> list[tuple[str, str, str]]:
     """Context payloads plus any user-supplied XSS payloads (additive)."""
     payloads = list(CONTEXT_XSS_PAYLOADS.get(context, CONTEXT_XSS_PAYLOADS["in_html"]))
     seen = {(p, t) for p, t, _ in payloads}
-    for custom in _load_custom_payloads("xss"):
+    for custom in _load_custom_payloads("xss", include_packs=True):
         if (custom, "custom") not in seen:
             payloads.append((custom, "custom", "User-supplied XSS payload"))
             seen.add((custom, "custom"))
