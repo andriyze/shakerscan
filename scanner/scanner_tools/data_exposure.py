@@ -166,7 +166,14 @@ async def check_api_data_exposure(
                                 "cvss_score": 7.5,
                             },
                         })
-                # Skip obvious HTML pages (UI), focus on API/text/log bodies.
+                # Skip HTML pages (UI / API docs / SPA) for the secret-value
+                # patterns: sample JWT/API-key text in documentation or example
+                # payloads must not become a high-severity finding. The CORS check
+                # above already ran regardless of content type.
+                if "html" in ctype.lower() or re.match(
+                    r"\s*(<!doctype html|<html\b)", resp.text[:256], re.IGNORECASE
+                ):
+                    return
                 body = resp.text[:_MAX_BODY_BYTES]
                 for pattern, title, family, cwe in SENSITIVE_VALUE_PATTERNS:
                     m = re.search(pattern, body)

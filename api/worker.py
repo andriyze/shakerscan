@@ -710,10 +710,13 @@ def _max_active_scans(r) -> int:
             return max(1, int(v))
     except Exception:
         pass
+    # Fallback when the API hasn't published the cap yet (fresh/headless start).
+    # Keep this default identical to the API's SHAKERSCAN_MAX_ACTIVE_SCANS default
+    # (10) so a worker doesn't silently run a different cap before the first poll.
     try:
-        return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 8))
+        return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 10))
     except (TypeError, ValueError):
-        return 8
+        return 10
 
 
 def _take_scan_slot(r, slot_id: str) -> bool:
@@ -6338,6 +6341,9 @@ def _worker_build_fingerprint() -> str | None:
         "findings.py": "/app/findings.py",
         "grading.py": "/app/grading.py",
         "reporting.py": "/app/reporting.py",
+        "data_exposure.py": "/app/scanner_tools/data_exposure.py",
+        "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
+        "approval_checks.py": "/app/scanner_tools/approval_checks.py",
     }
     h = hashlib.sha256()
     hashed = 0

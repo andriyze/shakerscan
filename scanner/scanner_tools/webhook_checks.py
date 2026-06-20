@@ -44,13 +44,25 @@ def _candidate_webhook_paths(endpoints: list[Any]) -> list[str]:
     seen: set[str] = set()
     for spec in endpoints or []:
         raw: str | None = None
+        method: str | None = None
         if isinstance(spec, str):
             s = spec.strip()
             parts = s.split(None, 1)
-            raw = parts[1].split()[0] if len(parts) == 2 and parts[0].upper() in (
-                "POST", "PUT", "GET", "PATCH", "DELETE", "OPTIONS", "HEAD") else s
+            if len(parts) == 2 and parts[0].upper() in (
+                    "POST", "PUT", "GET", "PATCH", "DELETE", "OPTIONS", "HEAD"):
+                method = parts[0].upper()
+                rest = parts[1].split()
+                raw = rest[0] if rest else None
+            else:
+                raw = s  # plain URL, method unknown
         elif isinstance(spec, dict):
             raw = spec.get("url") or spec.get("path")
+            method = str(spec["method"]).upper() if spec.get("method") else None
+        # Webhook receivers are POST; never POST to an explicitly read-only route
+        # (GET/HEAD/DELETE/OPTIONS). Method-unknown candidates are gated by the
+        # webhook path shape below.
+        if method in ("GET", "HEAD", "DELETE", "OPTIONS"):
+            continue
         if not raw or not isinstance(raw, str):
             continue
         if not _WEBHOOK_PATH_RE.search(raw):

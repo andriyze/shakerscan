@@ -2283,6 +2283,13 @@ async def lifespan(app: FastAPI):
     )
     await ensure_verification_schema(db_pool)
 
+    # Publish the active-scan concurrency cap up front so a fresh/headless
+    # deployment doesn't run on the worker fallback until /workers is first hit.
+    try:
+        _publish_max_active_scans()
+    except Exception:
+        pass
+
     # Start background tasks
     cleanup_task = asyncio.create_task(stale_scan_checker(db_pool))
     scheduler_task = asyncio.create_task(schedule_runner(db_pool))
@@ -4998,6 +5005,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "findings.py": "/workspace/scanner/findings.py",
         "grading.py": "/workspace/scanner/grading.py",
         "reporting.py": "/workspace/scanner/reporting.py",
+        "data_exposure.py": "/workspace/scanner/scanner_tools/data_exposure.py",
+        "webhook_checks.py": "/workspace/scanner/scanner_tools/webhook_checks.py",
+        "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
     }
     if all(os.path.exists(p) for p in workspace.values()):
         return _hash_source_files(workspace)
@@ -5011,6 +5021,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "findings.py": "/app/findings.py",
         "grading.py": "/app/grading.py",
         "reporting.py": "/app/reporting.py",
+        "data_exposure.py": "/app/scanner_tools/data_exposure.py",
+        "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
+        "approval_checks.py": "/app/scanner_tools/approval_checks.py",
     })
 
 
@@ -11271,8 +11284,9 @@ def _publish_max_active_scans(max_allowed: int | None = None) -> int:
 
 
 class WorkerScaleRequest(BaseModel):
-    # Hard ceiling here is a sanity bound; the effective cap is WORKER_SCALE_MAX,
-    # enforced in scale_workers so it can be raised by env without a code change.
+    # Hard ceiling here is just a sanity bound; the effective cap is
+    # _compute_max_allowed_workers() (RAM-derived, or SHAKERSCAN_MAX_WORKERS),
+    # enforced in scale_workers.
     count: int = Field(..., ge=1, le=200, description="Number of worker containers")
 
 
@@ -11608,13 +11622,17 @@ async def get_workers():
         return {
             "count": -1,
             "error": "Docker socket not available",
-            "workers": []
+            "workers": [],
+            "max_allowed": _compute_max_allowed_workers(),
+            "max_active_scans": _compute_max_active_scans(),
         }
     except Exception as e:
         return {
             "count": -1,
             "error": f"Failed to query Docker: {str(e)}",
-            "workers": []
+            "workers": [],
+            "max_allowed": _compute_max_allowed_workers(),
+            "max_active_scans": _compute_max_active_scans(),
         }
 
 

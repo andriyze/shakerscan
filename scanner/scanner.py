@@ -120,6 +120,9 @@ SCANNER_FINGERPRINT_FILES = {
     "findings.py": "/app/findings.py",
     "grading.py": "/app/grading.py",
     "reporting.py": "/app/reporting.py",
+    "data_exposure.py": "/app/scanner_tools/data_exposure.py",
+    "webhook_checks.py": "/app/scanner_tools/webhook_checks.py",
+    "approval_checks.py": "/app/scanner_tools/approval_checks.py",
 }
 SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")
