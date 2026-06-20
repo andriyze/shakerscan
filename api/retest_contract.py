@@ -1151,7 +1151,8 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS auth_context JSONB,
                 ADD COLUMN IF NOT EXISTS verification_mode TEXT DEFAULT 'deterministic',
                 ADD COLUMN IF NOT EXISTS ai_plan JSONB,
-                ADD COLUMN IF NOT EXISTS ai_reasoning TEXT
+                ADD COLUMN IF NOT EXISTS ai_reasoning TEXT,
+                ADD COLUMN IF NOT EXISTS campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL
             """)
 
             # Backfill NULLs to defaults

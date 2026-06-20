@@ -382,6 +382,11 @@ CREATE INDEX idx_scan_campaigns_parent ON scan_campaigns(parent_scan_id) WHERE p
 ALTER TABLE scans
 ADD COLUMN campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL;
 
+-- finding_verifications is created before scan_campaigns, so its campaign_id
+-- (a retest/verification can belong to a campaign) is added here by ALTER.
+ALTER TABLE finding_verifications
+ADD COLUMN campaign_id UUID REFERENCES scan_campaigns(id) ON DELETE SET NULL;
+
 -- ============================================================
 -- TARGET ENDPOINTS - Continuous ASM attack-surface inventory (docs §16)
 -- Recon upserts discovered endpoints; exploitation drains untested/stale ones.
