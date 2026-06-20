@@ -80,11 +80,30 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
-def test_worker_build_current_requires_matching_version_when_fingerprint_matches():
+def test_worker_build_current_is_fingerprint_authoritative_over_version_label():
+    # The source fingerprint covers all detection/orchestration modules and is the
+    # precise currency signal. The git version label is volatile (real commit, and
+    # workers snapshot the published value once at startup), so a matching
+    # fingerprint means current EVEN IF the version label lags — otherwise a current
+    # worker shows false-stale right after a volume-mount restart.
     assert api_module.worker_build_current(
         reported_fingerprint="same",
         reported_version="old",
         expected_fingerprint="same",
+        expected_version="new",
+    ) is True
+    # A genuinely stale fingerprint is still stale regardless of the label.
+    assert api_module.worker_build_current(
+        reported_fingerprint="stale",
+        reported_version="new",
+        expected_fingerprint="current",
+        expected_version="new",
+    ) is False
+    # No fingerprint reported -> fall back to the version label.
+    assert api_module.worker_build_current(
+        reported_fingerprint=None,
+        reported_version="old",
+        expected_fingerprint="current",
         expected_version="new",
     ) is False
 
