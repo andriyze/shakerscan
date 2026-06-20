@@ -11192,9 +11192,33 @@ async def get_discovery(discovery_id: str):
 # WORKER MANAGEMENT
 # ============================================================
 
-# Max worker replicas the /workers scaler will allow. Configurable so operators
-# with more CPU/RAM can run larger fleets (each worker uses ~1-2 cores, 2-4GB).
-WORKER_SCALE_MAX = max(1, int(os.environ.get("SHAKERSCAN_MAX_WORKERS") or 30))
+# Fleet container ceiling the /workers scaler allows. Default is derived from
+# Docker RAM (~1.2GB budgeted per worker) so a bigger Docker allocation auto-raises
+# the cap instead of a hardcoded number; an explicit SHAKERSCAN_MAX_WORKERS env
+# always overrides. Hard sanity bound: 200.
+def _compute_max_allowed_workers() -> int:
+    env_override = os.environ.get("SHAKERSCAN_MAX_WORKERS")
+    if env_override:
+        try:
+            return max(1, min(200, int(env_override)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        status, info = docker_socket_request("GET", "/info")
+        mem_gb = (info.get("MemTotal") or 0) / 1024 ** 3 if (status == 200 and isinstance(info, dict)) else 0
+    except Exception:
+        mem_gb = 0
+    try:
+        per_worker_gb = float(os.environ.get("SHAKERSCAN_PER_WORKER_MEM_GB") or 1.2)
+    except (TypeError, ValueError):
+        per_worker_gb = 1.2
+    try:
+        fraction = float(os.environ.get("SHAKERSCAN_SCAN_MEM_FRACTION") or 0.85)
+    except (TypeError, ValueError):
+        fraction = 0.85
+    if mem_gb <= 0 or per_worker_gb <= 0:
+        return 30
+    return max(2, min(200, int((mem_gb * fraction) / per_worker_gb)))
 
 # Hard per-worker memory cap applied to scaler-created worker containers. Without
 # it, a runaway/large scan can exhaust the whole Docker VM and OOM-thrash every
@@ -11222,36 +11246,23 @@ def _worker_hostconfig(network: str, binds: list) -> dict:
     return hc
 
 
-def _compute_max_active_scans() -> int:
-    """Fleet-wide concurrent active-scan cap derived from Docker RAM.
-
-    Idle workers are cheap (~37MB); the cost is concurrent ACTIVE scans
-    (~2-4GB each). So we bound CONCURRENCY (not container count): usable Docker
-    RAM x fraction / per-scan estimate. Workers enforce it via a Redis semaphore."""
+def _compute_max_active_scans(max_allowed: int | None = None) -> int:
+    """Max concurrent ACTIVE scans across the fleet (workers enforce it via a Redis
+    semaphore). Memory safety primarily comes from the RAM-derived fleet cap
+    (_compute_max_allowed_workers, ~1.2GB/worker); this is the per-scan/burst
+    concurrency knob, default 10, clamped to the fleet cap."""
     try:
-        status, info = docker_socket_request("GET", "/info")
-        mem_gb = (info.get("MemTotal") or 0) / 1024 ** 3 if (status == 200 and isinstance(info, dict)) else 0
-    except Exception:
-        mem_gb = 0
-    try:
-        per_scan_gb = float(os.environ.get("SHAKERSCAN_PER_SCAN_MEM_GB") or 3)
+        n = max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 10))
     except (TypeError, ValueError):
-        per_scan_gb = 3.0
-    try:
-        fraction = float(os.environ.get("SHAKERSCAN_SCAN_MEM_FRACTION") or 0.8)
-    except (TypeError, ValueError):
-        fraction = 0.8
-    if mem_gb <= 0 or per_scan_gb <= 0:
-        try:
-            return max(1, int(os.environ.get("SHAKERSCAN_MAX_ACTIVE_SCANS") or 8))
-        except (TypeError, ValueError):
-            return 8
-    return max(1, int((mem_gb * fraction) / per_scan_gb))
+        n = 10
+    if max_allowed is None:
+        max_allowed = _compute_max_allowed_workers()
+    return max(1, min(n, max_allowed))
 
 
-def _publish_max_active_scans() -> int:
+def _publish_max_active_scans(max_allowed: int | None = None) -> int:
     """Compute + publish the active-scan concurrency cap to Redis for workers."""
-    n = _compute_max_active_scans()
+    n = _compute_max_active_scans(max_allowed)
     try:
         get_redis().set("shakerscan:max_active_scans", n, ex=120)
     except Exception:
@@ -11580,13 +11591,14 @@ async def get_workers():
 
         running = len([w for w in worker_list if w.get("status") == "running"])
         stale_workers = [w["name"] for w in worker_list if w.get("build_current") is False]
-        # Refresh the memory-aware active-scan concurrency cap for workers.
-        max_active_scans = _publish_max_active_scans()
+        max_allowed_workers = _compute_max_allowed_workers()
+        # Refresh the per-scan active-scan concurrency cap for workers.
+        max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
 
         return {
             "count": running,
             "workers": worker_list,
-            "max_allowed": WORKER_SCALE_MAX,
+            "max_allowed": max_allowed_workers,
             "max_active_scans": max_active_scans,
             "expected_build_fingerprint": expected_fp,
             "expected_scanner_version": expected_version,
@@ -11613,8 +11625,9 @@ async def scale_workers(request: WorkerScaleRequest):
 
     try:
         count = request.count
-        if count < 1 or count > WORKER_SCALE_MAX:
-            raise HTTPException(400, f"Workers must be between 1 and {WORKER_SCALE_MAX}")
+        _max_allowed = _compute_max_allowed_workers()
+        if count < 1 or count > _max_allowed:
+            raise HTTPException(400, f"Workers must be between 1 and {_max_allowed}")
 
         # Get current workers via socket API
         filters = urllib.parse.quote('{"name":["worker"]}')

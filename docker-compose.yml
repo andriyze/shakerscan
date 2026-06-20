@@ -56,8 +56,9 @@ services:
       - LOCAL_ENV_FILE=/workspace/.env
       - SCANNER_VERSION=${SCANNER_VERSION:-dev}
       - GIT_COMMIT=${GIT_COMMIT:-dev}
-      # Max worker replicas the /workers scaler will allow (raise on bigger hosts).
-      - SHAKERSCAN_MAX_WORKERS=${SHAKERSCAN_MAX_WORKERS:-40}
+      # Fleet cap. Empty => derived from Docker RAM (~1.2GB/worker); set a number
+      # to force a fixed ceiling.
+      - SHAKERSCAN_MAX_WORKERS=${SHAKERSCAN_MAX_WORKERS:-}
       # AI options (optional - set in .env file)
       - AI_URL=${AI_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
