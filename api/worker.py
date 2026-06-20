@@ -6412,6 +6412,14 @@ async def async_main():
                 # Use run_in_executor for blocking Redis pop
                 result = await loop.run_in_executor(None, lambda: r.blpop(queue_keys, timeout=30))
                 if result is None:
+                    # Re-report build identity while idle so the per-worker version
+                    # label converges to the API-published commit after a deploy (the
+                    # startup report can run before the API publishes). build_current
+                    # already uses the source fingerprint; this just freshens the label.
+                    try:
+                        report_worker_build_fingerprint()
+                    except Exception:
+                        pass
                     continue  # Timeout, continue polling
 
                 _, job_json = result
