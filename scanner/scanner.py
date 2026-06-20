@@ -6711,46 +6711,64 @@ async def build_report(target: str,
             "CWE-444"
         ))
 
-    # Enhanced JWT security findings
-    if jwt_comprehensive_results.get("vulnerable") or jwt_comprehensive_results.get("findings"):
-        for finding in jwt_comprehensive_results.get("findings", []):
-            severity = finding.get("severity", "high")
+    # Enhanced JWT security findings.
+    # jwt_comprehensive_test() returns {vulnerable, issues:[str], evidence:[{type,..}]}
+    # (NOT a "findings" list). Map each evidence/issue to a finding by type so a
+    # detected weak-secret / alg:none / algorithm-confusion token is actually
+    # reported instead of silently dropped. Generic: keyed on JWT weakness class,
+    # not any specific app.
+    if jwt_comprehensive_results.get("vulnerable"):
+        # type -> (title, severity, cwe). alg:none and forgeable signatures are
+        # full token-forgery / auth-bypass primitives.
+        _JWT_TYPE_MAP = {
+            "none_algorithm":    ("JWT accepts 'none' algorithm (signature bypass / token forgery)", "high", "CWE-347"),
+            "id_token_alg_none": ("OIDC id_token accepts 'none' algorithm", "high", "CWE-347"),
+            "jwks_alg_none":     ("JWKS advertises 'none' algorithm", "high", "CWE-347"),
+            "weak_secret":       ("JWT signed with weak/guessable secret (token forgery)", "high", "CWE-326"),
+            "algorithm_confusion": ("JWT algorithm confusion (RS256→HS256, token forgery)", "high", "CWE-347"),
+            "kid_injection":     ("JWT 'kid' header injection (path traversal / SQLi)", "high", "CWE-94"),
+            "jwks_symmetric_key": ("JWKS exposes a symmetric signing key", "high", "CWE-326"),
+            "jwks_weak_rsa":     ("JWKS uses a weak RSA key", "medium", "CWE-326"),
+            "session_fixation":  ("OIDC session fixation", "high", "CWE-384"),
+            "issuer_insecure":   ("OIDC issuer served over insecure transport", "medium", "CWE-319"),
+            "open_redirect":     ("OAuth/OIDC open redirect", "medium", "CWE-601"),
+            "implicit_flow_enabled":   ("OAuth implicit flow enabled", "low", "CWE-1275"),
+            "ropc_enabled":            ("OAuth resource-owner-password-credentials flow enabled", "low", "CWE-522"),
+            "pkce_not_advertised":     ("OAuth PKCE not advertised", "low", "CWE-1275"),
+            "token_endpoint_auth_none": ("OAuth token endpoint allows 'none' client auth", "medium", "CWE-306"),
+            "introspection_enabled":   ("OAuth token introspection publicly enabled", "low", "CWE-16"),
+        }
+        _seen_jwt_types: set = set()
+        for ev in jwt_comprehensive_results.get("evidence", []):
+            et = (ev.get("type") if isinstance(ev, dict) else None) or "jwt_weakness"
+            if et in _seen_jwt_types:
+                continue
+            _seen_jwt_types.add(et)
+            title, severity, cwe = _JWT_TYPE_MAP.get(
+                et, (f"JWT weakness: {et}", "medium", "CWE-287"))
             report["findings"].append(normalize_finding(
-                f"jwt_{finding.get('type', 'vulnerability')}",
-                finding.get("title", "JWT Security Vulnerability"),
+                f"jwt_{et}",
+                title,
                 severity,
                 {
-                    "type": finding.get("type"),
-                    "evidence": finding.get("evidence", []),
-                    "recommendation": finding.get("recommendation", "Review JWT implementation")
+                    "type": et,
+                    "evidence": ev,
+                    "recommendation": "Verify JWT alg server-side against an allowlist, use a strong random secret/key, and validate kid/iss/aud claims.",
                 },
-                finding.get("cwe", "CWE-287")
+                cwe,
             ))
-        # Handle specific algorithm confusion findings
-        if jwt_comprehensive_results.get("algorithm_confusion", {}).get("vulnerable"):
+        # Issues without structured evidence (defensive): emit once each.
+        for issue in jwt_comprehensive_results.get("issues", []):
+            it = str(issue)
+            if it in _seen_jwt_types:
+                continue
+            _seen_jwt_types.add(it)
+            title, severity, cwe = _JWT_TYPE_MAP.get(
+                it, (f"JWT weakness: {it}", "medium", "CWE-287"))
             report["findings"].append(normalize_finding(
-                "jwt_algorithm_confusion",
-                "JWT Algorithm Confusion Attack (RS256 to HS256)",
-                "critical",
-                {
-                    "technique": "Algorithm substitution from RS256 to HS256",
-                    "evidence": jwt_comprehensive_results["algorithm_confusion"].get("evidence", []),
-                    "recommendation": "Explicitly verify the algorithm in JWT tokens server-side; never rely on the alg header"
-                },
-                "CWE-327"
-            ))
-        # Handle KID injection findings
-        if jwt_comprehensive_results.get("kid_injection", {}).get("vulnerable"):
-            report["findings"].append(normalize_finding(
-                "jwt_kid_injection",
-                "JWT Key ID (kid) Injection",
-                "critical",
-                {
-                    "technique": "Path traversal or SQL injection via kid header",
-                    "evidence": jwt_comprehensive_results["kid_injection"].get("evidence", []),
-                    "recommendation": "Sanitize and validate the kid claim; use an allowlist of valid key IDs"
-                },
-                "CWE-94"
+                f"jwt_{it}", title, severity,
+                {"type": it, "recommendation": "Review JWT implementation."},
+                cwe,
             ))
 
     # Enhanced GraphQL security findings
@@ -7238,6 +7256,34 @@ async def build_report(target: str,
                 },
                 "CWE-548"
             ))
+            # Concrete sensitive files harvested from the listing (and via the
+            # encoded-null-byte allowlist bypass). Each readable backup/secret/key
+            # is its own high-severity exposure, not just "listing enabled".
+            for sf in directory.get("sensitive_files", []) or []:
+                via_bypass = bool(sf.get("bypass"))
+                title = (
+                    f"Sensitive file exposed via allowlist bypass: {sf.get('file')}"
+                    if via_bypass else
+                    f"Sensitive file exposed: {sf.get('file')}"
+                )
+                report["findings"].append(normalize_finding(
+                    "exposed_file",
+                    title,
+                    "high",
+                    {
+                        "url": sf.get("url"),
+                        "file": sf.get("file"),
+                        "bypass": sf.get("bypass"),
+                        "markers": sf.get("markers"),
+                        "content_length": sf.get("content_length"),
+                        "content_preview": sf.get("content_preview"),
+                        "confidence": sf.get("confidence"),
+                        "discovery": "directory_listing_harvest",
+                    },
+                    # Null-byte allowlist bypass to read a blocked file is a path/
+                    # input-validation flaw; plain listing exposure is CWE-538.
+                    "CWE-158" if via_bypass else "CWE-538"
+                ))
 
     # New Security Enhancement Findings (IP Reputation, Brand Protection, Enhanced DNS, Cloud Security)
 

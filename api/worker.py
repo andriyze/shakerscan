@@ -6039,8 +6039,15 @@ async def process_exploit_batch_job(job_data: dict):
         'active_max_seconds': _active_secs,
         # Bound the WHOLE batch so a hang on a slow/remote endpoint can't tie up
         # the claimed in_progress endpoints for hours (the target's default smart
-        # max_duration is 600 min). Active budget + overhead for discovery/nuclei.
-        'max_duration_minutes': max(5, min(30, (_active_secs // 60) + 5)),
+        # max_duration is 600 min). This watchdog must comfortably EXCEED the
+        # active budget, not sit ~5 min above it: auth/setup/report overhead plus
+        # CPU/IO/target contention when many batches run concurrently push real
+        # wall-clock well past active_max_seconds, and a too-tight cap kills the
+        # batch mid-active-scan — losing every finding for the claimed endpoints.
+        # Give ~2x the active budget plus fixed overhead (more under exploit depth).
+        'max_duration_minutes': max(
+            15, min(60, (_active_secs // 60) * 2 + (20 if exploit_depth else 10))
+        ),
     }
     if coverage_dynamic_worker:
         lean.update({

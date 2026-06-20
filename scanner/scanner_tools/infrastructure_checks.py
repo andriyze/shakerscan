@@ -512,6 +512,91 @@ async def test_cloud_buckets(
 # 5. DIRECTORY LISTING EXPOSURE
 # ============================================================================
 
+# Extensions a static-file server's download allowlist commonly blocks (and that
+# are inherently sensitive when readable). Used to decide which listed files are
+# worth an allowlist-bypass retry and worth reporting. App-agnostic.
+_SENSITIVE_FILE_EXT = (
+    ".bak", ".old", ".save", ".swp", ".orig", ".config", ".conf", ".ini",
+    ".env", ".key", ".pem", ".p12", ".pfx", ".kdbx", ".keystore", ".jks",
+    ".sql", ".db", ".sqlite", ".sqlite3", ".mdb", ".dump",
+    ".zip", ".tar", ".tar.gz", ".tgz", ".gz", ".rar", ".7z", ".war",
+    ".pyc", ".log", ".pcap", ".csv", ".xls", ".xlsx",
+)
+# Trailing extensions a static server is likely to allow through, used in the
+# encoded-null-byte allowlist bypass (secret.bak -> secret.bak%2500.md).
+_NULLBYTE_ALLOWED_EXT = (".md", ".txt", ".pdf", ".png", ".json")
+
+
+def _parse_listing_hrefs(html: str) -> list[str]:
+    """Extract listed file names (not subdirectories) from a directory-listing
+    page. Works for Apache 'Index of', nginx autoindex, and Node serve-index."""
+    names: list[str] = []
+    for m in re.finditer(r'href=["\']?([^"\'> ]+)', html or "", re.IGNORECASE):
+        href = m.group(1).strip()
+        if not href or href in ("/", "..", "../", "./"):
+            continue
+        if href.startswith(("?", "#", "http://", "https://", "//", "mailto:", "javascript:")):
+            continue
+        if href.endswith("/"):
+            continue  # subdirectory, not a file
+        names.append(urllib.parse.unquote(href.rsplit("/", 1)[-1]))
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int = 30) -> list[dict[str, Any]]:
+    """From any exposed directory listing, fetch the listed files and flag the
+    sensitive ones — deriving targets from the app's own listing rather than a
+    hardcoded filename wordlist. When a sensitive file is blocked by a static
+    download allowlist, retry with the generic encoded-null-byte bypass
+    (file.bak%2500.md). Fully app-agnostic; the listing supplies the names."""
+    try:
+        from .exposure_markers import derive_markers, guess_confidence
+    except ImportError:  # flat-module execution (/app, not a package)
+        from exposure_markers import derive_markers, guess_confidence
+
+    found: list[dict[str, Any]] = []
+    base = dir_url if dir_url.endswith("/") else dir_url + "/"
+    for name in _parse_listing_hrefs(listing_html)[:max_files]:
+        lname = name.lower()
+        sensitive_ext = lname.endswith(_SENSITIVE_FILE_EXT)
+        file_url = urllib.parse.urljoin(base, urllib.parse.quote(name))
+        status, body, _ = await _fetch_url(file_url, timeout=8)
+        bypass_used = None
+        if (status != 200 or not body) and sensitive_ext and status in (401, 403, 404, 406):
+            # Encoded-null-byte extension-allowlist bypass (CWE-158 / CWE-22).
+            for ext in _NULLBYTE_ALLOWED_EXT:
+                bypass_url = urllib.parse.urljoin(base, urllib.parse.quote(name) + "%2500" + ext)
+                status, body, _ = await _fetch_url(bypass_url, timeout=8)
+                if status == 200 and body:
+                    file_url = bypass_url
+                    bypass_used = "encoded_null_byte"
+                    break
+        if status != 200 or not body:
+            continue
+        markers = derive_markers(name, body)
+        # Report when the bypass itself succeeded (that IS the vuln), when the
+        # file is inherently sensitive by extension, or when content markers fire.
+        if not (bypass_used or sensitive_ext or markers):
+            continue
+        found.append({
+            "file": name,
+            "url": file_url,
+            "bypass": bypass_used,
+            "sensitive_ext": sensitive_ext,
+            "markers": markers,
+            "content_length": len(body),
+            "content_preview": body[:300],
+            "confidence": guess_confidence(name, body, None),
+        })
+    return found
+
+
 async def test_directory_listing(
     url: str,
     discovered_urls: list[str] | None = None,
@@ -571,11 +656,21 @@ async def test_directory_listing(
         ]
         if any(marker in body_lower for marker in listing_markers):
             results["vulnerable"] = True
-            results["exposed_directories"].append({
+            entry = {
                 "directory": directory,
                 "url": test_url,
                 "content_preview": body[:300],
-            })
+            }
+            # Universal: harvest the actually-listed files (incl. allowlist-bypass
+            # for blocked sensitive ones) so an exposed directory turns into
+            # concrete sensitive-file findings on any app, not just a "listing".
+            try:
+                sensitive_files = await harvest_listed_files(test_url, body)
+                if sensitive_files:
+                    entry["sensitive_files"] = sensitive_files
+            except Exception:
+                pass
+            results["exposed_directories"].append(entry)
 
     return results
 

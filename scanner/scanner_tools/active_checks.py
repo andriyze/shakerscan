@@ -1772,21 +1772,6 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
         "settings.py", "local_settings.py", "config.inc.php", "database.inc.php", "db.inc.php",
         # Language/toolchain auth files
         ".npmrc", ".pypirc", ".gem/credentials", "auth.json",
-        # Node/Express "static folder + extension allowlist" exposures, as seen in
-        # OWASP Juice Shop. /ftp serves only .md/.pdf, but the classic poison-null-
-        # byte trick (%2500.md == URL-encoded %00 + .md) bypasses the allowlist and
-        # returns the real backup/secret. acquisitions.md is the confidential doc
-        # served directly. encryptionkeys/* are the JWT/premium signing keys.
-        "ftp/acquisitions.md",
-        "ftp/coupons_2013.md.bak%2500.md",
-        "ftp/package.json.bak%2500.md",
-        "ftp/eastere.gg%2500.md",
-        "ftp/suspicious_errors.yml%2500.md",
-        "ftp/encrypt.pyc%2500.md",
-        "ftp/incident-support.kdbx",
-        "encryptionkeys/premium.key",
-        "encryptionkeys/jwt.key",
-        "encryptionkeys/rsa_priv.key",
         ".well-known/security.txt",
     ]
     medium_priority_paths = [

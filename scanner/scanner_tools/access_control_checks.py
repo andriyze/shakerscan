@@ -67,6 +67,24 @@ CATEGORY_CONTENT_VALIDATORS = {
         "always_validate": True,
         "reject_html_content_type": True,
     },
+    "rest_api_models": {
+        # Auto-CRUD model collections are only a vuln when the unauthenticated
+        # response actually leaks sensitive records — a public /api/Products
+        # catalog returning 200 JSON is NOT a finding. Require sensitive PII /
+        # credential / token field markers so this stays precise and universal
+        # (no app-specific knowledge), and reject SPA HTML shells outright.
+        "required_patterns": [
+            '"email"', '"password"', '"passwordhash"', '"pwd"', '"ssn"',
+            '"token"', '"accesstoken"', '"apikey"', '"api_key"', '"secret"',
+            '"creditcard"', '"cardnumber"', '"cvv"', '"iban"', '"totpsecret"',
+            '"role":"admin"', '"isadmin"', '"is_admin"', '"privatekey"',
+            '"securityanswer"', '"sessionid"', '"refreshtoken"',
+        ],
+        "min_matches": 1,
+        "reject_html_always": True,
+        "reject_html_content_type": True,
+        "always_validate": True,
+    },
     "management_consoles": {
         # Management console patterns - more specific
         "required_patterns": [
@@ -490,19 +508,18 @@ PRIVILEGED_PATHS = {
         "/.aws/credentials", "/.aws/config",
         "/aws-credentials", "/aws.json",
     ],
-    # REST/JSON-API forced-browsing targets, case-sensitive. Express/loopback-style
-    # auto-exposed model routes (OWASP Juice Shop and similar) are case-sensitive,
-    # so the lowercase /api/users above never matches /api/Users. A 200 JSON list
-    # here = anonymous access to admin-only data (BFLA / function-level access).
+    # Auto-CRUD REST model collections, case-sensitive. Frameworks that auto-expose
+    # ORM models as REST endpoints (Express/loopback, Sails Blueprints, Feathers,
+    # LoopBack, NestJS CRUD, Strapi) route on the EXACT model class name, so the
+    # lowercase /api/users above never matches a PascalCase /api/Users collection.
+    # A 200 JSON record array on any of these = anonymous bulk read of admin-only
+    # data (BFLA / function-level access control). This is a generic technology
+    # wordlist, not app-specific: common model names + case variants.
     "rest_api_models": [
-        "/api/Users", "/api/Users/1",
-        "/api/Cards", "/api/Addresss", "/api/Deliverys",
-        "/api/Feedbacks", "/api/Complaints", "/api/Recycles",
-        "/api/Quantitys", "/api/SecurityQuestions",
-        "/rest/admin/application-configuration",
-        "/rest/admin/application-version",
-        "/rest/user/authentication-details",
-        "/ftp", "/ftp/",
+        "/api/Users", "/api/User", "/api/Accounts", "/api/Customers",
+        "/api/Orders", "/api/Products", "/api/Cards", "/api/Payments",
+        "/api/Addresses", "/api/Feedbacks", "/api/Reviews", "/api/Messages",
+        "/api/Files", "/api/Documents", "/api/Tokens", "/api/Sessions",
     ],
 }
 
