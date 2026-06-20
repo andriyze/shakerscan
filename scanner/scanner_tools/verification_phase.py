@@ -174,6 +174,26 @@ async def verify_high_severity_findings(
     # needs_verification status and are picked up by the worker's async auto-retest.
     verify_budget_used = 0
 
+    # When a scan-time verification budget (max_findings) applies, verify the
+    # high-value families first so noisy findings can't consume the budget before
+    # SQLi/XSS/BOLA/SSRF get proofed. Stable sort; below-threshold findings keep
+    # their relative order and aren't affected (they're passed through unverified).
+    if max_findings is not None:
+        _VERIFY_FAMILY_RANK = {"sqli": 0, "bola": 0, "idor": 0, "ssrf": 1, "xss": 1,
+                               "command_injection": 1, "rce": 1, "xxe": 1,
+                               "path_traversal": 2, "open_redirect": 3}
+        def _verify_priority(f: dict) -> int:
+            t = normalize_finding_type(str(f.get("type", "")).lower()) or ""
+            if t in _VERIFY_FAMILY_RANK:
+                return _VERIFY_FAMILY_RANK[t]
+            hay = (str(f.get("title", "")) + " " + str(f.get("tool", ""))).lower()
+            for kw, rank in (("bola", 0), ("idor", 0), ("object authorization", 0),
+                             ("sql", 0), ("xss", 1), ("ssrf", 1)):
+                if kw in hay:
+                    return rank
+            return 5
+        findings = sorted(findings, key=_verify_priority)
+
     for finding in findings:
         severity = finding.get("severity", "info").lower()
         vuln_type = finding.get("type", "").lower()
@@ -193,19 +213,6 @@ async def verify_high_severity_findings(
                 skipped_count += 1
             verified_findings.append(finding)
             continue
-
-        # Scan-time verification budget: once exhausted, defer remaining eligible
-        # findings (keep them suspected + needs_verification for async auto-retest)
-        # instead of blocking finalize for many more minutes.
-        if max_findings is not None and verify_budget_used >= max_findings:
-            finding["needs_verification"] = True
-            finding["suspected"] = True
-            finding["verification_skipped"] = True
-            finding.setdefault("verification_reason", "scan_verification_budget_exhausted")
-            skipped_count += 1
-            verified_findings.append(finding)
-            continue
-        verify_budget_used += 1
 
         # Determine finding type and attempt ladder via shared engine
         finding_type = normalize_finding_type(vuln_type)
@@ -235,6 +242,22 @@ async def verify_high_severity_findings(
         if finding_type == "sqli" and not verify_sqli:
             verified_findings.append(finding)
             continue
+
+        # Scan-time verification budget: spend it ONLY on findings that will actually
+        # attempt an expensive proof (a known finding_type with a prover ladder).
+        # Untyped/no-prover findings don't consume budget, so noisy high/critical
+        # signals can't starve SQLi/XSS/BOLA proofs. Once exhausted, defer the rest
+        # (kept suspected + needs_verification for the worker's async auto-retest).
+        if finding_type and max_findings is not None:
+            if verify_budget_used >= max_findings:
+                finding["needs_verification"] = True
+                finding["suspected"] = True
+                finding["verification_skipped"] = True
+                finding.setdefault("verification_reason", "scan_verification_budget_exhausted")
+                skipped_count += 1
+                verified_findings.append(finding)
+                continue
+            verify_budget_used += 1
 
         if finding_type == "sqli":
             try:

@@ -2075,3 +2075,26 @@ def test_focused_family_from_dynamic_coverage_family_options():
     }
 
     assert worker._focused_family_from_parent_options(options) == "bola"
+
+
+# ----- NUL-byte persistence guard (finalize data-loss regression) -------------
+def test_strip_null_bytes_removes_nul_from_nested_finding_strings():
+    # A NUL byte in finding evidence (e.g. binary content from the %2500 file-bypass
+    # harvest) crashed the Postgres INSERT and stranded scans mid-finalize. The
+    # save_findings sanitizer must strip \x00 from every nested string.
+    import json as _json
+    finding = {
+        "title": "Sensitive file\x00 exposed",
+        "url": "http://t/ftp/secret.key%2500.md",
+        "evidence": {"content_preview": "AES\x00KEY\x00material", "markers": ["a\x00b", "c"]},
+        "nested": [{"deep": "x\x00y"}],
+        "confidence": 0.9,
+    }
+    cleaned = worker._strip_null_bytes(finding)
+    blob = _json.dumps(cleaned)
+    assert "\x00" not in blob and "\\u0000" not in blob
+    assert cleaned["title"] == "Sensitive file exposed"
+    assert cleaned["evidence"]["content_preview"] == "AESKEYmaterial"
+    assert cleaned["evidence"]["markers"] == ["ab", "c"]
+    assert cleaned["nested"][0]["deep"] == "xy"
+    assert cleaned["confidence"] == 0.9  # non-strings untouched
