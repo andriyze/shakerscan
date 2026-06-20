@@ -730,7 +730,7 @@ def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
     assert worker._standalone_scan_rate_reservation_amount({
         "scan_type": "smart",
         "budget_profile": "thorough",
-    }) == 150
+    }) == 250  # §3: raised smart/thorough active_max_endpoints 150 -> 250
     assert worker._standalone_scan_rate_reservation_amount({
         "scan_type": "smart",
         "custom_budget": {"active_max_endpoints": 1234},
