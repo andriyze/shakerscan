@@ -1,0 +1,82 @@
+# Benchmark scorecard fixture — OWASP Juice Shop (DAST quality target).
+# Consumed by scripts/benchmark_targets.py (submit -> wait -> fetch -> score).
+# Juice Shop is a BENCHMARK to measure the universal engine, never a target to
+# hardcode against. Expected families describe the vuln CLASSES a competent DAST
+# should prove on this app; matching is by class + route token, not app secrets.
+name: juice-shop
+target_url: http://host.docker.internal:3001
+# Single Smart scan runs the global+browser checks where Juice Shop's crit/highs
+# live (coverage mode fragments them — see coverage-mode-loses-global-checks).
+scan_options:
+  scan_type: smart
+  parallel: false
+  budget_profile: thorough
+  exploit_depth: true
+  no_early_stop: true
+# auth: optional bearer tokens minted at runtime (see benchmark_targets.py --auth).
+auth:
+  user1_login: { url: /rest/user/login, email_field: email, password_field: password }
+
+# Per-target pass/fail gates.
+gates:
+  min_verified_high_critical: 6      # >=70% of the ~9 reliably-achievable here
+  require_verified_sqli: true        # Juice Shop must prove Critical SQLi
+  require_browser_proven_xss: true   # and browser-proven High DOM XSS
+  max_unverified_high_ratio: 0.35
+
+# Expected bug classes (class + route anchor + min severity + proof expectation).
+expected:
+  - id: sqli-search
+    family: sqli
+    route: /rest/products/search
+    min_severity: critical
+    proof: verified
+  - id: sqli-login
+    family: sqli
+    route: /rest/user/login
+    min_severity: critical
+    proof: verified
+  - id: xss-dom-search
+    family: xss
+    route: "#/search"
+    min_severity: high
+    proof: browser
+  - id: xss-reflected
+    family: xss
+    route: /rest/track-order
+    min_severity: high
+    proof: browser
+  - id: bfla-users
+    family: broken_access_control
+    route: /api/Users
+    min_severity: high
+    proof: deterministic
+  - id: exposed-metrics
+    family: sensitive_exposure
+    route: /metrics
+    min_severity: high
+    proof: deterministic
+  - id: exposed-ftp-listing
+    family: sensitive_exposure
+    route: /ftp
+    min_severity: high
+    proof: deterministic
+  - id: exposed-confidential
+    family: sensitive_exposure
+    route: /ftp/acquisitions.md
+    min_severity: high
+    proof: deterministic
+  - id: nosqli-reviews
+    family: nosqli
+    route: /rest/products/reviews
+    min_severity: high
+    proof: deterministic
+
+# Known hard-tail (beyond generic black-box DAST): tracked but NOT counted in the
+# min_verified_high_critical gate, so the benchmark stays fair.
+hard_tail:
+  - jwt-forged-rsa       # needs RSA pubkey recovery + HS/RS confusion
+  - rce-yaml-deser       # auth-gated, crafted YAML
+  - open-redirect-bypass # allowlist-bypass only; naive payloads 406
+  - product-blueprint    # static .stl asset
+  - stored-xss-header    # header-injection stored XSS

@@ -1,0 +1,42 @@
+# Benchmark scorecard fixture — Honey (broad detector-coverage DAST target).
+# Consumed by scripts/benchmark_targets.py. Honey exercises generic detectors
+# (data exposure, webhook bypass, approval bypass, path traversal, SQLi). The key
+# gate here is precision: broad categories without promoting weak evidence to High.
+name: honey
+target_url: https://honey.shakerscan.com
+scan_options:
+  scan_type: smart
+  parallel: true
+  shard_strategy: coverage
+  budget_profile: thorough
+  no_early_stop: true
+
+gates:
+  min_categories_found: 3            # broad category coverage
+  max_unverified_high_ratio: 0.25    # do NOT inflate suspected -> Critical
+  require_no_unproven_critical: true # Critical needs deterministic proof
+
+expected:
+  - id: data-exposure
+    family: sensitive_exposure
+    route: /api
+    min_severity: high
+    proof: deterministic
+  - id: webhook-bypass
+    family: webhook
+    route: /webhook
+    min_severity: high
+    proof: deterministic
+  - id: approval-bypass
+    family: approval
+    route: /approve
+    min_severity: high
+    proof: deterministic
+  - id: path-traversal
+    family: path_traversal
+    route: /file
+    min_severity: high
+    proof: deterministic
+
+hard_tail:
+  - ai-model-findings    # AI/model surfaces are scored separately
