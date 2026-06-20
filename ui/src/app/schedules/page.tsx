@@ -65,6 +65,7 @@ function SchedulesContent() {
   const [formDayOfWeek, setFormDayOfWeek] = useState(0)
   const [formTime, setFormTime] = useState('02:00')
   const [formScanType, setFormScanType] = useState<ScanType>('standard')
+  const [formKind, setFormKind] = useState<'normal_scan' | 'asm_improve'>('normal_scan')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -141,6 +142,7 @@ function SchedulesContent() {
         day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
         time_of_day: formTime,
         scan_type: formScanType,
+        scan_options: formKind === 'asm_improve' ? { kind: 'asm_improve' } : undefined,
       })
       setShowCreateModal(false)
       resetForm()
@@ -186,6 +188,7 @@ function SchedulesContent() {
     setFormDayOfWeek(0)
     setFormTime('02:00')
     setFormScanType('standard')
+    setFormKind('normal_scan')
     setError('')
   }
 
@@ -437,7 +440,27 @@ function SchedulesContent() {
                 )}
               </div>
 
+              {/* Schedule kind (§9): full scan vs ASM coverage wave */}
+              <div>
+                <label className="block text-sm font-medium text-gray-400 mb-1">Schedule type</label>
+                <select
+                  value={formKind}
+                  onChange={(e) => setFormKind(e.target.value as 'normal_scan' | 'asm_improve')}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="normal_scan">Full scan each run</option>
+                  <option value="asm_improve">Keep this target covered (ASM coverage wave)</option>
+                </select>
+                {formKind === 'asm_improve' && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Each run queues a bounded ASM wave (test claimable endpoints, else refresh
+                    discovery) using the target&apos;s ASM policy — spreads coverage over time.
+                  </p>
+                )}
+              </div>
+
               {/* Scan Type */}
+              {formKind === 'normal_scan' && (
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">Scan Type</label>
                 <select
@@ -452,6 +475,7 @@ function SchedulesContent() {
                   ))}
                 </select>
               </div>
+              )}
 
               {error && (
                 <p className="text-sm text-red-400">{error}</p>
