@@ -12880,6 +12880,11 @@ async def cli_main():
         args.vuln_injection = True
         args.vuln_web = True
         args.exposure_client = True
+        # Infrastructure exposure (directory listing, exposed/backup files, cloud
+        # buckets, CI/CD, k8s, registry) is high-value and low-risk (mostly GET
+        # probes). full/aggressive enable it; smart — the recommended mode — must
+        # too, or it silently skips exposed secrets/backups/listings on every target.
+        args.exposure_infra = True
         args.js_dependency_scanning = True
         args.js_secret_scanning = True
         args.websocket_testing = True
