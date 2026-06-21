@@ -45,6 +45,7 @@ ATTEMPT_LADDERS: dict[str, list[str]] = {
     "idor": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "bola": ["cross_user_access", "sequential_id_probe", "ai_reasoning"],
     "exposed_file": ["content_marker_replay", "ai_reasoning"],
+    "nosqli": ["nosql_operator_diff", "ai_reasoning"],
     "generic_http": ["ai_reasoning"],
 }
 
@@ -72,6 +73,8 @@ TYPE_ALIASES: dict[str, str] = {
     "broken_function_level_auth": "bola", "function_level_authorization": "bola",
     "broken_access_control": "bola", "broken-access-control": "bola",
     "missing_function_level_access_control": "bola",
+    "nosqli": "nosqli", "nosql_injection": "nosqli", "nosql-injection": "nosqli",
+    "nosqli_injection": "nosqli", "no_sql_injection": "nosqli",
     "exposed_file": "exposed_file", "exposed-file": "exposed_file",
     "exposed_files": "exposed_file", "sensitive_file_exposure": "exposed_file",
     "forced_browsing": "exposed_file", "forced-browsing": "exposed_file",
@@ -148,6 +151,7 @@ def dispatch_ladder_step(
     prove_jwt=None,
     prove_bola=None,
     prove_exposed_file=None,
+    prove_nosqli=None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Map a ladder step name + finding type to a prover coroutine.
 
@@ -244,6 +248,12 @@ def dispatch_ladder_step(
         step_meta["strategy"] = step_name
         if prove_exposed_file:
             return prove_exposed_file(url, evidence=evidence), step_meta
+        return None, step_meta
+
+    if finding_type == "nosqli":
+        step_meta["strategy"] = step_name
+        if prove_nosqli:
+            return prove_nosqli(url, param, "", evidence), step_meta
         return None, step_meta
 
     return None, step_meta

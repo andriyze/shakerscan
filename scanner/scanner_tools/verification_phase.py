@@ -148,6 +148,8 @@ async def verify_high_severity_findings(
             "prove_xxe",
             "prove_jwt",
             "prove_bola",
+            "prove_exposed_file",
+            "prove_nosqli",
         )
         for name in prover_names:
             fn = getattr(_proof_module, name, None)

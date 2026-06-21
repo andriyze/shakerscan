@@ -2693,6 +2693,7 @@ def _current_retest_capabilities() -> dict[str, bool]:
         "idor": "prove_bola",
         "bola": "prove_bola",
         "exposed_file": "prove_exposed_file",
+        "nosqli": "prove_nosqli",
     }
     # AI-only types (2fa_bypass, generic_http) keep False: there is no
     # deterministic prover, the AI verification tier handles them.
@@ -2713,6 +2714,7 @@ async def run_finding_retest(verification: dict) -> dict:
             prove_cors,
             prove_exposed_file,
             prove_jwt,
+            prove_nosqli,
             prove_open_redirect,
             prove_path_traversal,
             prove_sqli,
@@ -2916,6 +2918,7 @@ async def run_finding_retest(verification: dict) -> dict:
         "prove_jwt": prove_jwt,
         "prove_bola": prove_bola,
         "prove_exposed_file": prove_exposed_file,
+        "prove_nosqli": prove_nosqli,
     }
 
     def _call_prover(step_name: str):
