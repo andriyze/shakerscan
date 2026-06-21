@@ -282,9 +282,15 @@ function SchedulesContent() {
                     )}
                   </div>
                   <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
-                    <span className="px-2 py-0.5 bg-gray-800 rounded text-xs">
-                      {getScanTypeLabel(schedule.scan_type)}
-                    </span>
+                    {(schedule.scan_options as { kind?: string } | undefined)?.kind === 'asm_improve' ? (
+                      <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
+                        ASM coverage wave
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 bg-gray-800 rounded text-xs">
+                        {getScanTypeLabel(schedule.scan_type)}
+                      </span>
+                    )}
                     <span>
                       {schedule.frequency === 'weekly'
                         ? `Weekly ${DAYS_OF_WEEK.find(d => d.value === schedule.day_of_week)?.label || ''}`

@@ -370,6 +370,8 @@ export interface AsmGaps {
   by_auth_state: Record<string, Record<string, number>>
   by_param_location: Record<string, number>
   family_coverage?: Record<string, AsmFamilyCoverage>
+  confidence_distribution?: Record<string, { total: number; high_critical: number }>
+  stuck_verification?: number
   last_attempt_status: Record<string, number>
   attempt_ledger_status?: Record<string, number>
   sample_gaps: AsmEndpoint[]

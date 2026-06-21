@@ -759,7 +759,7 @@ function CoverageAdvisorCard({
               {rec?.reason || 'Load a target inventory to see the next ASM action.'}
             </p>
           </div>
-          {gaps?.recommendation.blockers.length ? (
+          {gaps?.recommendation?.blockers?.length ? (
             <div className="space-y-1">
               {gaps.recommendation.blockers.map((b) => (
                 <div key={b.kind} className="flex items-start gap-2 text-xs text-yellow-300">
@@ -792,6 +792,35 @@ function CoverageAdvisorCard({
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+          {gaps?.confidence_distribution && Object.keys(gaps.confidence_distribution).length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[11px] uppercase text-gray-500" title="How trustworthy the findings are: 'verified' = proven by a deterministic re-test; 'suspected' = reported but not yet proven.">
+                Proof quality (active findings)
+              </div>
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                {Object.entries(gaps.confidence_distribution).map(([tier, c]) => (
+                  <span key={tier} title={`${c.high_critical} high/critical of ${c.total} findings in this tier`}>
+                    <Badge className={
+                      tier === 'verified' ? 'bg-green-500/15 text-green-300'
+                        : tier === 'suspected' ? 'bg-amber-500/15 text-amber-300'
+                        : 'bg-gray-800 text-gray-400'}>
+                      {tier}: {c.total}{c.high_critical ? ` (${c.high_critical} H/C)` : ''}
+                    </Badge>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {!!gaps?.stuck_verification && gaps.stuck_verification > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs">
+              <span className="font-medium text-amber-300">
+                ⚠ {gaps.stuck_verification} high/critical finding{gaps.stuck_verification === 1 ? '' : 's'} stuck unproven
+              </span>
+              <span className="text-gray-400">
+                a re-test has been wedged &gt;1h or exhausted its attempts — needs manual review
+              </span>
             </div>
           )}
           {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
