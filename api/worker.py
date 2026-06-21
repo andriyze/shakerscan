@@ -6193,7 +6193,19 @@ async def process_exploit_batch_job(job_data: dict):
         # same CSP/TLS/DNS findings per shard. Default to skipping when the
         # planner didn't say.
         scan_opts['skip_global_checks'] = bool(options.get('skip_global_checks', True))
-    _active_secs = min(2400, max(120, 8 * len(endpoints)))
+    # Honor the planner's per-shard active budget when it set one; otherwise size it
+    # with the SAME realistic per-endpoint cost as the coverage planner
+    # (_coverage_active_seconds: ~20-32s/endpoint). The old hardcoded 8s/endpoint
+    # re-clamped a shard planned at e.g. 1120s down to 320s, stopping SQLi after a
+    # couple of endpoints — the dynamic pull-worker / ASM batch path was silently
+    # overriding the planner.
+    _planned_secs = (options.get('custom_budget') or {}).get('active_max_seconds')
+    if isinstance(_planned_secs, (int, float)) and _planned_secs > 0:
+        _active_secs = int(_planned_secs)
+    else:
+        _active_secs = parallel_scan._coverage_active_seconds(
+            {**options, 'exploit_depth': exploit_depth}, len(endpoints)
+        )
     lean = {
         'max_urls': 200, 'browser_max_pages': 5, 'browser_max_depth': 1,
         'param_discovery_url_limit': 0, 'param_discovery_max_params': 0,
@@ -6209,7 +6221,7 @@ async def process_exploit_batch_job(job_data: dict):
         # batch mid-active-scan — losing every finding for the claimed endpoints.
         # Give ~2x the active budget plus fixed overhead (more under exploit depth).
         'max_duration_minutes': max(
-            15, min(60, (_active_secs // 60) * 2 + (20 if exploit_depth else 10))
+            15, min(90, (_active_secs // 60) * 2 + (20 if exploit_depth else 10))
         ),
     }
     if coverage_dynamic_worker:
