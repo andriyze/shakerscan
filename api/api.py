@@ -9886,6 +9886,28 @@ async def asm_gaps(target_id: str):
             """,
             uuid.UUID(target_id),
         )
+        # §10.5: proof-quality distribution of active findings, so ASM gaps surface
+        # how trustworthy findings are (not just coverage). Bucketed by the
+        # deterministic verification verdict — 'exploited' = proven, no verdict =
+        # still suspected — which is the queryable proof signal on the findings table.
+        conf_rows = await conn.fetch(
+            """
+            SELECT
+                CASE
+                    WHEN last_verification_verdict = 'exploited' THEN 'verified'
+                    WHEN last_verification_verdict IN ('blocked_by_security', 'out_of_scope_internal') THEN 'mitigated'
+                    WHEN last_verification_verdict IN ('likely_fixed', 'false_positive') THEN 'likely_fixed'
+                    WHEN last_verification_verdict IN ('inconclusive', 'error') THEN 'inconclusive'
+                    ELSE 'suspected'
+                END AS tier,
+                count(*) AS n,
+                count(*) FILTER (WHERE severity IN ('critical', 'high')) AS high_critical
+            FROM findings
+            WHERE target_id = $1 AND status = 'active'
+            GROUP BY 1
+            """,
+            uuid.UUID(target_id),
+        )
 
     attempt_counts = {str(r["status"]): int(r["count"] or 0) for r in attempt_rows}
     family_coverage = {
@@ -9910,27 +9932,6 @@ async def asm_gaps(target_id: str):
         state = str(row["auth_state"] or "anonymous")
         by_auth.setdefault(state, {})[str(row["test_status"])] = int(row["count"] or 0)
 
-    # §10.5: confidence distribution of this target's active findings, so ASM gaps
-    # surface proof quality (not just coverage) — tiers mirror get_confidence_tier().
-    conf_rows = await conn.fetch(
-        """
-        SELECT
-            CASE
-                WHEN confidence >= 0.90 THEN 'verified'
-                WHEN confidence >= 0.80 THEN 'high'
-                WHEN confidence >= 0.65 THEN 'medium'
-                WHEN confidence >= 0.50 THEN 'low'
-                WHEN confidence IS NULL THEN 'unknown'
-                ELSE 'uncertain'
-            END AS tier,
-            count(*) AS n,
-            count(*) FILTER (WHERE severity IN ('critical', 'high')) AS high_critical
-        FROM findings
-        WHERE target_id = $1 AND status = 'active'
-        GROUP BY 1
-        """,
-        uuid.UUID(target_id),
-    )
     confidence_distribution = {
         str(r["tier"]): {"total": int(r["n"] or 0), "high_critical": int(r["high_critical"] or 0)}
         for r in conf_rows
