@@ -65,6 +65,13 @@ TYPE_ALIASES: dict[str, str] = {
     "idor": "idor", "bola": "bola",
     "insecure_direct_object_reference": "idor",
     "broken_object_level_authorization": "bola",
+    # BFLA / broken access control: the cross_user_access prover (replay the privileged
+    # request as a lower-privileged / second user and confirm privileged access) is the
+    # deterministic proof, so route these through the bola ladder.
+    "bfla": "bola", "broken_function_level_authorization": "bola",
+    "broken_function_level_auth": "bola", "function_level_authorization": "bola",
+    "broken_access_control": "bola", "broken-access-control": "bola",
+    "missing_function_level_access_control": "bola",
     "exposed_file": "exposed_file", "exposed-file": "exposed_file",
     "exposed_files": "exposed_file", "sensitive_file_exposure": "exposed_file",
     "forced_browsing": "exposed_file", "forced-browsing": "exposed_file",
