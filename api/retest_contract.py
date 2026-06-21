@@ -270,14 +270,22 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
     "smart_sqli": "sqli",
     "custom_sqli": "sqli",
     "oob_sqli": "sqli",
+    "nosql_injection": "nosqli",
+    "smart_nosql": "nosqli",
+    "nosqli": "nosqli",
     "2fa_bypass": "2fa_bypass",
     "mfa_bypass": "2fa_bypass",
     "commix": "command_injection",
     "smart_bola": "bola",
     "bola": "bola",
     "idor_bola": "bola",
-    "exposed_files": "exposed_file",
+    # BFLA / broken-access-control tools -> cross_user_access (bola) prover.
+    "bfla": "bola",
+    "smart_bfla": "bola",
+    "broken_function_level_authorization": "bola",
+    "access_control": "bola",
     "forced_browsing": "exposed_file",
+    "exposed_files": "exposed_file",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
@@ -345,13 +353,13 @@ def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | Non
     title = str(title or "").lower()
     tool = str(tool or "").lower()
 
-    # NoSQL injection must never be routed to the SQLi prover: the prover
-    # cannot reproduce NoSQL operator injection and would report a false
-    # "likely_fixed". This guard runs BEFORE the tool map so a NoSQL finding
-    # mistagged with a sqli-family tool still can't misroute. Without a
-    # dedicated prover these findings fall through to the AI verification path.
-    if "nosql" in title or tool == "nosql_injection":
-        return None
+    # NoSQL injection routes to the dedicated NoSQLi prover (operator-injection
+    # differential), NOT the SQLi prover. This guard runs BEFORE the generic
+    # "sql"+"inject" title check below (note "sql" is a substring of "nosql", so
+    # without this guard a NoSQL finding would misroute to sqli and report a false
+    # "likely_fixed"). Tool match is also handled here for nosql tools.
+    if "nosql" in title or "no sql" in title or tool in ("nosql_injection", "smart_nosql", "nosqli"):
+        return "nosqli"
 
     mapped = RETEST_TOOL_TYPE_MAP.get(tool)
     if mapped:
@@ -380,6 +388,12 @@ def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | Non
     if "jwt" in title:
         return "jwt"
     if "bola" in title or "broken object level" in title:
+        return "bola"
+    # BFLA / broken access control -> cross_user_access (bola) prover.
+    if any(k in title for k in (
+        "broken function level", "broken function-level", "bfla",
+        "broken access control", "function level authorization",
+        "function-level authorization", "missing function level access")):
         return "bola"
     if "idor" in title or "insecure direct object" in title:
         return "idor"

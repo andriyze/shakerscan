@@ -52,3 +52,42 @@ def test_prove_nosqli_no_query_param_inconclusive():
         poe.fetch_with_capture = orig
     assert proof.proven is False
     assert proof.evidence_type == "inconclusive"
+
+
+# --- JSON-body NoSQLi (crAPI login/search path) ------------------------------
+def test_prove_nosqli_json_body_auth_bypass():
+    # $ne(unlikely) -> 200 (logged in); $eq(unlikely) -> 401 (rejected) = bypass proven.
+    async def fake(url, method="GET", data=None, headers=None, timeout=12, **kw):
+        import json as _j
+        body = _j.loads(data) if data else {}
+        op = body.get("email")
+        if isinstance(op, dict) and "$ne" in op:
+            return {"status_code": 200, "body": '{"token":"eyJ...long-session-token..."}'}
+        return {"status_code": 401, "body": '{"error":"invalid"}'}
+    orig = poe.fetch_with_capture
+    poe.fetch_with_capture = fake
+    try:
+        import asyncio as _a
+        proof = _a.run(poe.prove_nosqli(
+            "http://t/identity/api/auth/login", "email",
+            evidence={"method": "POST", "body_template": {"email": "x", "password": "y"}}))
+    finally:
+        poe.fetch_with_capture = orig
+    assert proof.proven is True
+    assert proof.evidence_type == "nosql_operator_differential"
+
+
+def test_prove_nosqli_json_body_no_bypass_not_proven():
+    # Endpoint rejects the operator object identically both ways -> not proven.
+    async def fake(url, method="GET", data=None, headers=None, timeout=12, **kw):
+        return {"status_code": 401, "body": '{"error":"invalid"}'}
+    orig = poe.fetch_with_capture
+    poe.fetch_with_capture = fake
+    try:
+        import asyncio as _a
+        proof = _a.run(poe.prove_nosqli(
+            "http://t/login", "email",
+            evidence={"method": "POST", "body_template": {"email": "x"}}))
+    finally:
+        poe.fetch_with_capture = orig
+    assert proof.proven is False

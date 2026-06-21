@@ -9909,19 +9909,25 @@ async def asm_gaps(target_id: str):
             uuid.UUID(target_id),
         )
         # Verification Depth plan (B): High/Critical findings that are stuck unproven —
-        # either a retest wedged in queued/running for over an hour, or one that hit the
+        # either a retest wedged in queued/running for over an hour (measured by the
+        # finding_verifications ROW timestamp, not findings.updated_at which a later
+        # finding edit can reset and hide the wedged retest), or one that hit the
         # auto-retest attempt ceiling and is still not 'exploited'. Surfacing this keeps
         # findings from sitting needs_verification forever, invisibly.
         stuck_verification = await conn.fetchval(
             """
-            SELECT count(*) FROM findings
-            WHERE target_id = $1 AND status = 'active'
-              AND severity IN ('critical', 'high')
-              AND last_verification_verdict IS DISTINCT FROM 'exploited'
+            SELECT count(DISTINCT f.id) FROM findings f
+            WHERE f.target_id = $1 AND f.status = 'active'
+              AND f.severity IN ('critical', 'high')
+              AND f.last_verification_verdict IS DISTINCT FROM 'exploited'
               AND (
-                  (last_verification_status IN ('queued', 'running')
-                       AND updated_at < NOW() - INTERVAL '1 hour')
-                  OR verification_count >= $2
+                  EXISTS (
+                      SELECT 1 FROM finding_verifications v
+                      WHERE v.finding_id = f.id
+                        AND v.status IN ('queued', 'running')
+                        AND COALESCE(v.updated_at, v.created_at) < NOW() - INTERVAL '1 hour'
+                  )
+                  OR f.verification_count >= $2
               )
             """,
             uuid.UUID(target_id),

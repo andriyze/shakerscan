@@ -6577,7 +6577,8 @@ async def build_report(target: str,
     if nosql_results.get("vulnerable"):
         report["findings"].append(normalize_finding(
             "nosql_injection", "NoSQL Injection Vulnerability", "critical",
-            {"evidence": nosql_results["evidence"], "payloads_tested": len(nosql_results["payloads_tested"])},
+            {"type": "nosql_injection", "evidence": nosql_results["evidence"],
+             "payloads_tested": len(nosql_results["payloads_tested"])},
             "CWE-89"
         ))
 
@@ -10032,6 +10033,7 @@ async def build_report(target: str,
                                             f"NoSQL Injection in {finding.get('parameter', 'unknown')}",
                                             "high",
                                             {
+                                                "type": "nosql_injection",
                                                 "url": nosql_result.get("url"),
                                                 "method": nosql_result.get("method"),
                                                 "parameter": finding.get("parameter"),

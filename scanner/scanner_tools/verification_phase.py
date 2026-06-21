@@ -223,6 +223,12 @@ async def verify_high_severity_findings(
             title = str(finding.get("title", "")).lower()
             tool = str(finding.get("tool", "")).lower()
             for probe, ft in [
+                # NoSQL + BFLA MUST come before the generic sqli/bola checks: "sql
+                # injection" is a substring of "nosql injection", and BFLA titles
+                # don't contain "bola". First match wins.
+                ("nosql", "nosqli"), ("no sql", "nosqli"),
+                ("broken function level", "bola"), ("broken access control", "bola"),
+                ("function level authorization", "bola"), ("bfla", "bola"),
                 ("xss", "xss"), ("cross-site scripting", "xss"),
                 ("sqli", "sqli"), ("sql injection", "sqli"), ("sql-injection", "sqli"),
                 ("ssrf", "ssrf"), ("server-side request forgery", "ssrf"),
@@ -231,6 +237,7 @@ async def verify_high_severity_findings(
                 ("cors", "cors"),
                 ("command injection", "command_injection"), ("rce", "command_injection"),
                 ("ssti", "ssti"), ("template injection", "ssti"),
+                ("broken object level", "bola"), ("bola", "bola"),
             ]:
                 if probe in title or probe in tool:
                     finding_type = ft
