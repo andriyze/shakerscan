@@ -120,8 +120,8 @@ COVERAGE_PER_SHARD_CAP = 150
 # slice untested before the time budget cut SQLi off; smaller slices + more shards
 # (COVERAGE_MAX_SHARDS=128) cover the same worklist via parallelism without
 # ballooning any single shard's wall-clock.
-COVERAGE_ACTIVE_MIX_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_ACTIVE_MIX_PER_SHARD_CAP", 28)
-COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP", 20)
+COVERAGE_ACTIVE_MIX_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_ACTIVE_MIX_PER_SHARD_CAP", 40)
+COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP = _env_int("SHAKERSCAN_COVERAGE_EXPLOIT_DEPTH_PER_SHARD_CAP", 28)
 
 # Default harvested worklist size. The scanner also emits 5000 by default, but
 # callers can raise this with custom_budget.active_worklist_max.
@@ -147,7 +147,7 @@ RECON_DISCOVERY_BUDGET = {
     # (that is the shards' job). Keeps recon's one-time global detections without
     # turning planning into a second full scan.
     "active_max_endpoints": 20,
-    "active_max_seconds": 150,
+    "active_max_seconds": 200,
     "nuclei_max_targets": 0,
     "max_urls": 3000,            # worklist breadth is cheap; depth was the cost
     "api_probe_limit": 250,       # keep speculative API fan-out bounded in planning
@@ -156,8 +156,10 @@ RECON_DISCOVERY_BUDGET = {
     "discovery_depth": 3,
     "param_discovery_url_limit": 0,   # skip per-URL param discovery in recon
     "param_discovery_max_params": 0,
-    "phase4_max_seconds": 180,        # run global phase-4 web checks once (exposure/BFLA/...)
-    "max_duration_minutes": 15,       # hard bound so planning can't run away
+    "phase4_max_seconds": 300,        # global phase-4 once (exposure/BFLA/...): enough to
+                                      # RELIABLY finish; 180s left exposure/BFLA flaky on
+                                      # rich apps, dropping /metrics + /api/Users run-to-run.
+    "max_duration_minutes": 18,       # hard bound so planning can't run away
 }
 
 # Auth fields that establish the primary (user1) authenticated identity.
