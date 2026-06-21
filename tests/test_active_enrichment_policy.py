@@ -35,6 +35,17 @@ def test_reserve_active_enrichment_budget_handles_missing_budget():
     assert reserve == 0
 
 
+def test_reserve_enrichment_false_gives_full_budget_to_primary():
+    # Coverage shards skip the enrichment reserve (recon backbone runs enrichment
+    # once) so all the active time goes to per-endpoint SQLi/XSS breadth.
+    primary, reserve = reserve_active_enrichment_budget(784, reserve_enrichment=False)
+    assert primary == 784
+    assert reserve == 0
+    # default still reserves enrichment
+    primary_d, reserve_d = reserve_active_enrichment_budget(784)
+    assert primary_d < 784 and reserve_d > 0
+
+
 def test_enrichment_decision_uses_canonical_post_active_skip_reason():
     active_block = {"post_active_enrichment_skipped": "primary_family_budget_exhausted"}
 

@@ -8819,6 +8819,10 @@ async def build_report(target: str,
                 active_primary_max_seconds, active_enrichment_reserved_seconds = reserve_active_enrichment_budget(
                     scan_budget.get("active_max_seconds"),
                     primary_enabled=bool(run_sqli or run_xss),
+                    # Coverage shards (zero-rediscovery known-endpoint slices) spend their
+                    # whole budget on primary SQLi/XSS breadth; the recon backbone runs the
+                    # enrichment modules once for the whole parent.
+                    reserve_enrichment=not zero_rediscovery_scope,
                 )
                 active_block["active_total_max_seconds"] = scan_budget.get("active_max_seconds")
                 active_block["active_primary_max_seconds"] = active_primary_max_seconds

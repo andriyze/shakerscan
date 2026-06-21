@@ -5502,6 +5502,7 @@ async def process_scan_merge_job(job_data: dict):
     # is never graded better than any shard.
     agg_score = min_score
     agg_grade = min_score_grade
+    _graded_block = None
     try:
         from grading import grade as _grade_report
         _graded = _grade_report(merged)
@@ -5509,6 +5510,7 @@ async def process_scan_merge_job(job_data: dict):
         if _gs is not None and (min_score is None or _gs <= min_score):
             agg_score = _gs
             agg_grade = _graded.get('grade')
+            _graded_block = _graded
     except Exception as e:
         print(f"[merge {parent_id[:8]}] parent grade recompute skipped: {e}", flush=True)
     if agg_score is None:
@@ -5518,6 +5520,13 @@ async def process_scan_merge_job(job_data: dict):
         merged['result']['score'] = agg_score
     if agg_grade is not None:
         merged['result']['grade'] = agg_grade
+    # Apply the recomputed human-readable summary/notes/remediation so the result
+    # SUMMARY block matches the union grade (it was showing the stale shard summary,
+    # e.g. top-level F/32 but result.summary still "D (58/100) - 19 issues").
+    if _graded_block is not None:
+        for _k in ("summary", "notes", "remediation", "cvss_metrics", "compliance"):
+            if _graded_block.get(_k) is not None:
+                merged["result"][_k] = _graded_block[_k]
 
     # Recompute the verification/triage summary from the final union so the parent's
     # counts reflect recon + every shard, not a single shard's stale view.
@@ -5526,6 +5535,32 @@ async def process_scan_merge_job(job_data: dict):
         merged['verification_summary'] = summarize_verification(union_findings)
     except Exception as e:
         print(f"[merge {parent_id[:8]}] verification summary recompute skipped: {e}", flush=True)
+
+    # Recompute the triage block from the union too — the base-shard triage often
+    # showed confirmed.count=0 even when recon contributed verified Critical/High.
+    try:
+        def _u_sev(f):
+            return str(f.get("severity") or "").lower()
+        _confirmed = [f for f in union_findings if isinstance(f, dict) and f.get("verified") is True]
+        _suspected_high = [
+            f for f in union_findings
+            if isinstance(f, dict) and not f.get("verified") and _u_sev(f) in ("critical", "high")
+        ]
+        _needs_review = [
+            f for f in union_findings
+            if isinstance(f, dict) and f.get("confidence_tier") in ("low", "uncertain")
+        ]
+        _ai_fp = [f for f in union_findings if isinstance(f, dict) and f.get("ai_verdict") == "false_positive"]
+        _verif_skipped = [f for f in union_findings if isinstance(f, dict) and f.get("verification_skipped")]
+        merged["triage"] = {
+            "confirmed": {"count": len(_confirmed), "sample": _confirmed[:5]},
+            "suspected_high": {"count": len(_suspected_high), "sample": _suspected_high[:5]},
+            "needs_review": {"count": len(_needs_review), "sample": _needs_review[:5]},
+            "ai_false_positive": {"count": len(_ai_fp), "sample": _ai_fp[:5]},
+            "verification_skipped": {"count": len(_verif_skipped), "sample": _verif_skipped[:5]},
+        }
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] triage recompute skipped: {e}", flush=True)
 
     focused_family = _focused_family_from_parent_options(parent_options)
     focused_score, focused_grade = _recompute_focused_parent_result(
