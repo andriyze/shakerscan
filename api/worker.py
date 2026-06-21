@@ -161,6 +161,11 @@ AUTO_RETEST_ON_SCAN_COMPLETE = _DEFAULT_POLICY.auto_retest_enabled
 AUTO_RETEST_MIN_SEVERITY = _DEFAULT_POLICY.verification_min_severity
 AUTO_RETEST_MAX_PER_SCAN = _DEFAULT_POLICY.auto_retest_max_per_scan
 AUTO_RETEST_REQUESTED_BY = "auto_scan_policy"
+# Verification Depth plan (B): stop auto-retesting a finding that has already been
+# retested this many times without being proven, so a stubbornly-inconclusive finding
+# can't consume the bounded retest budget every scan forever. Manual retests are
+# unaffected; this only governs the automatic policy hook.
+AUTO_RETEST_MAX_ATTEMPTS = int(os.environ.get("AUTO_RETEST_MAX_ATTEMPTS", "3"))
 
 # AI verification (opt-in, Tier 2 after deterministic provers)
 AI_VERIFY_ENABLED = os.environ.get("AI_VERIFY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -3642,6 +3647,11 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             finding = dict(row)
             # Already proven by the scan — don't spend a retest slot re-confirming it.
             if str(finding.get("last_verification_verdict") or "") == "exploited":
+                skipped += 1
+                continue
+            # Attempt ceiling: a finding retested AUTO_RETEST_MAX_ATTEMPTS times without
+            # proof won't be auto-retested again (it surfaces as stuck in /asm/gaps).
+            if int(finding.get("verification_count") or 0) >= AUTO_RETEST_MAX_ATTEMPTS:
                 skipped += 1
                 continue
             if not _severity_allows_auto_retest(

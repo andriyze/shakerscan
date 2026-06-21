@@ -9908,6 +9908,25 @@ async def asm_gaps(target_id: str):
             """,
             uuid.UUID(target_id),
         )
+        # Verification Depth plan (B): High/Critical findings that are stuck unproven —
+        # either a retest wedged in queued/running for over an hour, or one that hit the
+        # auto-retest attempt ceiling and is still not 'exploited'. Surfacing this keeps
+        # findings from sitting needs_verification forever, invisibly.
+        stuck_verification = await conn.fetchval(
+            """
+            SELECT count(*) FROM findings
+            WHERE target_id = $1 AND status = 'active'
+              AND severity IN ('critical', 'high')
+              AND last_verification_verdict IS DISTINCT FROM 'exploited'
+              AND (
+                  (last_verification_status IN ('queued', 'running')
+                       AND updated_at < NOW() - INTERVAL '1 hour')
+                  OR verification_count >= $2
+              )
+            """,
+            uuid.UUID(target_id),
+            int(os.environ.get("AUTO_RETEST_MAX_ATTEMPTS", "3")),
+        )
 
     attempt_counts = {str(r["status"]): int(r["count"] or 0) for r in attempt_rows}
     family_coverage = {
@@ -9947,6 +9966,7 @@ async def asm_gaps(target_id: str):
         "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},
         "family_coverage": family_coverage,
         "confidence_distribution": confidence_distribution,
+        "stuck_verification": int(stuck_verification or 0),
         "last_attempt_status": attempt_counts,
         "attempt_ledger_status": {str(r["status"]): int(r["count"] or 0) for r in ledger_rows},
         "sample_gaps": [row_to_dict(r) for r in samples],
