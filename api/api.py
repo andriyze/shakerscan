@@ -9909,6 +9909,33 @@ async def asm_gaps(target_id: str):
     for row in by_auth_rows:
         state = str(row["auth_state"] or "anonymous")
         by_auth.setdefault(state, {})[str(row["test_status"])] = int(row["count"] or 0)
+
+    # §10.5: confidence distribution of this target's active findings, so ASM gaps
+    # surface proof quality (not just coverage) — tiers mirror get_confidence_tier().
+    conf_rows = await conn.fetch(
+        """
+        SELECT
+            CASE
+                WHEN confidence >= 0.90 THEN 'verified'
+                WHEN confidence >= 0.80 THEN 'high'
+                WHEN confidence >= 0.65 THEN 'medium'
+                WHEN confidence >= 0.50 THEN 'low'
+                WHEN confidence IS NULL THEN 'unknown'
+                ELSE 'uncertain'
+            END AS tier,
+            count(*) AS n,
+            count(*) FILTER (WHERE severity IN ('critical', 'high')) AS high_critical
+        FROM findings
+        WHERE target_id = $1 AND status = 'active'
+        GROUP BY 1
+        """,
+        uuid.UUID(target_id),
+    )
+    confidence_distribution = {
+        str(r["tier"]): {"total": int(r["n"] or 0), "high_critical": int(r["high_critical"] or 0)}
+        for r in conf_rows
+    }
+
     return {
         "coverage": coverage,
         "claimable": claimable,
@@ -9918,6 +9945,7 @@ async def asm_gaps(target_id: str):
         "by_auth_state": by_auth,
         "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},
         "family_coverage": family_coverage,
+        "confidence_distribution": confidence_distribution,
         "last_attempt_status": attempt_counts,
         "attempt_ledger_status": {str(r["status"]): int(r["count"] or 0) for r in ledger_rows},
         "sample_gaps": [row_to_dict(r) for r in samples],
