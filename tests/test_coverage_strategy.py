@@ -48,15 +48,18 @@ def test_auto_strategy_honors_explicit_family():
     assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "family") == "family"
 
 
-def test_coverage_recon_budget_skips_heavy_active_and_nuclei_work():
+def test_coverage_recon_budget_runs_bounded_global_backbone():
+    # Recon is the global/DOM/verification backbone (runs once): bounded active +
+    # phase-4 so it finds DOM-XSS/exposure/BFLA that zero-rediscovery shards skip,
+    # while still skipping nuclei + per-URL param discovery and staying time-bounded.
     budget = p.RECON_DISCOVERY_BUDGET
-    assert budget["active_max_endpoints"] == 1
-    assert budget["active_max_seconds"] == 0
+    assert budget["active_max_endpoints"] == 20
+    assert budget["active_max_seconds"] == 200
     assert budget["api_probe_limit"] == 250
     assert budget["param_discovery_url_limit"] == 0
     assert budget["nuclei_max_targets"] == 0
-    assert budget["phase4_max_seconds"] == 0
-    assert budget["max_duration_minutes"] <= 10
+    assert budget["phase4_max_seconds"] == 300
+    assert budget["max_duration_minutes"] <= 18
 
 
 # --------------------------- coverage partition ---------------------------
@@ -75,7 +78,7 @@ def test_coverage_partitions_all_endpoints_disjoint():
         assert cb["active_max_endpoints"] == len(s.options["custom_endpoints"])
         assert cb["api_probe_limit"] == 0
         assert cb["param_discovery_url_limit"] == 0
-        assert cb["active_max_seconds"] == max(300, 8 * len(s.options["custom_endpoints"]))
+        assert cb["active_max_seconds"] == min(3000, max(300, 20 * len(s.options["custom_endpoints"])))
         assert resolved["api_probe_limit"] == 0
         assert resolved["param_discovery_url_limit"] == 0
         assert resolved["browser_max_pages"] == 0
@@ -105,8 +108,9 @@ def test_exhaustive_coverage_shards_get_deeper_active_budget():
     )
 
     assert plan.shard_count == 2
-    assert all(s.options["custom_budget"]["active_max_seconds"] == 2250 for s in plan.shards)
-    assert all(s.options["resolved_budget"]["active_max_seconds"] == 2250 for s in plan.shards)
+    # exhaustive+exploit_depth: 32s/endpoint, 150-endpoint slices -> 4800 (< 5400 ceiling)
+    assert all(s.options["custom_budget"]["active_max_seconds"] == 4800 for s in plan.shards)
+    assert all(s.options["resolved_budget"]["active_max_seconds"] == 4800 for s in plan.shards)
 
 
 def test_finding_merge_key_collapses_repeated_passive_shard_findings():
@@ -335,11 +339,11 @@ def test_harvest_default_keeps_large_worklist():
 
 def test_coverage_per_shard_cap_option_controls_shard_count():
     eps = [f"GET /e{i}?id=1" for i in range(390)]
-    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # active-mix default cap 50
+    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # active-mix default cap 40
     many = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 50}, eps)
     explicit_large = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 150}, eps)
-    assert few.shard_count == 8
-    assert many.shard_count == 8
+    assert few.shard_count == 10   # ceil(390/40)
+    assert many.shard_count == 8   # ceil(390/50)
     assert explicit_large.shard_count == 3
     # still covers every endpoint, disjoint
     union = [e for s in many.shards for e in s.options["custom_endpoints"]]
@@ -347,9 +351,9 @@ def test_coverage_per_shard_cap_option_controls_shard_count():
 
 
 def test_coverage_default_cap_is_smaller_for_broad_active_mix():
-    assert p._default_coverage_per_shard_cap({"scan_type": "smart"}) == 50
-    assert p._coverage_dynamic_batch_size({"scan_type": "smart"}) == 50
-    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "exploit_depth": True}) == 35
+    assert p._default_coverage_per_shard_cap({"scan_type": "smart"}) == 40
+    assert p._coverage_dynamic_batch_size({"scan_type": "smart"}) == 40
+    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "exploit_depth": True}) == 28
     assert p._coverage_dynamic_batch_size({"scan_type": "smart", "coverage_dynamic_batch_size": 90}) == 90
 
 
@@ -358,19 +362,19 @@ def test_coverage_default_cap_keeps_focused_family_lanes_larger():
 
 
 def test_coverage_honors_explicit_shards_cap():
-    # 1800 endpoints auto-size to 36 broad active shards (cap 50); an explicit
+    # 1800 endpoints auto-size to 45 broad active shards (cap 40); an explicit
     # shards=3 must cap the fan-out to 3 without dropping any endpoint.
     eps = [f"GET /e{i}?id=1" for i in range(1800)]
     auto = p.plan_coverage_shards({"scan_type": "smart"}, eps)
     capped = p.plan_coverage_shards({"scan_type": "smart", "shards": 3}, eps)
-    assert auto.shard_count == 36
+    assert auto.shard_count == 45
     assert capped.shard_count == 3  # explicit request honored as a hard cap
     union = [e for s in capped.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)  # every endpoint still covered
     # string form also honored
     assert p.plan_coverage_shards({"scan_type": "smart", "shards": "4"}, eps).shard_count == 4
     # an explicit request LARGER than auto-size doesn't inflate beyond need
-    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 36
+    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 45
 
 
 def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
