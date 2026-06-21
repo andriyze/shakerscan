@@ -692,7 +692,10 @@ def summarize_verification(findings: list[dict]) -> dict[str, Any]:
         is_suspected = bool(f.get("suspected")) or (sev in ("high", "critical") and not is_verified)
         if is_suspected:
             suspected += 1
-        tier = str(f.get("confidence_tier") or "unknown")
+        # Verification Depth D (calibration): a deterministically-proven finding belongs
+        # in the 'verified' tier regardless of the generic confidence cap that may have
+        # left its score in the 'high' band — proof beats the heuristic cap.
+        tier = "verified" if is_verified else str(f.get("confidence_tier") or "unknown")
         by_tier[tier] = by_tier.get(tier, 0) + 1
         if not is_verified:
             if sev == "critical":
