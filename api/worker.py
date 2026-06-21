@@ -2229,15 +2229,14 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
 
     current_verdict = str(result.get("verdict") or "").lower()
 
-    # Always trust explicit AI exploit confirmation.
+    # Verification Depth plan (C): AI never PROVES a finding — only the deterministic
+    # provers can set 'exploited' (verified). An AI "exploited" verdict raises
+    # suspicion but is not deterministic proof, so map it to 'likely_vulnerable'
+    # (suspected, high-confidence) instead of 'exploited'. This keeps the verified
+    # tier trustworthy: a finding is verified iff a deterministic prover confirmed it.
     if ai_verdict == "exploited":
-        result["status"] = "completed"
-        result["result_status"] = "still_vulnerable"
-        result["verdict"] = "exploited"
-        result["verdict_reason"] = ai_result.get("reasoning", "AI verification confirmed vulnerability")
-        result["confidence"] = ai_result.get("confidence")
-        result["verification_mode"] = "ai_driven"
-        return result
+        ai_verdict = "likely_vulnerable"
+        ai_result = {**ai_result, "verdict": "likely_vulnerable"}
 
     ai_confidence = ai_result.get("confidence")
     ai_high_conf = isinstance(ai_confidence, (int, float)) and float(ai_confidence) >= FALSE_POSITIVE_MIN_CONFIDENCE

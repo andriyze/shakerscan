@@ -99,7 +99,9 @@ def test_ai_inconclusive_upgrades_error_to_completed_inconclusive():
     assert merged["result_status"] == "inconclusive"
 
 
-def test_ai_exploited_overrides_non_error_result():
+def test_ai_exploited_does_not_override_deterministic_verdict():
+    # Verification Depth C: AI never overrides a deterministic conclusion, and an AI
+    # "exploited" verdict is NOT proof — a deterministic 'likely_fixed' survives.
     result = {
         "status": "completed",
         "result_status": "likely_fixed",
@@ -109,11 +111,26 @@ def test_ai_exploited_overrides_non_error_result():
     ai_result = {"verdict": "exploited", "confidence": 0.92, "reasoning": "Exploit replay succeeded"}
     merged = _merge_ai_result_into_retest_result(result, ai_result)
 
-    assert merged["status"] == "completed"
+    assert merged["verdict"] == "likely_fixed"           # deterministic conclusion wins
+    assert merged["verification_mode"] == "deterministic"
+
+
+def test_ai_exploited_on_inconclusive_becomes_likely_vulnerable_not_verified():
+    # Verification Depth C: AI fills an inconclusive deterministic outcome but can only
+    # raise it to 'likely_vulnerable' (suspected) — never 'exploited' (verified).
+    result = {
+        "status": "running",
+        "result_status": "inconclusive",
+        "verdict": "inconclusive",
+        "verification_mode": "deterministic",
+    }
+    ai_result = {"verdict": "exploited", "confidence": 0.92, "reasoning": "AI thinks exploited"}
+    merged = _merge_ai_result_into_retest_result(result, ai_result)
+
+    assert merged["verdict"] == "likely_vulnerable"      # NOT 'exploited'
+    assert merged["verdict"] != "exploited"
+    assert merged["result_status"] == "inconclusive"     # not 'still_vulnerable' (verified)
     assert merged["verification_mode"] == "ai_driven"
-    assert merged["verdict"] == "exploited"
-    assert merged["result_status"] == "still_vulnerable"
-    assert merged["confidence"] == 0.92
 
 
 def test_ai_false_positive_does_not_override_existing_non_error_verdict():
