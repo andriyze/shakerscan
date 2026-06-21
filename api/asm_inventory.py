@@ -971,6 +971,8 @@ async def sweep_endpoint_reachability(
     retired = await _retire([p for p, _ in hard], get_only=True) + \
         await _retire([p for p, _ in soft], get_only=True)
 
+    purged = await gc_endpoint_inventory(conn, target_id)
+
     return {
         "probed": len(paths),
         "reachable": len(reachable),
@@ -978,8 +980,49 @@ async def sweep_endpoint_reachability(
         "hard_404": len(hard),
         "soft_404": len(soft),
         "retired": int(retired),
+        "purged": int(purged),
         "threshold": retire_threshold,
     }
+
+
+# §7.5: physically purge endpoints that have been retired ('gone') longer than the
+# retention window. 'gone' rows are already excluded from coverage denominators, but
+# purging stale ones keeps the inventory lean and prevents unbounded growth. Reversible:
+# a path that returns later is simply re-inserted as 'untested' by upsert_endpoints.
+# Duplicate rows can't exist (UNIQUE(target_id, fingerprint) + ON CONFLICT upsert).
+ASM_GONE_RETENTION_DAYS = int(os.environ.get("ASM_GONE_RETENTION_DAYS", "30"))
+
+
+async def gc_endpoint_inventory(
+    conn, target_id: str, *, gone_retention_days: int | None = None
+) -> int:
+    """Delete long-retired ('gone') endpoint rows. Returns the number purged."""
+    if gone_retention_days is None:
+        gone_retention_days = ASM_GONE_RETENTION_DAYS
+    if gone_retention_days <= 0:
+        return 0
+    import uuid as _uuid
+    try:
+        tid = _uuid.UUID(str(target_id))
+    except (ValueError, TypeError):
+        return 0
+    try:
+        deleted = await conn.fetchval(
+            """
+            WITH del AS (
+                DELETE FROM target_endpoints
+                WHERE target_id = $1
+                  AND test_status = 'gone'
+                  AND updated_at < NOW() - make_interval(days => $2)
+                RETURNING 1
+            )
+            SELECT count(*) FROM del
+            """,
+            tid, int(gone_retention_days),
+        )
+        return int(deleted or 0)
+    except Exception:
+        return 0
 
 
 async def upsert_endpoints(

@@ -257,11 +257,16 @@ class _SweepConn:
 
     async def fetchval(self, query, *args):
         self.fetchvals.append((query, args))
-        # args = (tid, paths, threshold); simulate all hitting threshold
-        return len(args[1]) if len(args) > 1 and args[1] is not None else 0
+        # retire calls pass (tid, paths, threshold) -> simulate all hitting threshold.
+        # the §7.5 GC purge call passes (tid, retention_days) -> no paths, purge 0.
+        paths = args[1] if len(args) > 1 else None
+        return len(paths) if isinstance(paths, (list, tuple)) else 0
 
     @property
-    def fetchval_args(self):  # back-compat: the last retire call's args
+    def fetchval_args(self):  # the last RETIRE call's args (ignores the GC purge call)
+        retire = [a for (_q, a) in self.fetchvals if len(a) >= 3]
+        if retire:
+            return retire[-1]
         return self.fetchvals[-1][1] if self.fetchvals else None
 
 
@@ -1290,3 +1295,28 @@ def test_decide_action_skips():
     # outside time window
     assert a.decide_asm_action(**{**base, "config": {"recon_interval_hours": 0,
                                   "window_start_hour": 2, "window_end_hour": 6}})["action"] == "none"
+
+
+# §7.5: GC of long-retired ('gone') endpoint rows -----------------------------
+def test_gc_endpoint_inventory_purges_and_is_bounded():
+    import asyncio as _aio
+
+    class _GcConn:
+        def __init__(self):
+            self.calls = []
+        async def fetchval(self, query, *args):
+            self.calls.append((query, args))
+            return 7  # simulate 7 stale-gone rows deleted
+
+    conn = _GcConn()
+    n = _aio.run(a.gc_endpoint_inventory(conn, _TID, gone_retention_days=30))
+    assert n == 7
+    q, args = conn.calls[-1]
+    assert "DELETE FROM target_endpoints" in q
+    assert "test_status = 'gone'" in q
+    assert args[1] == 30  # retention days passed through
+
+    # retention <= 0 disables GC (no DB call)
+    conn2 = _GcConn()
+    assert _aio.run(a.gc_endpoint_inventory(conn2, _TID, gone_retention_days=0)) == 0
+    assert conn2.calls == []
