@@ -3613,12 +3613,18 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
         auth_ctx = extract_auth_context(scan_options)
         auth_ctx_json = json.dumps(auth_ctx) if auth_ctx else None
 
+        # The auto-retest budget is bounded, so spend it on findings that still need
+        # PROOF (suspected/unverified), highest severity first — not on findings the
+        # scan already proved ('exploited'). This directly lifts the verified ratio:
+        # the budget targets the suspected High/Critical wall instead of re-confirming
+        # already-verified findings. (Verification Depth plan, workstream B.)
         rows = await conn.fetch("""
             SELECT f.*, t.url as target_url
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             WHERE f.scan_id = $1 AND f.status = 'active'
             ORDER BY
+                CASE WHEN f.last_verification_verdict = 'exploited' THEN 1 ELSE 0 END,
                 CASE f.severity
                     WHEN 'critical' THEN 1
                     WHEN 'high' THEN 2
@@ -3634,6 +3640,10 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                 break
 
             finding = dict(row)
+            # Already proven by the scan — don't spend a retest slot re-confirming it.
+            if str(finding.get("last_verification_verdict") or "") == "exploited":
+                skipped += 1
+                continue
             if not _severity_allows_auto_retest(
                 str(finding.get("severity") or ""),
                 auto_retest_min_severity,
