@@ -544,6 +544,8 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     assert summary["status_coverage"]["coverage"] == 0.25
     assert summary["attempt_coverage"] == {
         "total": 4,
+        "denominator": 4,
+        "denominator_label": "testable",
         "attempted": 3,
         "completed": 2,
         "tested": 2,
@@ -555,6 +557,10 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
         "coverage": 0.5,
         "basis": "latest_attempt_per_endpoint",
     }
+    # §11: headline carries one labeled denominator (testable = total − gone).
+    assert summary["denominator"] == 4
+    assert summary["testable"] == 4
+    assert summary["coverage_reconciles"] is True
 
 
 def test_coverage_summary_treats_completed_without_endpoint_telemetry_as_partial():
@@ -635,6 +641,9 @@ def test_campaign_attempt_summary_uses_expected_denominator_and_telemetry_guard(
 
     assert summary == {
         "total": 6,
+        # §11: single labeled denominator (coverage == tested / denominator).
+        "denominator": 6,
+        "denominator_label": "assigned_auth_scoped_endpoints",
         "attempted": 4,
         "completed": 2,
         "tested": 2,

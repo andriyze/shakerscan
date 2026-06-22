@@ -1161,6 +1161,12 @@ def attempt_coverage_from_rows(
     total = max(0, int(total or 0), attempted)
     summary = {
         "total": total,
+        # Single labeled denominator: coverage == tested / denominator, always
+        # (docs proposed-next-steps §11 — tested/denominator must reproduce the
+        # displayed coverage). The caller passes `total` already net of retired
+        # ('gone') rows, so this denominator is the testable surface.
+        "denominator": total,
+        "denominator_label": coverage_denominator or "testable",
         "attempted": attempted,
         "completed": completed,
         "tested": completed,
@@ -1252,9 +1258,22 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
     attempt_error = int(attempt_summary["error"])
     attempt_untested = int(attempt_summary["untested"])
     use_attempts = attempted > 0
+    tested = attempt_completed if use_attempts else status_summary["tested"]
+    coverage = attempt_summary["coverage"] if use_attempts else status_summary["coverage"]
+    # Headline coverage uses ONE labeled denominator: testable = total − gone
+    # (docs proposed-next-steps §11). `total` (raw, incl. retired/phantom rows) is
+    # kept for context but is NOT the coverage denominator, so the UI must divide
+    # `tested` by `denominator`, never by `total`. coverage_reconciles is a
+    # self-check so a desync is visible, not silently misleading.
+    coverage_reconciles = (testable == 0 and tested == 0) or (
+        testable > 0 and abs(coverage - round(tested / testable, 3)) <= 0.001
+    )
     return {
         "total": total,
-        "tested": attempt_completed if use_attempts else status_summary["tested"],
+        "testable": testable,
+        "denominator": testable,
+        "denominator_label": "testable = total − gone",
+        "tested": tested,
         "untested": attempt_untested if use_attempts else status_summary["untested"],
         "in_progress": status_summary["in_progress"],
         "stale": status_summary["stale"],
@@ -1265,8 +1284,16 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "rate_limited": attempt_rate_limited,
         "error": attempt_error,
         "attempted": attempted,
-        "coverage": attempt_summary["coverage"] if use_attempts else status_summary["coverage"],
+        "coverage": coverage,
         "coverage_basis": "attempt_ledger" if use_attempts else "endpoint_status",
+        "coverage_reconciles": coverage_reconciles,
+        # Detail breakdowns (kept behind clearly-labeled keys so the headline shows
+        # one number; the alternate-basis untested counts live here, not top-level).
+        "detail": {
+            "status_coverage": status_summary,
+            "attempt_coverage": attempt_summary,
+        },
+        # Back-compat aliases (existing consumers); prefer `detail.*`.
         "status_coverage": status_summary,
         "attempt_coverage": attempt_summary,
     }
