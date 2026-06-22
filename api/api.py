@@ -1437,6 +1437,29 @@ def synthesize_degraded_result(
     }
 
 
+def finding_proof_fields(finding: dict[str, Any]) -> dict[str, Any]:
+    """Derive a single proof state for a finding so the list and detail agree.
+
+    A High/Critical lead shown at full severity is the trust problem (docs §7):
+    `is_verified` is the ONE boolean (deterministic proof == verdict 'exploited');
+    `is_suspected` marks an unproven High/Critical that must render as "suspected"
+    with a visible badge in the findings LIST, not only the detail page; and not
+    count as a proven High/Critical in the headline grade.
+    """
+    verdict = str(finding.get("last_verification_verdict") or "").lower()
+    # Some report-sourced findings carry a scan-time `verified` flag; DB rows use
+    # the verdict. Treat either deterministic signal as proof.
+    is_verified = verdict == "exploited" or finding.get("verified") is True
+    severity = str(finding.get("severity") or "").lower()
+    is_high_crit = severity in ("high", "critical")
+    is_suspected = is_high_crit and not is_verified
+    return {
+        "is_verified": is_verified,
+        "is_suspected": is_suspected,
+        "proof_state": "verified" if is_verified else ("suspected" if is_suspected else "unverified"),
+    }
+
+
 def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
     normalized = normalize_retest_type(override_type)
     if normalized:
@@ -10520,6 +10543,9 @@ async def list_findings(
     for row in rows:
         row_dict = dict(row)
         row_dict.pop("total_count", None)
+        # Single proof-state so the list distinguishes proven vs suspected at a
+        # glance and agrees with the detail page (docs §7).
+        row_dict.update(finding_proof_fields(row_dict))
         findings_out.append(row_dict)
 
     return {
@@ -10539,6 +10565,8 @@ async def get_finding(finding_id: str):
             raise HTTPException(status_code=404, detail="Finding not found")
 
     result = dict(finding)
+    # Same single proof-state the list uses, so list and detail never disagree (§7).
+    result.update(finding_proof_fields(result))
 
     # Retest capability hints so the UI can gate the retest button instead of
     # surfacing a 400 after the click.
