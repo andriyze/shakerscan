@@ -498,6 +498,10 @@ export interface Finding {
   last_verification_confidence?: number
   last_verified_at?: string
   verification_count?: number
+  // Single proof-state (docs §7): derived server-side so list and detail agree.
+  is_verified?: boolean
+  is_suspected?: boolean
+  proof_state?: 'verified' | 'suspected' | 'unverified'
   created_at?: string
   updated_at?: string
   // Retest capability hints (populated by GET /findings/{id})

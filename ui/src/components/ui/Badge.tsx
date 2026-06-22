@@ -17,11 +17,13 @@ const BADGE_BASE = 'inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-me
 export function Badge({
   className = '',
   children,
+  title,
 }: {
   className?: string
   children: React.ReactNode
+  title?: string
 }) {
-  return <span className={`${BADGE_BASE} ${className}`}>{children}</span>
+  return <span className={`${BADGE_BASE} ${className}`} title={title}>{children}</span>
 }
 
 export function SeverityBadge({ severity }: { severity: string }) {
@@ -74,6 +76,37 @@ export function RetestVerdictBadge({
   const style = RETEST_VERDICT_BADGE_STYLES[verdict] ?? RETEST_VERDICT_BADGE_STYLES.inconclusive
   const label = RETEST_VERDICT_LABELS[verdict] ?? verdict.replace(/_/g, ' ')
   return <Badge className={`${style} ${className}`}>{label}</Badge>
+}
+
+/**
+ * Proof-state badge (docs §7): distinguishes a deterministically PROVEN finding
+ * from a SUSPECTED (unproven High/Critical) lead at a glance in the findings list,
+ * driven by the single server-derived `proof_state`. Renders nothing for ordinary
+ * unverified low/medium findings so the list stays uncluttered.
+ */
+export function ProofStateBadge({
+  proofState,
+  className = '',
+}: {
+  proofState?: 'verified' | 'suspected' | 'unverified' | null
+  className?: string
+}) {
+  if (proofState === 'verified') {
+    return (
+      <Badge className={`bg-emerald-500/20 text-emerald-300 ${className}`} >
+        <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full" aria-hidden="true" />
+        Proven
+      </Badge>
+    )
+  }
+  if (proofState === 'suspected') {
+    return (
+      <Badge className={`bg-amber-500/20 text-amber-300 ${className}`} title="Unproven High/Critical — a lead, not confirmed exploitation">
+        Suspected
+      </Badge>
+    )
+  }
+  return null
 }
 
 export function gradeTextColor(grade?: string | null): string {

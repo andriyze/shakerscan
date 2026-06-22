@@ -11,6 +11,7 @@ import {
   EmptyState,
   ErrorState,
   FindingStatusBadge,
+  ProofStateBadge,
   RetestVerdictBadge,
   SeverityBadge,
   SourceTypeBadge,
@@ -682,6 +683,7 @@ function FindingsContent() {
                   <div className="flex items-start gap-3">
                     <div className="flex items-center gap-3 shrink-0">
                       <SeverityBadge severity={finding.severity} />
+                      <ProofStateBadge proofState={finding.proof_state} />
                       <SourceTypeBadge type={sourceType} />
                     </div>
                     <div className="flex-1 min-w-0">
