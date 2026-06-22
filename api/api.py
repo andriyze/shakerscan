@@ -1383,6 +1383,58 @@ def _normalize_scan_result_for_api(scan_result: Any) -> Any:
     return scan_result
 
 
+def synthesize_degraded_result(
+    *,
+    target_url: str | None = None,
+    scan_type: str | None = None,
+    status: str | None = None,
+    phase: str | None = None,
+    progress: int | None = None,
+    error_message: str | None = None,
+    findings: list | None = None,
+    score: Any = None,
+    grade: Any = None,
+    diagnostics: dict | None = None,
+) -> dict[str, Any]:
+    """Build a minimal but durable result for a scan that ended without a full report.
+
+    A terminal scan (failed/cancelled/timed-out) must never leave `scans.result`
+    NULL — that makes `/result` 404 and the trust boundary "a scan that did work
+    has a recoverable result" collapses (docs proposed-next-steps §1). This produces
+    a self-describing degraded report that the UI/API can render: it carries the
+    termination reason, the phase/progress reached, any recovered findings, and the
+    explicit `grade_reliable=false` / `degraded=true` markers so a degraded scan can
+    never masquerade as a clean security result.
+    """
+    findings = findings or []
+    short_reason = (error_message or "Scan ended without a complete report").split("\n", 1)[0][:300]
+    meta: dict[str, Any] = {
+        "status": status or "failed",
+        "partial": bool(findings),
+        "degraded": True,
+        "grade_reliable": False,
+        "finalization_error": short_reason,
+        "terminated_at_phase": phase,
+        "progress_at_termination": progress,
+    }
+    if diagnostics:
+        meta["failure_diagnostics"] = diagnostics
+    return {
+        "target": target_url,
+        "scan_type": scan_type,
+        "findings": findings,
+        "result": {
+            "score": score,
+            "grade": grade,
+            "grade_reliable": False,
+            "summary": f"Degraded result — {short_reason}",
+        },
+        "scan_metadata": meta,
+        "degraded": True,
+        "error": error_message,
+    }
+
+
 def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
     normalized = normalize_retest_type(override_type)
     if normalized:
@@ -1797,8 +1849,24 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 # don't show alarming failures for shards/scans that contributed
                 # results. A genuine hang/crash (no heartbeat, Check 1) or a
                 # duration-exceed with NO recoverable results stays 'failed'.
-                stale_status = 'completed' if (duration_exceeded and partial_result) else 'failed'
+                # Status is decided from the REAL checkpoint, before we synthesize a
+                # placeholder result below — a synthesized result must not flip a
+                # genuine hang into a fake 'completed'.
+                recovered_from_checkpoint = partial_result is not None
+                stale_status = 'completed' if (duration_exceeded and recovered_from_checkpoint) else 'failed'
                 stale_phase = 'completed' if stale_status == 'completed' else 'terminated'
+
+                # Never persist a NULL result for a terminal scan: even a genuine
+                # hang/crash with no checkpoint gets a self-describing degraded
+                # result so /result returns an explanation instead of 404 (docs §1).
+                if partial_result is None:
+                    partial_result = synthesize_degraded_result(
+                        scan_type=scan_type,
+                        status=stale_status,
+                        phase=current_phase or None,
+                        progress=progress,
+                        error_message=error_msg,
+                    )
                 await conn.execute("""
                     UPDATE scans
                     SET status = $8,
@@ -8465,11 +8533,33 @@ async def get_scan_result(scan_id: str):
     """Get full scan result JSON."""
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow(
-            "SELECT result FROM scans WHERE id = $1", uuid.UUID(scan_id)
+            """SELECT result, status, current_phase, progress, scan_type,
+                      error_message, score, grade, target_url
+               FROM scans WHERE id = $1""",
+            uuid.UUID(scan_id),
         )
-        if not scan or not scan['result']:
+        if not scan:
             raise HTTPException(status_code=404, detail="Scan result not found")
-        return _normalize_scan_result_for_api(_decode_json_value(scan['result']))
+        if scan['result']:
+            return _normalize_scan_result_for_api(_decode_json_value(scan['result']))
+        # A scan row with no result is only a 404 while it is still pending/running.
+        # Once it reaches a terminal state, "did work but result not found" is the
+        # exact trust-boundary failure we must not have (docs §1): synthesize a
+        # durable degraded result from the row so callers always get an explanation.
+        if scan['status'] in ('failed', 'completed', 'cancelled'):
+            return _normalize_scan_result_for_api(
+                synthesize_degraded_result(
+                    target_url=scan['target_url'],
+                    scan_type=scan['scan_type'],
+                    status=scan['status'],
+                    phase=scan['current_phase'],
+                    progress=scan['progress'],
+                    error_message=scan['error_message'],
+                    score=scan['score'],
+                    grade=scan['grade'],
+                )
+            )
+        raise HTTPException(status_code=404, detail="Scan result not found")
 
 
 @app.get("/scans/{scan_id}/logs")

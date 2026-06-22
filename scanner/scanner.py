@@ -11327,6 +11327,20 @@ async def build_report(target: str,
         except asyncio.CancelledError:
             pass  # Expected when cancelling
 
+    # Mark finalization complete. The findings + pre_finalize checkpoints are
+    # written before the slow finalize tail (compliance, quality metrics, hunter
+    # summary, redactions); reaching here means that tail ran to completion. A
+    # report recovered from a checkpoint (timeout/crash during the tail) will NOT
+    # carry this flag, so consumers can distinguish a fully-finalized report from a
+    # degraded partial without guessing (docs §1 — finalization is a bounded phase).
+    if not isinstance(report.get("scan_metadata"), dict):
+        report["scan_metadata"] = {}
+    report["scan_metadata"]["finalized"] = True
+    try:
+        report["scan_metadata"]["finalized_at"] = datetime.now(UTC).isoformat()
+    except Exception:
+        pass
+
     return report
 
 # ---------- AI review ----------
