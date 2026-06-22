@@ -69,6 +69,7 @@ interface ScansFilters {
   domain?: string
   search?: string
   page?: number
+  include_internal?: string
 }
 
 function ScansContent() {
@@ -98,6 +99,10 @@ function ScansContent() {
   // Time cohort (?within=7) — exposure "What changed" links use it so the
   // destination shows the same windowed slice the tile counted.
   const withinFilter = filters.within ? Number(filters.within) : 0
+  // Continuous-ASM batch/recon scans are hidden from this list by default (they
+  // are internal coverage work, not user-initiated scans). This opt-in surfaces
+  // them so an "active ASM scan" is reachable here too.
+  const includeInternal = filters.include_internal === 'true'
   // Page is 1-based in URL (page=1 is first page), clamped to valid range
   const rawPage = Math.max(1, filters.page || 1)
 
@@ -161,6 +166,7 @@ function ScansContent() {
         root_domain: domainFilter || undefined,
         target: searchQuery || undefined,
         created_within_days: withinFilter || undefined,
+        include_internal: includeInternal || undefined,
         limit: PAGE_SIZE,
         offset: (rawPage - 1) * PAGE_SIZE
       })
@@ -189,7 +195,7 @@ function ScansContent() {
       }
       return false
     }
-  }, [statusFilter, domainFilter, searchQuery, withinFilter, rawPage, setFilter])
+  }, [statusFilter, domainFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
   useEffect(() => {
     fetchScans()
@@ -366,6 +372,18 @@ function ScansContent() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
         </div>
+
+        {/* Show Continuous-ASM batch/recon scans (hidden by default) */}
+        <label className="flex items-center gap-2 self-center text-sm text-gray-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={includeInternal}
+            onChange={(e) => setFilter('include_internal', e.target.checked ? 'true' : undefined)}
+            aria-label="Show ASM and internal scans"
+            className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+          />
+          Show ASM/internal scans
+        </label>
 
         {/* Time cohort chip (deep-linked from exposure "What changed") */}
         {withinFilter > 0 && (

@@ -9741,9 +9741,10 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
                 status_code=409,
                 detail=(
                     f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden ASM "
-                    "batch/recon scan — open it from the coverage advisor or "
-                    "/scans?include_internal=true."
+                    "finish before queueing another ASM action. It may be a hidden "
+                    "Continuous-ASM batch/recon scan — open it via the 'view scan' link on "
+                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
+                    "'Show ASM/internal scans' on the Scans page."
                 ),
             )
         coverage = await asm_inventory.coverage_summary(conn, target_id)
@@ -9781,9 +9782,10 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
                 status_code=409,
                 detail=(
                     f"Target already has an active scan ({_active_ids[0]}); wait for it to "
-                    "finish before queueing another ASM action. It may be a hidden ASM "
-                    "batch/recon scan — open it from the coverage advisor or "
-                    "/scans?include_internal=true."
+                    "finish before queueing another ASM action. It may be a hidden "
+                    "Continuous-ASM batch/recon scan — open it via the 'view scan' link on "
+                    "the coverage advisor, the 'ASM activity' panel on this page, or enable "
+                    "'Show ASM/internal scans' on the Scans page."
                 ),
             )
         base_opts = _decode_target_scan_options(target["scan_options"])
