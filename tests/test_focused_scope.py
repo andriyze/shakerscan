@@ -66,7 +66,7 @@ def test_focused_non_injection_families_skip_primary_active_runner():
 
     source = Path(__file__).resolve().parents[1].joinpath("scanner", "scanner.py").read_text()
 
-    primary_guard_index = source.index("if run_sqli or run_xss:")
+    primary_guard_index = source.index("if (run_sqli or run_xss) and not active_budget_zero:")
     runner_index = source.index("smart_results = await run_smart_active_tests(")
     focused_skip_index = source.index('active_block["primary_active_skipped"] = reason')
     budget_message_index = source.index("family-specific checks keep the active budget")

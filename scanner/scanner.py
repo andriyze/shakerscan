@@ -11230,7 +11230,11 @@ async def build_report(target: str,
             "configured": True,
         })
 
-    report["scan_metadata"] = {
+    # Preserve metadata set earlier in finalization (notably active-execution
+    # degradation). Replacing this dict would erase the exact markers benchmark
+    # and UI gates use to avoid trusting incomplete active coverage.
+    scan_metadata = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
+    scan_metadata.update({
         "scan_id": scan_session_id,
         "target": target,
         "completed_at": now_utc_iso(),
@@ -11257,7 +11261,8 @@ async def build_report(target: str,
         "checks_skipped": checks_skipped,
         "pre_scan_warnings": pre_scan_issues if pre_scan_issues else None,
         "browser_fetch_error": browser_fetch_error,
-    }
+    })
+    report["scan_metadata"] = scan_metadata
 
     # =========================================================================
     # SCAN QUALITY METRICS: Track signal quality and tool reliability

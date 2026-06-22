@@ -1503,6 +1503,130 @@ def generate_finding_fingerprint(finding: dict) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
+def _finding_proof_rank(finding: dict[str, Any]) -> int:
+    if not isinstance(finding, dict):
+        return 0
+    try:
+        _status, verdict, _confidence = _scan_time_verification_fields(finding)
+    except Exception:
+        verdict = None
+    if verdict == "exploited":
+        return 2
+    if verdict == "likely_vulnerable" or finding.get("suspected") or finding.get("needs_verification"):
+        return 1
+    return 0
+
+
+def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, float, int]:
+    if not isinstance(finding, dict):
+        return (0, 0, 0.0, 0)
+    severity_rank = SEVERITY_ORDER.get(str(finding.get("severity") or "").lower(), 0)
+    try:
+        confidence = float(finding.get("confidence") or finding.get("ai_confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    evidence_size = len(json.dumps(finding.get("evidence") or {}, sort_keys=True, default=str))
+    return (_finding_proof_rank(finding), severity_rank, confidence, evidence_size)
+
+
+def _finding_merge_instance(finding: dict[str, Any]) -> dict[str, Any]:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    return {
+        "title": finding.get("title"),
+        "severity": finding.get("severity"),
+        "tool": finding.get("tool"),
+        "url": finding.get("url") or evidence.get("url") or evidence.get("endpoint") or evidence.get("target"),
+        "method": finding.get("method") or evidence.get("method"),
+        "parameter": (
+            finding.get("parameter")
+            or finding.get("param")
+            or evidence.get("parameter")
+            or evidence.get("param")
+        ),
+        "cwe": finding.get("cwe"),
+        "verified": finding.get("verified") is True,
+    }
+
+
+def _finding_duplicate_count(finding: dict[str, Any]) -> int:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    dedup = finding.get("deduplication") if isinstance(finding.get("deduplication"), dict) else {}
+    for value in (dedup.get("original_count"), evidence.get("duplicate_count")):
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _merge_parent_duplicate_finding(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Merge duplicate parent findings without losing proof/evidence.
+
+    Count collapse should make one product finding, not discard the stronger shard's
+    proof or the concrete URLs/payloads that explain the collapsed instances.
+    """
+    if _finding_strength(incoming) > _finding_strength(existing):
+        primary = copy.deepcopy(incoming)
+    else:
+        primary = copy.deepcopy(existing)
+
+    evidence = primary.get("evidence") if isinstance(primary.get("evidence"), dict) else {}
+    evidence = copy.deepcopy(evidence)
+
+    def add_unique(key: str, value: Any) -> None:
+        if value in (None, "", []):
+            return
+        items = evidence.setdefault(key, [])
+        if not isinstance(items, list):
+            items = [items]
+            evidence[key] = items
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if item not in (None, "") and item not in items:
+                items.append(item)
+
+    for source in (existing, incoming):
+        ev = source.get("evidence") if isinstance(source.get("evidence"), dict) else {}
+        add_unique("all_urls", source.get("url") or ev.get("url") or ev.get("endpoint") or ev.get("target"))
+        add_unique("all_payloads", ev.get("payload") or ev.get("payloads") or ev.get("attack_payload"))
+
+    instances = evidence.setdefault("merged_instances", [])
+    if not isinstance(instances, list):
+        instances = []
+        evidence["merged_instances"] = instances
+    for source in (existing, incoming):
+        instance = _finding_merge_instance(source)
+        if instance not in instances:
+            instances.append(instance)
+    if len(instances) > 25:
+        evidence["merged_instances"] = instances[:25]
+
+    total_count = _finding_duplicate_count(existing) + _finding_duplicate_count(incoming)
+    evidence["duplicate_count"] = total_count
+    primary["evidence"] = evidence
+    dedup = primary.setdefault("deduplication", {})
+    if isinstance(dedup, dict):
+        dedup["consolidated"] = True
+        dedup["original_count"] = total_count
+        tools = {
+            str(source.get("tool"))
+            for source in (existing, incoming)
+            if source.get("tool")
+        }
+        existing_tools = dedup.get("tools_involved")
+        if isinstance(existing_tools, list):
+            tools.update(str(tool) for tool in existing_tools if tool)
+        dedup["tools_involved"] = sorted(tools)
+    return primary
+
+
+def _add_parent_union_finding(union: dict[str, dict], fingerprint: str, finding: dict[str, Any]) -> None:
+    if fingerprint in union:
+        union[fingerprint] = _merge_parent_duplicate_finding(union[fingerprint], finding)
+    else:
+        union[fingerprint] = finding
+
+
 def _strip_null_bytes(value):
     """Recursively remove NUL (\\x00) from strings. PostgreSQL text/JSONB cannot
     store \\u0000 — asyncpg raises UntranslatableCharacterError, which crashed
@@ -4700,6 +4824,60 @@ def _recompute_focused_parent_result(
     return score, grade
 
 
+def _mark_parallel_parent_degraded(
+    merged: dict[str, Any],
+    *,
+    failed_count: int,
+    total_count: int,
+) -> bool:
+    """Mark a merged parent report as partial when any shard failed."""
+    if failed_count <= 0 or total_count <= 0:
+        return False
+    completed_count = max(0, total_count - failed_count)
+    if completed_count:
+        reason = (
+            f"Parallel scan completed with {failed_count}/{total_count} failed shard(s); "
+            "grade is not reliable for full shard coverage"
+        )
+    else:
+        reason = (
+            f"Parallel scan had {failed_count}/{total_count} failed shard(s) and no completed shards; "
+            "grade is not reliable"
+        )
+
+    parallel = merged.setdefault("parallel", {})
+    if isinstance(parallel, dict):
+        parallel["degraded"] = True
+        parallel["degrade_reason"] = reason
+
+    meta = merged.setdefault("scan_metadata", {})
+    if isinstance(meta, dict):
+        meta["partial"] = True
+        meta["degraded"] = True
+        meta["grade_reliable"] = False
+        meta["parallel_shards_failed"] = failed_count
+        meta["parallel_shards_total"] = total_count
+
+    result = merged.setdefault("result", {})
+    if isinstance(result, dict):
+        result["grade_reliable"] = False
+        result["degraded"] = True
+        result["grade_warning"] = reason
+        issues = result.get("coverage_issues")
+        if not isinstance(issues, list):
+            issues = [str(issues)] if issues else []
+        if reason not in issues:
+            issues.append(reason)
+        result["coverage_issues"] = issues
+        grade = result.get("grade")
+        if grade is not None:
+            grade_text = str(grade)
+            if not grade_text.endswith("*"):
+                result.setdefault("original_grade", grade_text)
+                result["grade"] = f"{grade_text}*"
+    return True
+
+
 async def _record_endpoint_telemetry_attempts(
     conn,
     *,
@@ -5496,7 +5674,7 @@ async def process_scan_merge_job(job_data: dict):
                     fp = generate_finding_fingerprint(f)
                 except Exception:
                     fp = json.dumps(f, sort_keys=True, default=str)[:256]
-            union.setdefault(fp, f)
+            _add_parent_union_finding(union, fp, f)
 
     # Union the coverage recon pass's findings (browser/DOM-XSS + global checks the
     # zero-rediscovery shards don't run, already verified by the recon's own smart
@@ -5513,7 +5691,7 @@ async def process_scan_merge_job(job_data: dict):
                         fp = generate_finding_fingerprint(f)
                     except Exception:
                         fp = json.dumps(f, sort_keys=True, default=str)[:256]
-                union.setdefault(fp, f)
+                _add_parent_union_finding(union, fp, f)
             r.delete(f"coverage:recon_findings:{parent_id}")
             print(f"[merge {parent_id[:8]}] unioned {len(_recon_findings)} recon findings", flush=True)
     except Exception as e:
@@ -5646,19 +5824,6 @@ async def process_scan_merge_job(job_data: dict):
     except Exception as e:
         print(f"[merge {parent_id[:8]}] attack-chain recompute skipped: {e}", flush=True)
 
-    # Invariant harness over the freshly-merged report (docs §1): every block was
-    # just recomputed from union_findings, so they MUST reconcile. Record any
-    # violation in the report and log it — a silent desync is exactly the
-    # "sections disagree" failure we are trying to make impossible.
-    try:
-        from findings import check_report_invariants
-        _violations = check_report_invariants(merged)
-        merged['invariant_violations'] = _violations
-        if _violations:
-            print(f"[merge {parent_id[:8]}] REPORT INVARIANT VIOLATIONS: {_violations}", flush=True)
-    except Exception as e:
-        print(f"[merge {parent_id[:8]}] invariant check skipped: {e}", flush=True)
-
     completed_n = sum(1 for c in children if c['status'] == 'completed')
     failed_n = sum(1 for c in children if c['status'] == 'failed')
     strategy = parent_options.get('parallel_strategy')
@@ -5687,6 +5852,11 @@ async def process_scan_merge_job(job_data: dict):
         agg_cov['coverage_reports_from_shards'] = coverage_merge.get('coverage_reports_from_shards', 0)
         merged['smart_coverage'] = agg_cov  # top-level report section
 
+    if _mark_parallel_parent_degraded(merged, failed_count=failed_n, total_count=len(children)):
+        if isinstance(merged.get('result'), dict):
+            agg_grade = merged['result'].get('grade', agg_grade)
+            agg_score = merged['result'].get('score', agg_score)
+
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.
     try:
@@ -5704,6 +5874,18 @@ async def process_scan_merge_job(job_data: dict):
 
     merged['job_id'] = parent_job_id
     merged['scan_id'] = parent_id
+
+    # Invariant harness over the final merged report (docs §1): run it after
+    # shard counts, coverage aggregation, target correction, and partial-result
+    # markers are applied so trust gates see the same report users receive.
+    try:
+        from findings import check_report_invariants
+        _violations = check_report_invariants(merged)
+        merged['invariant_violations'] = _violations
+        if _violations:
+            print(f"[merge {parent_id[:8]}] REPORT INVARIANT VIOLATIONS: {_violations}", flush=True)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] invariant check skipped: {e}", flush=True)
 
     filepath = save_result_file(merged, parent_job_id)
 

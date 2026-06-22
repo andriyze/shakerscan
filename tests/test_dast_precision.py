@@ -147,7 +147,33 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
     assert all(item["suspected"] is True for item in adjusted)
 
 
-def test_precision_policy_accepts_verified_evidence_flag():
+def test_precision_policy_accepts_typed_deterministic_proof():
+    findings = [
+        {
+            "tool": "forced_browsing",
+            "title": "Accessible Sensitive File: /.env",
+            "severity": "high",
+            "cvss_score": 7.5,
+            "confidence": 0.8,
+            "evidence": {
+                "url": "https://example.test/.env",
+                "path": "/.env",
+                "status_code": 200,
+                "content_type": "text/plain",
+                "verified": True,
+                "proof_of_exploitation": True,
+            },
+        }
+    ]
+
+    adjusted = apply_dast_precision_policy(findings)
+
+    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["validation"]["evidence_level"] == "confirmed_exploit"
+    assert adjusted[0]["severity"] == "high"
+
+
+def test_precision_policy_rejects_generic_verified_evidence_flag():
     findings = [
         {
             "tool": "forced_browsing",
@@ -167,9 +193,10 @@ def test_precision_policy_accepts_verified_evidence_flag():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
-    assert adjusted[0]["validation"]["evidence_level"] == "confirmed_exploit"
-    assert adjusted[0]["severity"] == "high"
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["suspected"] is True
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
 
 
 def test_cap_severity_preserves_earliest_original_across_chain():
@@ -253,7 +280,8 @@ def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
     adjusted = apply_dast_precision_policy(findings)
 
     assert adjusted[0]["verified"] is False
-    assert adjusted[0]["precision_policy"]["ai_overrode_verified"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
+    assert "ai_overrode_verified" not in adjusted[0]["precision_policy"]
     assert adjusted[0]["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
     assert adjusted[0]["severity"] == "info"
     assert "AI judged false_positive" in adjusted[0]["verification_reason"]
@@ -276,7 +304,9 @@ def test_precision_policy_ai_false_positive_without_provenance_does_not_override
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
     assert adjusted[0]["severity"] == "high"
 
 
@@ -323,8 +353,11 @@ def test_precision_policy_low_confidence_ai_verdict_ignored():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    # Low-confidence AI verdict does not override heuristic verified.
-    assert adjusted[0]["verified"] is True
+    # Low-confidence AI verdict does not add a downgrade, but the generic
+    # verified flag still does not become deterministic proof.
+    assert adjusted[0]["verified"] is False
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["generic_verified_ignored"] is True
 
 
 def test_precision_policy_syncs_validation_confidence_on_verified():
@@ -336,7 +369,7 @@ def test_precision_policy_syncs_validation_confidence_on_verified():
             "cvss_score": 9.0,
             "confidence": 0.7,
             "verified": True,
-            "validation": {"confidence": 0.75, "evidence_level": "strong_indicator"},
+            "validation": {"verified": True, "confidence": 0.75, "evidence_level": "confirmed_exploit"},
             "evidence": {"verified": True},
         }
     ]
@@ -474,6 +507,7 @@ def test_precision_policy_accepts_graphql_verified_evidence_flag():
             "evidence": {
                 "issue": "introspection_enabled",
                 "verified": True,
+                "proof_type": "differential_response",
                 "evidence": [{"type": "introspection_enabled", "verified": True}],
             },
         }
@@ -831,7 +865,8 @@ def test_post_ai_precision_policy_applies_ai_false_positive_downgrade():
     assert finding["verified"] is False
     assert finding["severity"] == "info"
     assert finding["precision_policy"]["confidence_cap_reason"] == "ai_false_positive"
-    assert finding["precision_policy"]["ai_overrode_reason"] == "ai_false_positive_high_confidence"
+    assert finding["precision_policy"]["generic_verified_ignored"] is True
+    assert "ai_overrode_reason" not in finding["precision_policy"]
 
 
 def test_focused_fallback_summary_uses_focused_remediation_only():

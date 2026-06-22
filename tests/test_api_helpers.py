@@ -290,6 +290,7 @@ def test_scan_result_verification_overrides_promote_raw_scan_proof():
             {
                 "id": "smart_sqli:abc",
                 "verified": True,
+                "proof_of_exploitation": True,
                 "confidence": 0.95,
                 "last_verification_verdict": None,
             }
@@ -317,11 +318,16 @@ def test_scan_result_verification_overrides_ignore_stale_false_positive_without_
 
 def test_scan_time_verification_fields_preserves_zero_confidence():
     fields = scan_time_verification_fields(
-        {"verified": True, "verification_confidence": 0.0, "confidence": 0.95}
+        {"proof_of_exploitation": True, "verification_confidence": 0.0, "confidence": 0.95}
     )
 
     assert fields["last_verification_verdict"] == "exploited"
     assert fields["last_verification_confidence"] == 0.0
+
+
+def test_scan_time_verification_fields_generic_verified_is_not_proof():
+    assert scan_time_verification_fields({"verified": True, "confidence": 0.95}) is None
+    assert scan_time_verification_fields({"evidence": {"verified": True}, "confidence": 0.95}) is None
 
 
 def test_scan_time_verification_fields_strong_proof_is_exploited():

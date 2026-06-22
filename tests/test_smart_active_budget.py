@@ -165,18 +165,20 @@ def test_smart_sqli_emits_endpoint_attempt_telemetry(monkeypatch):
         )
     )
 
-    assert result["endpoint_attempts"] == [
-        {
-            "custom_endpoint": "GET /search?q=test",
-            "family": "sqli",
-            "method": "GET",
-            "url": "https://example.test/search?q=test",
-            "param_count": 1,
-            "attempted_params_count": 1,
-            "completed_params_count": 1,
-            "status": "completed",
-        }
-    ]
+    assert len(result["endpoint_attempts"]) == 1
+    attempt = result["endpoint_attempts"][0]
+    expected = {
+        "custom_endpoint": "GET /search?q=test",
+        "family": "sqli",
+        "method": "GET",
+        "url": "https://example.test/search?q=test",
+        "param_count": 1,
+        "attempted_params_count": 1,
+        "completed_params_count": 1,
+        "status": "completed",
+    }
+    assert {key: attempt.get(key) for key in expected} == expected
+    assert attempt["techniques_attempted"]
 
 
 def test_smart_sqli_accepts_query_param_maps(monkeypatch):

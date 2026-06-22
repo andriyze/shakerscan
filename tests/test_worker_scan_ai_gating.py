@@ -2068,6 +2068,57 @@ def test_focused_parent_result_recomputed_from_merged_bola_findings():
     assert "original_grade" not in merged["result"]
 
 
+def test_parallel_parent_degraded_when_any_shard_fails():
+    merged = {
+        "result": {"score": 90, "grade": "C", "grade_reliable": True},
+        "scan_metadata": {},
+        "parallel": {"shards_completed": 2, "shards_failed": 1},
+    }
+
+    changed = worker._mark_parallel_parent_degraded(merged, failed_count=1, total_count=3)
+
+    assert changed is True
+    assert merged["parallel"]["degraded"] is True
+    assert merged["scan_metadata"]["degraded"] is True
+    assert merged["scan_metadata"]["grade_reliable"] is False
+    assert merged["result"]["grade_reliable"] is False
+    assert merged["result"]["degraded"] is True
+    assert merged["result"]["grade"] == "C*"
+    assert merged["result"]["original_grade"] == "C"
+    assert merged["result"]["coverage_issues"]
+
+
+def test_parent_duplicate_merge_preserves_stronger_proof_and_instances():
+    union = {}
+    weak = {
+        "tool": "smart_sqli",
+        "title": "SQL injection suspected",
+        "severity": "high",
+        "confidence": 0.55,
+        "evidence": {"url": "https://example.test/a", "payload": "1"},
+    }
+    proven = {
+        "tool": "browser_replay",
+        "title": "SQL injection proven",
+        "severity": "high",
+        "confidence": 0.95,
+        "proof_of_exploitation": True,
+        "evidence": {"url": "https://example.test/b", "payload": "' OR 1=1--"},
+    }
+
+    worker._add_parent_union_finding(union, "same-finding", weak)
+    worker._add_parent_union_finding(union, "same-finding", proven)
+
+    merged = union["same-finding"]
+    assert merged["title"] == "SQL injection proven"
+    assert merged["evidence"]["duplicate_count"] == 2
+    assert set(merged["evidence"]["all_urls"]) == {"https://example.test/a", "https://example.test/b"}
+    assert set(merged["evidence"]["all_payloads"]) == {"1", "' OR 1=1--"}
+    assert len(merged["evidence"]["merged_instances"]) == 2
+    assert merged["deduplication"]["consolidated"] is True
+    assert merged["deduplication"]["tools_involved"] == ["browser_replay", "smart_sqli"]
+
+
 def test_focused_family_from_dynamic_coverage_family_options():
     options = {
         "parallel_strategy": "coverage_family",

@@ -255,6 +255,18 @@ def apply_gates(card, fixture):
     results = []
     def chk(name, ok, detail):
         results.append({"gate": name, "pass": bool(ok), "detail": detail})
+    invariant_violations = card.get("report_invariant_violations") or []
+    chk("report_invariants_clean", not invariant_violations,
+        "clean" if not invariant_violations else "; ".join(str(v) for v in invariant_violations[:5]))
+    chk("grade_reliable", card.get("grade_reliable") is not False,
+        f"grade_reliable={card.get('grade_reliable')}")
+    chk("active_execution_ok", not bool(card.get("active_execution_failed")),
+        f"active_execution_failed={bool(card.get('active_execution_failed'))}")
+    chk("report_not_degraded", not bool(card.get("report_degraded")),
+        f"report_degraded={bool(card.get('report_degraded'))}")
+    if "retest_settled" in card:
+        chk("retest_settled", card.get("retest_settled") is True,
+            f"retest_settled={card.get('retest_settled')}")
     if "min_verified_high_critical" in gates:
         n = gates["min_verified_high_critical"]
         chk("min_verified_high_critical", card["verified_high_critical"] >= n,
@@ -309,14 +321,16 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
     finish_card["phase"] = "scan_finish"
     # §4 active-execution honesty + §2 report-invariant signals on the card.
     meta = report.get("scan_metadata") or {}
+    result_block = report.get("result") or {}
     # §4: record the resolved budget contract the scan actually ran with, so a
     # budget change is visible in the scorecard history.
     _opts = meta.get("options") if isinstance(meta.get("options"), dict) else {}
     finish_card["resolved_budget"] = _opts.get("resolved_budget")
     finish_card["invariant_violations"] = report.get("invariant_violations")
     finish_card["active_execution_failed"] = bool(meta.get("active_execution_failed"))
-    finish_card["grade_reliable"] = (report.get("result") or {}).get("grade_reliable")
-    finish_card["report_invariant_violations"] = _report_invariants(report)
+    finish_card["grade_reliable"] = result_block.get("grade_reliable")
+    finish_card["report_degraded"] = bool(report.get("degraded") or meta.get("degraded") or result_block.get("degraded"))
+    finish_card["report_invariant_violations"] = list(report.get("invariant_violations") or []) or _report_invariants(report)
     finish_card["two_user"] = two_user
 
     cards_by_phase = {"scan_finish": finish_card}
@@ -334,6 +348,15 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
             post_card["phase"] = "post_retest"
             post_card["retest_settled"] = settled
             post_card["two_user"] = two_user
+            # The post-retest card is the scoring card, so carry over the report-level
+            # trust signals from scan finish. A verified-count lift must not hide a
+            # degraded report, active-lane failure, or invariant violation.
+            post_card["resolved_budget"] = finish_card.get("resolved_budget")
+            post_card["invariant_violations"] = finish_card.get("invariant_violations")
+            post_card["active_execution_failed"] = finish_card.get("active_execution_failed")
+            post_card["grade_reliable"] = finish_card.get("grade_reliable")
+            post_card["report_degraded"] = finish_card.get("report_degraded")
+            post_card["report_invariant_violations"] = finish_card.get("report_invariant_violations")
             cards_by_phase["post_retest"] = post_card
             scoring_card = post_card  # gates judged on proven state
             print(f"[{name}] post-retest re-score: verified H/C "

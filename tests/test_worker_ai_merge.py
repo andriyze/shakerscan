@@ -32,7 +32,7 @@ from worker import (  # noqa: E402
 
 def test_scan_time_verification_fields_promote_fresh_verified_finding():
     status, verdict, confidence = _scan_time_verification_fields(
-        {"verified": True, "confidence": 0.95, "last_verification_verdict": "false_positive"}
+        {"proof_of_exploitation": True, "confidence": 0.95, "last_verification_verdict": "false_positive"}
     )
 
     assert status == "still_vulnerable"
@@ -42,12 +42,21 @@ def test_scan_time_verification_fields_promote_fresh_verified_finding():
 
 def test_scan_time_verification_fields_accept_nested_validation_proof():
     status, verdict, confidence = _scan_time_verification_fields(
-        {"validation": {"verified": True, "confidence": "0.88"}}
+        {"validation": {"verified": True, "evidence_level": "confirmed_exploit", "confidence": "0.88"}}
     )
 
     assert status == "still_vulnerable"
     assert verdict == "exploited"
     assert confidence == 0.88
+
+
+def test_scan_time_verification_fields_rejects_generic_verified_flags():
+    assert _scan_time_verification_fields(
+        {"verified": True, "confidence": 0.95}
+    ) == (None, None, None)
+    assert _scan_time_verification_fields(
+        {"validation": {"verified": True, "confidence": "0.88"}}
+    ) == (None, None, None)
 
 
 def test_scan_time_verification_fields_ignores_stale_false_positive_without_fresh_proof():

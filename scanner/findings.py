@@ -24,6 +24,21 @@ _ENDPOINT_EVIDENCE_KEYS = (
 # Evidence keys naming the injected/affected parameter (kept in identity so two
 # different params on the same endpoint stay distinct).
 _PARAM_EVIDENCE_KEYS = ("parameter", "param", "object_id_key", "injection_point", "param_name")
+_CONFIRMED_EVIDENCE_LEVELS = {
+    "confirmed_exploit",
+    "proof_of_exploit",
+    "proof_of_exploitation",
+    "browser_proven",
+}
+_DETERMINISTIC_PROOF_TYPES = {
+    "browser_execution",
+    "browser_proof",
+    "cross_principal_replay",
+    "sqli_data_extraction",
+    "data_extraction",
+    "oob_callback",
+    "differential_response",
+}
 
 
 def template_path(path: str) -> str:
@@ -98,6 +113,47 @@ def templated_finding_identity(finding: dict) -> str | None:
     # detectors don't collapse when CWE is absent.
     vuln = str(finding.get("cwe") or "").strip() or str(finding.get("tool") or "").strip() or "generic"
     return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"})
+
+
+def _has_deterministic_proof(
+    finding: dict[str, Any],
+    evidence: dict[str, Any],
+    validation: dict[str, Any],
+    poe: dict[str, Any],
+    poe_result: dict[str, Any],
+) -> bool:
+    """Typed proof predicate for the verified tier.
+
+    Generic ``verified=True`` is too ambiguous: older emitters used it for
+    reachability, heuristic confidence, or AI support. The verified tier now
+    requires explicit exploit/proof provenance.
+    """
+    evidence_level = str(validation.get("evidence_level") or "").strip().lower()
+    proof_type = str(
+        finding.get("proof_type")
+        or evidence.get("proof_type")
+        or validation.get("proof_type")
+        or validation.get("poe_technique")
+        or ""
+    ).strip().lower()
+    return (
+        _truthy(validation.get("poe_proven"))
+        or _truthy(poe.get("proven"))
+        or _truthy(poe_result.get("proven"))
+        or _truthy(finding.get("proof_of_exploitation"))
+        or _truthy(evidence.get("proof_of_exploitation"))
+        or _truthy(evidence.get("payload_executed"))
+        or _truthy(evidence.get("executed"))
+        or bool(finding.get("extraction_evidence") or evidence.get("extraction_evidence"))
+        or bool(finding.get("extracted_data") or evidence.get("extracted_data"))
+        or bool(finding.get("browser_proof") or evidence.get("browser_proof"))
+        or proof_type in _DETERMINISTIC_PROOF_TYPES
+        or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
+    )
 
 # Support both package import (from scanner.findings) and script import (python3 findings.py)
 try:
@@ -352,20 +408,20 @@ def apply_dast_precision_policy(
         title = str(finding.get("title") or "").lower()
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
+        poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
         poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
 
         ai_confidence_score = ai_confidence(finding)
         ai_true_positive = is_trusted_ai_true_positive(finding)
         ai_false_positive = is_trusted_ai_false_positive(finding)
 
-        heuristic_verified = (
-            finding.get("verified") is True
-            or evidence.get("verified") is True
-            or evidence.get("confirmed") is True
-            or validation.get("verified") is True
-            or validation.get("poe_proven") is True
-            or poe_result.get("proven") is True
+        generic_verified_signal = (
+            _truthy(finding.get("verified"))
+            or _truthy(evidence.get("verified"))
+            or _truthy(evidence.get("confirmed"))
+            or _truthy(validation.get("verified"))
         )
+        heuristic_verified = _has_deterministic_proof(finding, evidence, validation, poe, poe_result)
 
         # AI verdict adjusts heuristic gating, but NEVER promotes to `verified`
         # (docs proposed-next-steps §8 — one proof taxonomy: AI is supporting
@@ -411,6 +467,17 @@ def apply_dast_precision_policy(
 
         if verified:
             continue
+
+        if generic_verified_signal:
+            policy = finding.setdefault("precision_policy", {})
+            policy["generic_verified_ignored"] = True
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["proof_state"] = "likely_vulnerable"
+            finding.setdefault(
+                "verification_reason",
+                "Generic verified flag is not deterministic exploit proof",
+            )
 
         # AI true_positive is a supporting signal, not deterministic proof (§8).
         # Keep the AI-validated finding visible at its assessed severity as a

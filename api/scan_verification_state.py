@@ -12,6 +12,28 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+_CONFIRMED_EVIDENCE_LEVELS = {
+    "confirmed_exploit",
+    "proof_of_exploit",
+    "proof_of_exploitation",
+    "browser_proven",
+}
+
+_DETERMINISTIC_PROOF_TYPES = {
+    "browser_execution",
+    "browser_proof",
+    "cross_principal_replay",
+    "sqli_data_extraction",
+    "data_extraction",
+    "oob_callback",
+    "differential_response",
+}
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"})
+
+
 def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
     """Return DB verification fields implied by fresh scan-time proof.
 
@@ -28,21 +50,37 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     if not isinstance(finding, dict):
         return None
 
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
     poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
     verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
     result_status = str(finding.get("result_status") or "").strip().lower()
     confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
+    evidence_level = str(validation.get("evidence_level") or "").strip().lower()
+    proof_type = str(
+        finding.get("proof_type")
+        or evidence.get("proof_type")
+        or validation.get("proof_type")
+        or validation.get("poe_technique")
+        or ""
+    ).strip().lower()
 
     strong_proof = (
-        finding.get("verified") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-        or poe.get("proven") is True
-        or poe_result.get("proven") is True
+        _truthy(validation.get("poe_proven"))
+        or _truthy(poe.get("proven"))
+        or _truthy(poe_result.get("proven"))
         or verdict == "exploited"
         or result_status == "verified_vulnerable"
+        or _truthy(finding.get("proof_of_exploitation"))
+        or _truthy(evidence.get("proof_of_exploitation"))
+        or _truthy(evidence.get("payload_executed"))
+        or _truthy(evidence.get("executed"))
+        or bool(finding.get("extraction_evidence") or evidence.get("extraction_evidence"))
+        or bool(finding.get("extracted_data") or evidence.get("extracted_data"))
+        or bool(finding.get("browser_proof") or evidence.get("browser_proof"))
+        or proof_type in _DETERMINISTIC_PROOF_TYPES
+        or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
     )
     weak_proof = (
         verdict == "likely_vulnerable"

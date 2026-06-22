@@ -59,6 +59,28 @@ def test_fleet_gate_allows_uniform_fleet(monkeypatch):
     assert summary["stale"] == 0
 
 
+def test_apply_gates_fails_report_trust_signals():
+    card = {
+        "verified_high_critical": 10,
+        "false_positive_risk": 0,
+        "expected_found": [],
+        "report_invariant_violations": ["findings_count mismatch"],
+        "grade_reliable": False,
+        "active_execution_failed": True,
+        "report_degraded": True,
+        "retest_settled": False,
+    }
+
+    gates = b.apply_gates(card, {"gates": {}})
+    failed = {g["gate"] for g in gates if not g["pass"]}
+
+    assert "report_invariants_clean" in failed
+    assert "grade_reliable" in failed
+    assert "active_execution_ok" in failed
+    assert "report_not_degraded" in failed
+    assert "retest_settled" in failed
+
+
 def test_retest_settle_returns_true_when_drained(monkeypatch):
     monkeypatch.setattr(b, "_get", lambda *a, **k: {
         "retest_pending": 0, "retest_queued": 0, "retest_running": 0,

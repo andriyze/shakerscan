@@ -26,6 +26,8 @@ from typing import Any
 
 from .common import get_auth_curl_args, run
 
+__test__ = False
+
 # curl -w sentinel: lets us read status + content-type without parsing the
 # (multi-block, redirect-prone) raw header stream.
 _META = "__SHAKER_META__"
@@ -472,3 +474,12 @@ async def run_injection_extra_checks(
         "skipped_checks": skipped_checks,
         "safe_mode": safe_mode,
     }
+
+
+for _pytest_helper in (
+    test_csv_formula_injection,
+    test_prototype_pollution,
+    test_rfi,
+    test_ssi_esi_injection,
+):
+    _pytest_helper.__test__ = False

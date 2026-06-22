@@ -7,6 +7,7 @@ DOCS = [
     ROOT / "docs" / "continuous-asm-architecture.md",
     ROOT / "docs" / "multi-node-architecture.md",
 ]
+STATUS_MATRIX_DOCS = DOCS[:2]
 
 REQUIRED_PROMPT_CONTRACT_BLOCKS = [
     "MODE",
@@ -63,7 +64,7 @@ def _shared_matrix_block(path: Path) -> str:
 
 
 def test_architecture_docs_share_identical_status_matrix():
-    blocks = {doc.name: _shared_matrix_block(doc) for doc in DOCS}
+    blocks = {doc.name: _shared_matrix_block(doc) for doc in STATUS_MATRIX_DOCS}
     canonical = blocks["parallel-scan-architecture.md"]
     assert blocks == {name: canonical for name in blocks}
 

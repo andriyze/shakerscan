@@ -101,3 +101,36 @@ def test_empty_fleet_not_uniform():
     s = api_module.compute_fleet_summary([])
     assert s["count"] == 0
     assert s["fleet_uniform"] is False
+
+
+def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
+    containers = [
+        {"Id": "aaa111", "Names": ["/shakerscan-worker-1"], "State": "running"},
+        {"Id": "bbb222", "Names": ["/shakerscan-worker-2"], "State": "running"},
+        {"Id": "ccc333", "Names": ["/shakerscan-worker-3"], "State": "running"},
+        {"Id": "ddd444", "Names": ["/shakerscan-worker-old"], "State": "exited"},
+    ]
+
+    class _Redis:
+        def hgetall(self, key):
+            assert key == "shakerscan:worker_build"
+            return {
+                b"aaa": b'{"build_fingerprint":"fp-current","scanner_version":"v1"}',
+                b"ccc": b'{"build_fingerprint":"fp-old","scanner_version":"v1"}',
+                b"ddd": b'{"build_fingerprint":"fp-old","scanner_version":"v1"}',
+            }
+
+    monkeypatch.setattr(api_module, "docker_socket_request", lambda *a, **k: (200, containers))
+    monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "fp-current")
+    monkeypatch.setattr(api_module, "current_scanner_version", lambda: "v1")
+
+    snap = api_module._worker_freshness_snapshot()
+
+    assert snap["available"] is True
+    assert snap["fleet_size"] == 4
+    assert snap["running"] == 3
+    assert snap["stale_count"] == 1
+    assert snap["stale_names"] == ["shakerscan-worker-3"]
+    assert snap["pending_count"] == 1
+    assert snap["pending_names"] == ["shakerscan-worker-2"]

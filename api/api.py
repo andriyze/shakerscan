@@ -5283,9 +5283,10 @@ def worker_build_current(
 def _worker_freshness_snapshot() -> dict:
     """Fleet build-freshness snapshot for scan-submit guards/metadata (§2).
 
-    Returns fleet_size, running, stale_count, stale_names, and the expected build
-    fingerprint. Best-effort: when Docker/Redis are unavailable, returns
-    available=False so callers fail open (never block a scan on missing telemetry).
+    Returns fleet_size, running, stale/pending counts, stale/pending names, and
+    the expected build fingerprint. Best-effort: when Docker/Redis are unavailable,
+    returns available=False so callers fail open (never block a scan on missing
+    telemetry).
     """
     snap = {
         "available": False,
@@ -5293,6 +5294,8 @@ def _worker_freshness_snapshot() -> dict:
         "running": 0,
         "stale_count": 0,
         "stale_names": [],
+        "pending_count": 0,
+        "pending_names": [],
         "expected_build_fingerprint": expected_build_fingerprint(),
     }
     try:
@@ -5330,8 +5333,11 @@ def _worker_freshness_snapshot() -> dict:
             if not _is_scan_worker_container_name(name):
                 continue
             snap["fleet_size"] += 1
-            if c.get("State") == "running":
+            is_running = c.get("State") == "running"
+            if is_running:
                 snap["running"] += 1
+            else:
+                continue
             info = _bfc(c.get("Id", "")) or {}
             cur = worker_build_current(
                 reported_fingerprint=info.get("build_fingerprint"),
@@ -5342,6 +5348,9 @@ def _worker_freshness_snapshot() -> dict:
             if cur is False:
                 snap["stale_count"] += 1
                 snap["stale_names"].append(name)
+            elif cur is None:
+                snap["pending_count"] += 1
+                snap["pending_names"].append(name)
     except Exception:
         pass
     return snap
@@ -8198,20 +8207,25 @@ async def submit_scan(request: ScanRequest):
     if _freshness.get("available"):
         options_payload["expected_build_fingerprint_at_submit"] = _freshness.get("expected_build_fingerprint")
         options_payload["stale_worker_count_at_submit"] = _freshness.get("stale_count")
+        options_payload["pending_worker_count_at_submit"] = _freshness.get("pending_count")
         options_payload["worker_fleet_size_at_submit"] = _freshness.get("fleet_size")
+        unsafe_worker_count = int(_freshness.get("stale_count") or 0) + int(_freshness.get("pending_count") or 0)
         if (getattr(request.options, "require_current_workers", False)
                 and scan_type in ACTIVE_ENFORCED_SCAN_TYPES
-                and _freshness.get("stale_count", 0) > 0):
+                and unsafe_worker_count > 0):
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "error": "stale_workers",
+                    "error": "workers_not_confirmed_current",
                     "message": (
-                        f"{_freshness['stale_count']} of {_freshness['fleet_size']} workers are "
-                        f"build-stale; refusing '{scan_type}' scan with require_current_workers=true. "
-                        "Restart workers to deploy current code, then re-submit."
+                        f"{unsafe_worker_count} of {_freshness['fleet_size']} workers are not confirmed "
+                        f"current ({_freshness.get('stale_count', 0)} stale, "
+                        f"{_freshness.get('pending_count', 0)} pending); refusing '{scan_type}' scan "
+                        "with require_current_workers=true. Restart workers to deploy current code and "
+                        "wait for build fingerprints, then re-submit."
                     ),
                     "stale_workers": _freshness.get("stale_names", []),
+                    "pending_workers": _freshness.get("pending_names", []),
                 },
             )
 
