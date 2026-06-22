@@ -337,7 +337,31 @@ def resolve_scan_budget(
                 value = ceiling
             budget[key] = value
 
+    budget.setdefault("budget_source", "resolved")
     return budget
+
+
+def resolve_or_consume_budget(
+    scan_type: str | None,
+    options: dict[str, Any] | None = None,
+    budget_profile: str | None = None,
+    custom_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return THE one resolved budget contract for a scan (docs proposed-next-steps §4).
+
+    Budget bugs recurred because the watchdog, stale checker, coverage planner,
+    dynamic ASM batch path, and scanner internals each re-resolved the budget and
+    could silently re-clamp it (e.g. SQLi back to 8s/endpoint after the planner
+    raised it). The budget is resolved ONCE at submission/planning and stamped into
+    ``options['resolved_budget']``; every runtime path must CONSUME that exact
+    object rather than re-deriving it. This consumes the stamped contract when
+    present and only resolves fresh (legacy/older scans) when it is absent.
+    """
+    if isinstance(options, dict):
+        stamped = options.get("resolved_budget")
+        if isinstance(stamped, dict) and stamped.get("max_duration_minutes") is not None:
+            return stamped
+    return resolve_scan_budget(scan_type, budget_profile, custom_budget)
 
 
 # =============================================================================

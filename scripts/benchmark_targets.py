@@ -309,6 +309,11 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
     finish_card["phase"] = "scan_finish"
     # §4 active-execution honesty + §2 report-invariant signals on the card.
     meta = report.get("scan_metadata") or {}
+    # §4: record the resolved budget contract the scan actually ran with, so a
+    # budget change is visible in the scorecard history.
+    _opts = meta.get("options") if isinstance(meta.get("options"), dict) else {}
+    finish_card["resolved_budget"] = _opts.get("resolved_budget")
+    finish_card["invariant_violations"] = report.get("invariant_violations")
     finish_card["active_execution_failed"] = bool(meta.get("active_execution_failed"))
     finish_card["grade_reliable"] = (report.get("result") or {}).get("grade_reliable")
     finish_card["report_invariant_violations"] = _report_invariants(report)

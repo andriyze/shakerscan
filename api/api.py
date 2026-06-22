@@ -32,11 +32,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
-    from constants import SMART_SCAN_BUDGETS, resolve_scan_budget
+    from constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 except ModuleNotFoundError as exc:
     if exc.name != "constants":
         raise
-    from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget
+    from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
@@ -992,6 +992,9 @@ def _build_scan_options_payload(options: Any, scan_type: str) -> dict[str, Any]:
         effective_budget_profile,
         options_payload.get("custom_budget"),
     )
+    # Stamp provenance: this is THE budget contract (docs §4); runtime paths must
+    # consume it via resolve_or_consume_budget, never re-resolve and re-clamp it.
+    resolved_budget["budget_source"] = "submission"
     options_payload["budget_profile"] = resolved_budget["budget_profile"]
     options_payload["resolved_budget"] = resolved_budget
     options_payload, _family = _apply_scan_check_family_policy(options_payload)
@@ -1791,13 +1794,18 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
 
             # Check 2: Max duration exceeded (safety net)
             if not is_stale and started_at:
+                # Consume the budget contract stamped at submission rather than
+                # re-resolving it here (docs §4) — the duration guard must use the
+                # SAME max_duration the scan was planned with, or it can reap a scan
+                # that is still inside its real budget.
                 effective_budget_profile = options.get("budget_profile") if isinstance(options, dict) else None
                 if isinstance(options, dict) and options.get("thorough_params") and not effective_budget_profile and not options.get("custom_budget"):
                     effective_budget_profile = "thorough"
-                resolved_budget = resolve_scan_budget(
+                resolved_budget = resolve_or_consume_budget(
                     scan_type,
-                    effective_budget_profile,
-                    options.get("custom_budget") if isinstance(options, dict) else None,
+                    options=options if isinstance(options, dict) else None,
+                    budget_profile=effective_budget_profile,
+                    custom_budget=options.get("custom_budget") if isinstance(options, dict) else None,
                 )
                 max_duration = int(resolved_budget.get("max_duration_minutes") or MAX_SCAN_DURATION.get(scan_type, 120))
                 scan_duration = (now - started_at.replace(tzinfo=None)).total_seconds() / 60

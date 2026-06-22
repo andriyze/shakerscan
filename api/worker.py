@@ -46,9 +46,9 @@ import parallel_scan
 import asm_inventory
 
 try:
-    from constants import resolve_scan_budget
+    from constants import resolve_scan_budget, resolve_or_consume_budget
 except ImportError:
-    from scanner.constants import resolve_scan_budget
+    from scanner.constants import resolve_scan_budget, resolve_or_consume_budget
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -2403,7 +2403,11 @@ def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> 
     if opts.get("thorough_params") and not profile and not custom_budget:
         profile = "thorough"
     try:
-        resolved = resolve_scan_budget(scan_type, profile, custom_budget)
+        # Consume the stamped budget contract (docs §4) so the active-endpoint cap
+        # matches what the scan was planned with, not a re-derived value.
+        resolved = resolve_or_consume_budget(
+            scan_type, options=opts, budget_profile=profile, custom_budget=custom_budget
+        )
     except Exception:
         resolved = {}
     try:
