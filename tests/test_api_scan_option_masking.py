@@ -264,6 +264,32 @@ def test_asm_recommendation_active_scan_waits_and_reports_blocker():
     assert rec["blockers"][0]["kind"] == "active_scan"
 
 
+def test_asm_recommendation_active_scan_blocker_surfaces_scan_id():
+    # The blocking scan is usually a hidden ASM batch/recon row; the blocker must
+    # carry its id so the UI can link the otherwise-invisible "active (1)" scan.
+    rec = api_module._asm_recommendation(
+        {"total": 9, "tested": 0, "untested": 0, "stale": 0, "in_progress": 9},
+        claimable=0,
+        active_scans=1,
+        active_scan_ids=["73e93470-aaaa-bbbb-cccc-000000000000"],
+    )
+    blocker = rec["blockers"][0]
+    assert blocker["kind"] == "active_scan"
+    assert blocker["scan_id"] == "73e93470-aaaa-bbbb-cccc-000000000000"
+    assert blocker["scan_ids"] == ["73e93470-aaaa-bbbb-cccc-000000000000"]
+
+
+def test_asm_recommendation_active_scan_blocker_omits_id_when_unknown():
+    rec = api_module._asm_recommendation(
+        {"total": 9, "tested": 0, "untested": 0, "stale": 0, "in_progress": 9},
+        claimable=0,
+        active_scans=1,
+    )
+    blocker = rec["blockers"][0]
+    assert blocker["kind"] == "active_scan"
+    assert "scan_id" not in blocker
+
+
 def test_asm_recommendation_auth_missing_is_visible_but_does_not_block_recon():
     rec = api_module._asm_recommendation(
         {"total": 20, "tested": 20, "untested": 0, "stale": 0, "in_progress": 0},
@@ -701,6 +727,8 @@ class _AsmActionConn:
         return 0
 
     async def fetch(self, query, *args):
+        if "SELECT id FROM scans" in query:
+            return [{"id": uuid.uuid4()} for _ in range(self.active)]
         if "last_attempt_status" in query and "GROUP BY" in query:
             return self.attempts
         return []

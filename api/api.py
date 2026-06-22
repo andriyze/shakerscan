@@ -9439,6 +9439,24 @@ async def _asm_active_scan_count(conn, target_id: str) -> int:
     ) or 0)
 
 
+async def _asm_active_scan_ids(conn, target_id: str) -> list[str]:
+    """IDs of the active scans blocking ASM actions on this target.
+
+    The blocking scan is usually a Continuous-ASM batch/recon row, which is hidden
+    from the /scans list by default — so callers surface the id here, letting the
+    UI link the otherwise-invisible "a scan is already active" scan.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id FROM scans
+        WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
+        ORDER BY started_at DESC NULLS LAST
+        """,
+        uuid.UUID(target_id),
+    )
+    return [str(r["id"]) for r in rows]
+
+
 def _asm_recommended_campaigns(
     *,
     coverage: dict[str, Any],
@@ -9505,6 +9523,7 @@ def _asm_recommendation(
     *,
     claimable: int = 0,
     active_scans: int = 0,
+    active_scan_ids: list[str] | None = None,
     last_attempt_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Small, stable decision model for UI/API/AI callers.
@@ -9523,7 +9542,18 @@ def _asm_recommendation(
 
     blockers: list[dict[str, Any]] = []
     if active_scans > 0:
-        blockers.append({"kind": "active_scan", "count": active_scans, "message": "A scan is already active for this target."})
+        # Surface the active scan id(s) so the UI can link the otherwise-hidden
+        # ASM batch/recon scan instead of leaving the user with "active (1)" and
+        # nothing to click.
+        active_blocker: dict[str, Any] = {
+            "kind": "active_scan",
+            "count": active_scans,
+            "message": "A scan is already active for this target.",
+        }
+        if active_scan_ids:
+            active_blocker["scan_id"] = active_scan_ids[0]
+            active_blocker["scan_ids"] = active_scan_ids
+        blockers.append(active_blocker)
     if auth_missing > 0:
         blockers.append({"kind": "auth_missing", "count": auth_missing, "message": "Some authenticated endpoints need credentials before they can be replayed."})
     if partial > 0:
@@ -9705,8 +9735,17 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        if await _asm_active_scan_count(conn, target_id) > 0:
-            raise HTTPException(status_code=409, detail="Target already has an active scan; wait for it to finish before queueing another ASM action")
+        _active_ids = await _asm_active_scan_ids(conn, target_id)
+        if _active_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
+                    "finish before queueing another ASM action. It may be a hidden ASM "
+                    "batch/recon scan — open it from the coverage advisor or "
+                    "/scans?include_internal=true."
+                ),
+            )
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
@@ -9736,8 +9775,17 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         target = await conn.fetchrow("SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        if await _asm_active_scan_count(conn, target_id) > 0:
-            raise HTTPException(status_code=409, detail="Target already has an active scan; wait for it to finish before queueing another ASM action")
+        _active_ids = await _asm_active_scan_ids(conn, target_id)
+        if _active_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Target already has an active scan ({_active_ids[0]}); wait for it to "
+                    "finish before queueing another ASM action. It may be a hidden ASM "
+                    "batch/recon scan — open it from the coverage advisor or "
+                    "/scans?include_internal=true."
+                ),
+            )
         base_opts = _decode_target_scan_options(target["scan_options"])
         if request.budget_profile:
             base_opts["budget_profile"] = request.budget_profile
@@ -9806,7 +9854,8 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         )
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        active = await _asm_active_scan_count(conn, target_id)
+        active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+        active = len(active_scan_ids)
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
         stale_days = request.stale_days if request.stale_days is not None else cfg["stale_days"]
@@ -9826,7 +9875,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             uuid.UUID(target_id),
         )
         attempt_counts = {str(rw["status"]): int(rw["count"] or 0) for rw in attempts}
-        rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, last_attempt_counts=attempt_counts)
+        rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, active_scan_ids=active_scan_ids, last_attempt_counts=attempt_counts)
         if rec["next_action"] == "wait":
             return {"action": "wait", "status": "busy", "endpoint_filter": endpoint_filter, **rec}
 
@@ -9961,7 +10010,8 @@ async def asm_gaps(target_id: str):
         cfg_row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(cfg_row["asm_config"] if cfg_row else {}))
         claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg["stale_days"])
-        active = await _asm_active_scan_count(conn, target_id)
+        active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+        active = len(active_scan_ids)
         by_auth_rows = await conn.fetch(
             """
             SELECT auth_state, test_status, COUNT(*) AS count
@@ -10085,6 +10135,7 @@ async def asm_gaps(target_id: str):
         coverage,
         claimable=claimable,
         active_scans=active,
+        active_scan_ids=active_scan_ids,
         last_attempt_counts=attempt_counts,
     )
     recommended_campaigns = _asm_recommended_campaigns(

@@ -774,7 +774,18 @@ function CoverageAdvisorCard({
               {gaps.recommendation.blockers.map((b) => (
                 <div key={b.kind} className="flex items-start gap-2 text-xs text-yellow-300">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span>{b.message} ({b.count})</span>
+                  <span>
+                    {b.message} ({b.count})
+                    {b.kind === 'active_scan' && b.scan_id ? (
+                      <>
+                        {' '}
+                        <Link href={`/scans/${b.scan_id}`} className="text-blue-400 underline hover:text-blue-300">
+                          view scan
+                        </Link>
+                        <span className="text-gray-500"> (ASM batch/recon — hidden from the Scans list)</span>
+                      </>
+                    ) : null}
+                  </span>
                 </div>
               ))}
             </div>

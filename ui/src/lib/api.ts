@@ -363,7 +363,7 @@ export interface AsmRecommendation {
   next_action: 'recon' | 'test' | 'wait'
   label: string
   reason: string
-  blockers: Array<{ kind: string; count: number; message: string }>
+  blockers: Array<{ kind: string; count: number; message: string; scan_id?: string; scan_ids?: string[] }>
 }
 
 export interface AsmFamilyCoverage { completed: number; attempts: number }
