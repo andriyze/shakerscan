@@ -1,3 +1,6 @@
+# Generated benchmark/test scratch output
+tests/benchmark/results/
+
 # Results (scan outputs, checkpoints) are local-only...
 results/*
 # ...except benchmark scorecards: §13 requires success to be visible in git history.
