@@ -1421,6 +1421,9 @@ def assess_scan_completeness(
     """
     modules = {}
     issues = []
+    # Active-execution honesty marker (docs §4); stays None unless active checks
+    # were requested in a non-public scan.
+    active_execution: dict[str, Any] | None = None
 
     # --- Required Modules ---
 
@@ -1658,6 +1661,35 @@ def assess_scan_completeness(
 
         attempted = bool(dalfox_results or sqlmap_results or dalfox_errors or sqlmap_errors or smart_attempted)
 
+        # Active-execution honesty (docs proposed-next-steps §4): a smart/full scan
+        # that requested active checks but tested ZERO endpoints must not earn a
+        # confident headline grade. Distinguish the two zero-attempt cases:
+        #   - injectable surface WAS discovered but the active lane tested nothing
+        #     => execution failure; grade is NOT reliable for active coverage.
+        #   - discovery found no parameterized/injectable endpoints
+        #     => legitimately nothing to test; grade stays reliable.
+        def _int(v: Any) -> int:
+            try:
+                return int(v or 0)
+            except (TypeError, ValueError):
+                return 0
+        endpoints_tested = (
+            _int(active_results.get("smart_total_endpoints_tested"))
+            + _int(active_results.get("get_endpoints_tested"))
+            + _int(active_results.get("post_endpoints_tested"))
+            + _int(active_results.get("xss_get_endpoints_tested"))
+            + _int(active_results.get("xss_post_endpoints_tested"))
+            + _int(active_results.get("endpoint_attempts_total"))
+        )
+        surface_found = (
+            _int(active_results.get("active_endpoints_discovered")) > 0
+            or _int(active_results.get("active_endpoints_selected")) > 0
+            or _int(active_results.get("active_worklist_total")) > 0
+            or _int(active_results.get("active_family_input_endpoints")) > 0
+        )
+        active_zero = (not attempted) and endpoints_tested == 0 and not dalfox_results and not sqlmap_results
+        active_execution_failed = active_zero and surface_found
+
         modules["active_checks"] = {
             "completed": attempted,
             "required": False,
@@ -1673,10 +1705,36 @@ def assess_scan_completeness(
                 "smart_xss_get_endpoints_tested": active_results.get("xss_get_endpoints_tested") or 0,
                 "smart_xss_post_endpoints_tested": active_results.get("xss_post_endpoints_tested") or 0,
                 "smart_reflections_found": active_results.get("smart_reflections_found") or 0,
+                "active_endpoints_discovered": active_results.get("active_endpoints_discovered") or 0,
+                "active_endpoints_selected": active_results.get("active_endpoints_selected") or 0,
+                "active_endpoints_tested": endpoints_tested,
+                "active_zero": active_zero,
+                "active_execution_failed": active_execution_failed,
+                "injectable_surface_found": surface_found,
             }
         }
-        if not attempted:
-            issues.append("Active checks requested but no results or errors recorded")
+        active_execution = {
+            "requested": True,
+            "endpoints_discovered": _int(active_results.get("active_endpoints_discovered")),
+            "endpoints_selected": _int(active_results.get("active_endpoints_selected")),
+            "endpoints_tested": endpoints_tested,
+            "injectable_surface_found": surface_found,
+            "zero_attempts": active_zero,
+            "execution_failed": active_execution_failed,
+        }
+        if active_execution_failed:
+            active_execution["reason"] = (
+                f"Active checks requested and {active_execution['endpoints_discovered'] or active_execution['endpoints_selected']} "
+                "injectable endpoint(s) discovered, but the active lane tested zero — "
+                "grade is NOT reliable for active coverage (execution failure, not a clean result)"
+            )
+            issues.append(active_execution["reason"])
+        elif active_zero:
+            active_execution["reason"] = (
+                "Active checks requested but discovery found no parameterized/injectable "
+                "surface to test"
+            )
+            issues.append(active_execution["reason"])
     elif active_checks_requested and public_only:
         modules["active_checks"] = {
             "completed": False,
@@ -1697,16 +1755,25 @@ def assess_scan_completeness(
 
     all_required_complete = required_completed == required_total
 
+    # An active-execution failure (surface discovered, zero tested) is a hard
+    # grade-reliability failure even though active_checks is an "optional" module:
+    # a confident grade on a scan whose active lane never ran is dishonest (docs §4).
+    active_execution_failed = bool(active_execution and active_execution.get("execution_failed"))
+
     if all_required_complete and (optional_total == 0 or optional_completed == optional_total):
         status = "complete"
     elif all_required_complete:
         status = "partial"  # Required OK but some optional failed
     else:
         status = "failed"  # Required modules failed
+    if active_execution_failed and status == "complete":
+        status = "partial"
 
     return {
         "status": status,
-        "grade_reliable": all_required_complete,
+        "grade_reliable": all_required_complete and not active_execution_failed,
+        "active_execution": active_execution,
+        "active_execution_failed": active_execution_failed,
         "required_completed": f"{required_completed}/{required_total}",
         "optional_completed": f"{optional_completed}/{optional_total}" if optional_total > 0 else "N/A",
         "modules": modules,
@@ -11091,9 +11158,21 @@ async def build_report(target: str,
         })
 
     # If required modules failed, mark grade as unreliable
+    active_execution_failed = bool(coverage.get("active_execution_failed"))
     if not coverage["grade_reliable"]:
         grade_result["grade_reliable"] = False
-        grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
+        if active_execution_failed:
+            # Active lane never ran despite discovered injectable surface (docs §4):
+            # be explicit that this is an active-coverage execution failure, not a
+            # clean security result, so the headline can't read as healthy.
+            grade_result["grade_warning"] = (
+                "Active checks requested but the active lane tested zero endpoints — "
+                "grade is not reliable for active coverage"
+            )
+            grade_result["degraded"] = True
+            grade_result["active_execution"] = coverage.get("active_execution")
+        else:
+            grade_result["grade_warning"] = "Grade may be inaccurate - required scan modules did not complete"
         grade_result["coverage_issues"] = coverage["issues"]
         # Optionally set grade to None or add indicator
         grade_result["original_grade"] = grade_result["grade"]
@@ -11103,6 +11182,15 @@ async def build_report(target: str,
         grade_result["grade_reliable"] = True
 
     report["result"] = grade_result
+    # Surface active-execution honesty at the report top level too, so the scans
+    # list / API can flag a degraded active scan without parsing the grade string.
+    if active_execution_failed:
+        report["active_execution"] = coverage.get("active_execution")
+        if not isinstance(report.get("scan_metadata"), dict):
+            report["scan_metadata"] = {}
+        report["scan_metadata"]["active_execution_failed"] = True
+        report["scan_metadata"]["grade_reliable"] = False
+        report["scan_metadata"]["degraded"] = True
 
     # Generate compliance report if requested
     if compliance_report and report.get("findings"):
