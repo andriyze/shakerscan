@@ -5584,6 +5584,32 @@ async def process_scan_merge_job(job_data: dict):
     except Exception as e:
         print(f"[merge {parent_id[:8]}] triage recompute skipped: {e}", flush=True)
 
+    # Recompute quality_metrics from the union too. This block was previously the
+    # ONLY report section left stale after merge: base_result was deep-copied with
+    # its single-shard quality_metrics while merged['findings'] grew to the union,
+    # so total_findings / severity_distribution disagreed with findings[] and every
+    # other recomputed block (docs proposed-next-steps §2). Same helper as the
+    # single-scan path, so the numbers are identical for an identical finding set.
+    try:
+        from findings import compute_quality_metrics
+        _base_qm = merged.get('quality_metrics') if isinstance(merged.get('quality_metrics'), dict) else {}
+        _cov_status = _base_qm.get('coverage_status')
+        if not _cov_status:
+            _cov_status = (merged.get('smart_coverage') or {}).get('status') or 'complete'
+        _checks_skipped = merged.get('checks_skipped')
+        if not isinstance(_checks_skipped, list):
+            _meta = merged.get('scan_metadata') if isinstance(merged.get('scan_metadata'), dict) else {}
+            _checks_skipped = _meta.get('checks_skipped') if isinstance(_meta.get('checks_skipped'), list) else []
+        _ai_enabled = bool((_base_qm.get('ai_validation') or {}).get('enabled'))
+        merged['quality_metrics'] = compute_quality_metrics(
+            union_findings,
+            coverage_status=_cov_status,
+            checks_skipped=_checks_skipped,
+            ai_enabled=_ai_enabled,
+        )
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] quality_metrics recompute skipped: {e}", flush=True)
+
     focused_family = _focused_family_from_parent_options(parent_options)
     focused_score, focused_grade = _recompute_focused_parent_result(
         merged,

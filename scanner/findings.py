@@ -712,6 +712,213 @@ def summarize_verification(findings: list[dict]) -> dict[str, Any]:
     }
 
 
+def compute_quality_metrics(
+    findings: list[dict],
+    *,
+    coverage_status: str = "complete",
+    checks_skipped: Any = 0,
+    ai_enabled: bool = False,
+) -> dict[str, Any]:
+    """Compute the ``quality_metrics`` report block from one canonical finding list.
+
+    Extracted from ``scanner.build_report`` so the parallel-merge path
+    (``api/worker.py``) can recompute quality_metrics from the union of all shards +
+    recon instead of leaving the base shard's stale block while ``findings[]`` grew
+    (docs proposed-next-steps §2 — every report block must derive from the SAME
+    canonical finding set). The single-scan path calls this same function, so both
+    paths produce identical numbers for the same finding list.
+    """
+    findings_list = findings or []
+    checks_skipped_count = (
+        checks_skipped if isinstance(checks_skipped, int) else len(checks_skipped or [])
+    )
+
+    confidence_distribution = {"verified": 0, "high": 0, "medium": 0, "low": 0, "uncertain": 0}
+    for f in findings_list:
+        tier = f.get("confidence_tier", "medium")
+        if tier in confidence_distribution:
+            confidence_distribution[tier] += 1
+
+    ai_verdicts = {"true_positive": 0, "false_positive": 0, "unclear": 0}
+    for f in findings_list:
+        verdict = f.get("ai_verdict", "")
+        if verdict in ai_verdicts:
+            ai_verdicts[verdict] += 1
+
+    tools_with_findings = set()
+    for f in findings_list:
+        tool = f.get("tool", "")
+        if tool:
+            tools_with_findings.add(tool)
+
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for f in findings_list:
+        sev = str(f.get("severity") or "info").lower()
+        if sev in severity_counts:
+            severity_counts[sev] += 1
+
+    quality_score = 100
+    if coverage_status != "complete":
+        quality_score -= 20
+    if checks_skipped_count:
+        quality_score -= checks_skipped_count * 5
+    if ai_verdicts["true_positive"] + ai_verdicts["false_positive"] > 0:
+        quality_score += 10
+
+    total_findings = len(findings_list)
+    if total_findings > 0:
+        uncertain_ratio = confidence_distribution["uncertain"] / total_findings
+        low_conf_ratio = (
+            confidence_distribution["uncertain"] + confidence_distribution["low"]
+        ) / total_findings
+        if uncertain_ratio > 0.3:
+            quality_score -= 15
+        elif uncertain_ratio > 0.2:
+            quality_score -= 10
+        if low_conf_ratio > 0.5:
+            quality_score -= 25
+        elif low_conf_ratio > 0.3:
+            quality_score -= 15
+
+    if total_findings > 0:
+        high_conf_ratio = (
+            confidence_distribution["verified"] + confidence_distribution["high"]
+        ) / total_findings
+        if high_conf_ratio > 0.7:
+            quality_score += 10
+        elif high_conf_ratio > 0.5:
+            quality_score += 5
+
+    confirmed_count = sum(1 for f in findings_list if f.get("verified") is True)
+    suspected_high_count = sum(
+        1
+        for f in findings_list
+        if f.get("severity") in ("high", "critical") and f.get("verified") is not True
+    )
+    needs_verification_count = sum(1 for f in findings_list if f.get("needs_verification"))
+    if total_findings and confirmed_count == 0:
+        quality_score -= 10
+    if suspected_high_count:
+        quality_score -= min(25, suspected_high_count * 8)
+    if needs_verification_count:
+        quality_score -= min(20, needs_verification_count * 3)
+
+    quality_score = max(0, min(100, quality_score))
+
+    if quality_score >= 90:
+        quality_grade = "A"
+    elif quality_score >= 80:
+        quality_grade = "B"
+    elif quality_score >= 70:
+        quality_grade = "C"
+    elif quality_score >= 60:
+        quality_grade = "D"
+    else:
+        quality_grade = "F"
+
+    reliability_notes: list[str] = []
+    if coverage_status != "complete":
+        reliability_notes.append(
+            f"Some tools did not complete successfully (coverage: {coverage_status})"
+        )
+    if confidence_distribution["uncertain"] > 0:
+        reliability_notes.append(
+            f"{confidence_distribution['uncertain']} finding(s) have uncertain confidence - manual review recommended"
+        )
+    if confidence_distribution["low"] > 0:
+        reliability_notes.append(
+            f"{confidence_distribution['low']} finding(s) have low confidence - validate before treating as exploitable"
+        )
+    if total_findings and confirmed_count == 0:
+        reliability_notes.append("No findings were confirmed by proof or verification")
+    if suspected_high_count:
+        reliability_notes.append(
+            f"{suspected_high_count} high/critical finding(s) are suspected, not confirmed"
+        )
+    if ai_verdicts["false_positive"] > 0:
+        reliability_notes.append(
+            f"{ai_verdicts['false_positive']} finding(s) marked as likely false positive by AI"
+        )
+    if checks_skipped_count:
+        reliability_notes.append(
+            f"{checks_skipped_count} check(s) were skipped due to scan configuration"
+        )
+
+    return {
+        "quality_score": quality_score,
+        "quality_grade": quality_grade,
+        "total_findings": total_findings,
+        "severity_distribution": severity_counts,
+        "confidence_distribution": confidence_distribution,
+        "ai_validation": {
+            "enabled": ai_enabled,
+            "verdicts": ai_verdicts,
+        },
+        "tools_with_findings": sorted(list(tools_with_findings)),
+        "coverage_status": coverage_status,
+        "reliability_notes": reliability_notes,
+    }
+
+
+def check_report_invariants(report: dict) -> list[str]:
+    """Return a list of report-block reconciliation violations (empty == consistent).
+
+    Every count that is meant to describe the same canonical finding set must agree:
+    ``findings[]`` length, ``quality_metrics.total_findings``,
+    ``verification_summary.total``, and the sum of ``severity_distribution`` (over
+    findings carrying a recognized severity). Triage buckets are intentionally
+    overlapping denominators, so they are only bounds-checked, never summed
+    (docs proposed-next-steps §2). Used by the report-invariant test and the
+    benchmark runner so a parent/shard merge that desyncs blocks fails loudly.
+    """
+    violations: list[str] = []
+    if not isinstance(report, dict):
+        return ["report is not a dict"]
+
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        return violations  # degraded/partial reports without a findings list are exempt
+    total = len(findings)
+
+    qm = report.get("quality_metrics")
+    if isinstance(qm, dict):
+        qm_total = qm.get("total_findings")
+        if isinstance(qm_total, int) and qm_total != total:
+            violations.append(
+                f"quality_metrics.total_findings={qm_total} != len(findings)={total}"
+            )
+        sev_dist = qm.get("severity_distribution")
+        if isinstance(sev_dist, dict):
+            buckets = {"critical", "high", "medium", "low", "info"}
+            expected = sum(
+                1 for f in findings
+                if isinstance(f, dict) and str(f.get("severity") or "info").lower() in buckets
+            )
+            sev_sum = sum(v for v in sev_dist.values() if isinstance(v, int))
+            if sev_sum != expected:
+                violations.append(
+                    f"severity_distribution sum={sev_sum} != findings-with-severity={expected}"
+                )
+
+    vs = report.get("verification_summary")
+    if isinstance(vs, dict):
+        vs_total = vs.get("total")
+        if isinstance(vs_total, int) and vs_total != total:
+            violations.append(
+                f"verification_summary.total={vs_total} != len(findings)={total}"
+            )
+
+    triage = report.get("triage")
+    if isinstance(triage, dict):
+        for bucket, data in triage.items():
+            if isinstance(data, dict) and isinstance(data.get("count"), int):
+                if data["count"] > total:
+                    violations.append(
+                        f"triage.{bucket}.count={data['count']} > len(findings)={total}"
+                    )
+    return violations
+
+
 def get_unique_cwes(findings: list[dict]) -> list[str]:
     """Get unique CWE IDs from findings.
 

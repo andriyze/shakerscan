@@ -11178,145 +11178,18 @@ async def build_report(target: str,
     # when findings may need additional validation.
     findings_list = report.get("findings", [])
 
-    # Count findings by confidence tier
-    confidence_distribution = {"verified": 0, "high": 0, "medium": 0, "low": 0, "uncertain": 0}
-    for f in findings_list:
-        tier = f.get("confidence_tier", "medium")
-        if tier in confidence_distribution:
-            confidence_distribution[tier] += 1
-
-    # Count AI verdicts if present
-    ai_verdicts = {"true_positive": 0, "false_positive": 0, "unclear": 0}
-    for f in findings_list:
-        verdict = f.get("ai_verdict", "")
-        if verdict in ai_verdicts:
-            ai_verdicts[verdict] += 1
-
-    # Track which tools produced findings
-    tools_with_findings = set()
-    for f in findings_list:
-        tool = f.get("tool", "")
-        if tool:
-            tools_with_findings.add(tool)
-
-    # Severity distribution
-    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for f in findings_list:
-        sev = f.get("severity", "info").lower()
-        if sev in severity_counts:
-            severity_counts[sev] += 1
-
-    # Calculate quality score (0-100)
-    # Higher score = more reliable scan results
-    quality_score = 100
-
-    # Penalize for tool failures
-    if coverage["status"] != "complete":
-        quality_score -= 20
-    if checks_skipped:
-        quality_score -= len(checks_skipped) * 5
-
-    # Reward for AI validation
-    if ai_verdicts["true_positive"] + ai_verdicts["false_positive"] > 0:
-        quality_score += 10
-
-    # Penalize for many uncertain or low-confidence findings
-    total_findings = len(findings_list)
-    if total_findings > 0:
-        uncertain_ratio = confidence_distribution["uncertain"] / total_findings
-        low_conf_ratio = (
-            confidence_distribution["uncertain"] + confidence_distribution["low"]
-        ) / total_findings
-        if uncertain_ratio > 0.3:
-            quality_score -= 15
-        elif uncertain_ratio > 0.2:
-            quality_score -= 10
-        if low_conf_ratio > 0.5:
-            quality_score -= 25
-        elif low_conf_ratio > 0.3:
-            quality_score -= 15
-
-    # Reward for high-confidence findings
-    if total_findings > 0:
-        high_conf_ratio = (confidence_distribution["verified"] + confidence_distribution["high"]) / total_findings
-        if high_conf_ratio > 0.7:
-            quality_score += 10
-        elif high_conf_ratio > 0.5:
-            quality_score += 5
-
-    confirmed_count = sum(1 for f in findings_list if f.get("verified") is True)
-    suspected_high_count = sum(
-        1
-        for f in findings_list
-        if f.get("severity") in ("high", "critical") and f.get("verified") is not True
+    # Quality metrics derive from the canonical findings_list. Computed via the
+    # shared helper so the parallel-merge path recomputes the exact same block from
+    # the union of all shards (docs proposed-next-steps §2 — one canonical finding
+    # set drives every report block).
+    from findings import compute_quality_metrics as _compute_quality_metrics
+    report["quality_metrics"] = _compute_quality_metrics(
+        findings_list,
+        coverage_status=coverage["status"],
+        checks_skipped=checks_skipped,
+        ai_enabled=pipeline_ai_enabled,
     )
-    needs_verification_count = sum(1 for f in findings_list if f.get("needs_verification"))
-    if total_findings and confirmed_count == 0:
-        quality_score -= 10
-    if suspected_high_count:
-        quality_score -= min(25, suspected_high_count * 8)
-    if needs_verification_count:
-        quality_score -= min(20, needs_verification_count * 3)
-
-    quality_score = max(0, min(100, quality_score))
-
-    # Quality grade
-    if quality_score >= 90:
-        quality_grade = "A"
-    elif quality_score >= 80:
-        quality_grade = "B"
-    elif quality_score >= 70:
-        quality_grade = "C"
-    elif quality_score >= 60:
-        quality_grade = "D"
-    else:
-        quality_grade = "F"
-
-    report["quality_metrics"] = {
-        "quality_score": quality_score,
-        "quality_grade": quality_grade,
-        "total_findings": total_findings,
-        "severity_distribution": severity_counts,
-        "confidence_distribution": confidence_distribution,
-        "ai_validation": {
-            "enabled": pipeline_ai_enabled,
-            "verdicts": ai_verdicts,
-        },
-        "tools_with_findings": sorted(list(tools_with_findings)),
-        "coverage_status": coverage["status"],
-        "reliability_notes": [],
-    }
     await asyncio.sleep(0)  # yield to heartbeat
-
-    # Add reliability notes
-    if coverage["status"] != "complete":
-        report["quality_metrics"]["reliability_notes"].append(
-            f"Some tools did not complete successfully (coverage: {coverage['status']})"
-        )
-    if confidence_distribution["uncertain"] > 0:
-        report["quality_metrics"]["reliability_notes"].append(
-            f"{confidence_distribution['uncertain']} finding(s) have uncertain confidence - manual review recommended"
-        )
-    if confidence_distribution["low"] > 0:
-        report["quality_metrics"]["reliability_notes"].append(
-            f"{confidence_distribution['low']} finding(s) have low confidence - validate before treating as exploitable"
-        )
-    if total_findings and confirmed_count == 0:
-        report["quality_metrics"]["reliability_notes"].append(
-            "No findings were confirmed by proof or verification"
-        )
-    if suspected_high_count:
-        report["quality_metrics"]["reliability_notes"].append(
-            f"{suspected_high_count} high/critical finding(s) are suspected, not confirmed"
-        )
-    if ai_verdicts["false_positive"] > 0:
-        report["quality_metrics"]["reliability_notes"].append(
-            f"{ai_verdicts['false_positive']} finding(s) marked as likely false positive by AI"
-        )
-    if checks_skipped:
-        report["quality_metrics"]["reliability_notes"].append(
-            f"{len(checks_skipped)} check(s) were skipped due to scan configuration"
-        )
 
     # =========================================================================
     # TRIAGE: Separate confirmed vs suspected findings + coverage gaps
