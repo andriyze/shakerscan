@@ -65,8 +65,18 @@ class FindingGroup:
 # GROUPING KEY EXTRACTION
 # =============================================================================
 
+def _template_endpoint_path(path: str) -> str:
+    """Template volatile id segments (/orders/1 -> /orders/{id}) so per-object-id
+    findings group together in-scan, matching the DB fingerprint (docs §5)."""
+    try:
+        from findings import template_path
+        return template_path(path)
+    except Exception:
+        return path
+
+
 def extract_endpoint(finding: dict) -> str | None:
-    """Extract the endpoint/URL from a finding's evidence."""
+    """Extract the endpoint/URL from a finding's evidence (path, id-templated)."""
     evidence = finding.get("evidence", {})
     if isinstance(evidence, dict):
         # Try common evidence keys
@@ -74,17 +84,17 @@ def extract_endpoint(finding: dict) -> str | None:
             if key in evidence:
                 val = evidence[key]
                 if isinstance(val, str):
-                    # Normalize URL to path only
+                    # Normalize URL to path only, then template volatile id segments
                     try:
                         parsed = urlparse(val)
-                        return parsed.path or "/"
+                        return _template_endpoint_path(parsed.path or "/")
                     except Exception:
                         return val
         # Check nested evidence
         if "details" in evidence and isinstance(evidence["details"], dict):
             for key in ["url", "endpoint", "path"]:
                 if key in evidence["details"]:
-                    return evidence["details"][key]
+                    return _template_endpoint_path(str(evidence["details"][key]))
     return None
 
 

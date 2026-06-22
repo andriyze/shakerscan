@@ -436,6 +436,17 @@ def finding_merge_key(finding: dict[str, Any]) -> str | None:
     """
     if not isinstance(finding, dict):
         return None
+    # Prefer the templated, id/payload-insensitive identity so a templated BOLA
+    # route or per-payload SQLi collapses to ONE finding in the parent report,
+    # consistent with the DB fingerprint (docs proposed-next-steps §5). Falls
+    # through to the title/url key for non-endpoint (passive/global) findings.
+    try:
+        from findings import templated_finding_identity
+        tid = templated_finding_identity(finding)
+    except Exception:
+        tid = None
+    if tid:
+        return "t|" + tid
     tool = str(finding.get("tool") or finding.get("type") or "").strip().lower()
     title = str(finding.get("title") or finding.get("name") or "").strip().lower()
     severity = str(finding.get("severity") or "").strip().lower()

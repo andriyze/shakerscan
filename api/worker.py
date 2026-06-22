@@ -1472,9 +1472,21 @@ async def run_discovery(root_domain: str) -> dict:
 def generate_finding_fingerprint(finding: dict) -> str:
     """Generate a unique fingerprint for deduplication.
 
-    Uses the full scanner ID (e.g., 'exposed_files:abc123') as fingerprint
-    to ensure consistency with UI and avoid collisions from suffix-only matching.
+    Endpoint findings get a TEMPLATED, id/payload-insensitive identity so one
+    BOLA route reported per object id (/orders/1../orders/46) and one SQLi param
+    reported per payload variant collapse to a single DB row instead of dozens
+    (docs proposed-next-steps §5). Non-endpoint findings (TLS, headers, DNS,
+    config) keep the stable scanner ID so distinct config issues never merge.
     """
+    # Templated identity for endpoint findings — primary count-explosion fix.
+    try:
+        from findings import templated_finding_identity
+        templated = templated_finding_identity(finding)
+    except Exception:
+        templated = None
+    if templated:
+        return "t:" + hashlib.sha256(templated.encode()).hexdigest()[:16]
+
     # Prefer scanner's original ID if available (full format: "tool:hash")
     scanner_id = finding.get('id', '')
     if scanner_id:

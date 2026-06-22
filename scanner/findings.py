@@ -9,9 +9,95 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from urllib.parse import urlparse
 from datetime import datetime, UTC
 from typing import Any
+
+_UUID_SEG_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_HEX_SEG_RE = re.compile(r"^[0-9a-fA-F]+$")
+# Evidence keys that may hold the finding's endpoint URL/path.
+_ENDPOINT_EVIDENCE_KEYS = (
+    "url", "endpoint", "affected_url", "target", "path",
+    "consumer_endpoint", "producer_endpoint",
+)
+# Evidence keys naming the injected/affected parameter (kept in identity so two
+# different params on the same endpoint stay distinct).
+_PARAM_EVIDENCE_KEYS = ("parameter", "param", "object_id_key", "injection_point", "param_name")
+
+
+def template_path(path: str) -> str:
+    """Template volatile id segments so /orders/1 and /orders/2 share an identity.
+
+    Conservative — mirrors api/asm_inventory.normalize_path: only all-digit, UUID,
+    and long-hex segments are templated, so literal route names (``/users``,
+    ``/profile``) are never collapsed (docs proposed-next-steps §5).
+    """
+    if not path:
+        return "/"
+    out: list[str] = []
+    for seg in path.split("/"):
+        if not seg:
+            out.append(seg)
+        elif seg.isdigit():
+            out.append("{id}")
+        elif _UUID_SEG_RE.match(seg):
+            out.append("{uuid}")
+        elif len(seg) >= 24 and _HEX_SEG_RE.match(seg):
+            out.append("{hash}")
+        else:
+            out.append(seg)
+    return "/".join(out) or "/"
+
+
+def templated_finding_identity(finding: dict) -> str | None:
+    """ID/payload-insensitive identity for an *endpoint* finding (docs §5).
+
+    Collapses the count-explosion — one templated BOLA route reported once per
+    object id, one SQLi param reported once per payload variant — by keying on
+    ``vuln_type | method | templated_path | sorted(param names)`` rather than the
+    concrete object id, query value, or payload. Returns None for findings with no
+    endpoint URL (TLS / headers / DNS / config), which keep their existing identity.
+
+    Distinct real vulns STAY distinct: a different path template, parameter,
+    method, or vuln class (CWE) yields a different key. Only same-endpoint,
+    same-param, same-class findings differing solely by id/payload collapse.
+    """
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    raw_url = finding.get("url") or ""
+    if not raw_url:
+        for k in _ENDPOINT_EVIDENCE_KEYS:
+            v = evidence.get(k)
+            if isinstance(v, str) and v:
+                raw_url = v
+                break
+    if not isinstance(raw_url, str) or not raw_url:
+        return None
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        return None  # not a real endpoint path (e.g. a title string captured as url)
+    tpath = template_path(path)
+
+    params: set[str] = set()
+    if parsed.query:
+        for pair in parsed.query.split("&"):
+            name = pair.split("=", 1)[0].strip()
+            if name:
+                params.add(name)
+    for k in _PARAM_EVIDENCE_KEYS:
+        v = evidence.get(k)
+        if isinstance(v, str) and v.strip():
+            params.add(v.strip())
+
+    method = str(evidence.get("method") or finding.get("method") or "GET").upper()
+    # vuln class: CWE is the stable discriminator; fall back to tool so distinct
+    # detectors don't collapse when CWE is absent.
+    vuln = str(finding.get("cwe") or "").strip() or str(finding.get("tool") or "").strip() or "generic"
+    return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
 
 # Support both package import (from scanner.findings) and script import (python3 findings.py)
 try:
