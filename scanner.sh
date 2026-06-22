@@ -1464,6 +1464,32 @@ show_status() {
         echo "  Running: $(echo $QUEUE | jq -r '.running')"
         echo "  Completed: $(echo $QUEUE | jq -r '.completed')"
     fi
+
+    # Worker fleet truth — read the SAME /workers source the API and benchmark
+    # runner use, so CLI status can never disagree with them about how many
+    # workers are real and which are running stale code (docs proposed-next-steps §3).
+    if curl -s "$api_url/workers" > /dev/null 2>&1; then
+        WK=$(curl -s "$api_url/workers")
+        echo ""
+        echo -e "${BLUE}Worker Fleet:${NC}"
+        echo "  Running:  $(echo "$WK" | jq -r '.count')"
+        echo "  Current:  $(echo "$WK" | jq -r '.current_count // "?"')  (on expected build $(echo "$WK" | jq -r '.expected_build_fingerprint // "?"'))"
+        local stale_n pending_n uniform
+        stale_n=$(echo "$WK" | jq -r '.stale_count // 0')
+        pending_n=$(echo "$WK" | jq -r '.pending_count // 0')
+        uniform=$(echo "$WK" | jq -r '.fleet_uniform')
+        if [ "$stale_n" != "0" ]; then
+            echo -e "  Stale:    ${RED}$stale_n${NC} running OLD code: $(echo "$WK" | jq -rc '.stale_workers')"
+        else
+            echo "  Stale:    0"
+        fi
+        [ "$pending_n" != "0" ] && echo -e "  Pending:  ${YELLOW}$pending_n${NC} (started, not yet registered a build)"
+        if [ "$uniform" = "true" ]; then
+            echo -e "  Uniform:  ${GREEN}yes — fleet safe to benchmark${NC}"
+        else
+            echo -e "  Uniform:  ${RED}NO — restart workers before trusting benchmark numbers${NC}"
+        fi
+    fi
 }
 
 show_logs() {

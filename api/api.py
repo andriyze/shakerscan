@@ -1018,7 +1018,9 @@ def _apply_auto_sharding_policy(
                 scan_type,
                 options_payload,
             )
-            return True, _running_scan_worker_count_best_effort()
+            # Size fan-out from CURRENT (non-stale) capacity so a mixed fleet can't
+            # spawn shards that run old code (docs proposed-next-steps §3).
+            return True, _current_scan_worker_count_best_effort()
         options_payload["parallel"] = False
         return False, None
 
@@ -1032,12 +1034,12 @@ def _apply_auto_sharding_policy(
         options_payload["parallel"] = False
         return False, None
 
-    worker_count = _running_scan_worker_count_best_effort()
+    worker_count = _current_scan_worker_count_best_effort()
     min_workers = max(1, int(settings.get("auto_sharding_min_workers") or 2))
     if worker_count is not None and worker_count < min_workers:
         options_payload["parallel"] = False
         options_payload["auto_sharding_reason"] = (
-            f"auto-sharding skipped: {worker_count} running worker(s), "
+            f"auto-sharding skipped: {worker_count} current-build worker(s), "
             f"minimum is {min_workers}"
         )
         return False, worker_count
@@ -11921,6 +11923,65 @@ def _running_scan_worker_count_best_effort() -> int | None:
         return None
 
 
+def _current_scan_worker_count_best_effort() -> int | None:
+    """Running worker count EXCLUDING workers confirmed to run stale code.
+
+    Auto-sharding sizes fan-out from fleet capacity; if it counts workers left
+    behind on an old build (unmanaged scale-out after a rebuild), a mixed fleet
+    inflates shard count and the extra shards run stale code — the "skew
+    masquerades as coverage" failure (docs proposed-next-steps §3: stale workers
+    must not silently contribute to capacity math). Cross-references the same
+    per-worker build registry /workers uses; falls back to the all-running count
+    when build identity is unavailable, so fresh fleets never regress.
+    """
+    try:
+        filters = urllib.parse.quote('{"name":["worker"]}')
+        status_code, containers = docker_socket_request(
+            "GET",
+            f"/containers/json?all=true&filters={filters}",
+        )
+        if status_code != 200 or not isinstance(containers, list):
+            return None
+        running = [
+            c for c in containers
+            if _is_scan_worker_container_name(
+                (c.get("Names", [""])[0] if c.get("Names") else "").lstrip("/")
+            ) and c.get("State") == "running"
+        ]
+        if not running:
+            return 0
+        try:
+            worker_build_raw = get_redis().hgetall("shakerscan:worker_build") or {}
+        except Exception:
+            worker_build_raw = {}
+        if not worker_build_raw:
+            return len(running)  # no build identity available -> don't penalize
+        worker_build: dict = {}
+        for host, raw in worker_build_raw.items():
+            host_s = (host.decode() if isinstance(host, bytes) else str(host)).lower()
+            raw_s = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                worker_build[host_s] = json.loads(raw_s)
+            except Exception:
+                continue
+        expected_fp = expected_build_fingerprint()
+        expected_version = current_scanner_version()
+        stale = 0
+        for c in running:
+            cid = (c.get("Id", "") or "").lower()
+            info = next((v for h, v in worker_build.items() if h and cid.startswith(h)), None)
+            if info is not None and worker_build_current(
+                reported_fingerprint=info.get("build_fingerprint"),
+                reported_version=info.get("scanner_version"),
+                expected_fingerprint=expected_fp,
+                expected_version=expected_version,
+            ) is False:
+                stale += 1
+        return max(0, len(running) - stale)
+    except Exception:
+        return None
+
+
 @app.get("/system/resources")
 async def get_system_resources():
     """CPU/RAM the Docker engine can give containers (i.e. the worker fleet).
@@ -11950,10 +12011,42 @@ async def get_system_resources():
         return {"available": False, "error": str(e)}
 
 
+def compute_fleet_summary(worker_list: list[dict]) -> dict[str, Any]:
+    """Pure fleet-truth summary over a /workers ``worker_list``.
+
+    The single source of truth for "is the fleet safe to trust" shared by the
+    /workers response, ``scanner.sh status``, and the benchmark fleet gate
+    (docs proposed-next-steps §3). ``current`` = running this build, ``stale`` =
+    running old code (unmanaged scale-out left behind by a rebuild), ``pending`` =
+    started but not yet registered a fingerprint. ``fleet_uniform`` is True only
+    when every running worker is confirmed on the expected build, so a mixed
+    fleet can never silently produce benchmark numbers.
+    """
+    running_workers = [w for w in worker_list if w.get("status") == "running"]
+    running = len(running_workers)
+    current_count = sum(1 for w in running_workers if w.get("build_current") is True)
+    stale_count = sum(1 for w in running_workers if w.get("build_current") is False)
+    pending_count = sum(1 for w in running_workers if w.get("build_current") is None)
+    stale_workers = [w.get("name") for w in worker_list if w.get("build_current") is False]
+    distinct_fingerprints = sorted({
+        w.get("build_fingerprint") for w in running_workers if w.get("build_fingerprint")
+    })
+    return {
+        "count": running,
+        "current_count": current_count,
+        "stale_count": stale_count,
+        "pending_count": pending_count,
+        "fleet_uniform": running > 0 and stale_count == 0 and pending_count == 0,
+        "distinct_fingerprints": distinct_fingerprints,
+        "stale_workers": stale_workers,
+    }
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
     import socket
+    import time
     import json as json_module
 
     docker_socket = "/var/run/docker.sock"
@@ -12036,12 +12129,21 @@ async def get_workers():
                 wb = _build_for_container(c.get('Id', '')) or {}
                 reported_fp = wb.get('build_fingerprint')
                 reported_version = wb.get('scanner_version')
+                # Container age — a benchmark needs to know "all workers were
+                # (re)started after the last rebuild", not just that they report a
+                # fingerprint (docs proposed-next-steps §3 — record container age).
+                created_epoch = c.get('Created')
+                age_seconds = None
+                if isinstance(created_epoch, (int, float)) and created_epoch > 0:
+                    age_seconds = max(0, int(time.time() - created_epoch))
                 worker_list.append({
                     "name": name,
                     "status": state,
                     "health": c.get('Status', ''),
                     "build_fingerprint": reported_fp,
                     "scanner_version": reported_version,
+                    "created": created_epoch,
+                    "age_seconds": age_seconds,
                     # True/False when the worker reported a fingerprint; null until it
                     # has registered (e.g. just started, or not yet picked up a job).
                     "build_current": worker_build_current(
@@ -12052,8 +12154,7 @@ async def get_workers():
                     ),
                 })
 
-        running = len([w for w in worker_list if w.get("status") == "running"])
-        stale_workers = [w["name"] for w in worker_list if w.get("build_current") is False]
+        summary = compute_fleet_summary(worker_list)
         max_allowed_workers = _compute_max_allowed_workers()
         # Refresh the per-scan active-scan concurrency cap for workers.
         max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
@@ -12061,13 +12162,12 @@ async def get_workers():
         _publish_scanner_version()
 
         return {
-            "count": running,
+            **summary,
             "workers": worker_list,
             "max_allowed": max_allowed_workers,
             "max_active_scans": max_active_scans,
             "expected_build_fingerprint": expected_fp,
             "expected_scanner_version": expected_version,
-            "stale_workers": stale_workers,
         }
     except FileNotFoundError:
         return {
