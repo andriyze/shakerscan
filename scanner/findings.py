@@ -24,28 +24,10 @@ _ENDPOINT_EVIDENCE_KEYS = (
 # Evidence keys naming the injected/affected parameter (kept in identity so two
 # different params on the same endpoint stay distinct).
 _PARAM_EVIDENCE_KEYS = ("parameter", "param", "object_id_key", "injection_point", "param_name")
-_CONFIRMED_EVIDENCE_LEVELS = {
-    "confirmed_exploit",
-    "proof_of_exploit",
-    "proof_of_exploitation",
-    "browser_proven",
-}
-_DETERMINISTIC_PROOF_TYPES = {
-    "browser_execution",
-    "cross_principal_replay",
-    "sqli_data_extraction",
-    "data_extraction",
-    "oob_callback",
-    "differential_response",
-}
-_BROWSER_EXECUTION_MARKERS = (
-    "payload executed",
-    "dialog fired",
-    "dialog triggered",
-    "console proof",
-    "dom proof",
-    "execution proof",
-)
+# Proof-state vocabulary (_CONFIRMED_EVIDENCE_LEVELS, _DETERMINISTIC_PROOF_TYPES,
+# _BROWSER_EXECUTION_MARKERS) and the _truthy / _has_browser_execution_proof helpers
+# are defined ONCE in ai_verdict_policy and imported below, so the "one proof
+# taxonomy" guarantee can't silently drift across copies (audit follow-up).
 
 
 def template_path(path: str) -> str:
@@ -122,24 +104,6 @@ def templated_finding_identity(finding: dict) -> str | None:
     return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
 
 
-def _truthy(value: Any) -> bool:
-    return value is True or (isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"})
-
-
-def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, Any]) -> bool:
-    """Return True only for positive browser execution proof, not failed attempts."""
-    for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
-        if isinstance(proof, dict):
-            if _truthy(proof.get("proven")) or _truthy(proof.get("payload_executed")) or _truthy(proof.get("executed")):
-                return True
-        elif isinstance(proof, str):
-            proof_text = proof.lower()
-            if any(marker in proof_text for marker in _BROWSER_EXECUTION_MARKERS):
-                return True
-    evidence_text = str(evidence).lower()
-    return any(marker in evidence_text for marker in _BROWSER_EXECUTION_MARKERS)
-
-
 def _has_deterministic_proof(
     finding: dict[str, Any],
     evidence: dict[str, Any],
@@ -198,6 +162,10 @@ try:
         ai_confidence,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
     )
 except ImportError:
     from constants import (
@@ -220,6 +188,10 @@ except ImportError:
         ai_confidence,
         is_trusted_ai_false_positive,
         is_trusted_ai_true_positive,
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
     )
 
 

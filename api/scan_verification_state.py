@@ -12,48 +12,27 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-_CONFIRMED_EVIDENCE_LEVELS = {
-    "confirmed_exploit",
-    "proof_of_exploit",
-    "proof_of_exploitation",
-    "browser_proven",
-}
-
-_DETERMINISTIC_PROOF_TYPES = {
-    "browser_execution",
-    "cross_principal_replay",
-    "sqli_data_extraction",
-    "data_extraction",
-    "oob_callback",
-    "differential_response",
-}
-
-_BROWSER_EXECUTION_MARKERS = (
-    "payload executed",
-    "dialog fired",
-    "dialog triggered",
-    "console proof",
-    "dom proof",
-    "execution proof",
-)
-
-
-def _truthy(value: Any) -> bool:
-    return value is True or (isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"})
-
-
-def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, Any]) -> bool:
-    """Return True only for positive browser execution proof, not failed attempts."""
-    for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
-        if isinstance(proof, dict):
-            if _truthy(proof.get("proven")) or _truthy(proof.get("payload_executed")) or _truthy(proof.get("executed")):
-                return True
-        elif isinstance(proof, str):
-            proof_text = proof.lower()
-            if any(marker in proof_text for marker in _BROWSER_EXECUTION_MARKERS):
-                return True
-    evidence_text = str(evidence).lower()
-    return any(marker in evidence_text for marker in _BROWSER_EXECUTION_MARKERS)
+# Proof-state vocabulary + helpers live ONCE in scanner/ai_verdict_policy so the
+# "one proof taxonomy" guarantee can't drift across copies (audit follow-up). The
+# scanner dir is on path in the API/worker runtime (flattened /app); unit tests
+# only add api/, so locate scanner/ relative to this file as a fallback.
+try:
+    from ai_verdict_policy import (
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
+    )
+except ImportError:
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
+    from ai_verdict_policy import (
+        _has_browser_execution_proof,
+        _truthy,
+        _CONFIRMED_EVIDENCE_LEVELS,
+        _DETERMINISTIC_PROOF_TYPES,
+    )
 
 
 def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
