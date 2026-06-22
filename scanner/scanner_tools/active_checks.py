@@ -557,12 +557,52 @@ async def dalfox_one(
     return {"findings": findings, "scan_completed": scan_completed, "error": error}
 
 
+_PATH_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _injectable_path_segment(path: str) -> tuple[str, int] | None:
+    """Return the last id/value-like path segment to fuzz, or None.
+
+    Reflected XSS / injection on PATH parameters (e.g. ``/track-order/{id}``) is
+    missed when only query params are tested (docs proposed-next-steps §12). A
+    segment is injectable when it looks like an id/value — numeric, a UUID, a long
+    hex/random token, or a mixed letters+digits token — rather than a literal route
+    word. This is a generic signal (no route names hardcoded), so it works on any
+    ``/x/{id}`` endpoint without target-fitting.
+    """
+    if not path:
+        return None
+    segs = path.split("/")
+    for i in range(len(segs) - 1, -1, -1):
+        s = segs[i]
+        if not s:
+            continue
+        is_id_like = (
+            s.isdigit()
+            or bool(_PATH_UUID_RE.match(s))
+            or (len(s) >= 10 and all(c in "0123456789abcdefABCDEF" for c in s))
+            or (len(s) >= 6 and any(c.isdigit() for c in s) and any(c.isalpha() for c in s))
+        )
+        if is_id_like:
+            return s, i
+    return None
+
+
+def _build_path_segment_url(parsed, seg_index: int, value: str) -> str:
+    """Rebuild a URL with the path segment at seg_index replaced by `value`."""
+    segs = parsed.path.split("/")
+    if 0 <= seg_index < len(segs):
+        segs[seg_index] = urllib.parse.quote(value, safe="")
+    return urllib.parse.urlunparse(parsed._replace(path="/".join(segs)))
+
+
 async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     """
     Custom XSS detection using proven payloads and reflection analysis.
     Detects reflected XSS and indicators of potential DOM XSS.
     Uses context-aware payload selection for improved accuracy.
-    Also tests fragment parameters for SPA hash routes (DOM XSS).
+    Also tests fragment parameters for SPA hash routes (DOM XSS) and id-like PATH
+    segments for reflected XSS (docs §12).
     """
     findings = []
     tested = 0
@@ -574,7 +614,11 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
     base_url, frag_path, frag_params = _parse_fragment_params(url)
     is_hash_route = _is_hash_route(url)
 
-    if not query_params and not frag_params:
+    # Id-like path segment (e.g. /track-order/{id}) — a reflected-XSS surface that
+    # query-only testing misses (docs §12).
+    path_segment = _injectable_path_segment(parsed.path)
+
+    if not query_params and not frag_params and not path_segment:
         return {"findings": [], "tested": 0, "vulnerable": False}
 
     # Context-specific XSS payloads - selected based on where input is reflected
@@ -813,6 +857,42 @@ async def custom_xss_test(url: str, auth_session: Any | None = None) -> dict:
                     "context": "html" if is_html else "json" if is_json else "unknown",
                     "reflection_context": reflection_context,  # Added: precise context detection
                 })
+
+    # Reflected XSS on an id-like PATH segment (docs §12 — /track-order/{id} style).
+    # Same canary -> context -> payload -> reflection flow as query params, but the
+    # injection point is a path segment instead of a query value.
+    if path_segment is not None:
+        seg_value, seg_index = path_segment
+        canary_url = _build_path_segment_url(parsed, seg_index, canary)
+        canary_body, _, content_type = await get_response(canary_url)
+        is_html = "html" in content_type.lower() or "<html" in canary_body.lower()
+        is_json = "json" in content_type.lower() or canary_body.strip().startswith(("{", "["))
+        reflection_context = "not_reflected"
+        if canary in canary_body:
+            reflection_context = detect_reflection_context(canary_body, canary)
+        if reflection_context != "not_reflected":
+            if reflection_context in CONTEXT_PAYLOADS:
+                xss_payloads = CONTEXT_PAYLOADS[reflection_context] + BYPASS_PAYLOADS
+            else:
+                xss_payloads = FALLBACK_PAYLOADS + BYPASS_PAYLOADS
+            for payload, payload_type in xss_payloads:
+                tested += 1
+                test_url = _build_path_segment_url(parsed, seg_index, payload)
+                test_body, _, _ = await get_response(test_url)
+                if payload in test_body:
+                    findings.append({
+                        "type": "Cross-Site Scripting (XSS)",
+                        "url": test_url,
+                        "parameter": f"path[{seg_index}]",
+                        "payload": payload,
+                        "payload_type": payload_type,
+                        "evidence": [f"Payload reflected unencoded in path segment: {payload[:50]}"],
+                        "severity": "high",
+                        "context": "html" if is_html else "json" if is_json else "unknown",
+                        "reflection_context": reflection_context,
+                        "injection_point": "path_segment",
+                    })
+                    break  # one proven payload per segment is enough
 
     # Test fragment parameters for hash routes (DOM XSS)
     # These require browser-based verification since payloads execute client-side
