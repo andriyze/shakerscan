@@ -1023,6 +1023,47 @@ def check_report_invariants(report: dict) -> list[str]:
                     violations.append(
                         f"triage.{bucket}.count={data['count']} > len(findings)={total}"
                     )
+
+    # --- Proof-state consistency (docs §1/§8) ---------------------------------
+    # The verified count and the proof state must agree across blocks and per
+    # finding, so a scan can't claim more proven exploitation than it has.
+    verified_findings = [f for f in findings if isinstance(f, dict) and f.get("verified") is True]
+    if isinstance(vs, dict) and isinstance(vs.get("verified"), int):
+        if vs["verified"] != len(verified_findings):
+            violations.append(
+                f"verification_summary.verified={vs['verified']} != "
+                f"findings(verified=True)={len(verified_findings)}"
+            )
+    # A finding cannot be both deterministically verified and a suspected lead.
+    contradictory = [
+        f for f in verified_findings if f.get("suspected") is True or f.get("needs_verification") is True
+    ]
+    if contradictory:
+        violations.append(
+            f"{len(contradictory)} finding(s) are both verified and suspected/needs_verification"
+        )
+    # AI never promotes (§8): a verified finding must rest on deterministic proof,
+    # never on an AI true_positive alone.
+    ai_only_verified = [
+        f for f in verified_findings
+        if (f.get("precision_policy") or {}).get("ai_supported_likely") is True
+        or str(f.get("proof_state") or "") == "likely_vulnerable"
+    ]
+    if ai_only_verified:
+        violations.append(
+            f"{len(ai_only_verified)} finding(s) marked verified but only AI-supported (§8: AI never promotes)"
+        )
+
+    # --- Active-execution honesty (docs §1/§6) --------------------------------
+    meta = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
+    result = report.get("result") if isinstance(report.get("result"), dict) else {}
+    if meta.get("active_execution_failed") is True and result.get("grade_reliable") is True:
+        violations.append("active_execution_failed=True but result.grade_reliable=True")
+    # An incomplete-marked grade (trailing '*') must not also claim reliability.
+    grade = str(result.get("grade") or "")
+    if grade.endswith("*") and result.get("grade_reliable") is True:
+        violations.append(f"grade '{grade}' marked incomplete but grade_reliable=True")
+
     return violations
 
 

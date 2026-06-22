@@ -11415,6 +11415,19 @@ async def build_report(target: str,
         except asyncio.CancelledError:
             pass  # Expected when cancelling
 
+    # Invariant harness (docs §1): self-check that every report block reconciles
+    # with the canonical finding set before we declare the report finalized. The
+    # result is recorded (not raised) so the scan still completes, but a desync is
+    # visible in the report and to the benchmark gate instead of silently shipping.
+    try:
+        from findings import check_report_invariants
+        _violations = check_report_invariants(report)
+        report["invariant_violations"] = _violations
+        if _violations:
+            print(f"[invariants] report violations: {_violations}", file=sys.stderr)
+    except Exception as e:
+        print(f"[invariants] check skipped: {e}", file=sys.stderr)
+
     # Mark finalization complete. The findings + pre_finalize checkpoints are
     # written before the slow finalize tail (compliance, quality metrics, hunter
     # summary, redactions); reaching here means that tail ran to completion. A

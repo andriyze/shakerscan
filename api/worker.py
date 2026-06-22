@@ -5642,6 +5642,19 @@ async def process_scan_merge_job(job_data: dict):
     except Exception as e:
         print(f"[merge {parent_id[:8]}] attack-chain recompute skipped: {e}", flush=True)
 
+    # Invariant harness over the freshly-merged report (docs §1): every block was
+    # just recomputed from union_findings, so they MUST reconcile. Record any
+    # violation in the report and log it — a silent desync is exactly the
+    # "sections disagree" failure we are trying to make impossible.
+    try:
+        from findings import check_report_invariants
+        _violations = check_report_invariants(merged)
+        merged['invariant_violations'] = _violations
+        if _violations:
+            print(f"[merge {parent_id[:8]}] REPORT INVARIANT VIOLATIONS: {_violations}", flush=True)
+    except Exception as e:
+        print(f"[merge {parent_id[:8]}] invariant check skipped: {e}", flush=True)
+
     completed_n = sum(1 for c in children if c['status'] == 'completed')
     failed_n = sum(1 for c in children if c['status'] == 'failed')
     strategy = parent_options.get('parallel_strategy')

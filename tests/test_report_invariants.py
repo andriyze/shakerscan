@@ -94,3 +94,57 @@ def test_invariants_flag_impossible_triage_bucket():
 def test_degraded_report_without_findings_list_is_exempt():
     # synthesize_degraded_result paths may omit a findings list; don't false-positive.
     assert check_report_invariants({"quality_metrics": {"total_findings": 3}}) == []
+
+
+# --- §1 harness extensions: proof-state + active-execution ------------------
+
+def test_invariants_catch_verified_count_mismatch():
+    findings = [_mk("critical", verified=True), _mk("high")]
+    report = {
+        "findings": findings,
+        "verification_summary": {"total": 2, "verified": 5},  # impossible
+    }
+    violations = check_report_invariants(report)
+    assert any("verification_summary.verified" in v for v in violations)
+
+
+def test_invariants_catch_finding_both_verified_and_suspected():
+    findings = [_mk("high", verified=True, suspected=True)]
+    report = {"findings": findings}
+    violations = check_report_invariants(report)
+    assert any("both verified and suspected" in v for v in violations)
+
+
+def test_invariants_catch_ai_only_verified():
+    # §8: a verified finding resting only on AI support is forbidden.
+    findings = [_mk("high", verified=True, proof_state="likely_vulnerable",
+                    precision_policy={"ai_supported_likely": True})]
+    report = {"findings": findings, "verification_summary": summarize_verification(findings)}
+    violations = check_report_invariants(report)
+    assert any("AI never promotes" in v for v in violations)
+
+
+def test_invariants_catch_active_failed_but_grade_reliable():
+    report = {
+        "findings": [],
+        "scan_metadata": {"active_execution_failed": True},
+        "result": {"grade_reliable": True},
+    }
+    violations = check_report_invariants(report)
+    assert any("active_execution_failed" in v for v in violations)
+
+
+def test_invariants_catch_incomplete_grade_marked_reliable():
+    report = {"findings": [], "result": {"grade": "C*", "grade_reliable": True}}
+    violations = check_report_invariants(report)
+    assert any("incomplete but grade_reliable" in v for v in violations)
+
+
+def test_consistent_active_failed_report_passes():
+    # The honest degraded shape (F4) must NOT trip the harness.
+    report = {
+        "findings": [],
+        "scan_metadata": {"active_execution_failed": True},
+        "result": {"grade": "C*", "grade_reliable": False},
+    }
+    assert check_report_invariants(report) == []
