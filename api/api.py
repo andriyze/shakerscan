@@ -11923,16 +11923,12 @@ def _running_scan_worker_count_best_effort() -> int | None:
         return None
 
 
-def _current_scan_worker_count_best_effort() -> int | None:
-    """Running worker count EXCLUDING workers confirmed to run stale code.
+def _stale_scan_worker_count_best_effort() -> int:
+    """Count running workers CONFIRMED to be on a stale build (0 when unknown).
 
-    Auto-sharding sizes fan-out from fleet capacity; if it counts workers left
-    behind on an old build (unmanaged scale-out after a rebuild), a mixed fleet
-    inflates shard count and the extra shards run stale code — the "skew
-    masquerades as coverage" failure (docs proposed-next-steps §3: stale workers
-    must not silently contribute to capacity math). Cross-references the same
-    per-worker build registry /workers uses; falls back to the all-running count
-    when build identity is unavailable, so fresh fleets never regress.
+    Cross-references the same per-worker build registry /workers uses. Returns 0
+    whenever build identity is unavailable, so it can only ever subtract a worker
+    we are certain is stale.
     """
     try:
         filters = urllib.parse.quote('{"name":["worker"]}')
@@ -11941,7 +11937,7 @@ def _current_scan_worker_count_best_effort() -> int | None:
             f"/containers/json?all=true&filters={filters}",
         )
         if status_code != 200 or not isinstance(containers, list):
-            return None
+            return 0
         running = [
             c for c in containers
             if _is_scan_worker_container_name(
@@ -11955,7 +11951,7 @@ def _current_scan_worker_count_best_effort() -> int | None:
         except Exception:
             worker_build_raw = {}
         if not worker_build_raw:
-            return len(running)  # no build identity available -> don't penalize
+            return 0
         worker_build: dict = {}
         for host, raw in worker_build_raw.items():
             host_s = (host.decode() if isinstance(host, bytes) else str(host)).lower()
@@ -11977,9 +11973,25 @@ def _current_scan_worker_count_best_effort() -> int | None:
                 expected_version=expected_version,
             ) is False:
                 stale += 1
-        return max(0, len(running) - stale)
+        return stale
     except Exception:
-        return None
+        return 0
+
+
+def _current_scan_worker_count_best_effort() -> int | None:
+    """Running worker count EXCLUDING workers confirmed to run stale code.
+
+    Auto-sharding sizes fan-out from fleet capacity; counting workers left behind
+    on an old build (unmanaged scale-out after a rebuild) inflates shard count and
+    spawns shards running stale code — the "skew masquerades as coverage" failure
+    (docs proposed-next-steps §3: stale workers must not silently contribute to
+    capacity math). Delegates to the all-running count, then subtracts only
+    workers we are CERTAIN are stale, so a uniform/fresh fleet is never penalized.
+    """
+    base = _running_scan_worker_count_best_effort()
+    if not base:  # None or 0
+        return base
+    return max(0, base - _stale_scan_worker_count_best_effort())
 
 
 @app.get("/system/resources")
