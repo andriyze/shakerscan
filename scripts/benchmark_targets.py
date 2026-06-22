@@ -67,6 +67,69 @@ def _get(url, timeout=30):
         return json.load(r)
 
 
+def _norm_live_finding(f):
+    """Map a /findings DB row to the report-finding shape collect_scorecard reads.
+
+    Crucially, a finding counts as ``verified`` if the deterministic auto-retest
+    proved it (``last_verification_verdict == 'exploited'``), not only the scan-time
+    triage flag — this is the whole point of the post-retest re-score (docs §6).
+    """
+    verdict = str(f.get("last_verification_verdict") or "").lower()
+    return {
+        "title": f.get("title"),
+        "url": f.get("url"),
+        "category": f.get("category") or f.get("cwe"),
+        "type": f.get("type"),
+        "cwe": f.get("cwe"),
+        "description": f.get("description"),
+        "severity": f.get("severity"),
+        "verified": bool(f.get("verified")) or verdict == "exploited",
+        "confidence_tier": f.get("confidence_tier"),
+    }
+
+
+def fetch_live_findings(api, scan_id, timeout=30):
+    """Live findings for a scan, carrying post-retest verdicts (docs §6)."""
+    try:
+        data = _get(f"{api}/findings?scan_id={scan_id}&limit=500", timeout=timeout)
+    except Exception:
+        return None
+    rows = data.get("findings") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    return [_norm_live_finding(f) for f in rows]
+
+
+def wait_for_retest_settle(api, timeout=600, poll=15):
+    """Wait for the async auto-retest wave to drain (docs §6 — the verified lift
+    happens AFTER the scan, so the scorecard must read once retests settle)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            q = _get(f"{api}/queue/stats", timeout=20)
+        except Exception:
+            return False
+        pending = sum(int(q.get(k) or 0) for k in
+                      ("retest_pending", "retest_queued", "retest_running"))
+        if pending == 0:
+            return True
+        time.sleep(poll)
+    return False
+
+
+def check_fleet(api):
+    """Return (uniform, summary) for the worker fleet (docs §3/§10 gate)."""
+    try:
+        w = _get(f"{api}/workers", timeout=20)
+    except Exception as e:
+        return False, {"error": str(e)}
+    return bool(w.get("fleet_uniform")), {
+        "count": w.get("count"), "current": w.get("current_count"),
+        "stale": w.get("stale_count"), "pending": w.get("pending_count"),
+        "fingerprints": w.get("distinct_fingerprints"),
+    }
+
+
 def _post(url, body, timeout=30):
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
@@ -114,6 +177,16 @@ def mint_token(target_url, login_cfg, email, password):
         return (resp.get("authentication", {}) or {}).get("token") or resp.get("token") or resp.get("access_token")
     except Exception:
         return None
+
+
+def _report_invariants(report):
+    """Run the shared report-invariant checker (§2/§10) — empty list == consistent."""
+    try:
+        sys.path.insert(0, os.path.join(REPO, "scanner"))
+        from findings import check_report_invariants
+        return check_report_invariants(report)
+    except Exception as e:
+        return [f"invariant-check-unavailable: {e}"]
 
 
 def collect_scorecard(report, fixture):
@@ -202,10 +275,11 @@ def apply_gates(card, fixture):
     return results
 
 
-def run_target(name, api, timeout, do_auth, preset_scan_id=None):
+def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False, retest_wait=600):
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     report = None
     scan_id = preset_scan_id
+    two_user = False
     if not scan_id:
         opts = dict(fx.get("scan_options") or {})
         if do_auth and fx.get("auth"):
@@ -218,9 +292,10 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None):
                                 "bench.u2@shaker.test", "Bench!Pass2")
                 if t2:
                     opts["user2_header"] = f"Bearer {t2}"
+                    two_user = True
         resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
         scan_id = resp.get("id") or resp.get("scan_id")
-        print(f"[{name}] submitted scan {scan_id}", flush=True)
+        print(f"[{name}] submitted scan {scan_id} (two_user={two_user})", flush=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
             st = _get(f"{api}/scans/{scan_id}")
@@ -228,13 +303,45 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None):
                 break
             time.sleep(30)
     report = _get(f"{api}/scans/{scan_id}/result")
-    card = collect_scorecard(report, fx)
-    gates = apply_gates(card, fx)
-    card["scan_id"] = scan_id
-    card["target"] = name
-    card["gates"] = gates
-    card["passed"] = all(g["pass"] for g in gates)
-    return card
+
+    # Scorecard #1: at scan finish (scan-time triage).
+    finish_card = collect_scorecard(report, fx)
+    finish_card["phase"] = "scan_finish"
+    # §4 active-execution honesty + §2 report-invariant signals on the card.
+    meta = report.get("scan_metadata") or {}
+    finish_card["active_execution_failed"] = bool(meta.get("active_execution_failed"))
+    finish_card["grade_reliable"] = (report.get("result") or {}).get("grade_reliable")
+    finish_card["report_invariant_violations"] = _report_invariants(report)
+    finish_card["two_user"] = two_user
+
+    cards_by_phase = {"scan_finish": finish_card}
+    scoring_card = finish_card
+
+    # Scorecard #2: after the deterministic auto-retest wave settles, re-read live
+    # findings so the verified count reflects PROOF, not just scan-time triage (§6).
+    if rescore_after_retest:
+        settled = wait_for_retest_settle(api, timeout=retest_wait)
+        live = fetch_live_findings(api, scan_id)
+        if live is not None:
+            retest_report = dict(report)
+            retest_report["findings"] = live
+            post_card = collect_scorecard(retest_report, fx)
+            post_card["phase"] = "post_retest"
+            post_card["retest_settled"] = settled
+            post_card["two_user"] = two_user
+            cards_by_phase["post_retest"] = post_card
+            scoring_card = post_card  # gates judged on proven state
+            print(f"[{name}] post-retest re-score: verified H/C "
+                  f"{finish_card['verified_high_critical']} -> {post_card['verified_high_critical']}", flush=True)
+
+    gates = apply_gates(scoring_card, fx)
+    out = dict(scoring_card)
+    out["scan_id"] = scan_id
+    out["target"] = name
+    out["gates"] = gates
+    out["passed"] = all(g["pass"] for g in gates)
+    out["scorecards"] = cards_by_phase
+    return out
 
 
 def main():
@@ -244,30 +351,63 @@ def main():
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--auth", action="store_true", help="mint bearer tokens from fixture auth config")
     ap.add_argument("--scan-id", default=None, help="score an existing scan id instead of submitting")
+    ap.add_argument("--rescore-after-retest", action="store_true",
+                    help="after the scan, wait for the auto-retest wave then re-score from live verdicts (§6)")
+    ap.add_argument("--retest-wait", type=int, default=900, help="max seconds to wait for the retest wave to settle")
+    ap.add_argument("--allow-stale-fleet", action="store_true",
+                    help="run even if the worker fleet is not uniform (NOT recommended — §10 gate)")
     args = ap.parse_args()
+
+    # §3/§10 fleet gate: a stale/mixed fleet silently produces bad numbers. Abort
+    # unless explicitly overridden, and record the fleet state in the output.
+    uniform, fleet = check_fleet(args.api)
+    if not uniform and not args.allow_stale_fleet:
+        print(f"ABORT: worker fleet is not uniform — refusing to benchmark on a mixed/stale fleet: {fleet}",
+              file=sys.stderr)
+        print("       restart all workers (docker restart $(docker ps -aq --filter name=shakerscan-worker)) "
+              "or pass --allow-stale-fleet.", file=sys.stderr)
+        return 2
+    if not uniform:
+        print(f"WARN: proceeding on a non-uniform fleet (--allow-stale-fleet): {fleet}", file=sys.stderr)
 
     os.makedirs(OUT_DIR, exist_ok=True)
     overall_ok = True
     cards = []
     for name in args.targets:
         try:
-            card = run_target(name, args.api, args.timeout, args.auth, args.scan_id)
+            card = run_target(name, args.api, args.timeout, args.auth, args.scan_id,
+                              rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait)
         except Exception as e:
             card = {"target": name, "error": str(e), "passed": False}
         cards.append(card)
         overall_ok = overall_ok and card.get("passed")
-        print(f"\n=== {name} scorecard ===")
+        print(f"\n=== {name} scorecard ({card.get('phase', 'scan_finish')}) ===")
         print(f"  verified H/C: {card.get('verified_high_critical')}  suspected: {card.get('suspected_high_critical')}  "
               f"FP-risk: {card.get('false_positive_risk')}  coverage: {card.get('coverage_percent')}")
         print(f"  expected recall: {card.get('expected_recall')}  "
               f"found {len(card.get('expected_found', []))}/{len(card.get('expected_found', []))+len(card.get('expected_missed', []))}")
+        if card.get("active_execution_failed"):
+            print("    [DEGRADED] active-execution failed: grade not reliable for active coverage")
+        if card.get("report_invariant_violations"):
+            print(f"    [INVARIANT] report blocks disagree: {card['report_invariant_violations']}")
         for m in card.get("expected_missed", []):
             print(f"    MISS {m['id']} ({m['family']} {m['route']})")
         for g in card.get("gates", []):
             print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
-    out = os.path.join(OUT_DIR, f"benchmark-{'_'.join(args.targets)}.json")
-    open(out, "w").write(json.dumps(cards, indent=2))
-    print(f"\nwrote {out}")
+    run = {
+        "fleet": fleet, "fleet_uniform": uniform,
+        "rescore_after_retest": args.rescore_after_retest,
+        "targets": cards, "passed": overall_ok,
+    }
+    # Latest-pointer (stable name) plus a timestamped, git-trackable record so a
+    # passing/failing run is visible in history (§10 — scorecards committed).
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    latest = os.path.join(OUT_DIR, f"benchmark-{'_'.join(args.targets)}.json")
+    archive = os.path.join(OUT_DIR, f"benchmark-{'_'.join(args.targets)}-{stamp}.json")
+    payload = json.dumps(run, indent=2)
+    open(latest, "w").write(payload)
+    open(archive, "w").write(payload)
+    print(f"\nwrote {latest}\nwrote {archive}")
     return 0 if overall_ok else 1
 
 
