@@ -12,6 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from ..ai_verdict_policy import has_deterministic_exploit_proof
+except ImportError:
+    from ai_verdict_policy import has_deterministic_exploit_proof
+
 logger = logging.getLogger(__name__)
 
 
@@ -420,12 +425,12 @@ def validate_sqli(
             evidence_level="confirmed_exploit",
         )
 
-    if finding.get("verified") is True or evidence.get("verified") is True or validation.get("verified") is True:
+    if has_deterministic_exploit_proof(finding):
         return ValidationResult(
             verified=True,
             confidence=ConfidenceTier.VERIFIED,
-            evidence="SQL injection finding marked verified by scanner evidence",
-            reason="SQL injection verified by scanner evidence",
+            evidence="SQL injection finding includes deterministic exploitation proof",
+            reason="SQL injection verified by deterministic proof",
             evidence_level="confirmed_exploit",
         )
 

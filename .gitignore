@@ -3,7 +3,7 @@ tests/benchmark/results/
 
 # Results (scan outputs, checkpoints) are local-only...
 results/*
-# ...except benchmark scorecards: §13 requires success to be visible in git history.
+# ...except benchmark scorecards: §13 requires benchmark outcomes to be visible in git history.
 # (ignore contents with results/* — not the dir — so a subdir can be re-included.)
 !results/benchmark-runs/
 results/benchmark-runs/*

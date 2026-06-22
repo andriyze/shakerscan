@@ -1,4 +1,6 @@
 {
+  "artifact_status": "failed_benchmark_scorecard",
+  "artifact_note": "This tracked Juice Shop benchmark is a failing/degraded benchmark outcome, not a success claim. The focused verification sidecar records narrower detector checks and does not satisfy benchmark gates.",
   "fleet": {
     "count": 16,
     "current": 16,

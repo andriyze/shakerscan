@@ -2393,14 +2393,12 @@ except Exception:
         """Fallback report gating helper when modular import is unavailable."""
         if not isinstance(finding, dict):
             return False
-        if finding.get("verified") is True:
+        try:
+            from ai_verdict_policy import has_deterministic_exploit_proof as _has_deterministic_exploit_proof
+        except Exception:
+            _has_deterministic_exploit_proof = None
+        if _has_deterministic_exploit_proof and _has_deterministic_exploit_proof(finding):
             return True
-        validation = finding.get("validation")
-        if isinstance(validation, dict):
-            if validation.get("verified") is True:
-                return True
-            if validation.get("poe_proven") is True:
-                return True
         verdict = str(
             finding.get("verification_verdict")
             or finding.get("last_verification_verdict")

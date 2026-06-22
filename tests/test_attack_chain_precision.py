@@ -24,7 +24,7 @@ def test_unverified_sqli_is_partial_not_complete_chain():
     assert "verified_exploit_evidence" in partial["missing_required"]
 
 
-def test_verified_sqli_can_form_complete_chain():
+def test_proven_sqli_can_form_complete_chain():
     result = analyze_attack_chains(
         [
             {
@@ -35,6 +35,7 @@ def test_verified_sqli_can_form_complete_chain():
                 "severity": "high",
                 "confidence": 0.95,
                 "verified": True,
+                "proof_of_exploitation": True,
             }
         ]
     )

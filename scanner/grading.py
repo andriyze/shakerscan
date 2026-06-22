@@ -24,7 +24,7 @@ try:
         EndpointPatterns,
     )
     from .target_context import is_local_or_private_scan_target
-    from .ai_verdict_policy import is_trusted_ai_false_positive
+    from .ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
 except ImportError:
     from constants import (
         FINDING_CVSS_SCORES,
@@ -38,7 +38,7 @@ except ImportError:
         EndpointPatterns,
     )
     from target_context import is_local_or_private_scan_target
-    from ai_verdict_policy import is_trusted_ai_false_positive
+    from ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
 
 
 def hsts_preload_readiness(hsts: str | None) -> dict[str, Any]:
@@ -580,13 +580,7 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
         if is_trusted_ai_false_positive(finding):
             return False
         validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
-        poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
-        if (
-            finding.get("verified") is True
-            or validation.get("verified") is True
-            or validation.get("poe_proven") is True
-            or poe_result.get("proven") is True
-        ):
+        if has_deterministic_exploit_proof(finding):
             return True
         if finding.get("suspected") or finding.get("needs_verification"):
             return False
@@ -637,7 +631,7 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
         """Weight grade impact by verification quality."""
         if is_trusted_ai_false_positive(finding):
             return 0.0
-        if finding.get("verified") is True:
+        if has_deterministic_exploit_proof(finding):
             return 1.0
         if finding.get("suspected") or finding.get("needs_verification"):
             return 0.25

@@ -1449,10 +1449,15 @@ def finding_proof_fields(finding: dict[str, Any]) -> dict[str, Any]:
     with a visible badge in the findings LIST, not only the detail page; and not
     count as a proven High/Critical in the headline grade.
     """
-    verdict = str(finding.get("last_verification_verdict") or "").lower()
-    # Some report-sourced findings carry a scan-time `verified` flag; DB rows use
-    # the verdict. Treat either deterministic signal as proof.
-    is_verified = verdict == "exploited" or finding.get("verified") is True
+    fields = _scan_time_verification_fields(finding) or {}
+    verdict = str(
+        fields.get("last_verification_verdict")
+        or finding.get("last_verification_verdict")
+        or ""
+    ).lower()
+    # DB rows use the persisted verdict; report-sourced rows must carry typed
+    # deterministic proof. A generic legacy `verified: true` flag is not enough.
+    is_verified = verdict == "exploited"
     severity = str(finding.get("severity") or "").lower()
     is_high_crit = severity in ("high", "critical")
     is_suspected = is_high_crit and not is_verified

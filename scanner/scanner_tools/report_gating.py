@@ -4,19 +4,18 @@ Helpers for report-time finding gating.
 
 from typing import Any
 
+try:
+    from ..ai_verdict_policy import has_deterministic_exploit_proof
+except ImportError:
+    from ai_verdict_policy import has_deterministic_exploit_proof
+
 
 def finding_has_verification_evidence(finding: dict[str, Any]) -> bool:
     """Return True when a finding has sufficient verification evidence for report gating."""
     if not isinstance(finding, dict):
         return False
-    if finding.get("verified") is True:
+    if has_deterministic_exploit_proof(finding):
         return True
-    validation = finding.get("validation")
-    if isinstance(validation, dict):
-        if validation.get("verified") is True:
-            return True
-        if validation.get("poe_proven") is True:
-            return True
     verdict = str(
         finding.get("verification_verdict")
         or finding.get("last_verification_verdict")
@@ -34,4 +33,3 @@ def finding_has_verification_evidence(finding: dict[str, Any]) -> bool:
     if isinstance(poe_result, dict) and poe_result.get("proven") is True:
         return True
     return False
-

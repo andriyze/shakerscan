@@ -56,8 +56,28 @@ def test_exploited_verdict_is_verified():
     assert r["proof_state"] == "verified"
 
 
-def test_scan_time_verified_flag_is_verified():
+def test_scan_time_generic_verified_flag_is_suspected():
     r = pf({"severity": "critical", "verified": True})
+    assert r["is_verified"] is False
+    assert r["is_suspected"] is True
+    assert r["proof_state"] == "suspected"
+
+
+def test_scan_time_typed_proof_is_verified():
+    r = pf({"severity": "critical", "proof_of_exploitation": True})
+    assert r["is_verified"] is True
+    assert r["is_suspected"] is False
+    assert r["proof_state"] == "verified"
+
+
+def test_failed_browser_proof_is_not_verified():
+    r = pf({"severity": "critical", "verified": True, "browser_proof": {"proven": False}})
+    assert r["is_verified"] is False
+    assert r["proof_state"] == "suspected"
+
+
+def test_proven_browser_proof_is_verified():
+    r = pf({"severity": "high", "browser_proof": {"proven": True, "confidence": 0.99}})
     assert r["is_verified"] is True
     assert r["proof_state"] == "verified"
 

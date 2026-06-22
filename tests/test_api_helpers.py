@@ -330,9 +330,16 @@ def test_scan_time_verification_fields_generic_verified_is_not_proof():
     assert scan_time_verification_fields({"evidence": {"verified": True}, "confidence": 0.95}) is None
 
 
+def test_scan_time_verification_fields_failed_browser_proof_is_not_proof():
+    assert scan_time_verification_fields(
+        {"verified": True, "browser_proof": {"proven": False, "confidence": 0.2}}
+    ) is None
+
+
 def test_scan_time_verification_fields_strong_proof_is_exploited():
     for finding in (
         {"poe": {"proven": True}},
+        {"browser_proof": {"proven": True, "confidence": 0.99}},
         {"verification_verdict": "exploited"},
         {"result_status": "verified_vulnerable"},
     ):

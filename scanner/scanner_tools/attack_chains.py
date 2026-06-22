@@ -23,6 +23,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+try:
+    from ..ai_verdict_policy import has_deterministic_exploit_proof
+except ImportError:
+    from ai_verdict_policy import has_deterministic_exploit_proof
+
 logger = logging.getLogger(__name__)
 
 
@@ -841,7 +846,6 @@ def build_attack_chain(
     }
 
     def summarize_finding(finding: dict, matched_type: str | None = None) -> dict:
-        validation = finding.get("validation", {}) if isinstance(finding.get("validation"), dict) else {}
         return {
             "id": finding.get("id") or finding.get("fingerprint"),
             "title": finding.get("title", finding.get("name", finding.get("type"))),
@@ -849,7 +853,7 @@ def build_attack_chain(
             "url": finding.get("url", finding.get("location")),
             "confidence": finding.get("confidence"),
             "confidence_tier": finding.get("confidence_tier"),
-            "verified": finding.get("verified") is True or validation.get("verified") is True,
+            "verified": has_deterministic_exploit_proof(finding),
             "tool": finding.get("tool"),
             "matched_type": matched_type,
         }
@@ -939,7 +943,8 @@ def calculate_chain_confidence(supporting_findings: list[dict]) -> float:
             tier = finding.get("confidence_tier")
             score = tier_scores.get(tier, 0.4)
         scores.append(score)
-        if finding.get("verified") is True:
+        summarized_verified = bool(finding.get("verified")) and "matched_type" in finding
+        if summarized_verified or has_deterministic_exploit_proof(finding):
             verified_count += 1
 
     base = sum(scores) / len(scores)

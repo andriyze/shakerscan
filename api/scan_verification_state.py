@@ -21,7 +21,6 @@ _CONFIRMED_EVIDENCE_LEVELS = {
 
 _DETERMINISTIC_PROOF_TYPES = {
     "browser_execution",
-    "browser_proof",
     "cross_principal_replay",
     "sqli_data_extraction",
     "data_extraction",
@@ -29,9 +28,32 @@ _DETERMINISTIC_PROOF_TYPES = {
     "differential_response",
 }
 
+_BROWSER_EXECUTION_MARKERS = (
+    "payload executed",
+    "dialog fired",
+    "dialog triggered",
+    "console proof",
+    "dom proof",
+    "execution proof",
+)
+
 
 def _truthy(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"})
+
+
+def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, Any]) -> bool:
+    """Return True only for positive browser execution proof, not failed attempts."""
+    for proof in (finding.get("browser_proof"), evidence.get("browser_proof")):
+        if isinstance(proof, dict):
+            if _truthy(proof.get("proven")) or _truthy(proof.get("payload_executed")) or _truthy(proof.get("executed")):
+                return True
+        elif isinstance(proof, str):
+            proof_text = proof.lower()
+            if any(marker in proof_text for marker in _BROWSER_EXECUTION_MARKERS):
+                return True
+    evidence_text = str(evidence).lower()
+    return any(marker in evidence_text for marker in _BROWSER_EXECUTION_MARKERS)
 
 
 def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
@@ -54,6 +76,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
     poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
+    browser_proof = finding.get("browser_proof") if isinstance(finding.get("browser_proof"), dict) else {}
     verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
     result_status = str(finding.get("result_status") or "").strip().lower()
     confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
@@ -78,7 +101,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or _truthy(evidence.get("executed"))
         or bool(finding.get("extraction_evidence") or evidence.get("extraction_evidence"))
         or bool(finding.get("extracted_data") or evidence.get("extracted_data"))
-        or bool(finding.get("browser_proof") or evidence.get("browser_proof"))
+        or _has_browser_execution_proof(finding, evidence)
         or proof_type in _DETERMINISTIC_PROOF_TYPES
         or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
     )
@@ -102,6 +125,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         validation.get("confidence"),
         poe.get("confidence"),
         poe_result.get("confidence"),
+        browser_proof.get("confidence"),
     ):
         confidence = _coerce_float(value)
         if confidence is not None:

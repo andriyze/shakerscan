@@ -277,8 +277,12 @@ export interface AsmCoverageRollup {
   total: number
   tested: number
   untested: number
+  testable?: number
+  denominator?: number
+  denominator_label?: string
   coverage: number
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
+  coverage_reconciles?: boolean
   attempted?: number
 }
 
@@ -313,6 +317,9 @@ export interface AsmCoverage {
   total: number
   tested: number
   untested: number
+  testable?: number
+  denominator?: number
+  denominator_label?: string
   in_progress: number
   stale: number
   gone: number
@@ -324,8 +331,13 @@ export interface AsmCoverage {
   attempted?: number
   coverage: number
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
+  coverage_reconciles?: boolean
   status_coverage?: Record<string, number | string>
   attempt_coverage?: Record<string, number | string>
+  detail?: {
+    status_coverage?: Record<string, number | string>
+    attempt_coverage?: Record<string, number | string>
+  }
 }
 
 export interface AsmEndpoint {

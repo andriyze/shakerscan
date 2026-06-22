@@ -14,10 +14,38 @@ from scanner_tools import finding_validator, report_gating  # noqa: E402
 sys.path.pop(0)
 
 
-def test_finding_has_verification_evidence_accepts_nested_validation_flags():
+def test_finding_has_verification_evidence_rejects_generic_nested_validation_flags():
     finding = {
         "title": "HSTS header missing",
         "validation": {"verified": True, "confidence": 0.6},
+    }
+
+    assert report_gating.finding_has_verification_evidence(finding) is False
+
+
+def test_finding_has_verification_evidence_accepts_nested_validation_proof():
+    finding = {
+        "title": "Confirmed SQL injection",
+        "validation": {"verified": True, "evidence_level": "confirmed_exploit", "confidence": 0.9},
+    }
+
+    assert report_gating.finding_has_verification_evidence(finding) is True
+
+
+def test_finding_has_verification_evidence_rejects_failed_browser_proof():
+    finding = {
+        "title": "Potential XSS",
+        "verified": True,
+        "browser_proof": {"proven": False, "attempted": True},
+    }
+
+    assert report_gating.finding_has_verification_evidence(finding) is False
+
+
+def test_finding_has_verification_evidence_accepts_proven_browser_proof():
+    finding = {
+        "title": "Confirmed XSS",
+        "browser_proof": {"proven": True, "confidence": 0.99},
     }
 
     assert report_gating.finding_has_verification_evidence(finding) is True

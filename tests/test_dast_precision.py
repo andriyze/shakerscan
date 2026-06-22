@@ -560,6 +560,26 @@ def test_grade_ceiling_ignores_unverified_suspected_high_findings():
     assert result["grade"] in {"A", "B"}
 
 
+def test_grade_does_not_full_weight_generic_verified_without_proof():
+    generic_verified = {
+        "tool": "legacy_probe",
+        "title": "Legacy verified high",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "confidence": 0.6,
+        "verified": True,
+    }
+    proven = {
+        **generic_verified,
+        "proof_of_exploitation": True,
+    }
+
+    generic_grade = grade(_healthy_grade_report([generic_verified]))
+    proven_grade = grade(_healthy_grade_report([proven]))
+
+    assert generic_grade["score"] > proven_grade["score"]
+
+
 def test_quick_public_scan_accepts_basic_tls_probe_for_completeness():
     report = _healthy_grade_report([])
     report["http"]["status"] = "HTTP/2 200"
@@ -802,6 +822,24 @@ def test_ai_rule_verdict_trusts_verified_exploitation_evidence():
     assert verdict == "true_positive"
     assert confidence >= 0.95
     assert "verified exploitation evidence" in rationale
+
+
+def test_ai_rule_verdict_does_not_trust_generic_verified_flags_as_proof():
+    verdict, confidence, rationale = _ai_rule_verdict(
+        {
+            "tool": "custom_probe",
+            "title": "Potential issue",
+            "verified": True,
+            "evidence": {"verified": True},
+            "validation": {"verified": True, "confidence": 0.9},
+        },
+        http_status="HTTP/2 200",
+        target_host="honey.shakerscan.com",
+    )
+
+    assert verdict == "unclear"
+    assert confidence == 0.5
+    assert "verified exploitation evidence" not in rationale
 
 
 def test_ai_quality_metrics_refresh_after_ai_review():

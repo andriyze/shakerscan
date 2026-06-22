@@ -20,9 +20,11 @@ from typing import Any
 # Support both package import and script import
 try:
     from .findings import normalize_finding
+    from .ai_verdict_policy import has_deterministic_exploit_proof
     from .target_context import is_local_or_private_scan_target
 except ImportError:
     from findings import normalize_finding
+    from ai_verdict_policy import has_deterministic_exploit_proof
     from target_context import is_local_or_private_scan_target
 
 
@@ -578,16 +580,8 @@ def _ai_rule_verdict(f: dict, http_status: str | None, target_host: str = "") ->
     title = (f.get("title") or "").lower()
     tool = (f.get("tool") or "").lower()
     ev = f.get("evidence") or {}
-    validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
     rationale = []
-    if (
-        f.get("verified") is True
-        or f.get("proof_of_exploitation") is True
-        or ev.get("verified") is True
-        or ev.get("proof_of_exploitation") is True
-        or validation.get("verified") is True
-        or validation.get("poe_proven") is True
-    ):
+    if has_deterministic_exploit_proof(f):
         rationale.append("Finding includes verified exploitation evidence")
         return "true_positive", 0.95, "; ".join(rationale)
 

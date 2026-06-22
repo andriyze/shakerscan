@@ -59,6 +59,22 @@ def test_scan_time_verification_fields_rejects_generic_verified_flags():
     ) == (None, None, None)
 
 
+def test_scan_time_verification_fields_rejects_failed_browser_proof():
+    assert _scan_time_verification_fields(
+        {"verified": True, "browser_proof": {"proven": False, "confidence": 0.2}}
+    ) == (None, None, None)
+
+
+def test_scan_time_verification_fields_accepts_proven_browser_proof():
+    status, verdict, confidence = _scan_time_verification_fields(
+        {"browser_proof": {"proven": True, "confidence": 0.99}}
+    )
+
+    assert status == "still_vulnerable"
+    assert verdict == "exploited"
+    assert confidence == 0.99
+
+
 def test_scan_time_verification_fields_ignores_stale_false_positive_without_fresh_proof():
     assert _scan_time_verification_fields(
         {"verified": False, "last_verification_verdict": "false_positive", "confidence": 0.9}

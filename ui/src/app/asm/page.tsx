@@ -90,6 +90,13 @@ function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
 }
 
+function asmCoverageDenominator(coverage: AsmCoverage | null): { value: number; label: string } {
+  if (!coverage) return { value: 0, label: 'testable' }
+  const value = coverage.denominator ?? coverage.testable ?? Math.max(coverage.total - coverage.gone, 0)
+  const label = coverage.denominator_label || (coverage.denominator !== undefined || coverage.testable !== undefined ? 'testable' : 'total - gone')
+  return { value, label }
+}
+
 // The ASM scheduling window is stored/evaluated in UTC; these helpers surface
 // the local-time equivalent so users can schedule against their own clock.
 const LOCAL_TZ =
@@ -719,12 +726,13 @@ function CoverageAdvisorCard({
     }
   }
 
+  const denominator = asmCoverageDenominator(coverage)
   const rec = gaps?.recommendation
     ?? (coverage
       ? {
-          next_action: coverage.total === 0 ? 'recon' as const : (coverage.untested + coverage.stale > 0 ? 'test' as const : 'recon' as const),
-          label: coverage.total === 0 ? 'Discover endpoints' : (coverage.untested + coverage.stale > 0 ? 'Test next endpoint batch' : 'Refresh discovery'),
-          reason: coverage.total === 0
+          next_action: denominator.value === 0 ? 'recon' as const : (coverage.untested + coverage.stale > 0 ? 'test' as const : 'recon' as const),
+          label: denominator.value === 0 ? 'Discover endpoints' : (coverage.untested + coverage.stale > 0 ? 'Test next endpoint batch' : 'Refresh discovery'),
+          reason: denominator.value === 0
             ? 'No persistent endpoint inventory exists yet.'
             : (coverage.untested + coverage.stale > 0
                 ? `${coverage.untested + coverage.stale} endpoint(s) are untested or stale.`
@@ -736,6 +744,7 @@ function CoverageAdvisorCard({
   const icon = next === 'test' ? Play : next === 'recon' ? Search : CheckCircle2
   const Icon = icon
   const coveragePct = coverage ? pct(coverage.coverage) : '—'
+  const coverageDenominatorText = coverage ? `${coverage.tested} / ${denominator.value} tested` : 'No coverage data'
   const selectedFamilyOption = checkFamilyOptions.find((option) => option.value === checkFamily && !option.disabled)
   const selectedRiskLabel = formatRiskLevel(selectedFamilyOption?.riskLevel)
   const plannedFamilyOptions = checkFamilyOptions.filter((option) => option.disabled)
@@ -758,6 +767,7 @@ function CoverageAdvisorCard({
             <p className="mt-1 text-sm text-gray-400">
               {rec?.reason || 'Load a target inventory to see the next ASM action.'}
             </p>
+            <div className="mt-1 text-xs text-gray-500">{coverageDenominatorText} · denominator: {denominator.label}</div>
           </div>
           {gaps?.recommendation?.blockers?.length ? (
             <div className="space-y-1">
@@ -1072,6 +1082,8 @@ function TargetView({ targetId }: { targetId: string }) {
     }
   }
 
+  const coverageDenominator = asmCoverageDenominator(coverage)
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -1110,16 +1122,16 @@ function TargetView({ targetId }: { targetId: string }) {
             <span className="text-sm font-medium text-gray-400">Coverage</span>
             <div className="text-right">
               <div className="text-sm text-gray-300">
-                {pct(coverage.coverage)} · {coverage.tested} / {coverage.total} tested
+                {pct(coverage.coverage)} · {coverage.tested} / {coverageDenominator.value} tested
               </div>
               <div className="text-xs text-gray-500">
-                {coverage.coverage_basis === 'attempt_ledger' ? 'From scanner attempt ledger' : 'From endpoint status'}
+                {coverage.coverage_basis === 'attempt_ledger' ? 'From scanner attempt ledger' : 'From endpoint status'} · denominator: {coverageDenominator.label}
               </div>
             </div>
           </div>
           <CoverageBar coverage={coverage.coverage} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
-            <CoverageStat label="Total" value={coverage.total} />
+            <CoverageStat label="Testable" value={coverageDenominator.value} />
             <CoverageStat label="Tested" value={coverage.tested} accent="text-green-400" />
             <CoverageStat label="Untested" value={coverage.untested} accent="text-gray-300" />
             <CoverageStat label="In progress" value={coverage.in_progress} accent="text-blue-400" />
