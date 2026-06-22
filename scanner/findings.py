@@ -367,25 +367,29 @@ def apply_dast_precision_policy(
             or poe_result.get("proven") is True
         )
 
-        # AI verdict overrides heuristic gating in both directions:
-        #   - A high-confidence true_positive confirms a finding the static
-        #     gates would have downgraded (e.g. DOM XSS in vendor chunks the
-        #     AI inspected and validated).
-        #   - A high-confidence false_positive overrides heuristic
-        #     "verified=True" signals so a confidently-misclassified finding
-        #     does not get bumped to confirmed_exploit by static gates.
+        # AI verdict adjusts heuristic gating, but NEVER promotes to `verified`
+        # (docs proposed-next-steps §8 — one proof taxonomy: AI is supporting
+        # signal, only deterministic proof is `verified`/exploited):
+        #   - A high-confidence false_positive overrides heuristic "verified=True"
+        #     so a confidently-misclassified finding is not bumped to
+        #     confirmed_exploit by static gates.
+        #   - A high-confidence true_positive does NOT set verified; it keeps an
+        #     AI-validated finding visible at its severity as a `likely_vulnerable`
+        #     suspected lead (handled below) instead of being buried by the
+        #     heuristic downgrade ladder.
         if ai_false_positive and heuristic_verified:
             heuristic_verified = False
             policy = finding.setdefault("precision_policy", {})
             policy["ai_overrode_verified"] = True
             policy["ai_overrode_reason"] = "ai_false_positive_high_confidence"
 
-        verified = heuristic_verified or ai_true_positive
+        verified = heuristic_verified  # deterministic proof only — AI never promotes
         finding["verified"] = bool(verified)
         if verified:
             validation["evidence_level"] = validation.get("evidence_level") or "confirmed_exploit"
             if validation:
                 finding["validation"] = validation
+            finding["proof_state"] = "exploited"
             finding["suspected"] = False
             finding["needs_verification"] = False
             finding.pop("verification_reason", None)
@@ -406,6 +410,23 @@ def apply_dast_precision_policy(
                 finding["validation"]["confidence"] = finding["confidence"]
 
         if verified:
+            continue
+
+        # AI true_positive is a supporting signal, not deterministic proof (§8).
+        # Keep the AI-validated finding visible at its assessed severity as a
+        # `likely_vulnerable` suspected lead that still needs deterministic proof,
+        # instead of letting the per-tool heuristic ladder bury it. It does NOT
+        # count as verified for the grade/benchmark gates.
+        if ai_true_positive and not ai_false_positive:
+            finding["suspected"] = True
+            finding["needs_verification"] = True
+            finding["proof_state"] = "likely_vulnerable"
+            policy = finding.setdefault("precision_policy", {})
+            policy["ai_supported_likely"] = True
+            finding["verification_reason"] = (
+                f"AI judged true_positive with {ai_confidence_score:.0%} confidence "
+                "(likely vulnerable — not deterministic proof)"
+            )
             continue
 
         # If AI judged this a false positive with high confidence, downgrade

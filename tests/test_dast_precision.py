@@ -200,9 +200,10 @@ def test_cap_severity_accepts_critical_target_without_keyerror():
     assert finding["severity"] == "high"
 
 
-def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
-    # A DOM XSS finding on a third-party CDN chunk would normally be capped to
-    # info, but a high-confidence AI true_positive should override and verify.
+def test_precision_policy_ai_true_positive_is_likely_not_verified():
+    # docs §8: AI never promotes to `verified`. A high-confidence AI true_positive
+    # keeps the finding visible at its severity as a `likely_vulnerable` SUSPECTED
+    # lead, but it is NOT deterministically verified.
     findings = [
         {
             "tool": "dom_xss",
@@ -219,9 +220,13 @@ def test_precision_policy_ai_true_positive_overrides_heuristic_downgrade():
 
     adjusted = apply_dast_precision_policy(findings)
 
-    assert adjusted[0]["verified"] is True
+    assert adjusted[0]["verified"] is False  # AI never promotes to verified
+    assert adjusted[0]["proof_state"] == "likely_vulnerable"
+    assert adjusted[0]["suspected"] is True
+    assert adjusted[0]["needs_verification"] is True
+    assert adjusted[0]["precision_policy"]["ai_supported_likely"] is True
+    # Still kept at its assessed severity (not buried by the heuristic ladder).
     assert adjusted[0]["severity"] == "high"
-    assert adjusted[0]["confidence"] >= 0.9
 
 
 def test_precision_policy_ai_false_positive_overrides_heuristic_verified():
