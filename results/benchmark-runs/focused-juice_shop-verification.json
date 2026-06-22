@@ -1,0 +1,11 @@
+{
+  "note": "focused custom-endpoints Juice Shop verification (login POST-body SQLi, track-order path, reviews) on final build",
+  "scan_id": "94c8b46a-9fe5-4e39-a6af-8a4a5ade04ed",
+  "total_findings": 29,
+  "exploited": 3,
+  "likely_vulnerable": 1,
+  "sqli_login_detected": true,
+  "invariant_violations": [],
+  "grade": "F",
+  "grade_reliable": true
+}

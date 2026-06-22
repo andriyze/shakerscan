@@ -1,0 +1,340 @@
+{
+  "fleet": {
+    "count": 16,
+    "current": 16,
+    "stale": 0,
+    "pending": 0,
+    "fingerprints": [
+      "496557ffd8a6510e"
+    ]
+  },
+  "fleet_uniform": true,
+  "rescore_after_retest": true,
+  "targets": [
+    {
+      "total_findings": 0,
+      "verified_high_critical": 0,
+      "suspected_high_critical": 0,
+      "false_positive_risk": 0.0,
+      "coverage_percent": null,
+      "endpoints_discovered": null,
+      "endpoints_tested": null,
+      "budget_exhausted": false,
+      "budget_exhausted_reason": null,
+      "auth_blocked": false,
+      "auth_states_tested": [],
+      "timeout": false,
+      "error": null,
+      "expected_found": [],
+      "expected_missed": [
+        {
+          "id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof": "verified",
+          "evidence": null
+        },
+        {
+          "id": "sqli-login",
+          "family": "sqli",
+          "route": "/rest/user/login",
+          "proof": "verified",
+          "evidence": null
+        },
+        {
+          "id": "xss-dom-search",
+          "family": "xss",
+          "route": "#/search",
+          "proof": "browser",
+          "evidence": null
+        },
+        {
+          "id": "xss-reflected",
+          "family": "xss",
+          "route": "/rest/track-order",
+          "proof": "browser",
+          "evidence": null
+        },
+        {
+          "id": "bfla-users",
+          "family": "broken_access_control",
+          "route": "/api/Users",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
+          "proof": "deterministic",
+          "evidence": null
+        },
+        {
+          "id": "nosqli-reviews",
+          "family": "nosqli",
+          "route": "/rest/products/reviews",
+          "proof": "deterministic",
+          "evidence": null
+        }
+      ],
+      "expected_recall": 0.0,
+      "phase": "post_retest",
+      "retest_settled": true,
+      "two_user": false,
+      "resolved_budget": null,
+      "invariant_violations": null,
+      "active_execution_failed": false,
+      "grade_reliable": false,
+      "report_degraded": true,
+      "report_invariant_violations": [],
+      "scan_id": "c2fbf1a8-f558-4769-9dd9-7065172418e9",
+      "target": "juice_shop",
+      "gates": [
+        {
+          "gate": "report_invariants_clean",
+          "pass": true,
+          "detail": "clean"
+        },
+        {
+          "gate": "grade_reliable",
+          "pass": false,
+          "detail": "grade_reliable=False"
+        },
+        {
+          "gate": "active_execution_ok",
+          "pass": true,
+          "detail": "active_execution_failed=False"
+        },
+        {
+          "gate": "report_not_degraded",
+          "pass": false,
+          "detail": "report_degraded=True"
+        },
+        {
+          "gate": "retest_settled",
+          "pass": true,
+          "detail": "retest_settled=True"
+        },
+        {
+          "gate": "min_verified_high_critical",
+          "pass": false,
+          "detail": "0 >= 6"
+        },
+        {
+          "gate": "max_unverified_high_ratio",
+          "pass": true,
+          "detail": "0.0 <= 0.35"
+        },
+        {
+          "gate": "require_verified_sqli",
+          "pass": false,
+          "detail": "no verified SQLi"
+        },
+        {
+          "gate": "require_browser_proven_xss",
+          "pass": false,
+          "detail": "no browser-proven XSS"
+        }
+      ],
+      "passed": false,
+      "scorecards": {
+        "scan_finish": {
+          "total_findings": 0,
+          "verified_high_critical": 0,
+          "suspected_high_critical": 0,
+          "false_positive_risk": 0.0,
+          "coverage_percent": null,
+          "endpoints_discovered": null,
+          "endpoints_tested": null,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [],
+          "timeout": false,
+          "error": null,
+          "expected_found": [],
+          "expected_missed": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "evidence": null
+            }
+          ],
+          "expected_recall": 0.0,
+          "phase": "scan_finish",
+          "resolved_budget": null,
+          "invariant_violations": null,
+          "active_execution_failed": false,
+          "grade_reliable": false,
+          "report_degraded": true,
+          "report_invariant_violations": [],
+          "two_user": false
+        },
+        "post_retest": {
+          "total_findings": 0,
+          "verified_high_critical": 0,
+          "suspected_high_critical": 0,
+          "false_positive_risk": 0.0,
+          "coverage_percent": null,
+          "endpoints_discovered": null,
+          "endpoints_tested": null,
+          "budget_exhausted": false,
+          "budget_exhausted_reason": null,
+          "auth_blocked": false,
+          "auth_states_tested": [],
+          "timeout": false,
+          "error": null,
+          "expected_found": [],
+          "expected_missed": [
+            {
+              "id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "sqli-login",
+              "family": "sqli",
+              "route": "/rest/user/login",
+              "proof": "verified",
+              "evidence": null
+            },
+            {
+              "id": "xss-dom-search",
+              "family": "xss",
+              "route": "#/search",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "xss-reflected",
+              "family": "xss",
+              "route": "/rest/track-order",
+              "proof": "browser",
+              "evidence": null
+            },
+            {
+              "id": "bfla-users",
+              "family": "broken_access_control",
+              "route": "/api/Users",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof": "deterministic",
+              "evidence": null
+            },
+            {
+              "id": "nosqli-reviews",
+              "family": "nosqli",
+              "route": "/rest/products/reviews",
+              "proof": "deterministic",
+              "evidence": null
+            }
+          ],
+          "expected_recall": 0.0,
+          "phase": "post_retest",
+          "retest_settled": true,
+          "two_user": false,
+          "resolved_budget": null,
+          "invariant_violations": null,
+          "active_execution_failed": false,
+          "grade_reliable": false,
+          "report_degraded": true,
+          "report_invariant_violations": []
+        }
+      }
+    }
+  ],
+  "passed": false
+}
