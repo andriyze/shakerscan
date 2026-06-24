@@ -34,6 +34,7 @@ from ai_gate.targets.rest_json import (
     SseConversationTarget,
     build_headers,
     extract_response_text,
+    profile_response_byte_cap,
     replace_placeholders,
 )
 from ai_gate.targets.widget_playwright import WidgetPlaywrightConversationTarget
@@ -5919,12 +5920,13 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     token_budget = TokenBudget(
         int(raw_token_budget) if isinstance(raw_token_budget, (int, float)) and raw_token_budget > 0 else None
     )
+    response_byte_cap = profile_response_byte_cap(scan_profile)
     if target_type == "widget":
         target_adapter = WidgetPlaywrightConversationTarget(target_url, target)
     elif target.get("streaming_mode") == "sse":
-        target_adapter = SseConversationTarget(target_url, target)
+        target_adapter = SseConversationTarget(target_url, target, default_max_response_bytes=response_byte_cap)
     else:
-        target_adapter = RestJsonConversationTarget(target_url, target)
+        target_adapter = RestJsonConversationTarget(target_url, target, default_max_response_bytes=response_byte_cap)
     max_turns_per_conversation = resolve_max_turns_per_conversation(metadata_json, scan_profile)
     runner = ConversationRunner(
         aiohttp_module=aiohttp,

@@ -1071,20 +1071,74 @@ def _signature_verification_status(
     }
 
 
-def _license_policy(license_ref: Any) -> dict[str, Any]:
-    license_text = str(license_ref or "").strip()
-    normalized = license_text.lower()
+_SPDX_PERMISSIVE = {
+    "apache-2.0", "mit", "bsd-2-clause", "bsd-3-clause", "isc", "0bsd", "bsl-1.0",
+    "zlib", "unlicense", "cc0-1.0", "mpl-2.0", "python-2.0", "postgresql", "openrail",
+    "openrail++", "bigscience-openrail-m", "creativeml-openrail-m", "llama2", "llama3",
+}
+_SPDX_COPYLEFT = {
+    "gpl-2.0", "gpl-3.0", "agpl-3.0", "lgpl-2.1", "lgpl-3.0", "epl-2.0", "cddl-1.0",
+    "ms-rl", "osl-3.0",
+}
+_SPDX_ALIASES = {
+    "apache 2.0": "apache-2.0", "apache2": "apache-2.0", "apache2.0": "apache-2.0",
+    "apache license 2.0": "apache-2.0", "bsd": "bsd-3-clause", "gplv2": "gpl-2.0",
+    "gplv3": "gpl-3.0", "gpl2": "gpl-2.0", "gpl3": "gpl-3.0", "agplv3": "agpl-3.0",
+    "lgplv3": "lgpl-3.0", "the unlicense": "unlicense", "cc-0": "cc0-1.0",
+}
+_SPDX_SUFFIXES = ("-only", "-or-later", "+")
+
+
+def _normalize_spdx_token(token: str) -> str:
+    t = str(token or "").strip().strip("()").strip().lower()
+    return _SPDX_ALIASES.get(t, t)
+
+
+def _spdx_base(token: str) -> str:
+    base = _normalize_spdx_token(token)
+    for suffix in _SPDX_SUFFIXES:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base
+
+
+def _classify_license_token(token: str) -> str:
+    normalized = _normalize_spdx_token(token)
     if not normalized:
-        status = "missing"
-    elif normalized in PERMISSIVE_LICENSES:
-        status = "permissive"
-    elif any(hint in normalized for hint in RESTRICTIVE_LICENSE_HINTS):
+        return "missing"
+    if any(hint in normalized for hint in RESTRICTIVE_LICENSE_HINTS):
+        return "restricted"
+    base = _spdx_base(normalized)
+    if base in _SPDX_PERMISSIVE or normalized in PERMISSIVE_LICENSES:
+        return "permissive"
+    if base in _SPDX_COPYLEFT or base.startswith(("gpl-", "agpl-", "lgpl-")):
+        return "restricted"
+    if base.startswith(("apache", "mit", "bsd", "isc", "mpl", "openrail")):
+        return "permissive"
+    return "review_required"
+
+
+def _license_policy(license_ref: Any) -> dict[str, Any]:
+    """Classify a license, normalizing SPDX identifiers and parsing expressions.
+
+    Supports SPDX expressions like "MIT OR Apache-2.0" and "(MIT AND GPL-3.0-only)":
+    restricted if any sub-license is restricted, permissive only if all are.
+    """
+    license_text = str(license_ref or "").strip()
+    if not license_text:
+        return {"license": license_ref, "status": "missing", "normalized": [], "review_required": True}
+    tokens = [t for t in (part.strip() for part in re.split(r"\s+(?:and|or|with)\s+|[()]", license_text, flags=re.IGNORECASE)) if t]
+    classes = [_classify_license_token(t) for t in tokens] or ["review_required"]
+    if "restricted" in classes:
         status = "restricted"
+    elif all(c == "permissive" for c in classes):
+        status = "permissive"
     else:
         status = "review_required"
     return {
         "license": license_ref,
         "status": status,
+        "normalized": [_normalize_spdx_token(t) for t in tokens],
         "review_required": status in {"missing", "restricted", "review_required"},
     }
 

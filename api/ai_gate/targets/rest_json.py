@@ -441,8 +441,22 @@ class ConversationExchange:
         return transcript
 
 
+# R6b/§3.8: per-profile response-body caps. An explicit metadata/target
+# max_response_bytes always wins; otherwise the cap scales with scan depth.
+PROFILE_RESPONSE_BYTE_CAPS = {
+    "smoke": 65_536,
+    "trace": 131_072,
+    "standard": 262_144,
+    "deep": 1_000_000,
+}
+
+
+def profile_response_byte_cap(scan_profile: Any) -> int:
+    return PROFILE_RESPONSE_BYTE_CAPS.get(str(scan_profile or "").strip().lower(), 262_144)
+
+
 class RestJsonConversationTarget:
-    def __init__(self, target_url: str, target: dict[str, Any]) -> None:
+    def __init__(self, target_url: str, target: dict[str, Any], *, default_max_response_bytes: int | None = None) -> None:
         self.target = target
         self.method = str(target.get("method") or "POST").upper()
         raw_url = str(target.get("endpoint_url") or target_url).strip()
@@ -482,7 +496,7 @@ class RestJsonConversationTarget:
         metadata = as_dict(target.get("metadata_json"))
         self.max_response_bytes = _coerce_int(
             metadata.get("max_response_bytes", target.get("max_response_bytes")),
-            262_144,
+            default_max_response_bytes or 262_144,
             minimum=1_024,
             maximum=5_000_000,
         )
@@ -1200,7 +1214,7 @@ class RestJsonConversationTarget:
 
 
 class SseConversationTarget(RestJsonConversationTarget):
-    def __init__(self, target_url: str, target: dict[str, Any]) -> None:
+    def __init__(self, target_url: str, target: dict[str, Any], **kwargs: Any) -> None:
         sse_target = dict(target)
         sse_target["streaming_mode"] = "sse"
-        super().__init__(target_url, sse_target)
+        super().__init__(target_url, sse_target, **kwargs)

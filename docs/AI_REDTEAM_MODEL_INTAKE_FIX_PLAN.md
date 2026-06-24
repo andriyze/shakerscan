@@ -140,17 +140,20 @@ tampered / broken-chain / wrong-key flagged; presence checks still fire); live r
   `production_safety_tiers` in the manifest. Locked by
   `tests/test_production_safety_classification.py` (3). (Remaining: add the endpoint-URL hash to the
   stored `confirm_production` evidence.)
-- **§3.8** Wire per-profile response caps (smoke 64 KB / standard 256 KB / deep 1 MB) instead of the
-  flat 256 KB default.
-- **Widget target parity:** integrate the request budget (§3.7) and response cap (§3.8) into
-  `ai_gate/targets/widget_playwright.py` (currently rest_json only).
-- **§3.12** Surface the judging quality gate in the UI ("deterministic only" / "needs review") —
-  `judging_quality_gate` is computed and exposed by the API but no UI reads it.
-- **§3.13** Add a safe `resources/list` probe to MCP readiness.
-- **§3.14** Ensure the `onnx` package is installed in the scanner image so ONNX inspection is always
-  parser-backed (it falls back to ASCII-string heuristics when absent).
-- **§3.15** Add SPDX identifier normalization + expression parsing (`MIT OR Apache-2.0`) on top of the
-  existing permissive/restricted/review classification.
+- **§3.8 ✅ (2026-06-24)** Per-profile response caps wired: `rest_json.profile_response_byte_cap`
+  (smoke 64 KB / trace 128 KB / standard 256 KB / deep 1 MB) is passed as the adapter's
+  `default_max_response_bytes`; an explicit metadata `max_response_bytes` still wins.
+- **§3.13 ✅ (2026-06-24)** Safe read-only `resources/list` probe added to MCP readiness
+  (`ai_assurance._extract_mcp_resources` + an `mcp.resource_inventory` check); never invokes a tool.
+- **§3.15 ✅ (2026-06-24)** SPDX identifier normalization + expression parsing added to
+  `model_intake._license_policy` (`MIT OR Apache-2.0` → permissive; any restricted sub-license →
+  restricted; aliases like `apache 2.0` normalized; exposes a `normalized` token list).
+- **Widget target parity (remaining):** integrate the request budget (§3.7) and response cap (§3.8)
+  into `ai_gate/targets/widget_playwright.py` (Playwright adapter; currently rest_json only).
+- **§3.12 (remaining):** surface the judging quality gate in the UI ("deterministic only" /
+  "needs review") — `judging_quality_gate` is computed and exposed by the API but no UI reads it.
+- **§3.14 (remaining):** ensure the `onnx` package is installed in the scanner image so ONNX inspection
+  is always parser-backed (it falls back to ASCII-string heuristics when absent — image-build change).
 
 ---
 

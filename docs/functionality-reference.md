@@ -448,11 +448,11 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | AI Gate widget target | Partial | Request-budget and response-cap parity with REST not yet wired. |
 | AI Gate per-finding retest | Shipped | Deterministic proof still outranks AI judgment. |
 | Cross-principal AI testing | Shipped | Requires configured principals. |
-| MCP readiness checks | Partial | Add safe `resources/list`; some checks lean on declared metadata. |
+| MCP readiness checks | Shipped | Safe `resources/list` added; audience/scope still partly from declared metadata. |
 | Transcript retention / purge | Shipped | Response-time redaction by default + audited admin gate (`AI_TRANSCRIPT_ALLOW_SENSITIVE`). |
 | Model Intake checksum / range / local-file gates | Shipped | Solid baseline. |
 | Model Intake signature / provenance crypto | Shipped | Real detached-sig verification (`cryptography`: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims, not proof. |
-| Model Intake governance evidence | Partial | Add SPDX expression parsing / normalization. |
+| Model Intake governance evidence | Shipped | SPDX normalization + expression parsing added (`MIT OR Apache-2.0`). |
 | Agent execution receipts | Shipped | Verifies content-hash, prev_hash chain, and signature (Ed25519/RSA/ECDSA). |
 | Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
 | Durable policy + exception registry | Partial | Profiles hard-coded, exceptions payload-driven; no DB-backed objects. |

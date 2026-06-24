@@ -655,6 +655,17 @@ def _extract_mcp_tools(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_mcp_resources(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, dict) and isinstance(result.get("resources"), list):
+        return [item for item in result["resources"] if isinstance(item, dict)]
+    if isinstance(payload.get("resources"), list):
+        return [item for item in payload["resources"] if isinstance(item, dict)]
+    return []
+
+
 def _tool_schema_risks(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     risks: list[dict[str, Any]] = []
     for tool in tools[:100]:
@@ -714,6 +725,15 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
         timeout_seconds=timeout_seconds,
         json_body=_mcp_jsonrpc_request("tools/list", "shakerscan-readiness-unauth-tools"),
     )
+    # Read-only resources/list (safe, never invokes a tool).
+    resources_list_probe = _fetch_url_metadata(
+        endpoint_url,
+        method="POST",
+        timeout_seconds=timeout_seconds,
+        headers=auth_headers,
+        json_body=_mcp_jsonrpc_request("resources/list", "shakerscan-readiness-resources"),
+    )
+    resources = _extract_mcp_resources(resources_list_probe.get("json"))
     tools = _extract_mcp_tools(tools_list_probe.get("json"))
     unauthenticated_tools = _extract_mcp_tools(unauthenticated_tools_probe.get("json"))
     tool_schema_risks = _tool_schema_risks(tools)
@@ -726,6 +746,16 @@ def run_mcp_live_readiness_probe(target: dict[str, Any], *, timeout_seconds: int
     auth_header_text = " ".join(authenticate_headers).lower()
 
     checks = [
+        {
+            "id": "mcp.resource_inventory",
+            "label": "Resource inventory (resources/list)",
+            "status": "pass" if isinstance(resources_list_probe.get("json"), dict) else "warn",
+            "evidence": (
+                f"{len(resources)} resource(s) advertised via resources/list"
+                if resources
+                else "resources/list returned no resources or is not supported"
+            ),
+        },
         {
             "id": "mcp.protected_resource_metadata",
             "label": "Protected resource metadata",
