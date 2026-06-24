@@ -696,6 +696,8 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 - AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED`.
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
   `AI_TRANSCRIPT_ALLOW_SENSITIVE` (default off — when on, `GET /ai/scans/{id}/transcript?include_sensitive=true` returns raw, audit-logged bodies; otherwise responses are redacted at response time).
+- AI credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` (a Fernet key; when set, AI-target credential
+  secrets are encrypted at rest with an `enc:fernet:` prefix; unset = plaintext, backward compatible).
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
@@ -721,10 +723,11 @@ limited with per-tool timeouts and a global deadline.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
   on `0.0.0.0` is only safe behind a firewall/VPN/reverse proxy.
 - **AI redaction**: sensitive headers/bodies and secret-bearing URL params/metadata are redacted
-  before any content is sent to an AI provider. *Current limitation:* redaction works, but a single
-  shared `redact_sensitive()` helper, worker-side credential-reference indirection (secrets still reach
-  scanner subprocess command lines), and encryption-at-rest for AI-target credentials are remaining
-  work (fix-plan R2); transcript responses still need a default response-time redaction gate (R3).
+  before any content is sent to an AI provider, via the shared `redact_sensitive()` helper (R2a).
+  AI-target credential secrets can be encrypted at rest, opt-in via `AI_CREDENTIAL_ENC_KEY` (R2b), and
+  transcript responses are redacted at response time by default (R3). *Remaining:* worker-side
+  credential-reference indirection — credential secrets still reach the scanner subprocess command line
+  (fix-plan R2b remainder).
 
 ---
 

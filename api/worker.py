@@ -44,6 +44,7 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from secret_store import decrypt_secret
 
 try:
     from constants import resolve_scan_budget, resolve_or_consume_budget
@@ -494,7 +495,7 @@ def _runtime_ai_target_credential_from_row(row: dict[str, Any] | None) -> dict[s
 
     metadata = parse_json_field(row.get("metadata_json")) or {}
     auth_kind = row.get("auth_kind") or "none"
-    secret = row.get("secret_value")
+    secret = decrypt_secret(row.get("secret_value"))
     if auth_kind == "multi_header":
         try:
             headers = json.loads(secret or "[]")

@@ -22,7 +22,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.1 | Model Intake checksum semantics | ✅ | — |
 | 3.2 | HTTP Range truncation handling | ✅ | — |
 | 3.3 | Signature / provenance **crypto** verification | ✅ | Real detached-sig verification (cryptography: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims (R1) |
-| 3.4 | Secret redaction | 🟡 | Shared helper done (R2a); worker inline secrets + encryption-at-rest remain (R2b) |
+| 3.4 | Secret redaction | 🟡 | Shared helper (R2a) + encryption-at-rest (R2b) done; worker command-line indirection remains |
 | 3.5 | Local file read gate | ✅ | — |
 | 3.6 | AI Gate production safety | 🟡 | Probe production-safety filter is inert (binary flag, no probe overrides); no endpoint-hash in evidence |
 | 3.7 | Request budget by HTTP call | ✅ | (widget target not integrated) |
@@ -93,11 +93,17 @@ Masking keys and nested-metadata redaction shipped. Remaining structural fixes:
   `[REDACTED]` provider redactor by design. Verified: `tests/test_shared_redaction.py` (8) +
   `test_api_scan_option_masking` (90), `test_model_intake` (29), `test_ai_verifier_safety` (11) green;
   live stack reboots healthy with the flat-layout import.
-- **Credential-reference indirection in the worker.** `api/worker.py` still passes raw `--auth-*` /
-  `--login-password` on the command line and returns raw `secret_value`; replace inline secrets with
-  credential refs resolved at the worker. (R2b)
-- **Encryption-at-rest for `ai_target_credentials.secret_value`** (`db/init.sql` stores it as plaintext
-  `TEXT`; no Fernet/crypto touches that column). (R2b)
+- ✅ **Encryption-at-rest for `ai_target_credentials.secret_value` — DONE (R2b, 2026-06-24).**
+  New `api/secret_store.py` (`encrypt_secret`/`decrypt_secret`) encrypts the credential secret on write
+  in `_build_ai_credential` and decrypts at the two read sites
+  (`worker._runtime_ai_target_credential_from_row` and the API credential resolver). Opt-in via
+  `AI_CREDENTIAL_ENC_KEY` (a Fernet key); off by default → plaintext passthrough (backward compatible).
+  Encrypted values carry an `enc:fernet:` prefix so legacy plaintext and encrypted rows coexist during
+  rollout and re-encryption never doubles up. Verified live (default plaintext; key set → `enc:fernet:`
+  ciphertext that round-trips) and by `tests/test_secret_store.py` (3).
+- **Credential-reference indirection in the worker (remaining).** `api/worker.py` still passes raw
+  `--auth-*` / `--login-password` on the scanner subprocess command line; replace inline secrets with
+  credential refs resolved just-in-time. (Larger refactor across worker + scanner.)
 
 ### R3 — Transcript redaction enforcement (was §3.10) ✅ DONE (2026-06-24)
 `GET /ai/scans/{id}/transcript` now redacts at response time by default

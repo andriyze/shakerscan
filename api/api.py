@@ -59,6 +59,11 @@ except ModuleNotFoundError as exc:
         redact_text,
     )
 
+try:
+    from secret_store import decrypt_secret, encrypt_secret
+except ModuleNotFoundError:
+    from api.secret_store import decrypt_secret, encrypt_secret
+
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 
@@ -3129,7 +3134,7 @@ def _build_ai_credential_db_record(
     header_name = str(credential.header_name or "").strip() or None
     secret = str(credential.secret or "").strip()
     existing_secret = (
-        str(existing.get("secret_value") or "")
+        str(decrypt_secret(existing.get("secret_value")) or "")
         if existing and existing.get("auth_kind") == auth_kind
         else ""
     )
@@ -3174,7 +3179,7 @@ def _build_ai_credential_db_record(
         return {
             "auth_kind": auth_kind,
             "header_name": None,
-            "secret_value": secret_value,
+            "secret_value": encrypt_secret(secret_value),
             "secret_preview": f"{len(pairs)} header{'s' if len(pairs) != 1 else ''}",
             "metadata_json": {"headers": [{"name": pair["name"], "value": "***"} for pair in pairs]},
         }
@@ -3187,7 +3192,7 @@ def _build_ai_credential_db_record(
     return {
         "auth_kind": auth_kind,
         "header_name": header_name,
-        "secret_value": secret,
+        "secret_value": encrypt_secret(secret),
         "secret_preview": _mask_ai_target_secret(secret),
         "metadata_json": metadata,
     }
@@ -4642,7 +4647,7 @@ def _runtime_credential_from_row(row: Optional[dict[str, Any]]) -> dict[str, Any
 
     auth_kind = row.get("auth_kind")
     metadata = _decode_json_value(row.get("metadata_json")) or {}
-    secret = row.get("secret_value")
+    secret = decrypt_secret(row.get("secret_value"))
     if auth_kind == "multi_header":
         try:
             headers = json.loads(secret or "[]")
