@@ -5052,6 +5052,7 @@ async def process_scan_plan_job(job_data: dict):
     coverage_auth_states: list[str] = []
     coverage_allocation = 'static'
     harvested: list[str] = []
+    harvest_meta: dict[str, Any] | None = None
     precreated_campaign_id: str | None = None
     if requested_strategy in {'coverage', 'coverage_family'}:
         # Discover-once: run a discovery-focused recon pass (active disabled),
@@ -5103,10 +5104,7 @@ async def process_scan_plan_job(job_data: dict):
         )
         # Surface the worklist cap so "Full Coverage" never reports ~100% over a
         # silently truncated surface: endpoints beyond the cap were discovered but
-        # will not be tested.
-        parent_options['coverage_worklist_raw_discovered'] = harvest_meta['raw_discovered']
-        parent_options['coverage_worklist_cap'] = harvest_meta['cap']
-        parent_options['coverage_worklist_truncated'] = harvest_meta['truncated']
+        # will not be tested. (Recorded on parent_options where it is built below.)
         if harvest_meta['truncated']:
             print(f"[{parent_id[:8]}] coverage: WORKLIST TRUNCATED — discovered "
                   f"{harvest_meta['raw_discovered']} endpoints, testing only "
@@ -5280,6 +5278,13 @@ async def process_scan_plan_job(job_data: dict):
     parent_options['parallel_strategy'] = plan.strategy
     if plan.strategy in {'coverage', 'coverage_family'}:
         parent_options['coverage_allocation'] = coverage_allocation
+        if harvest_meta is not None:
+            # Surface the worklist cap so "Full Coverage" never reports ~100% over a
+            # silently truncated surface (endpoints beyond the cap were discovered
+            # but will not be tested).
+            parent_options['coverage_worklist_raw_discovered'] = harvest_meta['raw_discovered']
+            parent_options['coverage_worklist_cap'] = harvest_meta['cap']
+            parent_options['coverage_worklist_truncated'] = harvest_meta['truncated']
         if harvested and coverage_auth_states:
             planned_families = {
                 asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
