@@ -27,6 +27,30 @@ from ai_gate_scan import (  # noqa: E402
 )
 
 
+def test_judge_does_not_downgrade_finding_with_deterministic_proof():
+    # A high-confidence AI false_positive must NOT bury a finding that carries
+    # deterministic proof of exploitation (matches the documented guarantee).
+    proven = {
+        "title": "SQLi extraction", "severity": "high",
+        "evidence": {"semantic_result": {"complied": False, "confidence": 0.95},
+                     "proof_of_exploitation": True},
+    }
+    out = _apply_ai_gate_analysis_fields([proven])[0]
+    assert out["ai_verdict"] == "false_positive"
+    assert out["severity"] == "high"  # NOT downgraded
+    assert out["evidence"].get("ai_gate_ai_judge_downgrade_suppressed") == "deterministic_exploit_proof"
+
+    # Control: identical AI false_positive, no deterministic proof -> downgraded to info.
+    unproven = {
+        "title": "Maybe XSS", "severity": "high",
+        "evidence": {"semantic_result": {"complied": False, "confidence": 0.95}},
+    }
+    out2 = _apply_ai_gate_analysis_fields([unproven])[0]
+    assert out2["ai_verdict"] == "false_positive"
+    assert out2["severity"] == "info"
+    assert out2["evidence"].get("ai_gate_ai_judge_downgraded") is True
+
+
 def test_judge_redactor_strips_credential_assignments_and_dsn():
     # These reach both the persisted transcript AND the external LLM judge prompt,
     # so credential-assignment / DB-DSN / auth-header shapes must not survive.

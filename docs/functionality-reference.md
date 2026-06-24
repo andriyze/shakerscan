@@ -324,11 +324,11 @@ endpoints lower it) and exploit-maturity bonuses. The scan returns:
 evidence for high-severity findings.
 
 **Attack-chain analysis** (`attack_chains.py`): correlates findings into exploitable chains with
-business impact. Documented chain types include `xss_to_account_takeover`,
-`sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`, `idor_to_data_breach`,
-`lfi_to_credential_theft`, `auth_bypass_to_admin_access`, `cors_to_data_theft`, and
-`weak_jwt_to_impersonation`. Partial chains can be surfaced with
-`include_partial_attack_chains: true`.
+business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
+`xss_to_account_takeover`, `sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`,
+`idor_to_data_breach`, `lfi_to_credential_theft`, `cors_to_data_theft`,
+`weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`.
+Partial chains can be surfaced with `include_partial_attack_chains: true`.
 
 **Coverage tracking** (`coverage_tracker.py`, `completion_status.py`): `result.smart_coverage` reports
 endpoints/parameters/templates discovered vs tested, by method and parameter location, plus discovery

@@ -24,6 +24,10 @@ from ai_gate.planner import (
     plan_probe_pack,
     resolve_max_turns_per_conversation,
 )
+try:  # flat /app layout vs. scanner package layout
+    from ai_verdict_policy import has_deterministic_exploit_proof
+except ModuleNotFoundError:  # pragma: no cover - package-style local imports
+    from scanner.ai_verdict_policy import has_deterministic_exploit_proof
 from ai_gate.probe_registry import (
     AGENT_TOOL_ABUSE_PROBES,
     MCP_SECURITY_PROBES,
@@ -5095,12 +5099,19 @@ def _apply_ai_gate_analysis_fields(findings: list[dict[str, Any]]) -> list[dict[
                 and isinstance(confidence, (int, float))
                 and confidence >= SEMANTIC_FALSE_POSITIVE_DOWNGRADE_FLOOR
             ):
-                original_severity = _normalize_severity(finding.get("severity"))
-                evidence["ai_gate_pre_ai_judge_severity"] = original_severity
-                evidence["ai_gate_ai_judge_downgraded"] = True
-                finding["severity"] = "info"
-                finding["confidence"] = min(float(finding.get("confidence") or 0.4), 0.4)
-                finding["confidence_tier"] = "low"
+                if has_deterministic_exploit_proof(finding):
+                    # The semantic judge never overrides deterministic proof of
+                    # exploitation (PoE/extraction/browser-execution). This matches
+                    # the DAST policy (is_trusted_ai_false_positive) and the
+                    # documented guarantee that AI cannot bury a proven finding.
+                    evidence["ai_gate_ai_judge_downgrade_suppressed"] = "deterministic_exploit_proof"
+                else:
+                    original_severity = _normalize_severity(finding.get("severity"))
+                    evidence["ai_gate_pre_ai_judge_severity"] = original_severity
+                    evidence["ai_gate_ai_judge_downgraded"] = True
+                    finding["severity"] = "info"
+                    finding["confidence"] = min(float(finding.get("confidence") or 0.4), 0.4)
+                    finding["confidence_tier"] = "low"
             continue
 
         if rubric:

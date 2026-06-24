@@ -652,11 +652,10 @@ Smart scans correlate findings into exploitable attack chains:
 | `ssrf_to_cloud_breach` | SSRF + cloud metadata access | Cloud IAM credential theft |
 | `idor_to_data_breach` | BOLA + predictable IDs | Mass user data exfiltration |
 | `lfi_to_credential_theft` | LFI + sensitive file access | Credential file exposure |
-| `auth_bypass_to_admin_access` | Auth bypass + admin functions | Unauthorized admin access |
 | `cors_to_data_theft` | CORS misconfig + sensitive endpoints | Cross-origin data theft |
 | `weak_jwt_to_impersonation` | JWT weakness + user endpoints | User impersonation |
-| `open_redirect_to_phishing` | Open redirect + auth pages | Credential phishing |
-| `info_disclosure_to_exploitation` | Info leak + known CVE | Targeted exploitation |
+| `xxe_to_data_exfil` | XXE + file read / SSRF-via-XXE | Server file / credential exfiltration |
+| `deserialization_to_rce` | Insecure deserialization sink + gadget | Remote code execution / server compromise |
 
 Enable partial chains in the human-readable report with `"include_partial_attack_chains": true`. `result.attack_chains` structure: `{chains, partial_chains, report, summary: {total_chains, total_partial_chains, critical_chains, high_chains, chain_types, partial_chain_types, partial_chains_included}}`.
 
