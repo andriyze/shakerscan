@@ -1122,6 +1122,51 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_finding_exceptions_finding
                 ON finding_exceptions(finding_id)
             """)
+            # R9: durable AI surface inventory + attempt ledger (mirrors the DAST
+            # target_endpoints + asm_endpoint_attempts pair for the AI surface).
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_surfaces (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
+                    surface_type TEXT NOT NULL DEFAULT 'api_chat',
+                    endpoint_url TEXT,
+                    auth_kind TEXT,
+                    owner TEXT,
+                    environment TEXT,
+                    risk_tier TEXT,
+                    data_classification TEXT,
+                    tools_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    last_seen TIMESTAMPTZ,
+                    last_tested TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ai_surfaces_target_unique UNIQUE (ai_target_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_surface_attempts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    surface_id UUID REFERENCES ai_surfaces(id) ON DELETE CASCADE,
+                    scan_id UUID,
+                    probe_pack TEXT,
+                    scan_profile TEXT,
+                    environment TEXT,
+                    families TEXT[],
+                    status TEXT,
+                    proof_state TEXT,
+                    findings_count INTEGER NOT NULL DEFAULT 0,
+                    critical_high_count INTEGER NOT NULL DEFAULT 0,
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ai_surface_attempts_unique UNIQUE (surface_id, scan_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_surface_attempts_surface
+                ON ai_surface_attempts(surface_id, completed_at DESC)
+            """)
             await conn.execute("""
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',

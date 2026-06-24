@@ -279,10 +279,22 @@ needed); the UI still groups as DAST/AI. Logic extracted to `_source_type_filter
 has no distinct source marker — retests update existing findings — so it is intentionally not a
 separate value.)
 
-### AI surface inventory and attempt ledger (R9)
+### AI surface inventory and attempt ledger (R9) ✅ DONE (2026-06-24)
 
-`GET /ai/inventory` / `build_ai_inventory` already produce a derived inventory view. Make it durable,
-mirroring the DAST endpoint inventory + attempt ledger (`target_endpoints` + `asm_endpoint_attempts`):
+Durable `ai_surfaces` + `ai_surface_attempts` tables now back the AI inventory (mirroring the DAST
+`target_endpoints` + `asm_endpoint_attempts` pair; schema in `db/init.sql` +
+`run_schema_migrations`). `POST /ai/surfaces/sync` upserts one surface per AI target (type, endpoint,
+auth kind, owner/environment/risk-tier/data-classification + tool count from metadata) and backfills
+the attempt ledger from completed AI Gate scans (probe pack/profile, families, findings +
+critical/high counts, decision/proof, timestamps); idempotent via `UNIQUE(ai_target_id)` and
+`UNIQUE(surface_id, scan_id)`. `GET /ai/surfaces` lists surfaces with attempt rollups + `last_tested`;
+`GET /ai/surfaces/{id}/attempts` returns the per-surface ledger. Verified live (314 surfaces synced,
+286 attempts backfilled, per-surface ledger, idempotent re-sync, 404 on unknown surface). Follow-on:
+auto-sync on AI-target create/scan-complete (today it is an on-demand/backfill sync, like the ASM
+backfill path). The original target object model below is retained for reference.
+
+Original target (now implemented as above): make `GET /ai/inventory` durable, mirroring the DAST
+endpoint inventory + attempt ledger (`target_endpoints` + `asm_endpoint_attempts`):
 
 `AISurface { surface_id, target_id, type (api_chat|rag|agent|mcp|widget|model_artifact),
 endpoint/template, auth_profile, principals, tools/resources_exposed, data_sources/retrieval_indexes,

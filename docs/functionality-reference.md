@@ -663,10 +663,14 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `PATCH|DELETE /ai/targets/{id}` · `POST /ai/targets/{id}/scan` · `POST /ai/targets/{id}/test` ·
 `POST /ai/targets/{id}/mcp/live-readiness` · `GET /ai/targets/{id}/runtime-risk` ·
 `GET|POST /ai/targets/{id}/principals` · `PATCH|DELETE /ai/targets/{id}/principals/{pid}` ·
-`GET|DELETE /ai/scans/{id}/transcript` · `POST /ai/findings/{id}/retest`
+`GET|DELETE /ai/scans/{id}/transcript` · `POST /ai/findings/{id}/retest` ·
+`POST /ai/surfaces/sync` · `GET /ai/surfaces` · `GET /ai/surfaces/{id}/attempts`
 
 **Model Intake**: `POST /model-intake/resolve` · `POST /model-intake/scan` ·
 `POST /model-intake/targets/{id}/rescan`
+
+**Governance (deployment gate)**: `GET|POST /policy-profiles` · `PATCH|DELETE /policy-profiles/{id}` ·
+`GET|POST /finding-exceptions` · `PATCH|DELETE /finding-exceptions/{id}`
 
 **AI Ops Router**: `POST /ai/ops/route`
 

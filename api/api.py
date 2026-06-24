@@ -8785,6 +8785,138 @@ async def delete_finding_exception(exception_id: str):
     return {"deleted": True, "id": exception_id}
 
 
+# ============================================================
+# DURABLE AI SURFACE INVENTORY + ATTEMPT LEDGER (R9)
+# ============================================================
+
+@app.post("/ai/surfaces/sync")
+async def sync_ai_surfaces():
+    """Upsert the durable AI surface inventory from saved AI targets and backfill
+    the attempt ledger from completed AI Gate scans (mirrors the DAST endpoint
+    inventory + attempt ledger). Idempotent; safe to call repeatedly."""
+    surfaces_upserted = 0
+    attempts_written = 0
+    async with db_pool.acquire() as conn:
+        targets = await conn.fetch("SELECT * FROM ai_targets WHERE COALESCE(is_active, true) = true")
+        target_to_surface: dict[Any, Any] = {}
+        for t in targets:
+            md = _decode_json_value(t["metadata_json"]) or {}
+            cred = await conn.fetchrow("SELECT auth_kind FROM ai_target_credentials WHERE ai_target_id=$1", t["id"])
+            tools = md.get("tool_inventory") if isinstance(md.get("tool_inventory"), list) else []
+            row = await conn.fetchrow(
+                """
+                INSERT INTO ai_surfaces
+                    (ai_target_id, surface_type, endpoint_url, auth_kind, owner, environment,
+                     risk_tier, data_classification, tools_count, metadata_json, last_seen, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+                ON CONFLICT (ai_target_id) DO UPDATE SET
+                    surface_type=EXCLUDED.surface_type, endpoint_url=EXCLUDED.endpoint_url,
+                    auth_kind=EXCLUDED.auth_kind, owner=EXCLUDED.owner, environment=EXCLUDED.environment,
+                    risk_tier=EXCLUDED.risk_tier, data_classification=EXCLUDED.data_classification,
+                    tools_count=EXCLUDED.tools_count, metadata_json=EXCLUDED.metadata_json,
+                    last_seen=NOW(), updated_at=NOW()
+                RETURNING id
+                """,
+                t["id"], t["target_type"] or "api_chat", t["endpoint_url"],
+                (cred["auth_kind"] if cred else None),
+                md.get("asset_owner") or md.get("owner"),
+                md.get("environment") or md.get("deployment_environment"),
+                md.get("risk_tier"), md.get("data_classification"),
+                len(tools), json.dumps(md),
+            )
+            target_to_surface[t["id"]] = row["id"]
+            surfaces_upserted += 1
+
+        scans = await conn.fetch(
+            """
+            SELECT id, ai_target_id, options, result, created_at, completed_at
+            FROM scans
+            WHERE run_kind LIKE 'ai_%' AND status = 'completed' AND ai_target_id IS NOT NULL
+            ORDER BY completed_at DESC NULLS LAST
+            LIMIT 500
+            """
+        )
+        for s in scans:
+            surface_id = target_to_surface.get(s["ai_target_id"])
+            if not surface_id:
+                continue
+            opts = _decode_json_value(s["options"]) or {}
+            res = _decode_json_value(s["result"]) or {}
+            findings = res.get("findings") if isinstance(res, dict) else []
+            findings = findings if isinstance(findings, list) else []
+            crit_high = sum(1 for f in findings if str(f.get("severity") or "").lower() in ("critical", "high"))
+            families = sorted({
+                str(f.get("family") or f.get("category"))
+                for f in findings if (f.get("family") or f.get("category"))
+            })
+            ai_gate = res.get("ai_gate") if isinstance(res.get("ai_gate"), dict) else {}
+            decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
+            await conn.execute(
+                """
+                INSERT INTO ai_surface_attempts
+                    (surface_id, scan_id, probe_pack, scan_profile, environment, families,
+                     status, proof_state, findings_count, critical_high_count, started_at, completed_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                ON CONFLICT (surface_id, scan_id) DO UPDATE SET
+                    findings_count=EXCLUDED.findings_count, critical_high_count=EXCLUDED.critical_high_count,
+                    families=EXCLUDED.families, status=EXCLUDED.status, proof_state=EXCLUDED.proof_state,
+                    completed_at=EXCLUDED.completed_at
+                """,
+                surface_id, s["id"],
+                opts.get("probe_pack") or opts.get("ai_probe_pack"),
+                opts.get("scan_profile") or opts.get("ai_scan_profile"),
+                opts.get("environment") or (decision.get("environment") if isinstance(decision, dict) else None),
+                families, "completed",
+                str(decision.get("decision")) if isinstance(decision, dict) and decision.get("decision") else None,
+                len(findings), crit_high, s["created_at"], s["completed_at"],
+            )
+            attempts_written += 1
+
+        await conn.execute(
+            """
+            UPDATE ai_surfaces s SET last_tested = sub.mx
+            FROM (SELECT surface_id, MAX(completed_at) mx FROM ai_surface_attempts GROUP BY surface_id) sub
+            WHERE s.id = sub.surface_id AND sub.mx IS NOT NULL
+            """
+        )
+    return {"surfaces_upserted": surfaces_upserted, "attempts_written": attempts_written}
+
+
+@app.get("/ai/surfaces")
+async def list_ai_surfaces():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.*,
+                   COALESCE(a.attempt_count, 0) AS attempt_count,
+                   a.last_attempt_at,
+                   COALESCE(a.total_findings, 0) AS total_findings,
+                   COALESCE(a.total_crit_high, 0) AS total_crit_high
+            FROM ai_surfaces s
+            LEFT JOIN (
+                SELECT surface_id, COUNT(*) AS attempt_count, MAX(completed_at) AS last_attempt_at,
+                       SUM(findings_count) AS total_findings, SUM(critical_high_count) AS total_crit_high
+                FROM ai_surface_attempts GROUP BY surface_id
+            ) a ON a.surface_id = s.id
+            ORDER BY s.updated_at DESC
+            """
+        )
+    return {"ai_surfaces": [row_to_dict(r) for r in rows]}
+
+
+@app.get("/ai/surfaces/{surface_id}/attempts")
+async def list_ai_surface_attempts(surface_id: str):
+    async with db_pool.acquire() as conn:
+        surface = await conn.fetchrow("SELECT * FROM ai_surfaces WHERE id=$1", uuid.UUID(surface_id))
+        if not surface:
+            raise HTTPException(status_code=404, detail="AI surface not found")
+        rows = await conn.fetch(
+            "SELECT * FROM ai_surface_attempts WHERE surface_id=$1 ORDER BY completed_at DESC NULLS LAST",
+            uuid.UUID(surface_id),
+        )
+    return {"surface": row_to_dict(surface), "attempts": [row_to_dict(r) for r in rows]}
+
+
 @app.get("/scans/{scan_id}/ai-redteam-report")
 async def get_ai_redteam_report(
     scan_id: str,
