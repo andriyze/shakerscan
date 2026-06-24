@@ -22,6 +22,25 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+try:
+    from redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        redact_sensitive,
+        redact_url_credentials,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "redaction":
+        raise
+    from scanner.redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        redact_sensitive,
+        redact_url_credentials,
+    )
+
 
 RISKY_EXTENSIONS = {
     ".pkl",
@@ -115,108 +134,18 @@ RESTRICTIVE_LICENSE_HINTS = (
     "unknown",
 )
 
-SENSITIVE_METADATA_KEYS = {
-    "access_key",
-    "access_key_id",
-    "access_token",
-    "api_key",
-    "api_secret",
-    "api_token",
-    "authorization",
-    "aws_access_key_id",
-    "aws_secret_access_key",
-    "aws_session_token",
-    "azure_sas_token",
-    "bearer_token",
-    "client_secret",
-    "credential",
-    "credentials",
-    "gcp_credentials",
-    "hf_token",
-    "huggingface_token",
-    "password",
-    "private_key",
-    "refresh_token",
-    "secret",
-    "secret_access_key",
-    "secret_value",
-    "session_token",
-    "token",
-}
-
-SENSITIVE_METADATA_KEY_FRAGMENTS = (
-    "_secret",
-    "secret_",
-    "_token",
-    "token_",
-    "_credential",
-    "credential_",
-    "private_key",
-    "password",
-)
-
-SENSITIVE_QUERY_KEYS = {
-    "access_token",
-    "access-token",
-    "api_key",
-    "api-key",
-    "awsaccesskeyid",
-    "expires",
-    "x-amz-credential",
-    "x-amz-security-token",
-    "x-amz-signature",
-    "signature",
-    "sig",
-    "token",
-}
-
-
-def _is_sensitive_metadata_key(key: Any) -> bool:
-    normalized = str(key or "").strip().lower().replace("-", "_")
-    return normalized in SENSITIVE_METADATA_KEYS or any(fragment in normalized for fragment in SENSITIVE_METADATA_KEY_FRAGMENTS)
-
-
-def _redact_reference(value: str) -> str:
-    parsed = urllib.parse.urlparse(value)
-    if not parsed.scheme or not parsed.netloc:
-        return value
-
-    netloc = parsed.netloc
-    if parsed.password:
-        hostname = parsed.hostname or ""
-        username = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""), safe="")
-        host = f"{username}:***@{hostname}" if username else hostname
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        netloc = host
-
-    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    if query_pairs:
-        redacted_pairs = [
-            (key, "***" if key.strip().lower().replace("_", "-") in SENSITIVE_QUERY_KEYS else value)
-            for key, value in query_pairs
-        ]
-        query = urllib.parse.urlencode(redacted_pairs, doseq=True)
-    else:
-        query = parsed.query
-    return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment))
+# Sensitive-key matching and value masking are centralized in scanner.redaction
+# so the API and Model Intake share one key-set (previously these diverged).
+# These names are kept as aliases for backward compatibility.
+SENSITIVE_METADATA_KEYS = SENSITIVE_KEYS
+SENSITIVE_METADATA_KEY_FRAGMENTS = SENSITIVE_KEY_FRAGMENTS
+_is_sensitive_metadata_key = is_sensitive_key
+_redact_reference = redact_url_credentials
 
 
 def redact_model_intake_value(value: Any) -> Any:
     """Mask secrets in model-intake metadata and user-visible artifacts."""
-    if isinstance(value, dict):
-        redacted: dict[Any, Any] = {}
-        for key, item in value.items():
-            if _is_sensitive_metadata_key(key) and item not in (None, "", [], {}):
-                redacted[key] = "***"
-            else:
-                redacted[key] = redact_model_intake_value(item)
-        return redacted
-    if isinstance(value, list):
-        return [redact_model_intake_value(item) for item in value]
-    if isinstance(value, str):
-        return _redact_reference(value)
-    return value
+    return redact_sensitive(value, redact_strings=True)
 
 
 def _artifact_name(ref: str) -> str:

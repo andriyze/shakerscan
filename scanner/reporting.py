@@ -22,10 +22,12 @@ try:
     from .findings import normalize_finding
     from .ai_verdict_policy import has_deterministic_exploit_proof
     from .target_context import is_local_or_private_scan_target
+    from .redaction import redact_text
 except ImportError:
     from findings import normalize_finding
     from ai_verdict_policy import has_deterministic_exploit_proof
     from target_context import is_local_or_private_scan_target
+    from redaction import redact_text
 
 
 # ---------- Reproduction command helpers ----------
@@ -649,12 +651,8 @@ def _mask_text_host(text: str, host: str, replacement_host: str, scheme: str | N
 
 
 def _redact_sensitive(text: str) -> str:
-    """Redact sensitive tokens from text."""
-    if not isinstance(text, str):
-        return text
-    text = re.sub(r"(?i)(authorization:\s*bearer)\s+[A-Za-z0-9._-]+", r"\1 ***", text)
-    text = re.sub(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)", r"\1=***", text)
-    return text
+    """Redact sensitive tokens from text (shared scrubber, see scanner.redaction)."""
+    return redact_text(text)
 
 
 def _redact_body_value(value: Any) -> Any:

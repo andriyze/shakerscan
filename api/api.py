@@ -38,6 +38,25 @@ except ModuleNotFoundError as exc:
         raise
     from scanner.constants import SMART_SCAN_BUDGETS, resolve_scan_budget, resolve_or_consume_budget
 
+try:
+    from redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        mask_secret,
+        redact_sensitive,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "redaction":
+        raise
+    from scanner.redaction import (
+        SENSITIVE_KEYS,
+        SENSITIVE_KEY_FRAGMENTS,
+        is_sensitive_key,
+        mask_secret,
+        redact_sensitive,
+    )
+
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 
@@ -463,51 +482,13 @@ def _decode_json_value(value: Any) -> Any:
     return value
 
 
-SENSITIVE_SCAN_OPTION_KEYS = {
-    "access_token",
-    "ai_api_key",
-    "api_key",
-    "api_token",
-    "auth_cookies",
-    "auth_header",
-    "auth_headers_json",
-    "auth_scenario_json",
-    "authorization",
-    "bearer_token",
-    "client_secret",
-    "credential",
-    "credentials",
-    "hf_token",
-    "huggingface_token",
-    "login_password",
-    "password",
-    "private_key",
-    "refresh_token",
-    "secret",
-    "secret_value",
-    "session_token",
-    "token",
-    "user2_cookies",
-    "user2_header",
-}
-
-SENSITIVE_SCAN_OPTION_KEY_FRAGMENTS = (
-    "_secret",
-    "secret_",
-    "_token",
-    "token_",
-    "_credential",
-    "credential_",
-    "private_key",
-    "password",
-)
-
-
-def _is_sensitive_scan_option_key(key: Any) -> bool:
-    normalized = str(key or "").strip().lower().replace("-", "_")
-    return normalized in SENSITIVE_SCAN_OPTION_KEYS or any(
-        fragment in normalized for fragment in SENSITIVE_SCAN_OPTION_KEY_FRAGMENTS
-    )
+# Sensitive-key matching + value masking live in the shared scanner.redaction
+# module so the API and Model Intake cannot drift out of sync. These names are
+# kept as thin aliases for the existing call sites.
+SENSITIVE_SCAN_OPTION_KEYS = SENSITIVE_KEYS
+SENSITIVE_SCAN_OPTION_KEY_FRAGMENTS = SENSITIVE_KEY_FRAGMENTS
+_is_sensitive_scan_option_key = is_sensitive_key
+_mask_secret = mask_secret
 
 
 def _sanitize_scan_options(value: Any) -> Any:
@@ -515,29 +496,7 @@ def _sanitize_scan_options(value: Any) -> Any:
     options = _decode_json_value(value)
     if not isinstance(options, dict):
         return options
-
-    def mask_nested(candidate: Any) -> Any:
-        if isinstance(candidate, dict):
-            masked_dict = {}
-            for key, item in candidate.items():
-                if _is_sensitive_scan_option_key(key) and item not in (None, "", [], {}):
-                    masked_dict[key] = "***"
-                else:
-                    masked_dict[key] = mask_nested(item)
-            return masked_dict
-        if isinstance(candidate, list):
-            return [mask_nested(item) for item in candidate]
-        return candidate
-
-    return mask_nested(options)
-
-
-def _mask_secret(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) <= 8:
-        return "*" * len(value)
-    return f"{value[:4]}...{value[-4:]}"
+    return redact_sensitive(options)
 
 
 def _default_ai_settings() -> dict[str, Any]:

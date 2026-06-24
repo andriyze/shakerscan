@@ -22,7 +22,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.1 | Model Intake checksum semantics | ✅ | — |
 | 3.2 | HTTP Range truncation handling | ✅ | — |
 | 3.3 | Signature / provenance **crypto** verification | 🔴 | No real cosign/sigstore/DSSE; trusts caller-supplied booleans |
-| 3.4 | Secret redaction | 🟡 | No shared helper; worker inline secrets; no encryption-at-rest |
+| 3.4 | Secret redaction | 🟡 | Shared helper done (R2a); worker inline secrets + encryption-at-rest remain (R2b) |
 | 3.5 | Local file read gate | ✅ | — |
 | 3.6 | AI Gate production safety | 🟡 | Probe production-safety filter is inert (binary flag, no probe overrides); no endpoint-hash in evidence |
 | 3.7 | Request budget by HTTP call | ✅ | (widget target not integrated) |
@@ -79,18 +79,21 @@ plus `signature_verifier` / `transparency_log_verified` / `attestation_subject_d
 passes; a signature over a different digest fails; the report distinguishes "present" vs "claimed
 verified" vs "cryptographically verified".
 
-### R2 — Secret-handling structural fixes (was P0 §3.4) 🟡
-Masking keys and nested-metadata redaction shipped (`api/api.py:_sanitize_scan_options` +
-`SENSITIVE_SCAN_OPTION_KEYS`; `model_intake.py:redact_model_intake_value`). The structural fixes did
-not land:
-- **One shared `redact_sensitive()` helper.** Logic is duplicated 4 ways (`api.py`, `model_intake.py`,
-  `scanner/reporting.py:_redact_sensitive`, `ai_verifier.py`) with **diverging** key-sets — only
-  `model_intake`'s set covers the AWS/Azure/GCP keys. Unify them so coverage can't drift.
+### R2 — Secret-handling structural fixes (was P0 §3.4) 🟡 (R2a done)
+Masking keys and nested-metadata redaction shipped. Remaining structural fixes:
+- ✅ **One shared `redact_sensitive()` helper — DONE (R2a, 2026-06-24).** `scanner/redaction.py` is now
+  the single source of the sensitive key-set (the **union** of the old api + model_intake sets, so the
+  AWS/Azure/GCP gap on the api side is closed and api auth keys are covered by model_intake) plus the
+  masking / URL-credential / free-text helpers. `api/api.py`, `scanner/scanner_tools/model_intake.py`,
+  and `scanner/reporting.py` all delegate to it; `ai_verifier.py` keeps its separate, more aggressive
+  `[REDACTED]` provider redactor by design. Verified: `tests/test_shared_redaction.py` (8) +
+  `test_api_scan_option_masking` (90), `test_model_intake` (29), `test_ai_verifier_safety` (11) green;
+  live stack reboots healthy with the flat-layout import.
 - **Credential-reference indirection in the worker.** `api/worker.py` still passes raw `--auth-*` /
   `--login-password` on the command line and returns raw `secret_value`; replace inline secrets with
-  credential refs resolved at the worker.
+  credential refs resolved at the worker. (R2b)
 - **Encryption-at-rest for `ai_target_credentials.secret_value`** (`db/init.sql` stores it as plaintext
-  `TEXT`; no Fernet/crypto touches that column).
+  `TEXT`; no Fernet/crypto touches that column). (R2b)
 
 ### R3 — Transcript redaction enforcement (was §3.10) 🟡
 Sensitivity labels, retention fields, and the purge endpoint shipped
