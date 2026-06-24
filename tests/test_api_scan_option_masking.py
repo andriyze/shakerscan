@@ -234,6 +234,18 @@ def test_asm_domain_rate_reservation_uses_root_domain_key():
     assert api_module._asm_reserved_count(r, "api.example.com") == 3
 
 
+def test_ai_production_scan_requires_explicit_confirmation():
+    reason = api_module._ai_production_confirmation_reason
+    # production target OR production environment, without confirmation -> refused
+    assert reason(True, "staging", False) is not None
+    assert reason(False, "production", False) is not None
+    # confirmation present -> allowed through
+    assert reason(True, "production", True) is None
+    # non-production, no confirmation needed
+    assert reason(False, "staging", False) is None
+    assert reason(False, None, False) is None
+
+
 def test_asm_recommendation_empty_inventory_runs_recon():
     rec = api_module._asm_recommendation(
         {"total": 0, "tested": 0, "untested": 0, "stale": 0, "in_progress": 0}

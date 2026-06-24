@@ -3364,6 +3364,22 @@ async def _fetch_honey_ai_gate_registry(base_url: str) -> dict[str, Any]:
     return await asyncio.to_thread(_fetch_json_url, url)
 
 
+def _ai_production_confirmation_reason(
+    production_mode: bool, environment: str | None, confirm_production: bool
+) -> str | None:
+    """Return a refusal reason when a production AI Gate scan lacks explicit
+    confirmation, else None. Extracted so the gate is unit-testable (a regression
+    that drops it would otherwise let active probes hit production unconfirmed)."""
+    production_scan = bool(production_mode) or str(environment or "") == "production"
+    if production_scan and not confirm_production:
+        return (
+            "This AI target is marked production"
+            if production_mode
+            else "This AI Gate scan targets the production environment"
+        )
+    return None
+
+
 async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) -> dict[str, Any]:
     if request.probe_pack not in AI_PROBE_PACKS:
         raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
@@ -3382,13 +3398,10 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             raise HTTPException(status_code=404, detail="AI target not found")
         if not target_row["is_active"]:
             raise HTTPException(status_code=409, detail="AI target is inactive")
-        production_scan = bool(target_row["production_mode"]) or request.environment == "production"
-        if production_scan and not request.confirm_production:
-            reason = (
-                "This AI target is marked production"
-                if target_row["production_mode"]
-                else "This AI Gate scan targets the production environment"
-            )
+        reason = _ai_production_confirmation_reason(
+            bool(target_row["production_mode"]), request.environment, request.confirm_production
+        )
+        if reason:
             raise HTTPException(
                 status_code=409,
                 detail=f"{reason}. Re-submit with confirm_production=true.",

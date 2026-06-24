@@ -206,6 +206,56 @@ def test_model_intake_allows_low_and_info_advisories():
     assert _intake_decision([{"severity": "medium"}])["decision"] == "review"
 
 
+def test_intake_decision_blocks_on_critical_or_high():
+    # The single most important decision line: any critical/high finding blocks.
+    assert _intake_decision([{"severity": "critical"}])["decision"] == "block"
+    assert _intake_decision([{"severity": "high"}])["decision"] == "block"
+    # mixed: a high alongside advisories still blocks
+    assert _intake_decision([{"severity": "low"}, {"severity": "high"}])["decision"] == "block"
+    assert _intake_decision([])["decision"] == "allow"
+
+
+def test_model_intake_checksum_mismatch_is_critical_and_blocks(tmp_path):
+    # A tampered artifact (observed hash != expected) must yield a critical
+    # sha256_mismatch finding and a block decision.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+    wrong_sha = "0" * 64  # deliberately not the artifact's hash
+
+    result = asyncio.run(run_model_intake_scan(str(artifact), {
+        "allow_local_files": True,
+        "expected_sha256": wrong_sha,
+        "require_signature": False,
+        "require_model_governance": False,
+    }))
+    findings = {f["id"]: f for f in result["findings"]}
+    assert "model_intake:sha256_mismatch" in findings
+    assert findings["model_intake:sha256_mismatch"]["severity"] == "critical"
+    assert result["result"]["decision"] == "block"
+
+
+def test_model_intake_missing_deployment_approval_is_flagged(tmp_path):
+    # With approval required, deployment_approved=False raises the approval finding;
+    # the approved twin (only that field changed) does not.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    def run(approved: bool):
+        return asyncio.run(run_model_intake_scan(str(artifact), {
+            "allow_local_files": True, "expected_sha256": sha,
+            "require_signature": False, "require_model_governance": False,
+            "require_deployment_approval": True, "deployment_approved": approved,
+        }))
+
+    unapproved_ids = {f["id"] for f in run(False)["findings"]}
+    approved_ids = {f["id"] for f in run(True)["findings"]}
+    assert "model_intake:missing_deployment_approval" in unapproved_ids
+    assert "model_intake:missing_deployment_approval" not in approved_ids
+
+
 def test_model_intake_uses_artifact_url_extension_when_display_name_has_dots(tmp_path):
     artifact = tmp_path / "model.safetensors"
     artifact.write_bytes(_safetensors_bytes())
@@ -443,7 +493,9 @@ def test_model_intake_runs_metadata_governance_for_unsupported_registry_refs():
     )
 
     finding_ids = {finding["id"] for finding in result["findings"]}
-    assert finding_ids == {"model_intake:unsupported_artifact_scheme"}
+    # Containment, not exact-set equality: a new advisory check firing on this input
+    # should not false-fail the assertion that the unsupported scheme is rejected.
+    assert "model_intake:unsupported_artifact_scheme" in finding_ids
     assert result["model_intake"]["checks"]["license_review"] is True
     assert result["model_intake"]["checks"]["sbom_dependencies"] is True
 
