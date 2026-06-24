@@ -38,7 +38,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 4.2 | Deployment gate API | ✅ | — |
 | 4.3 | Agent execution receipts | ✅ | Verifies content-hash, prev_hash chain linkage, and signature (R5) |
 | 4.4 | Model/data poisoning coverage | ✅ | Strict-policy-gated; no explicit data-source allowlist check |
-| 4.5 | Policy profiles + exception workflow | 🟡 | Hard-coded profiles + payload-driven exceptions; no DB-backed `policies`/`finding_exceptions` tables |
+| 4.5 | Policy profiles + exception workflow | ✅ | DB-backed `policy_profiles` + `finding_exceptions` tables + CRUD; consumed by the deployment decision (R4) |
 
 **Net:** the breadth and most of the trust/safety semantics shipped. The materially-open items are
 **3.3** (the one true remaining P0 — signature verification is asserted, not enforced), the structural
@@ -111,13 +111,19 @@ client host). The response surfaces `redaction_applied`, `sensitivity_label`, an
 flag off does **not** reveal; the admin-gate helper honors `true/1/yes/on`. Behaviour unit-locked in
 `tests/test_shared_redaction.py` (`scrub_text` composition).
 
-### R4 — Durable policy + exception registry (was §4.5) 🟡
-`POLICY_PROFILES` is a hard-coded Python dict and exceptions are read from scan options/result JSON
-(`api/api.py:_policy_profile_for_scan`, `_exception_records`, `_apply_policy_exceptions`). There is no
-`policies` or `finding_exceptions` table (confirmed absent from `db/init.sql` and
-`retest_contract.run_schema_migrations`). **Do:** persist policy profiles and finding exceptions
-(owner, scope, compensating controls, approver, expiry) so decisions are auditable and exceptions can
-expire server-side and re-open blocking status.
+### R4 — Durable policy + exception registry (was §4.5) ✅ DONE (2026-06-24)
+Added DB-backed `policy_profiles` and `finding_exceptions` tables (`db/init.sql` +
+`retest_contract.run_schema_migrations`) with full CRUD: `GET/POST /policy-profiles`,
+`PATCH/DELETE /policy-profiles/{id}`, `GET/POST /finding-exceptions`,
+`PATCH/DELETE /finding-exceptions/{id}`. `build_deployment_decision` now consumes them:
+`GET /scans/{id}/deployment-decision` fetches active policy profiles (override the built-in
+`POLICY_PROFILES` by environment, e.g. raising the block threshold) and active, unexpired, approved
+finding exceptions for the scan's target, and merges them with the existing payload-driven ones.
+Exceptions are time-bound: an active+approved+unexpired exception clears the covered blocking finding;
+**revoking or letting it expire re-opens the block**. `finding_exceptions` requires an approver/owner
+to be auditable. Verified live (create → block cleared `applied=1` → revoke → re-blocked) and by
+`tests/test_policy_exception_registry.py` (3: active covers; revoked/expired/unapproved don't; DB
+profile overrides the threshold).
 
 ### R5 — Agent execution receipt verification (was §4.3) ✅ DONE (2026-06-24)
 `ai_gate_scan.py:_agent_execution_receipt_findings` now cryptographically verifies receipts in addition

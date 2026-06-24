@@ -3567,7 +3567,12 @@ POLICY_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _policy_profile_for_scan(scan: dict[str, Any], result: dict[str, Any], product: str) -> dict[str, Any]:
+def _policy_profile_for_scan(
+    scan: dict[str, Any],
+    result: dict[str, Any],
+    product: str,
+    db_profiles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     options = _sanitize_scan_options(scan.get("options")) if scan.get("options") is not None else {}
     raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
     policy_profile = ""
@@ -3585,16 +3590,33 @@ def _policy_profile_for_scan(scan: dict[str, Any], result: dict[str, Any], produ
     if not policy_profile and product == "model_intake":
         summary = (result.get("model_intake") or {}).get("summary") if isinstance(result.get("model_intake"), dict) else {}
         policy_profile = str((summary or {}).get("deployment_environment") or "").strip().lower()
+    # A durable DB-backed policy profile (R4) for this environment/name overrides
+    # the built-in defaults.
+    db_profiles = db_profiles or {}
+    db_match = db_profiles.get(policy_profile)
+    if db_match is None and isinstance(raw_options, dict):
+        requested = str(raw_options.get("policy_profile") or "").strip().lower()
+        db_match = db_profiles.get(requested)
+    if db_match:
+        profile = dict(db_match)
+        profile.setdefault("id", policy_profile or profile.get("environment") or "custom")
+        profile["source"] = "db"
+        return profile
     if policy_profile not in POLICY_PROFILES:
         policy_profile = "production" if product in {"ai_gate", "model_intake"} else "staging"
     profile = dict(POLICY_PROFILES[policy_profile])
     profile["id"] = policy_profile
+    profile["source"] = "builtin"
     if isinstance(options, dict) and options.get("policy_profile"):
         profile["requested_profile"] = options.get("policy_profile")
     return profile
 
 
-def _exception_records(scan: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
+def _exception_records(
+    scan: dict[str, Any],
+    result: dict[str, Any],
+    db_exceptions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     raw_options = _decode_json_value(scan.get("options")) if scan.get("options") is not None else {}
     candidates: list[Any] = []
     if isinstance(raw_options, dict):
@@ -3610,6 +3632,9 @@ def _exception_records(scan: dict[str, Any], result: dict[str, Any]) -> list[dic
     for candidate in candidates:
         if isinstance(candidate, list):
             exceptions.extend(item for item in candidate if isinstance(item, dict))
+    # Durable DB-backed exceptions (R4) take precedence and are merged in.
+    if db_exceptions:
+        exceptions.extend(item for item in db_exceptions if isinstance(item, dict))
     return exceptions
 
 
@@ -3662,7 +3687,12 @@ def _apply_policy_exceptions(
     return remaining, applied
 
 
-def build_deployment_decision(scan: dict[str, Any]) -> dict[str, Any]:
+def build_deployment_decision(
+    scan: dict[str, Any],
+    *,
+    db_policy_profiles: dict[str, dict[str, Any]] | None = None,
+    db_exceptions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
     scan_type = str(scan.get("scan_type") or "")
@@ -3677,7 +3707,7 @@ def build_deployment_decision(scan: dict[str, Any]) -> dict[str, Any]:
         product_for_policy = "ai_gate"
     elif isinstance(result, dict) and (result.get("model_intake") or run_kind == "model_intake"):
         product_for_policy = "model_intake"
-    policy_profile = _policy_profile_for_scan(scan, result if isinstance(result, dict) else {}, product_for_policy)
+    policy_profile = _policy_profile_for_scan(scan, result if isinstance(result, dict) else {}, product_for_policy, db_profiles=db_policy_profiles)
 
     if isinstance(result, dict) and (result.get("ai_gate") or run_kind.startswith("ai_")):
         product = "ai_gate"
@@ -3715,7 +3745,7 @@ def build_deployment_decision(scan: dict[str, Any]) -> dict[str, Any]:
         findings,
         minimum=str(policy_profile.get("minimum_block_severity") or "high"),
     )
-    exceptions = _exception_records(scan, result if isinstance(result, dict) else {})
+    exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
     blocking_findings, applied_exceptions = _apply_policy_exceptions(blocking_findings, exceptions)
     if blocking_findings and raw_decision == "allow":
         raw_decision = "block"
@@ -8540,14 +8570,214 @@ async def get_scan_deployment_decision(scan_id: str):
     """Return a machine-readable deployment gate decision for CI/CD."""
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow("""
-            SELECT id, status, scan_type, run_kind, result, score, grade, completed_at
+            SELECT id, target_id, status, scan_type, run_kind, result, score, grade, completed_at
             FROM scans
             WHERE id = $1
         """, uuid.UUID(scan_id))
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
+        target_id = scan["target_id"]
+        profile_rows = await conn.fetch("""
+            SELECT * FROM policy_profiles
+            WHERE is_active = true
+              AND (active_from IS NULL OR active_from <= NOW())
+              AND (active_until IS NULL OR active_until > NOW())
+        """)
+        exc_rows = await conn.fetch("""
+            SELECT * FROM finding_exceptions
+            WHERE status IN ('active','approved','accepted_risk')
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND (target_id IS NULL OR target_id = $1)
+        """, target_id)
 
-    return build_deployment_decision(row_to_dict(scan))
+    db_policy_profiles: dict[str, dict[str, Any]] = {}
+    for r in profile_rows:
+        env = str(r["environment"] or "").strip().lower()
+        if not env:
+            continue
+        db_policy_profiles.setdefault(env, {
+            "name": r["name"],
+            "environment": env,
+            "minimum_block_severity": r["minimum_block_severity"],
+            "expires_days": r["expires_days"],
+            "strict_model_intake": r["strict_model_intake"],
+            "allow_active_exceptions": r["allow_active_exceptions"],
+            "owner": r["owner"],
+            "version": r["version"],
+            "id": env,
+        })
+    db_exceptions = [{
+        "finding_id": r["finding_id"],
+        "fingerprint": r["fingerprint"],
+        "status": r["status"],
+        "approver": r["approver"],
+        "owner": r["owner"],
+        "scope": r["scope"],
+        "reason": r["reason"],
+        "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+    } for r in exc_rows]
+
+    return build_deployment_decision(
+        row_to_dict(scan),
+        db_policy_profiles=db_policy_profiles,
+        db_exceptions=db_exceptions,
+    )
+
+
+# ============================================================
+# POLICY PROFILES + FINDING EXCEPTIONS (durable registry, R4)
+# ============================================================
+
+class PolicyProfileRequest(BaseModel):
+    name: str
+    product_area: str = "ai_gate"
+    environment: str = "production"
+    minimum_block_severity: str = "high"
+    expires_days: int = 30
+    strict_model_intake: bool = False
+    allow_active_exceptions: bool = True
+    owner: Optional[str] = None
+    version: Optional[str] = None
+    is_active: bool = True
+
+
+class FindingExceptionRequest(BaseModel):
+    finding_id: Optional[str] = None
+    fingerprint: Optional[str] = None
+    policy_id: Optional[str] = None
+    target_id: Optional[str] = None
+    scope: Optional[str] = None
+    owner: Optional[str] = None
+    approver: Optional[str] = None
+    reason: Optional[str] = None
+    compensating_controls: Optional[str] = None
+    status: str = "active"
+    expires_at: Optional[str] = None
+
+
+@app.get("/policy-profiles")
+async def list_policy_profiles():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM policy_profiles ORDER BY created_at DESC")
+    return {"policy_profiles": [row_to_dict(r) for r in rows]}
+
+
+@app.post("/policy-profiles")
+async def create_policy_profile(req: PolicyProfileRequest):
+    async with db_pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO policy_profiles
+                    (name, product_area, environment, minimum_block_severity, expires_days,
+                     strict_model_intake, allow_active_exceptions, owner, version, is_active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                RETURNING *
+                """,
+                req.name, req.product_area, req.environment.strip().lower(),
+                req.minimum_block_severity, req.expires_days, req.strict_model_intake,
+                req.allow_active_exceptions, req.owner, req.version, req.is_active,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="Policy profile name already exists")
+    return row_to_dict(row)
+
+
+@app.patch("/policy-profiles/{profile_id}")
+async def update_policy_profile(profile_id: str, req: PolicyProfileRequest):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE policy_profiles SET
+                name=$2, product_area=$3, environment=$4, minimum_block_severity=$5,
+                expires_days=$6, strict_model_intake=$7, allow_active_exceptions=$8,
+                owner=$9, version=$10, is_active=$11, updated_at=NOW()
+            WHERE id=$1 RETURNING *
+            """,
+            uuid.UUID(profile_id), req.name, req.product_area, req.environment.strip().lower(),
+            req.minimum_block_severity, req.expires_days, req.strict_model_intake,
+            req.allow_active_exceptions, req.owner, req.version, req.is_active,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Policy profile not found")
+    return row_to_dict(row)
+
+
+@app.delete("/policy-profiles/{profile_id}")
+async def delete_policy_profile(profile_id: str):
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM policy_profiles WHERE id=$1", uuid.UUID(profile_id))
+    if result.endswith("0"):
+        raise HTTPException(status_code=404, detail="Policy profile not found")
+    return {"deleted": True, "id": profile_id}
+
+
+@app.get("/finding-exceptions")
+async def list_finding_exceptions(target_id: Optional[str] = None, status: Optional[str] = None):
+    clauses, params = [], []
+    if target_id:
+        params.append(uuid.UUID(target_id))
+        clauses.append(f"target_id = ${len(params)}")
+    if status:
+        params.append(status)
+        clauses.append(f"status = ${len(params)}")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(f"SELECT * FROM finding_exceptions{where} ORDER BY created_at DESC", *params)
+    return {"finding_exceptions": [row_to_dict(r) for r in rows]}
+
+
+@app.post("/finding-exceptions")
+async def create_finding_exception(req: FindingExceptionRequest):
+    if not (req.finding_id or req.fingerprint):
+        raise HTTPException(status_code=422, detail="finding_id or fingerprint is required")
+    if not (req.approver or req.owner):
+        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
+    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO finding_exceptions
+                (finding_id, fingerprint, policy_id, target_id, scope, owner, approver,
+                 reason, compensating_controls, status, expires_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            RETURNING *
+            """,
+            req.finding_id, req.fingerprint,
+            uuid.UUID(req.policy_id) if req.policy_id else None,
+            uuid.UUID(req.target_id) if req.target_id else None,
+            req.scope, req.owner, req.approver, req.reason, req.compensating_controls,
+            req.status, expires_at,
+        )
+    return row_to_dict(row)
+
+
+@app.patch("/finding-exceptions/{exception_id}")
+async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
+    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE finding_exceptions SET
+                scope=$2, owner=$3, approver=$4, reason=$5, compensating_controls=$6,
+                status=$7, expires_at=$8, updated_at=NOW()
+            WHERE id=$1 RETURNING *
+            """,
+            uuid.UUID(exception_id), req.scope, req.owner, req.approver, req.reason,
+            req.compensating_controls, req.status, expires_at,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Finding exception not found")
+    return row_to_dict(row)
+
+
+@app.delete("/finding-exceptions/{exception_id}")
+async def delete_finding_exception(exception_id: str):
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
+    if result.endswith("0"):
+        raise HTTPException(status_code=404, detail="Finding exception not found")
+    return {"deleted": True, "id": exception_id}
 
 
 @app.get("/scans/{scan_id}/ai-redteam-report")

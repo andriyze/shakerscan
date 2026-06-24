@@ -581,3 +581,44 @@ CREATE TRIGGER trigger_update_finding_timestamps
 BEFORE UPDATE ON findings
 FOR EACH ROW
 EXECUTE FUNCTION update_finding_timestamps();
+
+-- R4: durable policy profiles + finding exceptions (also created idempotently in
+-- run_schema_migrations for existing installs).
+CREATE TABLE IF NOT EXISTS policy_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    product_area TEXT NOT NULL DEFAULT 'ai_gate',
+    environment TEXT NOT NULL DEFAULT 'production',
+    minimum_block_severity TEXT NOT NULL DEFAULT 'high',
+    expires_days INTEGER NOT NULL DEFAULT 30,
+    strict_model_intake BOOLEAN NOT NULL DEFAULT false,
+    allow_active_exceptions BOOLEAN NOT NULL DEFAULT true,
+    owner TEXT,
+    version TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS finding_exceptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    finding_id TEXT,
+    fingerprint TEXT,
+    policy_id UUID REFERENCES policy_profiles(id) ON DELETE SET NULL,
+    target_id UUID,
+    scope TEXT,
+    owner TEXT,
+    approver TEXT,
+    reason TEXT,
+    compensating_controls TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT finding_exceptions_status_check
+        CHECK (status IN ('active','approved','accepted_risk','revoked','expired'))
+);
+CREATE INDEX IF NOT EXISTS idx_finding_exceptions_target_status ON finding_exceptions(target_id, status);
+CREATE INDEX IF NOT EXISTS idx_finding_exceptions_finding ON finding_exceptions(finding_id);

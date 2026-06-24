@@ -455,7 +455,7 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | Model Intake governance evidence | Shipped | SPDX normalization + expression parsing added (`MIT OR Apache-2.0`). |
 | Agent execution receipts | Shipped | Verifies content-hash, prev_hash chain, and signature (Ed25519/RSA/ECDSA). |
 | Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
-| Durable policy + exception registry | Partial | Profiles hard-coded, exceptions payload-driven; no DB-backed objects. |
+| Durable policy + exception registry | Shipped | DB-backed `policy_profiles` + `finding_exceptions` + CRUD; consumed by the deployment decision; exceptions expire and re-open blocks. |
 
 ### AI proof and evidence states
 
