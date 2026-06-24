@@ -132,11 +132,14 @@ The summary now reports `chain_verified`, `hash_verified_count`, `hash_mismatch_
 tampered / broken-chain / wrong-key flagged; presence checks still fire); live runtime confirmed.
 
 ### R6 — Minor hardening (small, independent)
-- **§3.6** Make the production-safety probe filter effective: today every probe defaults to
-  `safe_for_production=True` with no overrides in `probe_registry.py`, so the planner filter removes
-  nothing. Either populate the classification (or the proposed 3-way `production_safe` /
-  `production_review` / `non_production_only`) or drop the inert filter. Also add the endpoint-URL hash
-  to the stored `confirm_production` evidence.
+- **§3.6 ✅ (R6a, 2026-06-24)** Production-safety probe filter is now effective.
+  `planner.classify_production_safety` derives `production_safe` / `production_review` /
+  `non_production_only` from probe family/technique/severity (an explicit `safe_for_production=false`
+  always blocks), and `plan_probe_pack(production_mode=True)` drops `non_production_only` probes (e.g.
+  agent-abuse 11/14, mcp-security 7/8, rag-lite 2/10) while surfacing `production_review_probe_ids` and
+  `production_safety_tiers` in the manifest. Locked by
+  `tests/test_production_safety_classification.py` (3). (Remaining: add the endpoint-URL hash to the
+  stored `confirm_production` evidence.)
 - **§3.8** Wire per-profile response caps (smoke 64 KB / standard 256 KB / deep 1 MB) instead of the
   flat 256 KB default.
 - **Widget target parity:** integrate the request budget (§3.7) and response cap (§3.8) into

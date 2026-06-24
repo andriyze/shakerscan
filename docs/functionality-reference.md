@@ -444,7 +444,7 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 
 | Capability | Status | Trust / proof caveat |
 |---|---|---|
-| AI Gate REST / RAG / agent / MCP probing | Shipped | Production probe-safety filter is wired but inert (no probe is marked unsafe) — fix-plan R6. |
+| AI Gate REST / RAG / agent / MCP probing | Shipped | Production probe-safety filter now effective (3-tier derived classification; `non_production_only` probes dropped in production). |
 | AI Gate widget target | Partial | Request-budget and response-cap parity with REST not yet wired. |
 | AI Gate per-finding retest | Shipped | Deterministic proof still outranks AI judgment. |
 | Cross-principal AI testing | Shipped | Requires configured principals. |
