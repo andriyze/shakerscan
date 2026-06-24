@@ -16,6 +16,7 @@ results/benchmark-runs/*
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/projects/
 
 # Node
 node_modules/
