@@ -422,10 +422,51 @@ continuously monitored.
 
 ## 11. AI red teaming
 
-The AI side has four capabilities: **AI Gate** (probe-driven red teaming), **Model Intake** (static
-artifact vetting), **AI Security Sessions** (interactive testing), and **AI-assisted analysis** of
-DAST findings. For engineering-depth onboarding see
-[`docs/AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md).
+The AI side has four capabilities:
+
+1. **AI Gate** — probe-driven runtime testing of chat, RAG, agent, MCP, and widget surfaces.
+2. **Model Intake** — static artifact and supply-chain vetting before deployment.
+3. **AI Security Sessions** — interactive browser/session testing with separate user contexts.
+4. **AI-assisted analysis** — correlation, explanation, and retest planning for DAST findings.
+
+**Design principle.** AI may help judge, correlate, and explain, but verified security decisions must
+be backed by deterministic, cryptographic, parser-backed, protocol-backed, or replay-backed evidence.
+Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
+below); AI is never the sole authority for verified status or severity promotion. For engineering-depth
+onboarding see [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md); for the
+implemented-vs-remaining backlog see
+[`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md).
+
+### AI capability status quick read
+
+Status reflects shipped behavior verified against code (2026-06-23). "Partial" means the capability
+runs but the listed caveat applies — treat the caveat as load-bearing, not cosmetic.
+
+| Capability | Status | Trust / proof caveat |
+|---|---|---|
+| AI Gate REST / RAG / agent / MCP probing | Shipped | Production probe-safety filter is wired but inert (no probe is marked unsafe) — fix-plan R6. |
+| AI Gate widget target | Partial | Request-budget and response-cap parity with REST not yet wired. |
+| AI Gate per-finding retest | Shipped | Deterministic proof still outranks AI judgment. |
+| Cross-principal AI testing | Shipped | Requires configured principals. |
+| MCP readiness checks | Partial | Add safe `resources/list`; some checks lean on declared metadata. |
+| Transcript retention / purge | Partial | Response-time redaction gate still needed; `include_sensitive` is a stub. |
+| Model Intake checksum / range / local-file gates | Shipped | Solid baseline. |
+| Model Intake signature / provenance crypto | **Missing (P0)** | Metadata booleans are trusted; no cosign/sigstore/DSSE verification. |
+| Model Intake governance evidence | Partial | Add SPDX expression parsing / normalization. |
+| Agent execution receipts | Partial | Validates field presence, not hash-chain / signature. |
+| Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
+| Durable policy + exception registry | Partial | Profiles hard-coded, exceptions payload-driven; no DB-backed objects. |
+
+### AI proof and evidence states
+
+Today a finding exposes a three-state proof level — `verified` (deterministic proof), `suspected`, or
+`unverified` (`api/api.py`), with `proof_state` `exploited` / `likely_vulnerable` at the scanner — and
+deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
+(`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
+`inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
+never render as *verified*. That taxonomy and its block/verified rules are tracked in
+[`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md) and converge with the DAST
+proof-state work in [`proposed-next-steps.md`](proposed-next-steps.md).
 
 ### 11.1 AI Gate
 
@@ -501,6 +542,11 @@ Model Intake (`scanner/scanner_tools/model_intake.py`) statically vets model art
 importing or executing model code**. Inputs: `artifact_url`, `metadata_url`, `expected_sha256`,
 `signature_url`, `model_card_url`, and inline `metadata_json`, plus `require_*` gates.
 
+> **Open P0 (signature/provenance).** Model Intake verifies checksums and records signature/provenance
+> metadata, but strict **cryptographic** signature/provenance verification is not yet implemented.
+> Until fix-plan R1 ships, metadata such as `sigstore_verified: true` is **claimed evidence, not
+> cryptographic proof** — a caller-supplied boolean can currently pass strict policy.
+
 Checks include:
 - **Unsafe serialization** — flags pickle-like formats (`.pkl`, `.pickle`, `.joblib`, `.pt`, `.pth`,
   `.ckpt`, `.bin`, `.mar`) vs. safer ones (`.safetensors`, `.onnx`, `.tflite`, `.gguf`); scans for
@@ -508,8 +554,10 @@ Checks include:
   `pickle.loads`, network downloaders, base64 decode).
 - **Archive payload analysis** — enumerates `.tar.gz`/`.zip` contents and flags executable extensions
   without decompressing/running anything.
-- **Provenance & integrity** — checksum (`sha256`) verification, signature/attestation presence and
-  validity, Hugging Face reference normalization.
+- **Provenance & integrity** — checksum (`sha256`) verification; signature/attestation **presence**;
+  **claimed** signature/provenance metadata; **cryptographic** signature/provenance verification only
+  when verifier support is configured (fix-plan R1 — not shipped yet); Hugging Face reference
+  normalization.
 - **Governance evidence** — model card presence, license policy (permissive vs. restrictive),
   SBOM/AIBOM, malware-scan evidence, security-eval evidence, deployment restrictions, monitoring plan,
   and deployment approval.
@@ -562,7 +610,11 @@ missing-signature/missing-approval model presets). Probe/test-case metadata is e
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
 optional AI verdict fields, and verification history. The UI exposes two product source categories —
-**DAST** (`source_type=dast`, which currently includes model-intake) and **AI** (`source_type=ai`).
+**DAST** (`source_type=dast`, which currently overloads "not AI Gate" and so **includes model-intake**)
+and **AI** (`source_type=ai`). Splitting storage into distinct `source_type`s (`dast`, `asm`,
+`ai_gate`, `ai_session`, `model_intake`, `ai_assisted_retest`, `manual`) — while the UI keeps grouping
+them as DAST/AI — is tracked as remaining work in the fix plan; it affects reporting, dashboards,
+deployment decisions, and exposure-graph clarity, so it is more than a UI nicety.
 Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
 
 **Exposure graph** (`/exposure/*`): a derived graph across domains, targets, APIs, auth roles,
@@ -667,7 +719,10 @@ limited with per-tool timeouts and a global deadline.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
   on `0.0.0.0` is only safe behind a firewall/VPN/reverse proxy.
 - **AI redaction**: sensitive headers/bodies and secret-bearing URL params/metadata are redacted
-  before any content is sent to an AI provider.
+  before any content is sent to an AI provider. *Current limitation:* redaction works, but a single
+  shared `redact_sensitive()` helper, worker-side credential-reference indirection (secrets still reach
+  scanner subprocess command lines), and encryption-at-rest for AI-target credentials are remaining
+  work (fix-plan R2); transcript responses still need a default response-time redaction gate (R3).
 
 ---
 

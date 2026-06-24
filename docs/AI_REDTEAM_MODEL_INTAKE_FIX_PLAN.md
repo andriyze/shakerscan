@@ -45,6 +45,21 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 half of **3.4** (shared redaction helper, credential indirection, encryption-at-rest), and the two
 PARTIAL product features **4.3** (receipt crypto) and **4.5** (durable policy/exception registry).
 
+### Updated priority order
+
+| Priority | Item | Why |
+|---|---|---|
+| **P0** | Real signature/provenance verification — **R1** | Strict Model Intake policy is not trustworthy while caller-supplied booleans can pass. |
+| **P0** | Shared redaction + credential indirection + encryption-at-rest — **R2** | AI targets/transcripts/model metadata are sensitive; foundational. |
+| **P0** | Transcript response-time redaction — **R3** | Storage-time controls are not enough; transcripts carry the exact secrets the scanner hunts. |
+| **P1** | Unified AI proof/evidence taxonomy — [target arch](#unified-ai-proof-and-evidence-taxonomy) | Prevents claimed / AI-judged evidence from rendering as verified. |
+| **P1** | Durable policy + exception registry — **R4** | Needed for deployment gates, audits, expiring risk acceptance. |
+| **P1** | Agent receipt hash-chain/signature verification — **R5** | Required before receipts can be called verified. |
+| **P1** | Model Intake source-type split — [target arch](#source-type-taxonomy-r8) | Fixes reporting, dashboards, deployment decisions, exposure-graph clarity. |
+| **P2** | Production probe-safety classification — **R6** | Makes AI Gate safer for real environments. |
+| **P2** | MCP `resources/list`, widget parity, per-profile caps, SPDX parsing — **R6** | Independent hardening. |
+| **P2** | AI surface inventory / attempt ledger — [target arch](#ai-surface-inventory-and-attempt-ledger-r9) | Aligns AI Gate/Model Intake with the DAST/ASM evidence-first architecture. |
+
 ---
 
 ## Remaining work (impact-ordered, actionable)
@@ -121,6 +136,128 @@ when present; report "claimed" vs "verified" receipts.
 
 ---
 
+## Target architecture (object models & flows)
+
+Everything in this section is **target/proposed**, not shipped. These object models deliberately
+converge with the DAST evidence-first work in [`proposed-next-steps.md`](proposed-next-steps.md)
+(§2 application graph, §4 evidence object store, §5 finding/evidence split) — AI and DAST should share
+one inventory → evidence → proof-state → policy pipeline, not two parallel ones.
+
+### AI product flow
+
+```text
+AI Target / Model Artifact / Session
+        |
+        v
+AI Surface Resolver            (GET /ai/inventory exists today as a derived view)
+        |
+        v
+Policy Gate + Probe Safety Classifier
+        |
+        v
+Probe Pack / Model Intake Scanner / Session Action
+        |
+        v
+Deterministic Classifier + Optional AI Judge
+        |
+        v
+Proof State + Evidence Objects + Redaction
+        |
+        v
+Findings + Exposure Graph + Deployment Decision
+        |
+        v
+Retest / Exception / Continuous Monitoring
+```
+
+AI is not "an LLM decides vulnerability": it is probe → evidence → proof state → policy decision.
+
+### Unified AI proof and evidence taxonomy
+
+Current: a finding exposes `verified` / `suspected` / `unverified` (`api/api.py`) with scanner
+`proof_state` `exploited` / `likely_vulnerable`. Target: one taxonomy across DAST + AI so that *claimed*
+and *AI-judged* evidence can never render as *verified*.
+
+| Proof state | Meaning | Can block deploy? | Counts as verified? |
+|---|---|---:|---:|
+| `deterministic_verified` | Replayed/proved by deterministic checker, parser, crypto verifier, or protocol result | Yes | Yes |
+| `cryptographically_verified` | Signature/provenance/receipt verified against configured trust roots | Yes | Yes |
+| `claimed_present` | Metadata claims evidence exists; ShakerScan did not verify it | Policy-dependent | No |
+| `ai_judged_likely` | AI or heuristic says likely vulnerable | Review gate | No |
+| `inconclusive` | Probe ran but evidence insufficient | No, unless strict policy requires proof | No |
+| `blocked` | Missing credentials, principals, approval, policy, or verifier | Policy-dependent | No |
+| `false_positive` | Deterministic or reviewed downgrade | No | No |
+
+### Secret-handling target architecture (R2)
+
+- one shared `redact_sensitive()` helper used by API, scanner reporting, Model Intake, AI verifier, transcripts;
+- credential references (not raw secrets) in API/Redis/worker job payloads;
+- worker resolves credentials just-in-time;
+- secrets never appear on scanner subprocess command lines;
+- AI-target credentials encrypted at rest;
+- transcript and report responses apply response-time redaction by default.
+
+### Transcript access model (R3)
+
+- default transcript response is redacted;
+- sensitive fields withheld unless caller is local/admin and `include_sensitive` is actually available;
+- response includes `redaction_applied`, `sensitivity_label`, and `include_sensitive_available`;
+- raw transcript access is audited.
+
+### Policy and exception registry (R4)
+
+`PolicyProfile { policy_id, product_area (ai_gate|model_intake|dast|asm), name, environment
+(dev|staging|prod), required_evidence, blocked_finding_families, allowed_exceptions, owner, version,
+active_from, active_until }`.
+
+`FindingException { exception_id, finding_id|fingerprint, policy_id, scope, owner, approver, reason,
+compensating_controls, expiry, status, audit_events }`.
+
+The deployment-decision endpoint should consume these durable records (today it reads a hard-coded
+profile dict plus payload-supplied exceptions). Converges with the evidence/exception direction in
+[`proposed-next-steps.md`](proposed-next-steps.md) §4–§5.
+
+### Verified-receipt requirements (R5)
+
+A receipt is `cryptographically_verified` only when: canonical serialization is stable; the hash
+matches receipt contents; `prev_hash` links to the previous receipt; the signature verifies against the
+configured tool/agent key; and scope + approval binding match the action. Until then, `receipt_hash` /
+`prev_hash` / `signature` are reported as **claimed**, not verified.
+
+### Three-tier probe safety model (R6)
+
+Replace the always-true binary `safe_for_production` with a real classification carried by every probe
+pack entry:
+
+- `production_safe` — passive/harmless probes; OK with confirmation + budget caps.
+- `production_review` — may produce sensitive output, policy stress, tool-boundary attempts, or
+  unexpected cost; requires explicit review/confirmation.
+- `non_production_only` — prompt-injection chains, tool abuse, poisoning, approval bypass, destructive
+  or state-changing tests; requires a Lab/staging target.
+
+### Source-type taxonomy (R8)
+
+Stop overloading `source_type=dast` to mean "not AI Gate." Persist distinct values — `dast`, `asm`,
+`ai_gate`, `ai_session`, `model_intake`, `ai_assisted_retest`, `manual` — while the UI still groups
+them as DAST/AI. This is a schema + derivation + deployment-decision + exposure-graph change (a real
+implementation task with a migration, not a doc edit).
+
+### AI surface inventory and attempt ledger (R9)
+
+`GET /ai/inventory` / `build_ai_inventory` already produce a derived inventory view. Make it durable,
+mirroring the DAST endpoint inventory + attempt ledger (`target_endpoints` + `asm_endpoint_attempts`):
+
+`AISurface { surface_id, target_id, type (api_chat|rag|agent|mcp|widget|model_artifact),
+endpoint/template, auth_profile, principals, tools/resources_exposed, data_sources/retrieval_indexes,
+model/provider_metadata, owner/environment, last_seen, last_tested, risk_posture }`.
+
+`AISurfaceAttempt { surface_id, campaign_id|scan_id, probe_pack, probe_family, principal, status,
+proof_state, evidence_ids, started_at, completed_at }`.
+
+This makes AI Gate / Model Intake part of the same continuous control plane as DAST/ASM.
+
+---
+
 ## Implemented (collapsed — do not re-propose; pointers for reference)
 
 - **§3.1 Checksum semantics** — `model_intake.py` derives `checksum_policy_status`
@@ -177,6 +314,16 @@ python3 -m pytest tests/test_api_scan_option_masking.py
 
 UI checks when copy/controls change: `npm run build` then `npx playwright test`. Targeted smoke scans
 only after API/unit tests pass.
+
+**Required trust-contract tests** (gate the remaining work above):
+
+- metadata-only signature claim fails strict policy; valid fixture signature passes; signature over the wrong digest fails (R1);
+- a forged receipt hash/signature stays `claimed`, not `verified` (R5);
+- transcript response redacts sensitive fields by default; `include_sensitive` requires an admin/local gate and is audited (R3);
+- `source_type=model_intake` filters separately from `dast` and `ai_gate` (R8);
+- a policy exception expires and re-opens blocking status (R4);
+- the `production_safe` filter actually removes non-production probes (R6);
+- the UI visibly marks deterministic vs judged vs claimed vs missing evidence (R6 §3.12).
 
 ---
 
