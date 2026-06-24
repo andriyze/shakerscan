@@ -196,6 +196,38 @@ def run_dast() -> H.Scorecard:
     except Exception as e:
         sc.error("D-1 standard scan", e)
 
+    # D-2 (active recall): a BOUNDED, un-sharded active scan of Juice Shop's known
+    # SQL-injectable login must detect the SQLi. Bounding is essential — an
+    # unbounded smart scan auto-shards into ~25 shards with multi-hour budgets; with
+    # parallel disabled + a tight budget it completes in ~30-60s AND detects.
+    try:
+        _, resp = H.post("/scans", {
+            "target": JUICE_SHOP,
+            "options": {
+                "scan_type": "smart", "sqli": True, "parallel": False,
+                "custom_endpoints": [
+                    'POST /rest/user/login json:{"email":"test@test.com","password":"test"}',
+                    "GET /rest/products/search?q=apple",
+                ],
+                "custom_budget": {"max_urls": 40, "active_max_endpoints": 8,
+                                  "active_max_seconds": 420, "browser_max_pages": 5,
+                                  "nuclei_max_targets": 0},
+            },
+        })
+        scan_id = resp.get("scan_id") or resp.get("id")
+        sc.check("D-2 bounded active scan accepted", bool(scan_id), str(resp)[:100])
+        if scan_id:
+            scan = H.wait_for_scan(scan_id, timeout=600, poll=8, label="D-2")
+            sc.check("D-2 bounded active scan completes", str(scan.get("status")) == "completed",
+                     f"status={scan.get('status')}")
+            findings = (H.scan_result(scan_id).get("findings") or [])
+            sqli = [f for f in findings
+                    if "sql" in (str(f.get("category")) + str(f.get("title"))).lower()]
+            sc.check("D-2 detects SQLi on injectable login", bool(sqli),
+                     f"sqli={[str(f.get('title'))[:45] for f in sqli][:3]}")
+    except Exception as e:
+        sc.error("D-2 bounded active SQLi detection", e)
+
     return sc
 
 
