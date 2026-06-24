@@ -250,12 +250,16 @@ pack entry:
 - `non_production_only` — prompt-injection chains, tool abuse, poisoning, approval bypass, destructive
   or state-changing tests; requires a Lab/staging target.
 
-### Source-type taxonomy (R8)
+### Source-type taxonomy (R8) ✅ DONE (2026-06-24)
 
-Stop overloading `source_type=dast` to mean "not AI Gate." Persist distinct values — `dast`, `asm`,
-`ai_gate`, `ai_session`, `model_intake`, `ai_assisted_retest`, `manual` — while the UI still groups
-them as DAST/AI. This is a schema + derivation + deployment-decision + exposure-graph change (a real
-implementation task with a migration, not a doc edit).
+`GET /findings?source_type=` is now first-class and granular: `dast` / `ai` / `ai_gate` / `ai_session` /
+`model_intake` / `asm` / `manual` (validated; unknown values → 422). `model_intake` and the AI sources
+filter **separately** from `dast` — the `dast` filter explicitly excludes
+`ai_gate`/`ai_session`/`model_intake`. Derived from the existing `findings.source` markers (no migration
+needed); the UI still groups as DAST/AI. Logic extracted to `_source_type_filter_sql` and locked by
+`tests/test_source_type_filter.py` (4); verified live across all seven values. (`ai_assisted_retest`
+has no distinct source marker — retests update existing findings — so it is intentionally not a
+separate value.)
 
 ### AI surface inventory and attempt ledger (R9)
 

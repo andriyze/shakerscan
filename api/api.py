@@ -501,6 +501,33 @@ def _sanitize_scan_options(value: Any) -> Any:
     return redact_sensitive(options)
 
 
+def _source_type_filter_sql(source_type: Optional[str]) -> str:
+    """SQL fragment for the findings `source_type` filter (first-class taxonomy).
+
+    Values: dast / ai / ai_gate / ai_session / model_intake / asm / manual.
+    model_intake and the AI sources filter separately from dast (R8); the UI still
+    groups them as DAST vs AI.
+    """
+    if source_type == "ai":
+        return " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
+    if source_type == "ai_gate":
+        return " AND f.source = 'ai_gate'"
+    if source_type == "ai_session":
+        return " AND f.source = 'ai_session'"
+    if source_type == "model_intake":
+        return " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
+    if source_type == "asm":
+        return " AND f.source = 'asm'"
+    if source_type == "manual":
+        return " AND f.source = 'manual'"
+    if source_type == "dast":
+        return (
+            " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake')"
+            " AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
+        )
+    return ""
+
+
 def _default_ai_settings() -> dict[str, Any]:
     shared_ai_url = os.environ.get("AI_URL", "").strip()
     shared_ai_key = os.environ.get("AI_API_KEY", "").strip()
@@ -10433,7 +10460,7 @@ async def list_findings(
     request: Request,
     severity: Optional[str] = None,
     status: Optional[str] = None,
-    source_type: Optional[str] = Query(None, regex="^(dast|ai|model_intake)$"),
+    source_type: Optional[str] = Query(None, regex="^(dast|ai|ai_gate|ai_session|model_intake|asm|manual)$"),
     target_id: Optional[str] = None,
     ai_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
@@ -10506,12 +10533,7 @@ async def list_findings(
             params.append(status)
             param_idx += 1
 
-        if source_type == "ai":
-            query += " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"
-        elif source_type == "model_intake":
-            query += " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
-        elif source_type == "dast":
-            query += " AND COALESCE(f.source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake') AND f.ai_target_id IS NULL AND COALESCE(f.tool, '') <> 'model_intake'"
+        query += _source_type_filter_sql(source_type)
 
         if target_id:
             query += f" AND f.target_id = ${param_idx}"

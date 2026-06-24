@@ -611,12 +611,10 @@ missing-signature/missing-approval model presets). Probe/test-case metadata is e
 **Findings lifecycle**: every DAST, AI Gate, AI-session, and model-intake result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
-optional AI verdict fields, and verification history. The UI exposes two product source categories —
-**DAST** (`source_type=dast`, which currently overloads "not AI Gate" and so **includes model-intake**)
-and **AI** (`source_type=ai`). Splitting storage into distinct `source_type`s (`dast`, `asm`,
-`ai_gate`, `ai_session`, `model_intake`, `ai_assisted_retest`, `manual`) — while the UI keeps grouping
-them as DAST/AI — is tracked as remaining work in the fix plan; it affects reporting, dashboards,
-deployment decisions, and exposure-graph clarity, so it is more than a UI nicety.
+optional AI verdict fields, and verification history. The UI groups findings into two product
+categories — **DAST** and **AI** — but the API `source_type` filter is first-class and granular:
+`dast`, `ai`, `ai_gate`, `ai_session`, `model_intake`, `asm`, `manual`. `model_intake` and the AI
+sources filter **separately** from `dast` (R8).
 Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
 
 **Exposure graph** (`/exposure/*`): a derived graph across domains, targets, APIs, auth roles,
