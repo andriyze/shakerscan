@@ -113,3 +113,46 @@ def test_fingerprint_only_exception_covers_blocking_finding():
     not_covered = api_module.build_deployment_decision(scan, db_exceptions=other)
     assert any(f.get("fingerprint") == "fp-abc" for f in not_covered["blocking_findings"])
     assert not not_covered["applied_exceptions"]
+
+
+def test_policy_scoped_exception_only_applies_under_its_policy():
+    # An exception scoped to policy_id only suppresses the finding when the scan is
+    # evaluated under that exact policy profile.
+    scan = {
+        "id": "s5", "status": "completed", "scan_type": "smart", "run_kind": "web_dast",
+        "result": {"findings": [{"id": "F1", "severity": "high", "title": "x"}]},
+        "options": json.dumps({"environment": "production"}),
+    }
+    profiles = {"production": {
+        "name": "prod", "environment": "production", "minimum_block_severity": "high",
+        "expires_days": 30, "id": "production", "profile_id": "PROF-1",
+    }}
+
+    def applied(policy_id):
+        exc = [{"finding_id": "F1", "status": "active", "approver": "sec",
+                "expires_at": FUTURE, "policy_id": policy_id}]
+        d = api_module.build_deployment_decision(scan, db_policy_profiles=profiles, db_exceptions=exc)
+        return len(d["applied_exceptions"])
+
+    assert applied("PROF-1") == 1   # matches active policy
+    assert applied("OTHER") == 0    # scoped to a different policy -> ignored
+    assert applied(None) == 1       # unscoped -> applies anywhere
+
+
+def test_strict_model_intake_promotes_indeterminate_checks_to_blocking():
+    scan = {
+        "id": "m1", "status": "completed", "scan_type": "model_intake", "run_kind": "model_intake",
+        "options": json.dumps({"environment": "production"}),
+        "result": {"model_intake": {"checks": {"sbom_valid": None}}, "result": {"decision": "allow"}},
+    }
+    strict = {"production": {"name": "p", "environment": "production", "minimum_block_severity": "high",
+                            "expires_days": 30, "strict_model_intake": True, "id": "production"}}
+    lax = {"production": dict(strict["production"], strict_model_intake=False)}
+
+    d_strict = api_module.build_deployment_decision(scan, db_policy_profiles=strict)
+    assert d_strict["decision"] == "needs_review"
+    assert any(m["id"] == "sbom_valid" for m in d_strict["required_evidence_missing"])
+
+    d_lax = api_module.build_deployment_decision(scan, db_policy_profiles=lax)
+    assert d_lax["decision"] == "allow"
+    assert not d_lax["required_evidence_missing"]

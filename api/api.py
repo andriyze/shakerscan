@@ -3525,7 +3525,9 @@ def _deployment_gate_findings(findings: Any, *, minimum: str = "high", limit: in
     return selected[:limit]
 
 
-def _deployment_gate_required_evidence_missing(result: dict[str, Any], product: str) -> list[dict[str, Any]]:
+def _deployment_gate_required_evidence_missing(
+    result: dict[str, Any], product: str, *, strict_model_intake: bool = False
+) -> list[dict[str, Any]]:
     missing: list[dict[str, Any]] = []
     if product == "ai_gate":
         ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
@@ -3543,7 +3545,9 @@ def _deployment_gate_required_evidence_missing(result: dict[str, Any], product: 
         for key, value in checks.items():
             if value is False:
                 missing.append({"id": str(key), "label": str(key).replace("_", " "), "status": "failed"})
-            elif value is None and key in {"signature_verification", "approval_evidence"}:
+            elif value is None and (strict_model_intake or key in {"signature_verification", "approval_evidence"}):
+                # A strict policy profile promotes EVERY indeterminate intake check to
+                # required evidence; the default only requires signature/approval.
                 missing.append({"id": str(key), "label": str(key).replace("_", " "), "status": "missing"})
     return missing
 
@@ -3758,7 +3762,11 @@ def build_deployment_decision(
     if raw_decision not in {"allow", "needs_approval", "needs_review", "block"}:
         raw_decision = "needs_review"
 
-    missing = _deployment_gate_required_evidence_missing(result if isinstance(result, dict) else {}, product)
+    missing = _deployment_gate_required_evidence_missing(
+        result if isinstance(result, dict) else {},
+        product,
+        strict_model_intake=bool(policy_profile.get("strict_model_intake")),
+    )
     if raw_decision == "allow" and missing:
         raw_decision = "needs_review"
         rationale = "Required deployment evidence is missing or incomplete."
@@ -3767,6 +3775,15 @@ def build_deployment_decision(
         minimum=str(policy_profile.get("minimum_block_severity") or "high"),
     )
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
+    # A policy-scoped exception (non-null policy_id) only applies when the scan is
+    # evaluated under that exact policy profile — so a lenient-policy waiver cannot
+    # silently suppress the same finding under a stricter policy.
+    active_profile_id = str(policy_profile.get("profile_id") or "").strip()
+    exceptions = [
+        exc for exc in exceptions
+        if not str(exc.get("policy_id") or "").strip()
+        or str(exc.get("policy_id")).strip() == active_profile_id
+    ]
     exceptions_disabled = policy_profile.get("allow_active_exceptions", True) is False
     if exceptions_disabled:
         # The active policy profile forbids exception-based suppression: blocking
@@ -8648,10 +8665,12 @@ async def get_scan_deployment_decision(scan_id: str):
             "owner": r["owner"],
             "version": r["version"],
             "id": env,
+            "profile_id": str(r["id"]),
         })
     db_exceptions = [{
         "finding_id": r["finding_id"],
         "fingerprint": r["fingerprint"],
+        "policy_id": str(r["policy_id"]) if r["policy_id"] else None,
         "status": r["status"],
         "approver": r["approver"],
         "owner": r["owner"],
@@ -8687,9 +8706,9 @@ class PolicyProfileRequest(BaseModel):
 class FindingExceptionRequest(BaseModel):
     finding_id: Optional[str] = None
     fingerprint: Optional[str] = None
-    policy_id: Optional[str] = None
-    target_id: Optional[str] = None
-    scope: Optional[str] = None
+    policy_id: Optional[str] = None       # scopes the waiver to one policy profile (enforced)
+    target_id: Optional[str] = None       # scopes the waiver to one target (enforced in loader SQL)
+    scope: Optional[str] = None           # free-text descriptor; not an enforcement gate
     owner: Optional[str] = None
     approver: Optional[str] = None
     reason: Optional[str] = None
