@@ -82,7 +82,10 @@ def test_model_intake_accepts_signed_safetensors_with_provenance(tmp_path):
     assert result["findings"] == []
     assert result["model_intake"]["summary"]["format_posture"] == "safer_static_format"
     assert result["model_intake"]["summary"]["aibom_generated"] is True
-    assert result["model_intake"]["summary"]["signature_verification_status"] == "verified"
+    # R1: a metadata-only cryptographic claim is "claimed", never "verified" — real
+    # cryptographic verification requires a public key + detached signature.
+    assert result["model_intake"]["summary"]["signature_verification_status"] == "claimed_verified"
+    assert result["model_intake"]["summary"]["signature_cryptographically_verified"] is False
     assert result["model_intake"]["aibom"]["completeness"]["fields"]["base_model"] is True
     assert any(component["type"] == "tokenizer" for component in result["model_intake"]["aibom"]["components"])
     assert result["result"]["grade"] == "A"

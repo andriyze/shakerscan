@@ -451,7 +451,7 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | MCP readiness checks | Partial | Add safe `resources/list`; some checks lean on declared metadata. |
 | Transcript retention / purge | Shipped | Response-time redaction by default + audited admin gate (`AI_TRANSCRIPT_ALLOW_SENSITIVE`). |
 | Model Intake checksum / range / local-file gates | Shipped | Solid baseline. |
-| Model Intake signature / provenance crypto | **Missing (P0)** | Metadata booleans are trusted; no cosign/sigstore/DSSE verification. |
+| Model Intake signature / provenance crypto | Shipped | Real detached-sig verification (`cryptography`: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims, not proof. |
 | Model Intake governance evidence | Partial | Add SPDX expression parsing / normalization. |
 | Agent execution receipts | Partial | Validates field presence, not hash-chain / signature. |
 | Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
@@ -542,10 +542,12 @@ Model Intake (`scanner/scanner_tools/model_intake.py`) statically vets model art
 importing or executing model code**. Inputs: `artifact_url`, `metadata_url`, `expected_sha256`,
 `signature_url`, `model_card_url`, and inline `metadata_json`, plus `require_*` gates.
 
-> **Open P0 (signature/provenance).** Model Intake verifies checksums and records signature/provenance
-> metadata, but strict **cryptographic** signature/provenance verification is not yet implemented.
-> Until fix-plan R1 ships, metadata such as `sigstore_verified: true` is **claimed evidence, not
-> cryptographic proof** — a caller-supplied boolean can currently pass strict policy.
+> **Signature/provenance (R1, shipped 2026-06-24).** Model Intake performs real detached-signature
+> verification (Ed25519 / RSA-PSS / ECDSA via the `cryptography` lib) over the artifact or its digest
+> when a public key + signature are supplied (`signature_public_key`/`_url`, `signature_value`/
+> `signature_url`); `require_cryptographic_signature_verification` makes a metadata-only claim fail.
+> Metadata booleans such as `sigstore_verified: true` are treated as **claims**, never as cryptographic
+> proof. (A cosign/Sigstore-rekor transparency-log layer is an optional future add-on.)
 
 Checks include:
 - **Unsafe serialization** — flags pickle-like formats (`.pkl`, `.pickle`, `.joblib`, `.pt`, `.pth`,
@@ -555,9 +557,9 @@ Checks include:
 - **Archive payload analysis** — enumerates `.tar.gz`/`.zip` contents and flags executable extensions
   without decompressing/running anything.
 - **Provenance & integrity** — checksum (`sha256`) verification; signature/attestation **presence**;
-  **claimed** signature/provenance metadata; **cryptographic** signature/provenance verification only
-  when verifier support is configured (fix-plan R1 — not shipped yet); Hugging Face reference
-  normalization.
+  **claimed** signature/provenance metadata; **cryptographic** detached-signature verification
+  (Ed25519/RSA-PSS/ECDSA via the `cryptography` lib, over the artifact or its digest); Hugging Face
+  reference normalization.
 - **Governance evidence** — model card presence, license policy (permissive vs. restrictive),
   SBOM/AIBOM, malware-scan evidence, security-eval evidence, deployment restrictions, monitoring plan,
   and deployment approval.

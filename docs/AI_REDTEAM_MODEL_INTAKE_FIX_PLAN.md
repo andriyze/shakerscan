@@ -21,7 +21,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 |---|------|--------|------------------------|
 | 3.1 | Model Intake checksum semantics | ✅ | — |
 | 3.2 | HTTP Range truncation handling | ✅ | — |
-| 3.3 | Signature / provenance **crypto** verification | 🔴 | No real cosign/sigstore/DSSE; trusts caller-supplied booleans |
+| 3.3 | Signature / provenance **crypto** verification | ✅ | Real detached-sig verification (cryptography: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims (R1) |
 | 3.4 | Secret redaction | 🟡 | Shared helper done (R2a); worker inline secrets + encryption-at-rest remain (R2b) |
 | 3.5 | Local file read gate | ✅ | — |
 | 3.6 | AI Gate production safety | 🟡 | Probe production-safety filter is inert (binary flag, no probe overrides); no endpoint-hash in evidence |
@@ -64,20 +64,24 @@ PARTIAL product features **4.3** (receipt crypto) and **4.5** (durable policy/ex
 
 ## Remaining work (impact-ordered, actionable)
 
-### R1 — Real signature/provenance verification (was P0 §3.3) 🔴
-`scanner/scanner_tools/model_intake.py:_signature_verification_status` sets
-`cryptographically_verified` purely from caller-supplied metadata booleans
-(`signature_cryptographically_verified`, `sigstore_bundle_verified`, `cosign_bundle_verified`, …).
-No cosign/sigstore/DSSE/in-toto/rekor verification runs anywhere in the module. A caller can assert
-`signature_cryptographically_verified: true` and pass strict policy.
-**Do:** add optional verifier integration (`cosign verify-blob`/`verify-attestation`, DSSE/in-toto/SLSA
-against configured trust roots), detect verifier availability at startup (do not hard-require cosign),
-add policy flag `require_cryptographic_signature_verification`, and split the reported state into
-`signature_claimed_present` / `signature_claimed_verified` / `signature_cryptographically_verified`
-plus `signature_verifier` / `transparency_log_verified` / `attestation_subject_digest_match`.
-**Done when:** metadata-only `sigstore_verified: true` fails strict policy; a valid fixture signature
-passes; a signature over a different digest fails; the report distinguishes "present" vs "claimed
-verified" vs "cryptographically verified".
+### R1 — Real signature/provenance verification (was P0 §3.3) ✅ DONE (2026-06-24)
+Model Intake now performs **actual** detached-signature verification via the `cryptography` library
+(`_verify_signature_crypto` + `_load_and_verify_signature` in `model_intake.py`): Ed25519, RSA-PSS /
+RSA-PKCS1, and ECDSA over the raw artifact or its digest, with the public key + detached signature
+supplied inline (`signature_public_key`, `signature_value`) or by URL (`signature_public_key_url`,
+`signature_url`). `cryptographically_verified` is now set **only** by a real check — caller-supplied
+metadata booleans (`sigstore_verified`, `signature_cryptographically_verified`, …) are reclassified as
+**claims**. The status splits into `claimed_present` / `claimed_verified` / `cryptographically_verified`
+and surfaces `signature_verifier`, `transparency_log_verified`, `attestation_subject_digest_match`, and
+`signature_crypto_attempted`. New policy flag `require_cryptographic_signature_verification`: a
+metadata-only claim then yields a **high** `signature_not_verified` finding, and a present-but-invalid
+signature yields a **high** `signature_invalid` finding regardless of policy. When the `cryptography`
+lib is absent the verifier reports `verifier_unavailable` rather than silently passing.
+Verified: 6 new crypto tests (`tests/test_model_intake_signature_crypto.py` — Ed25519/RSA-PSS/digest-hex
+pass; tampered + wrong-key blocked; claim-only flagged high) + the existing 29 `test_model_intake`
+green; live HuggingFace (`nex-agi/Nex-N2-mini`) intake runs the path cleanly.
+Optional follow-on: a `cosign verify-blob` / Sigstore-rekor transparency-log integration can layer on
+top when those binaries are present; the cryptography-based verifier is the shipped baseline.
 
 ### R2 — Secret-handling structural fixes (was P0 §3.4) 🟡 (R2a done)
 Masking keys and nested-metadata redaction shipped. Remaining structural fixes:

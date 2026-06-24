@@ -858,7 +858,162 @@ def _registry_reference(ref: str, metadata: dict[str, Any]) -> dict[str, Any]:
     return reference
 
 
-def _signature_verification_status(metadata: dict[str, Any], signature_url: Any, signed_by: Any) -> dict[str, Any]:
+def _decode_signature_value(raw: Any) -> bytes | None:
+    """Decode an inline detached signature value: base64, hex, or raw bytes/text."""
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    import base64
+    import binascii
+    try:
+        return base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error):
+        pass
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        pass
+    return text.encode("utf-8", "ignore")
+
+
+def _verify_signature_crypto(
+    public_key_pem: Any,
+    signature_bytes: bytes | None,
+    payload_bytes: bytes | None,
+    *,
+    rsa_padding: str = "pss",
+    hash_name: str = "sha256",
+) -> dict[str, Any]:
+    """Real detached-signature verification via the cryptography library.
+
+    Never raises. ``verified`` is True only when an actual cryptographic check
+    passed — caller-supplied metadata booleans never set it (that is the whole
+    point of R1). When the cryptography library is unavailable, reports
+    ``verifier_unavailable`` rather than silently passing.
+    """
+    if not (public_key_pem and signature_bytes and payload_bytes):
+        return {"available": None, "attempted": False, "verified": False, "error": "missing_material"}
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding as asy_padding, rsa
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        return {"available": False, "attempted": False, "verified": False, "error": "verifier_unavailable"}
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+    except Exception as exc:  # noqa: BLE001 - report, never raise
+        return {"available": True, "attempted": False, "verified": False, "error": f"public_key_load_failed:{type(exc).__name__}"}
+    hash_cls = {"sha256": hashes.SHA256, "sha384": hashes.SHA384, "sha512": hashes.SHA512}.get(
+        str(hash_name).lower(), hashes.SHA256
+    )
+    hash_alg = hash_cls()
+    try:
+        if isinstance(key, ed25519.Ed25519PublicKey):
+            key.verify(bytes(signature_bytes), bytes(payload_bytes))
+            algorithm = "ed25519"
+        elif isinstance(key, rsa.RSAPublicKey):
+            if str(rsa_padding).lower() == "pkcs1":
+                pad = asy_padding.PKCS1v15()
+            else:
+                pad = asy_padding.PSS(mgf=asy_padding.MGF1(hash_alg), salt_length=asy_padding.PSS.MAX_LENGTH)
+            key.verify(bytes(signature_bytes), bytes(payload_bytes), pad, hash_alg)
+            algorithm = f"rsa-{str(rsa_padding).lower()}-{str(hash_name).lower()}"
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(bytes(signature_bytes), bytes(payload_bytes), ec.ECDSA(hash_alg))
+            algorithm = f"ecdsa-{str(hash_name).lower()}"
+        else:
+            return {"available": True, "attempted": False, "verified": False, "error": "unsupported_key_type"}
+    except InvalidSignature:
+        return {"available": True, "attempted": True, "verified": False, "verifier": "cryptography", "error": "invalid_signature"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": True, "verified": False, "error": f"verify_error:{type(exc).__name__}"}
+    return {"available": True, "attempted": True, "verified": True, "verifier": f"cryptography:{algorithm}", "algorithm": algorithm}
+
+
+async def _load_and_verify_signature(
+    options: dict[str, Any],
+    metadata: dict[str, Any],
+    signature_url: Any,
+    artifact_bytes: bytes,
+    sha256: str | None,
+    *,
+    timeout_seconds: int,
+    allow_local_files: bool,
+) -> dict[str, Any]:
+    """Gather signature material (inline or fetched) and run real verification.
+
+    A public key is required to verify; without one we cannot cryptographically
+    verify and return ``no_public_key`` (metadata claims may still be reported as
+    *claimed*, never *verified*).
+    """
+    pub_inline = options.get("signature_public_key") or metadata.get("signature_public_key")
+    pub_url = options.get("signature_public_key_url") or metadata.get("signature_public_key_url")
+    sig_inline = options.get("signature_value") or metadata.get("signature_value")
+    rsa_padding = str(options.get("signature_rsa_padding") or metadata.get("signature_rsa_padding") or "pss")
+    hash_name = str(options.get("signature_hash") or metadata.get("signature_hash") or "sha256")
+    payload_kind = str(options.get("signature_payload") or metadata.get("signature_payload") or "artifact").lower()
+    expected_sha256 = str(options.get("expected_sha256") or metadata.get("sha256") or "").strip().lower() or None
+
+    public_key_pem: Any = None
+    if pub_inline:
+        public_key_pem = pub_inline
+    elif pub_url:
+        pk_bytes, _pk_meta = await _fetch_artifact(
+            str(pub_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
+            metadata=metadata, allow_local_files=allow_local_files,
+        )
+        if pk_bytes:
+            public_key_pem = pk_bytes
+    if not public_key_pem:
+        return {"available": None, "attempted": False, "verified": False, "error": "no_public_key"}
+
+    signature_bytes = _decode_signature_value(sig_inline) if sig_inline else None
+    if not signature_bytes and signature_url:
+        sig_bytes, _sig_meta = await _fetch_artifact(
+            str(signature_url), max_bytes=1_000_000, timeout_seconds=timeout_seconds,
+            metadata=metadata, allow_local_files=allow_local_files,
+        )
+        if sig_bytes:
+            signature_bytes = sig_bytes
+    if not signature_bytes:
+        return {"available": True, "attempted": False, "verified": False, "error": "no_signature"}
+
+    digest_based = False
+    if payload_kind in ("digest_hex", "digesthex", "digest-hex") and sha256:
+        payload_bytes: bytes | None = sha256.encode()
+        digest_based = True
+    elif payload_kind in ("digest_raw", "digest", "digestraw", "digest-raw") and sha256:
+        try:
+            payload_bytes = bytes.fromhex(sha256)
+        except ValueError:
+            payload_bytes = sha256.encode()
+        digest_based = True
+    else:
+        payload_bytes = artifact_bytes
+
+    result = _verify_signature_crypto(
+        public_key_pem, signature_bytes, payload_bytes, rsa_padding=rsa_padding, hash_name=hash_name
+    )
+    if result.get("verified"):
+        result["attestation_subject_digest_match"] = bool(
+            not expected_sha256 or (sha256 and sha256 == expected_sha256)
+        )
+        result["payload_kind"] = "digest" if digest_based else "artifact"
+    return result
+
+
+def _signature_verification_status(
+    metadata: dict[str, Any],
+    signature_url: Any,
+    signed_by: Any,
+    crypto: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     claim_keys = (
         "signature_verified",
         "sigstore_verified",
@@ -866,7 +1021,9 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
         "attestation_verified",
         "provenance_verified",
     )
-    cryptographic_verification_keys = (
+    # Metadata booleans asserting cryptographic verification are CLAIMS, not proof
+    # (R1). Only the real verifier result can set cryptographically_verified.
+    crypto_claim_keys = (
         "signature_cryptographically_verified",
         "cryptographic_signature_verified",
         "sigstore_bundle_verified",
@@ -874,11 +1031,16 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
         "attestation_cryptographically_verified",
         "provenance_cryptographically_verified",
     )
-    claimed_verified = any(_boolish(metadata.get(key)) for key in claim_keys)
-    cryptographically_verified = any(_boolish(metadata.get(key)) for key in cryptographic_verification_keys)
+    claimed_verified = any(_boolish(metadata.get(key)) for key in (*claim_keys, *crypto_claim_keys))
+    crypto = crypto or {}
+    cryptographically_verified = bool(crypto.get("verified"))
+    crypto_attempted = bool(crypto.get("attempted"))
+    crypto_invalid = crypto_attempted and not cryptographically_verified
     present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
     if cryptographically_verified:
         status = "verified"
+    elif crypto_invalid:
+        status = "invalid"
     elif claimed_verified:
         status = "claimed_verified"
     elif present:
@@ -888,14 +1050,22 @@ def _signature_verification_status(metadata: dict[str, Any], signature_url: Any,
     return {
         "status": status,
         "verified": cryptographically_verified,
+        "claimed_present": present,
         "claimed_verified": claimed_verified,
         "cryptographically_verified": cryptographically_verified,
+        "crypto_attempted": crypto_attempted,
+        "crypto_invalid": crypto_invalid,
         "present": present,
         "signature_url": signature_url,
         "signed_by": signed_by,
+        "verifier": crypto.get("verifier"),
+        "algorithm": crypto.get("algorithm"),
+        "transparency_log_verified": bool(crypto.get("transparency_log_verified")),
+        "attestation_subject_digest_match": crypto.get("attestation_subject_digest_match"),
+        "crypto_error": crypto.get("error"),
         "verification_evidence": {
             key: metadata.get(key)
-            for key in (*claim_keys, *cryptographic_verification_keys)
+            for key in (*claim_keys, *crypto_claim_keys)
             if metadata.get(key) not in (None, "", [], {})
         },
     }
@@ -1474,8 +1644,16 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     poisoning_eval_ref = _metadata_value(metadata, "poisoning_evals", "backdoor_evals", "canary_eval_report", "data_poisoning_evals")
     metadata_unavailable = bool(metadata_url and metadata_fetch_meta.get("error") and not metadata)
     require_signature_verification = _boolish(options.get("require_signature_verification"))
+    require_cryptographic_signature_verification = _boolish(
+        options.get("require_cryptographic_signature_verification")
+        or metadata.get("require_cryptographic_signature_verification")
+    )
     registry_reference = _registry_reference(artifact_ref, metadata)
-    signature_status = _signature_verification_status(metadata, signature_url, signed_by)
+    crypto_signature_result = await _load_and_verify_signature(
+        options, metadata, signature_url, artifact_bytes, sha256,
+        timeout_seconds=timeout_seconds, allow_local_files=allow_local_files,
+    )
+    signature_status = _signature_verification_status(metadata, signature_url, signed_by, crypto_signature_result)
     license_policy = _license_policy(license_ref)
     sbom_policy = _sbom_policy(sbom_ref, strict=strict_governance)
     try:
@@ -1606,19 +1784,39 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
             remediation="Require Sigstore, registry signing, or an equivalent signed attestation for deployable model artifacts.",
         ))
 
+    # A present-but-invalid signature (real verifier ran and rejected it) is a red
+    # flag regardless of policy flags — surface it as high severity.
+    if signature_status["status"] == "invalid" and not metadata_unavailable:
+        findings.append(_finding(
+            finding_id="signature_invalid",
+            title="Model artifact signature failed cryptographic verification",
+            severity="high",
+            description="A detached signature was present and the cryptographic verifier rejected it against the artifact/digest and supplied public key.",
+            artifact_ref=artifact_ref,
+            evidence={"artifact": name, "signature": signature_status},
+            remediation="Do not deploy. Re-sign the artifact with the correct key, or correct the public key / payload (artifact vs digest) used for verification.",
+        ))
+
+    effective_require_verification = require_signature_verification or require_cryptographic_signature_verification
     if (
-        require_signature_verification
+        effective_require_verification
         and signature_status["status"] in {"present_unverified", "claimed_verified"}
         and not metadata_unavailable
     ):
+        crypto_strict = require_cryptographic_signature_verification
         findings.append(_finding(
             finding_id="signature_not_verified",
-            title="Model artifact signature is present but not verified",
-            severity="medium",
-            description="The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence.",
+            title="Model artifact signature is present but not cryptographically verified",
+            severity="high" if crypto_strict else "medium",
+            description=(
+                "Policy requires cryptographic signature verification, but intake could not verify the "
+                "signature; only a metadata claim is present."
+                if crypto_strict
+                else "The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence."
+            ),
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "signature": signature_status},
-            remediation="Verify the signature or attestation with Sigstore/cosign or the registry verifier and record cryptographic verification evidence in model intake metadata.",
+            remediation="Provide a public key (signature_public_key/_url) and detached signature (signature_value/signature_url) so intake can run real cryptographic verification, or verify with Sigstore/cosign and record the verifier result.",
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
@@ -2058,9 +2256,14 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "aibom_completeness": aibom["completeness"]["score"],
         "provenance_present": bool(provenance_ref),
         "signature_present": bool(signature_url or signed_by),
+        "signature_claimed_present": signature_status["claimed_present"],
         "signature_verified": signature_status["verified"],
         "signature_claimed_verified": signature_status["claimed_verified"],
         "signature_cryptographically_verified": signature_status["cryptographically_verified"],
+        "signature_verifier": signature_status.get("verifier"),
+        "signature_transparency_log_verified": signature_status.get("transparency_log_verified"),
+        "signature_attestation_subject_digest_match": signature_status.get("attestation_subject_digest_match"),
+        "signature_crypto_attempted": signature_status.get("crypto_attempted"),
         "expected_hash_present": bool(expected_sha256),
         "deployment_approved": deployment_approved,
         "license_present": bool(license_ref),
