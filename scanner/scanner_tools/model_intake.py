@@ -556,14 +556,22 @@ def _download_http(
             declared_length = int(content_length) if content_length is not None else None
         except ValueError:
             declared_length = None
+        status = getattr(response, "status", None)
         if content_range:
             total = content_range.get("total")
             truncated = total is None or int(content_range["end"]) + 1 < int(total)
+        elif status == 206:
+            # 206 Partial Content: the server served only part of the resource in
+            # response to our Range request. Without a Content-Range total proving
+            # we fetched the whole file, assume the artifact exceeds the cap
+            # (fail-safe) — otherwise a capped prefix hashed against the
+            # full-artifact digest surfaces as a FALSE checksum mismatch.
+            truncated = True
         else:
             truncated = len(data) > max_bytes or (declared_length is not None and declared_length > max_bytes)
         return data[:max_bytes], {
             "source": "http",
-            "status": getattr(response, "status", None),
+            "status": status,
             "content_type": headers.get("Content-Type"),
             "content_length": content_length,
             "content_range": headers.get("Content-Range"),
