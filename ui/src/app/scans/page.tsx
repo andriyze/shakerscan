@@ -459,7 +459,8 @@ function ScansContent() {
                         return_status: statusFilter,
                         return_domain: domainFilter,
                         return_search: searchQuery,
-                        return_page: page > 1 ? page : undefined
+                        return_page: page > 1 ? page : undefined,
+                        return_include_internal: includeInternal ? 'true' : undefined
                       })}
                       className="block truncate text-sm text-blue-400 hover:text-blue-300"
                       title={scan.target_url}
