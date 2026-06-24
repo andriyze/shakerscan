@@ -178,9 +178,11 @@ Open this repo in Claude Code, Codex, OpenCode, or another agent that can read r
 
 ## Resources
 
+- **[Functionality Reference](docs/functionality-reference.md)** - Complete map of what ShakerScan does across DAST and AI red teaming, with links out to the architecture and policy docs.
 - **[Visual Walkthrough](WALKTHROUGH.md)** - Terminal and web UI screenshots.
 - **[Smart Scan Policy](docs/SMART_SCAN_POLICY.md)** - Smart scan budgets, safety controls, and quality checks.
 - **[Honey AI Gate Prompt](docs/HONEY_AI_GATE_CONTROL_PROMPT.md)** - LLM prompt for adding AI Gate RAG/agent/MCP control-evidence scenarios to Honey.
+- **[Honey AI Red Team Course Prompt](docs/HONEY_AI_REDTEAM_COURSE_PROMPT.md)** - LLM prompt for adding the AI red-team course and scenarios to the Honey test app.
 - **[Honey Model Intake Prompt](docs/HONEY_MODEL_INTAKE_PROMPT.md)** - LLM prompt for adding model-intake calibration scenarios to the Honey test app.
 - **[AI Test Workflows](docs/AI_TEST_WORKFLOWS.md)** - operator workflow and Honey endpoint contract for secure RAG/agent testing and model-intake approval checks.
 

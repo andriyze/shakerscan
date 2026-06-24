@@ -49,6 +49,9 @@ The scanner runs as Docker containers:
 - **PostgreSQL** - Stores scans, findings, targets
 - **Redis** - Job queue
 
+For a full map of product capabilities and pointers to the architecture/policy docs, see
+[docs/functionality-reference.md](docs/functionality-reference.md).
+
 ## Current UI (Implemented)
 
 - **Dashboard (`/`)**: real-time metrics (targets, scans, findings, avg score), queue stats (pending/running/completed/failed with clickable links), worker scaling (1-20 with +/- controls), Gungnir CT monitor toggle, recent scans list (last 5), critical/high findings list (last 5). Auto-refreshes every 10-30s.

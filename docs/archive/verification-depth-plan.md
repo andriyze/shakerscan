@@ -1,5 +1,10 @@
 # Verification Depth Plan — lift the verified-vs-suspected ratio
 
+> **ARCHIVED (2026-06-23).** Historical plan. The verification *mechanisms* it proposed
+> (workstreams A–D) have landed; the residual *outcome* (recall / proven-vs-suspected ratio) is now
+> tracked in [proposed-next-steps.md](../proposed-next-steps.md) §1 and the benchmark recall gate.
+> Kept for root-cause detail only.
+
 **Status:** proposal, 2026-06-20. A *new* effort, separate from `proposed-next-steps.md`
 (which is fully implemented). That plan put the verification *mechanisms* in place
 (suspected vs verified labeling, `verification_summary`, confidence tiers, the

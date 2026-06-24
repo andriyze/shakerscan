@@ -3,9 +3,9 @@
 **Status:** archived investigation log from a live validation run (Juice Shop / crAPI /
 honey.shakerscan.com, 2026-06-17). This is no longer a canonical roadmap. Keep it for historical
 evidence/root-cause detail only. Current implementation direction lives in
-[parallel-scan-architecture.md](parallel-scan-architecture.md),
-[continuous-asm-architecture.md](continuous-asm-architecture.md), and
-[proposed-next-steps.md](proposed-next-steps.md).
+[parallel-scan-architecture.md](../parallel-scan-architecture.md),
+[continuous-asm-architecture.md](../continuous-asm-architecture.md), and
+[proposed-next-steps.md](../proposed-next-steps.md).
 
 Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a

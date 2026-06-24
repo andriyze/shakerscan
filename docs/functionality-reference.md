@@ -3,7 +3,7 @@
 **Status:** Comprehensive functional reference for the whole product. This is the "what can ShakerScan
 actually do" map across both pillars: **DAST** (Dynamic Application Security Testing) and **AI red
 teaming** (AI Gate, Model Intake, AI Security Sessions, AI-assisted analysis).
-**Date:** 2026-06-17
+**Date:** 2026-06-23
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 

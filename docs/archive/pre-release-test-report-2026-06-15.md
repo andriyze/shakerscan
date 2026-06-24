@@ -1,5 +1,8 @@
 # ShakerScan Pre-Release Test Report — 2026-06-15
 
+> **ARCHIVED (2026-06-23).** Point-in-time QA snapshot of build `669c203` (now many commits behind
+> HEAD). Kept as release-test history only.
+
 **Scope:** Full pre-release pass focused on parallel scans, plus UI, API, tests, retest, and AI Gate.
 **Targets:** Juice Shop (`http://host.docker.internal:3001`, DAST) and Honey (`https://honey.shakerscan.com`, DAST + AI Gate).
 **Build under test:** `main` @ `669c203` (+ uncommitted shard-leak read-filter fix in `api/api.py`).

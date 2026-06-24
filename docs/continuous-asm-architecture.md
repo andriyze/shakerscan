@@ -14,7 +14,7 @@ Current DAST-quality lesson from Juice Shop/crAPI validation: ASM must measure a
 campaign quality, not just endpoint touch count. The engine now proves real Critical SQLi and High
 BOLA/Authz on lab apps, but XSS, workflow/write-BOLA, mass-assignment, and JWT remain quality gaps
 that ASM should expose as family/proof/workflow gaps.
-**Date:** 2026-06-16
+**Date:** 2026-06-23
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 

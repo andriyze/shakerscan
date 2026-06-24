@@ -1,5 +1,9 @@
 # Juice Shop Crit/High DAST Detection — Gap Analysis & Handoff
 
+> **ARCHIVED (2026-06-23).** Superseded by [proposed-next-steps.md](../proposed-next-steps.md) §1
+> (detection recall) and the committed benchmark scorecards in `results/benchmark-runs/`, which now
+> machine-track the same misses (`sqli-login`, `nosqli-reviews`). Kept for the per-entry gap detail.
+
 **Goal:** make ShakerScan's DAST engine (universal, not Juice-Shop-tuned) detect ≥70%
 of Juice Shop's Critical/High vulnerabilities. Juice Shop is the *benchmark*; every
 change must be a generic capability that works on any app with that vuln class.

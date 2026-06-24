@@ -1,7 +1,7 @@
 # Parallel Scanning Architecture — Design & Implementation Plan
 
 **Status:** Parallel-scan core (Phase 0 dictionaries + Phase 1 orchestration) implemented & deployed; high-budget `coverage` mode implemented; zero-rediscovery coverage child execution implemented; dynamic pull-based Full Coverage allocation is now the default for coverage parents, with explicit static slices kept as fallback. Continuous ASM is now documented separately in [continuous-asm-architecture.md](continuous-asm-architecture.md). Current DAST-quality lesson from Juice Shop/crAPI validation: parallelism is the execution substrate, not the goal. The scanner now proves real Critical SQLi and High BOLA/Authz on lab apps, but broad fan-out still needs worker-aware sizing, family-specific campaigns, and browser/stateful XSS/BOLA workflows to consistently raise true High/Critical coverage.
-**Date:** 2026-06-14 (implemented 2026-06-15)
+**Date:** 2026-06-23 (core implemented 2026-06-15)
 **Author:** Architecture audit (Claude Code)
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
 
