@@ -45,6 +45,7 @@ try:
         is_sensitive_key,
         mask_secret,
         redact_sensitive,
+        redact_text,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "redaction":
@@ -55,6 +56,7 @@ except ModuleNotFoundError as exc:
         is_sensitive_key,
         mask_secret,
         redact_sensitive,
+        redact_text,
     )
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
@@ -6775,9 +6777,30 @@ async def get_ai_target_runtime_risk(target_id: str):
     }
 
 
+def _ai_transcript_sensitive_allowed() -> bool:
+    """Admin gate for raw (unredacted) transcript access.
+
+    ShakerScan has no user-auth layer, so the operator opts in explicitly via
+    AI_TRANSCRIPT_ALLOW_SENSITIVE. When off (default), raw transcripts are never
+    returned over the API regardless of the include_sensitive query param.
+    """
+    return str(os.environ.get("AI_TRANSCRIPT_ALLOW_SENSITIVE", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 @app.get("/ai/scans/{scan_id}/transcript")
-async def get_ai_scan_transcript(scan_id: str, include_sensitive: bool = False):
-    """Return AI Gate transcripts for a completed scan."""
+async def get_ai_scan_transcript(scan_id: str, request: Request, include_sensitive: bool = False):
+    """Return AI Gate transcripts for a completed scan.
+
+    Transcripts are redacted at response time by default (they routinely contain
+    the exact secrets/PII the probes were hunting for). Raw bodies are returned
+    only when the operator has enabled AI_TRANSCRIPT_ALLOW_SENSITIVE and the
+    caller asks with include_sensitive=true; that access is audit-logged.
+    """
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow(
             "SELECT result, run_kind FROM scans WHERE id = $1",
@@ -6791,15 +6814,35 @@ async def get_ai_scan_transcript(scan_id: str, include_sensitive: bool = False):
     if not transcripts:
         raise HTTPException(status_code=404, detail="Transcript not available")
     retention = ai_gate.get("transcript_retention") if isinstance(ai_gate, dict) else {}
+    sensitivity_label = (retention or {}).get("transcript_sensitivity")
+
+    available = _ai_transcript_sensitive_allowed()
+    reveal = bool(include_sensitive) and available
+    if reveal:
+        client_host = getattr(getattr(request, "client", None), "host", "unknown")
+        logger.warning(
+            "AI transcript RAW (unredacted) access: scan_id=%s client=%s sensitivity=%s count=%s",
+            scan_id, client_host, sensitivity_label, len(transcripts),
+        )
+        response_transcripts = transcripts
+        redaction_applied = False
+    else:
+        response_transcripts = redact_sensitive(transcripts, redact_strings=True, scrub_text=True)
+        redaction_applied = True
+
+    retention_out = dict(retention or {})
+    retention_out.update({
+        "redaction_applied": redaction_applied,
+        "include_sensitive_available": available,
+    })
     return {
         "scan_id": scan_id,
-        "transcripts": transcripts,
-        "transcript_retention": retention or {
-            "redaction_applied": True,
-            "include_sensitive_available": False,
-        },
-        "include_sensitive": include_sensitive,
-        "include_sensitive_available": bool((retention or {}).get("include_sensitive_available")),
+        "transcripts": response_transcripts,
+        "transcript_retention": retention_out,
+        "sensitivity_label": sensitivity_label,
+        "redaction_applied": redaction_applied,
+        "include_sensitive": reveal,
+        "include_sensitive_available": available,
     }
 
 

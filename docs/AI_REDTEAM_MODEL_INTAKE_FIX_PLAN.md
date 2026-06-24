@@ -28,7 +28,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.7 | Request budget by HTTP call | ✅ | (widget target not integrated) |
 | 3.8 | Response body cap | ✅ | Flat 256 KB cap; per-profile defaults not wired; widget not integrated |
 | 3.9 | AI Gate per-finding retest | ✅ | — |
-| 3.10 | Transcript retention & redaction policy | 🟡 | `include_sensitive` override is a hardcoded-`False` stub; no response-time redaction gate |
+| 3.10 | Transcript retention & redaction policy | ✅ | Response-time redaction default + audited admin gate (R3) |
 | 3.11 | Cross-principal AI testing | ✅ | — |
 | 3.12 | Judging availability gate | ✅ | UI "deterministic only" indicator not surfaced |
 | 3.13 | MCP readiness auth-aware checks | ✅ | No `resources/list` probe; some checks lean on declared metadata |
@@ -95,14 +95,17 @@ Masking keys and nested-metadata redaction shipped. Remaining structural fixes:
 - **Encryption-at-rest for `ai_target_credentials.secret_value`** (`db/init.sql` stores it as plaintext
   `TEXT`; no Fernet/crypto touches that column). (R2b)
 
-### R3 — Transcript redaction enforcement (was §3.10) 🟡
-Sensitivity labels, retention fields, and the purge endpoint shipped
-(`ai_gate_scan.py:_ai_gate_sensitivity_summary`; `DELETE /ai/scans/{id}/transcript`). But
-`include_sensitive_available` is hardcoded `False` (`ai_gate_scan.py`, `api.py`) — the
-`include_sensitive=true` override is echoed back but never honored — and the transcript endpoint
-returns persisted `transcripts` verbatim with **no response-time redaction gate** keyed to the
-sensitivity label. **Do:** make redaction the default at response time and wire a real
-admin/local-only `include_sensitive` path.
+### R3 — Transcript redaction enforcement (was §3.10) ✅ DONE (2026-06-24)
+`GET /ai/scans/{id}/transcript` now redacts at response time by default
+(`redact_sensitive(..., redact_strings=True, scrub_text=True)` — masks credential keys, URL
+credentials, and inline bearer/api-key/token/secret patterns while keeping the prompt/response
+readable). Raw bodies are returned only when the operator sets `AI_TRANSCRIPT_ALLOW_SENSITIVE` **and**
+the caller passes `include_sensitive=true`; that access is audit-logged (`logger.warning` with the
+client host). The response surfaces `redaction_applied`, `sensitivity_label`, and
+`include_sensitive_available`. Verified live against honey (`shaker-rag-lite` smoke): default
+`redaction_applied=true`, `include_sensitive_available=false`, and `include_sensitive=true` with the
+flag off does **not** reveal; the admin-gate helper honors `true/1/yes/on`. Behaviour unit-locked in
+`tests/test_shared_redaction.py` (`scrub_text` composition).
 
 ### R4 — Durable policy + exception registry (was §4.5) 🟡
 `POLICY_PROFILES` is a hard-coded Python dict and exceptions are read from scan options/result JSON

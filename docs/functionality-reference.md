@@ -449,7 +449,7 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | AI Gate per-finding retest | Shipped | Deterministic proof still outranks AI judgment. |
 | Cross-principal AI testing | Shipped | Requires configured principals. |
 | MCP readiness checks | Partial | Add safe `resources/list`; some checks lean on declared metadata. |
-| Transcript retention / purge | Partial | Response-time redaction gate still needed; `include_sensitive` is a stub. |
+| Transcript retention / purge | Shipped | Response-time redaction by default + audited admin gate (`AI_TRANSCRIPT_ALLOW_SENSITIVE`). |
 | Model Intake checksum / range / local-file gates | Shipped | Solid baseline. |
 | Model Intake signature / provenance crypto | **Missing (P0)** | Metadata booleans are trusted; no cosign/sigstore/DSSE verification. |
 | Model Intake governance evidence | Partial | Add SPDX expression parsing / normalization. |
@@ -694,6 +694,8 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 - AI retest verification: `AI_VERIFY_ENABLED`, `AI_VERIFY_URL`, `AI_VERIFY_API_KEY`,
   `AI_VERIFY_MODEL`, `AI_VERIFY_USE_BROWSER`, `AI_VERIFY_MAX_PER_SCAN`, `AI_VERIFY_MIN_SEVERITY`.
 - AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED`.
+- AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
+  `AI_TRANSCRIPT_ALLOW_SENSITIVE` (default off — when on, `GET /ai/scans/{id}/transcript?include_sensitive=true` returns raw, audit-logged bodies; otherwise responses are redacted at response time).
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.

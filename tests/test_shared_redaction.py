@@ -85,3 +85,27 @@ def test_redact_text_scrubs_known_patterns():
     assert redact_text("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
     assert redact_text("api_key=SECRET&x=1") == "api_key=***&x=1"
     assert redact_text(None) is None
+
+
+def test_scrub_text_composes_url_and_text_redaction_for_transcripts():
+    # Transcript-shaped payload: mask credential KEYS, scrub inline secrets in free
+    # text, redact URL creds in references, keep the readable prompt/response.
+    transcript = {
+        "prompt": "Please summarize the doc",
+        "request_headers": {"Authorization": "Bearer eyJsecret"},
+        "response": "Sure. Debug note: api_key=SECRETVALUE was used.",
+        "reference": "https://svc/internal?token=zzz&page=2",
+    }
+    out = redact_sensitive(transcript, redact_strings=True, scrub_text=True)
+    assert out["prompt"] == "Please summarize the doc"          # readable text preserved
+    assert out["request_headers"]["Authorization"] == "***"      # sensitive key masked
+    assert "SECRETVALUE" not in out["response"]                  # inline secret scrubbed
+    assert "api_key=***" in out["response"]
+    assert "token=%2A%2A%2A" in out["reference"] or "token=***" in out["reference"]
+    assert "page=2" in out["reference"]
+
+
+def test_scrub_text_off_by_default_preserves_free_text():
+    # Default (redact_strings only) does NOT scrub inline free-text tokens.
+    out = redact_sensitive({"response": "api_key=SECRET"}, redact_strings=True)
+    assert out["response"] == "api_key=SECRET"

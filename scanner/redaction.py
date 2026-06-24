@@ -160,27 +160,41 @@ def redact_text(text: Any) -> Any:
     return text
 
 
-def redact_sensitive(value: Any, *, redact_strings: bool = False, mask: str = MASK) -> Any:
+def redact_sensitive(
+    value: Any,
+    *,
+    redact_strings: bool = False,
+    scrub_text: bool = False,
+    mask: str = MASK,
+) -> Any:
     """Recursively mask values stored under sensitive keys.
 
     - dict: any key matching :func:`is_sensitive_key` with a non-empty value is
       replaced with ``mask``; other values recurse.
     - list/tuple: each item recurses.
     - str: returned unchanged unless ``redact_strings`` is set, in which case
-      reference-URL credentials are masked.
+      reference-URL credentials are masked; with ``scrub_text`` the free-text
+      bearer/api-key/token/secret patterns are scrubbed too (used for
+      transcript/evidence bodies).
     """
+    def _recurse(item: Any) -> Any:
+        return redact_sensitive(item, redact_strings=redact_strings, scrub_text=scrub_text, mask=mask)
+
     if isinstance(value, dict):
         out: dict[Any, Any] = {}
         for key, item in value.items():
             if is_sensitive_key(key) and item not in _EMPTY:
                 out[key] = mask
             else:
-                out[key] = redact_sensitive(item, redact_strings=redact_strings, mask=mask)
+                out[key] = _recurse(item)
         return out
     if isinstance(value, list):
-        return [redact_sensitive(item, redact_strings=redact_strings, mask=mask) for item in value]
+        return [_recurse(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(redact_sensitive(item, redact_strings=redact_strings, mask=mask) for item in value)
+        return tuple(_recurse(item) for item in value)
     if isinstance(value, str) and redact_strings:
-        return redact_url_credentials(value)
+        out_str = redact_url_credentials(value)
+        if scrub_text:
+            out_str = redact_text(out_str)
+        return out_str
     return value
