@@ -36,7 +36,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.15 | Governance evidence validation | 🟡 | No SPDX identifier normalization / expression parsing |
 | 4.1 | Indirect prompt-injection harness | ✅ | — |
 | 4.2 | Deployment gate API | ✅ | — |
-| 4.3 | Agent execution receipts | 🟡 | Detects missing/replayed/unscoped, but does not cryptographically verify the hash chain/signature |
+| 4.3 | Agent execution receipts | ✅ | Verifies content-hash, prev_hash chain linkage, and signature (R5) |
 | 4.4 | Model/data poisoning coverage | ✅ | Strict-policy-gated; no explicit data-source allowlist check |
 | 4.5 | Policy profiles + exception workflow | 🟡 | Hard-coded profiles + payload-driven exceptions; no DB-backed `policies`/`finding_exceptions` tables |
 
@@ -119,12 +119,17 @@ flag off does **not** reveal; the admin-gate helper honors `true/1/yes/on`. Beha
 (owner, scope, compensating controls, approver, expiry) so decisions are auditable and exceptions can
 expire server-side and re-open blocking status.
 
-### R5 — Agent execution receipt verification (was §4.3) 🟡
-`ai_gate_scan.py:_agent_execution_receipt_findings` detects missing approval, replayed approval
-(duplicate `approval_id`), unscoped tool calls, and output-not-bound-to-receipt — but only by field
-**presence**. It does not verify the hash chain (`prev_hash` linkage) or any signature, so a forged
-receipt with non-empty fake `receipt_hash`/`signature` passes. **Do:** validate the chain and signature
-when present; report "claimed" vs "verified" receipts.
+### R5 — Agent execution receipt verification (was §4.3) ✅ DONE (2026-06-24)
+`ai_gate_scan.py:_agent_execution_receipt_findings` now cryptographically verifies receipts in addition
+to the presence checks: it recomputes each receipt's content-hash under a defined canonical convention
+(`sha256(prev_hash + '.' + canonical_content)`), checks `prev_hash` chain linkage, and verifies the
+detached `signature` against `receipt_public_key` (Ed25519 / RSA-PSS / ECDSA via
+`_verify_receipt_signature`, lazy `cryptography`). A tampered receipt → **high** `receipt_hash_mismatch`;
+a broken chain → **high** `receipt_chain_broken`; a bad signature → **high** `receipt_signature_invalid`.
+The summary now reports `chain_verified`, `hash_verified_count`, `hash_mismatch_count`,
+`chain_break_count`, `signature_verified_count`, `signature_invalid_count` — i.e. *verified* vs merely
+*claimed*. Verified by `tests/test_agent_receipt_verification.py` (6: valid chain/signatures pass;
+tampered / broken-chain / wrong-key flagged; presence checks still fire); live runtime confirmed.
 
 ### R6 — Minor hardening (small, independent)
 - **§3.6** Make the production-safety probe filter effective: today every probe defaults to

@@ -5582,6 +5582,72 @@ def _cross_principal_probe_extensions(
     return tuple(generated[:10])
 
 
+_RECEIPT_INTEGRITY_FIELDS = {"receipt_hash", "chain_hash", "signature", "prev_hash", "previous_hash"}
+
+
+def _canonical_receipt_content(receipt: dict[str, Any]) -> str:
+    """Canonical JSON of a receipt's content, excluding the integrity/chain fields."""
+    content = {k: v for k, v in receipt.items() if k not in _RECEIPT_INTEGRITY_FIELDS}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _expected_receipt_hash(receipt: dict[str, Any], prev_hash: str) -> str:
+    """ShakerScan's verifiable receipt-hash convention: sha256(prev_hash + '.' + canonical_content)."""
+    payload = f"{prev_hash or ''}.{_canonical_receipt_content(receipt)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _verify_receipt_signature(message: bytes, signature_raw: Any, public_key_pem: Any) -> dict[str, Any]:
+    """Verify a detached receipt signature over ``message``. Never raises.
+
+    ``verified`` is True only when a real cryptographic check passes.
+    """
+    if not (signature_raw and public_key_pem):
+        return {"available": None, "attempted": False, "verified": False, "error": "missing_material"}
+    import base64
+    import binascii
+
+    sig = signature_raw
+    if isinstance(sig, str):
+        try:
+            sig = base64.b64decode(sig, validate=True)
+        except (ValueError, binascii.Error):
+            try:
+                sig = bytes.fromhex(signature_raw)
+            except ValueError:
+                sig = signature_raw.encode()
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding as asy_padding, rsa
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        return {"available": False, "attempted": False, "verified": False, "error": "verifier_unavailable"}
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": False, "verified": False, "error": f"public_key_load_failed:{type(exc).__name__}"}
+    try:
+        if isinstance(key, ed25519.Ed25519PublicKey):
+            key.verify(bytes(sig), message)
+        elif isinstance(key, rsa.RSAPublicKey):
+            key.verify(
+                bytes(sig), message,
+                asy_padding.PSS(mgf=asy_padding.MGF1(hashes.SHA256()), salt_length=asy_padding.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(bytes(sig), message, ec.ECDSA(hashes.SHA256()))
+        else:
+            return {"available": True, "attempted": False, "verified": False, "error": "unsupported_key_type"}
+    except InvalidSignature:
+        return {"available": True, "attempted": True, "verified": False, "error": "invalid_signature"}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": True, "attempted": True, "verified": False, "error": f"verify_error:{type(exc).__name__}"}
+    return {"available": True, "attempted": True, "verified": True}
+
+
 def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_receipts = metadata_json.get("agent_execution_receipts") or metadata_json.get("execution_receipts")
     receipts = raw_receipts if isinstance(raw_receipts, list) else []
@@ -5618,11 +5684,90 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
             if not (input_hash and output_hash and receipt_hash):
                 missing_binding.append(index)
 
+    # Cryptographic verification (R5): not just field presence — actually verify the
+    # content-hash, prev_hash chain linkage, and signature when those fields are present.
+    public_key_pem = (
+        metadata_json.get("receipt_public_key")
+        or metadata_json.get("agent_receipt_public_key")
+        or metadata_json.get("receipt_signing_public_key")
+    )
+    sign_payload_mode = str(metadata_json.get("receipt_signature_payload") or "receipt_hash").strip().lower()
+    hash_mismatch: list[int] = []
+    chain_breaks: list[int] = []
+    signature_invalid: list[int] = []
+    hash_verified_count = 0
+    signature_verified_count = 0
+    signature_attempted = False
+    prev_hash = ""
+    for index, receipt in enumerate(receipts[:200]):
+        if not isinstance(receipt, dict):
+            continue
+        declared_hash = str(receipt.get("receipt_hash") or receipt.get("chain_hash") or "").strip()
+        raw_prev = receipt.get("prev_hash", receipt.get("previous_hash"))
+        declared_prev = str(raw_prev).strip() if raw_prev not in (None, "") else None
+        # Chain linkage: a declared prev_hash must match the previous receipt's hash.
+        if declared_prev is not None and index > 0 and declared_prev != prev_hash:
+            chain_breaks.append(index)
+        if declared_hash:
+            prev_for_hash = declared_prev if declared_prev is not None else prev_hash
+            expected = _expected_receipt_hash(receipt, prev_for_hash)
+            if expected == declared_hash:
+                hash_verified_count += 1
+            else:
+                hash_mismatch.append(index)
+            signature = receipt.get("signature")
+            if signature and public_key_pem:
+                signature_attempted = True
+                message = (
+                    _canonical_receipt_content(receipt).encode("utf-8")
+                    if sign_payload_mode == "canonical"
+                    else declared_hash.encode("utf-8")
+                )
+                sig_result = _verify_receipt_signature(message, signature, public_key_pem)
+                if sig_result.get("verified"):
+                    signature_verified_count += 1
+                elif sig_result.get("attempted"):
+                    signature_invalid.append(index)
+            prev_hash = declared_hash
+
     probe = {
         "id": "agent.receipt-chain",
         "family": "tool_abuse",
         "owasp": "LLM08:2025",
     }
+    if hash_mismatch:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt hash does not match its contents",
+            severity="high",
+            description="A receipt declared a receipt_hash that does not match the canonical hash of its contents, indicating a tampered or forged receipt rather than a verifiable audit record.",
+            remediation="Recompute receipt_hash as sha256(prev_hash + '.' + canonical_content) and reject receipts whose hash does not verify.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": hash_mismatch[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="hash_mismatch",
+        ))
+    if chain_breaks:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt chain is broken",
+            severity="high",
+            description="A receipt's prev_hash does not link to the previous receipt's hash, so the execution chain cannot be proven intact (possible inserted/removed/reordered receipts).",
+            remediation="Hash-chain receipts so each prev_hash equals the previous receipt_hash; reject chains that do not link.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": chain_breaks[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="chain_broken",
+        ))
+    if signature_invalid:
+        findings.append(_build_finding(
+            probe=probe,
+            title="Agent execution receipt signature failed verification",
+            severity="high",
+            description="A receipt carried a signature and a public key was provided, but the signature did not verify — the receipt is not cryptographically authentic.",
+            remediation="Sign the receipt hash with the agent/tool key and verify against the configured public key before trusting the receipt.",
+            owasp="LLM08:2025",
+            evidence={"receipt_indexes": signature_invalid[:25], "judge_layer": "receipt_crypto"},
+            source_suffix="signature_invalid",
+        ))
     if missing_approval:
         findings.append(_build_finding(
             probe=probe,
@@ -5668,6 +5813,12 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
             source_suffix="missing_hash_binding",
         ))
 
+    chain_verified = bool(
+        hash_verified_count > 0
+        and not hash_mismatch
+        and not chain_breaks
+        and not signature_invalid
+    )
     return findings, {
         "available": True,
         "receipt_count": len(receipts),
@@ -5676,6 +5827,15 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
         "replayed_approval_count": len(replayed_approvals),
         "unscoped_tool_call_count": len(unscoped_tool_calls),
         "missing_hash_binding_count": len(missing_binding),
+        # Cryptographic verification (R5): claimed vs actually verified.
+        "chain_verified": chain_verified,
+        "hash_verified_count": hash_verified_count,
+        "hash_mismatch_count": len(hash_mismatch),
+        "chain_break_count": len(chain_breaks),
+        "signature_public_key_present": bool(public_key_pem),
+        "signature_attempted": signature_attempted,
+        "signature_verified_count": signature_verified_count,
+        "signature_invalid_count": len(signature_invalid),
     }
 
 

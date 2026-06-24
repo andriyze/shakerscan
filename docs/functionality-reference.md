@@ -453,7 +453,7 @@ runs but the listed caveat applies — treat the caveat as load-bearing, not cos
 | Model Intake checksum / range / local-file gates | Shipped | Solid baseline. |
 | Model Intake signature / provenance crypto | Shipped | Real detached-sig verification (`cryptography`: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims, not proof. |
 | Model Intake governance evidence | Partial | Add SPDX expression parsing / normalization. |
-| Agent execution receipts | Partial | Validates field presence, not hash-chain / signature. |
+| Agent execution receipts | Shipped | Verifies content-hash, prev_hash chain, and signature (Ed25519/RSA/ECDSA). |
 | Deployment gate API | Shipped | Should converge on the unified proof/policy states. |
 | Durable policy + exception registry | Partial | Profiles hard-coded, exceptions payload-driven; no DB-backed objects. |
 
