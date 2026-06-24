@@ -92,11 +92,23 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Free-text token scrubbing (used by scanner reporting). Behaviour-preserving:
-# these are exactly reporting._redact_sensitive's historical patterns.
+# Free-text token scrubbing (used by scanner reporting + AI transcript bodies).
+# The first two patterns are reporting._redact_sensitive's historical ones
+# (header / query-string / env-var `key=value` shapes). The third catches
+# JSON / dict-literal `"api_key": "SECRET"` shapes, which transcript request and
+# response bodies embed as text and which the `=`-only pattern misses.
+_SENSITIVE_TEXT_KEY = (
+    r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|authorization|"
+    r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
+    r"refresh[_-]?token|bearer)[a-z0-9_-]*"
+)
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(authorization:\s*bearer)\s+[A-Za-z0-9._-]+"), r"\1 ***"),
     (re.compile(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)"), r"\1=***"),
+    (
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']*(["\'])'),
+        r"\1\2***\3",
+    ),
 )
 
 _EMPTY = (None, "", [], {})

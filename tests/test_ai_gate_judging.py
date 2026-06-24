@@ -252,9 +252,18 @@ def test_planner_filters_unsafe_custom_probes_in_production_mode():
         production_mode=True,
     )
 
+    blocked_ids = plan.manifest["blocked_for_production_probe_ids"]
     assert "custom.destructive" not in {probe.id for probe in plan.probes}
-    assert plan.manifest["blocked_for_production_probe_ids"] == ["custom.destructive"]
-    assert any("safe_for_production=false" in error for error in plan.validation_errors)
+    # The explicit safe_for_production=False custom probe must be blocked. Under the
+    # 3-tier classification model, built-in non_production_only probes (e.g. the
+    # smoke unbounded-consumption probe) are filtered too, so assert containment
+    # rather than an exact one-element list.
+    assert "custom.destructive" in blocked_ids
+    assert "smoke.unbounded-consumption" in blocked_ids
+    assert any(
+        "custom.destructive" in error and "non_production_only" in error
+        for error in plan.validation_errors
+    )
 
 
 def test_high_severity_deterministic_finding_is_semantic_candidate():

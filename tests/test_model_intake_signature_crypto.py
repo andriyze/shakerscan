@@ -19,7 +19,10 @@ crypto = pytest.importorskip("cryptography")
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa  # noqa: E402
 
-from scanner.scanner_tools.model_intake import run_model_intake_scan  # noqa: E402
+from scanner.scanner_tools.model_intake import (  # noqa: E402
+    _public_key_sha256,
+    run_model_intake_scan,
+)
 
 
 def _safetensors_bytes(payload=b"\0\0\0\0"):
@@ -65,12 +68,14 @@ def test_ed25519_detached_signature_verifies(tmp_path):
         data,
         signature_public_key=_pub_pem(priv.public_key()),
         signature_value=base64.b64encode(signature).decode(),
+        signature_trusted_keys=[_pub_pem(priv.public_key())],  # configured trust anchor
         require_cryptographic_signature_verification=True,
     ))
 
     summary = result["model_intake"]["summary"]
     assert summary["signature_verification_status"] == "verified"
     assert summary["signature_cryptographically_verified"] is True
+    assert summary["signature_trusted_root"] is True
     assert summary["signature_verifier"].startswith("cryptography:ed25519")
     assert summary["signature_attestation_subject_digest_match"] is True
     ids = _finding_ids(result)
@@ -95,6 +100,7 @@ def test_rsa_pss_detached_signature_verifies(tmp_path):
         signature_public_key=_pub_pem(priv.public_key()),
         signature_value=base64.b64encode(signature).decode(),
         signature_rsa_padding="pss",
+        signature_trusted_keys=[_pub_pem(priv.public_key())],  # configured trust anchor
         require_cryptographic_signature_verification=True,
     ))
     summary = result["model_intake"]["summary"]
@@ -117,6 +123,7 @@ def test_digest_hex_payload_signature_verifies(tmp_path):
         signature_public_key=_pub_pem(priv.public_key()),
         signature_value=base64.b64encode(signature).decode(),
         signature_payload="digest_hex",
+        signature_trusted_keys=[_pub_pem(priv.public_key())],  # configured trust anchor
         require_cryptographic_signature_verification=True,
     ))
     summary = result["model_intake"]["summary"]
@@ -160,6 +167,84 @@ def test_wrong_key_does_not_verify(tmp_path):
     ))
     assert result["model_intake"]["summary"]["signature_verification_status"] == "invalid"
     assert "model_intake:signature_invalid" in _finding_ids(result)
+
+
+def test_valid_signature_without_trust_root_is_untrusted(tmp_path):
+    # A self-signed artifact: the signature math passes, but no trust anchor is
+    # configured, so provenance is NOT trusted and the status must not be "verified".
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    signature = priv.sign(data)
+
+    result = _run(artifact, _base_opts(
+        data,
+        signature_public_key=_pub_pem(priv.public_key()),
+        signature_value=base64.b64encode(signature).decode(),
+        require_cryptographic_signature_verification=True,
+    ))
+    summary = result["model_intake"]["summary"]
+    assert summary["signature_verification_status"] == "untrusted_root"
+    assert summary["signature_valid"] is True
+    assert summary["signature_cryptographically_verified"] is False
+    assert summary["signature_trusted_root"] is None
+    findings = {f["id"]: f for f in result["findings"]}
+    assert "model_intake:signature_not_verified" in findings
+    assert findings["model_intake:signature_not_verified"]["severity"] == "high"
+    # The top-line "is this signature verified?" summary flag reflects the downgrade.
+    assert summary["signature_verified"] is False
+
+
+def test_valid_signature_with_untrusted_key_is_flagged(tmp_path):
+    # The signing key is valid but a DIFFERENT key is the configured trust anchor.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+
+    signer = ed25519.Ed25519PrivateKey.generate()
+    trusted = ed25519.Ed25519PrivateKey.generate()  # the only anchor we trust
+    signature = signer.sign(data)
+
+    result = _run(artifact, _base_opts(
+        data,
+        signature_public_key=_pub_pem(signer.public_key()),
+        signature_value=base64.b64encode(signature).decode(),
+        signature_trusted_keys=[_pub_pem(trusted.public_key())],
+        require_cryptographic_signature_verification=True,
+    ))
+    summary = result["model_intake"]["summary"]
+    assert summary["signature_verification_status"] == "untrusted_key"
+    assert summary["signature_valid"] is True
+    assert summary["signature_cryptographically_verified"] is False
+    assert summary["signature_trusted_root"] is False
+    assert "model_intake:signature_not_verified" in _finding_ids(result)
+
+
+def test_trusted_key_by_sha256_fingerprint_verifies(tmp_path):
+    # Trust can be configured by fingerprint instead of full PEM.
+    artifact = tmp_path / "model.safetensors"
+    data = _safetensors_bytes()
+    artifact.write_bytes(data)
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    signature = priv.sign(data)
+    fingerprint = _public_key_sha256(_pub_pem(priv.public_key()))
+
+    result = _run(artifact, _base_opts(
+        data,
+        signature_public_key=_pub_pem(priv.public_key()),
+        signature_value=base64.b64encode(signature).decode(),
+        signature_trusted_key_sha256=fingerprint,
+        require_cryptographic_signature_verification=True,
+    ))
+    summary = result["model_intake"]["summary"]
+    assert summary["signature_verification_status"] == "verified"
+    assert summary["signature_cryptographically_verified"] is True
+    assert summary["signature_trusted_root"] is True
+    assert summary["signature_key_fingerprint"] == fingerprint
+    assert "model_intake:signature_not_verified" not in _finding_ids(result)
 
 
 def test_require_crypto_with_metadata_claim_only_is_flagged(tmp_path):

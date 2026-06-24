@@ -47,3 +47,24 @@ def test_manifest_reports_safety_tiers():
     # tiers partition every planned probe (non-production: nothing blocked)
     assert sum(tiers.values()) == len(plan.probes)
     assert "production_review_probe_ids" in plan.manifest
+
+
+def test_generated_principal_probes_are_production_filtered():
+    # Generated principal-pair probes are added AFTER plan_probe_pack's filter, so
+    # the production-safety filter must be re-applied to them too. The admin
+    # impersonation probe (family=tool_abuse) is non_production_only and must be
+    # dropped from a production scan.
+    from ai_gate_scan import _cross_principal_probe_extensions, _production_safe_principal_probes
+
+    principals = [
+        {"role": "attacker", "id": "a1", "label": "attacker"},
+        {"role": "admin", "id": "ad1", "label": "admin"},
+    ]
+    generated = _cross_principal_probe_extensions("agent_trace", principals, "standard")
+    admin_probes = [p for p in generated if p.technique == "principal_pair_admin_impersonation"]
+    assert admin_probes, "expected an admin-impersonation principal probe to be generated"
+
+    safe, blocked_ids = _production_safe_principal_probes(generated)
+    blocked = set(blocked_ids)
+    assert all(p.id in blocked for p in admin_probes)
+    assert all(p not in safe for p in admin_probes)

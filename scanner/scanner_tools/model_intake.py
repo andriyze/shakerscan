@@ -936,6 +936,104 @@ def _verify_signature_crypto(
     return {"available": True, "attempted": True, "verified": True, "verifier": f"cryptography:{algorithm}", "algorithm": algorithm}
 
 
+def _public_key_sha256(public_key_pem: Any) -> str | None:
+    """SHA-256 over the DER SubjectPublicKeyInfo — a stable signing-key fingerprint."""
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+            load_pem_public_key,
+        )
+    except ImportError:
+        return None
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        key = load_pem_public_key(bytes(pem))
+        der = key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    except Exception:  # noqa: BLE001 - report no fingerprint, never raise
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def _iter_str_tokens(raw: Any):
+    """Yield individual tokens from a list/tuple/set or a comma/space-delimited string."""
+    if raw is None:
+        return
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            yield from _iter_str_tokens(item)
+        return
+    for token in re.split(r"[,\s]+", str(raw)):
+        if token:
+            yield token
+
+
+def _iter_pem_blocks(raw: Any):
+    """Yield individual PEM blocks from a list or a (possibly multi-key) PEM bundle."""
+    if raw is None:
+        return
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            yield from _iter_pem_blocks(item)
+        return
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    blocks = re.findall(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", text, re.DOTALL)
+    if blocks:
+        yield from blocks
+    elif text.strip():
+        yield text
+
+
+def _configured_trust_anchor_fingerprints(options: dict[str, Any]) -> set[str]:
+    """Collect operator-configured trusted signing-key SHA-256 fingerprints.
+
+    Trust anchors come ONLY from operator-controlled inputs (scan options and
+    environment), never from the artifact's own metadata — a publisher could
+    otherwise self-declare their key as trusted, which is the self-signing hole
+    this guards against.
+    """
+    fingerprints: set[str] = set()
+
+    def _add_fp(raw: Any) -> None:
+        for token in _iter_str_tokens(raw):
+            norm = token.strip().lower().replace(":", "")
+            if norm:
+                fingerprints.add(norm)
+
+    def _add_key(raw: Any) -> None:
+        for pem in _iter_pem_blocks(raw):
+            fp = _public_key_sha256(pem)
+            if fp:
+                fingerprints.add(fp)
+
+    _add_fp(options.get("signature_trusted_key_sha256"))
+    _add_fp(options.get("signature_trusted_key_fingerprints"))
+    _add_key(options.get("signature_trusted_keys"))
+    _add_fp(os.environ.get("MODEL_INTAKE_TRUSTED_KEY_SHA256"))
+    _add_key(os.environ.get("MODEL_INTAKE_TRUSTED_SIGNING_KEYS"))
+    return fingerprints
+
+
+def _evaluate_signature_trust_root(public_key_pem: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """Decide whether a (validly-signing) key chains to a configured trust anchor.
+
+    ``trusted_root`` is True/False when anchors are configured, or None when none
+    are configured (trusted provenance simply cannot be established — a valid
+    signature alone does not prove a trusted publisher).
+    """
+    anchors = _configured_trust_anchor_fingerprints(options)
+    key_fp = _public_key_sha256(public_key_pem)
+    if not anchors:
+        trusted_root: bool | None = None
+    else:
+        trusted_root = bool(key_fp and key_fp in anchors)
+    return {
+        "key_fingerprint": key_fp,
+        "trusted_root": trusted_root,
+        "trust_anchors_configured": bool(anchors),
+    }
+
+
 async def _load_and_verify_signature(
     options: dict[str, Any],
     metadata: dict[str, Any],
@@ -1000,11 +1098,20 @@ async def _load_and_verify_signature(
     result = _verify_signature_crypto(
         public_key_pem, signature_bytes, payload_bytes, rsa_padding=rsa_padding, hash_name=hash_name
     )
-    if result.get("verified"):
+    signature_valid = bool(result.get("verified"))
+    result["signature_valid"] = signature_valid
+    if signature_valid:
         result["attestation_subject_digest_match"] = bool(
             not expected_sha256 or (sha256 and sha256 == expected_sha256)
         )
         result["payload_kind"] = "digest" if digest_based else "artifact"
+        # A valid signature only establishes TRUSTED provenance when the signing key
+        # chains to an operator-configured trust anchor. Without that, a publisher
+        # could self-sign, so downgrade ``verified`` from cryptographic-pass-only to
+        # cryptographic-pass-AND-trusted.
+        trust = _evaluate_signature_trust_root(public_key_pem, options)
+        result.update(trust)
+        result["verified"] = signature_valid and trust.get("trusted_root") is True
     return result
 
 
@@ -1033,12 +1140,23 @@ def _signature_verification_status(
     )
     claimed_verified = any(_boolish(metadata.get(key)) for key in (*claim_keys, *crypto_claim_keys))
     crypto = crypto or {}
+    # ``signature_valid`` = the raw cryptographic check passed; ``cryptographically_verified``
+    # additionally requires the signing key to chain to a configured trust anchor.
+    signature_valid = bool(crypto.get("signature_valid")) or bool(crypto.get("verified"))
     cryptographically_verified = bool(crypto.get("verified"))
+    trusted_root = crypto.get("trusted_root")
     crypto_attempted = bool(crypto.get("attempted"))
-    crypto_invalid = crypto_attempted and not cryptographically_verified
+    crypto_invalid = crypto_attempted and not signature_valid
     present = bool(signature_url or signed_by or metadata.get("attestation_url") or metadata.get("provenance_url"))
     if cryptographically_verified:
         status = "verified"
+    elif signature_valid and trusted_root is False:
+        # Signature math passed but the signing key is not a configured trust anchor.
+        status = "untrusted_key"
+    elif signature_valid:
+        # Signature math passed but no trust anchors are configured, so provenance
+        # cannot be established (the key may be self-signed).
+        status = "untrusted_root"
     elif crypto_invalid:
         status = "invalid"
     elif claimed_verified:
@@ -1050,6 +1168,10 @@ def _signature_verification_status(
     return {
         "status": status,
         "verified": cryptographically_verified,
+        "signature_valid": signature_valid,
+        "trusted_root": trusted_root,
+        "key_fingerprint": crypto.get("key_fingerprint"),
+        "trust_anchors_configured": bool(crypto.get("trust_anchors_configured")),
         "claimed_present": present,
         "claimed_verified": claimed_verified,
         "cryptographically_verified": cryptographically_verified,
@@ -1852,25 +1974,41 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         ))
 
     effective_require_verification = require_signature_verification or require_cryptographic_signature_verification
+    untrusted_signature = signature_status["status"] in {"untrusted_key", "untrusted_root"}
     if (
         effective_require_verification
-        and signature_status["status"] in {"present_unverified", "claimed_verified"}
+        and signature_status["status"] in {"present_unverified", "claimed_verified", "untrusted_key", "untrusted_root"}
         and not metadata_unavailable
     ):
         crypto_strict = require_cryptographic_signature_verification
+        if untrusted_signature:
+            description = (
+                "A detached signature is cryptographically valid, but the signing key does not chain to "
+                "a configured trust anchor, so the artifact's provenance is untrusted (it may be self-signed). "
+                "Trusted verification requires an operator-configured trust root."
+            )
+        elif crypto_strict:
+            description = (
+                "Policy requires cryptographic signature verification, but intake could not verify the "
+                "signature; only a metadata claim is present."
+            )
+        else:
+            description = (
+                "The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence."
+            )
         findings.append(_finding(
             finding_id="signature_not_verified",
             title="Model artifact signature is present but not cryptographically verified",
-            severity="high" if crypto_strict else "medium",
-            description=(
-                "Policy requires cryptographic signature verification, but intake could not verify the "
-                "signature; only a metadata claim is present."
-                if crypto_strict
-                else "The artifact has signature or attestation metadata, but intake does not have cryptographic verification evidence."
-            ),
+            severity="high" if (crypto_strict or untrusted_signature) else "medium",
+            description=description,
             artifact_ref=artifact_ref,
             evidence={"artifact": name, "signature": signature_status},
-            remediation="Provide a public key (signature_public_key/_url) and detached signature (signature_value/signature_url) so intake can run real cryptographic verification, or verify with Sigstore/cosign and record the verifier result.",
+            remediation=(
+                "Configure a trusted signing key (signature_trusted_keys / signature_trusted_key_sha256 or the "
+                "MODEL_INTAKE_TRUSTED_* environment variables) and re-sign with a key that chains to it."
+                if untrusted_signature
+                else "Provide a public key (signature_public_key/_url) and detached signature (signature_value/signature_url) so intake can run real cryptographic verification, or verify with Sigstore/cosign and record the verifier result."
+            ),
         ))
 
     risky_ext = ext in RISKY_EXTENSIONS
@@ -2312,6 +2450,10 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "signature_present": bool(signature_url or signed_by),
         "signature_claimed_present": signature_status["claimed_present"],
         "signature_verified": signature_status["verified"],
+        "signature_valid": signature_status.get("signature_valid"),
+        "signature_trusted_root": signature_status.get("trusted_root"),
+        "signature_key_fingerprint": signature_status.get("key_fingerprint"),
+        "signature_trust_anchors_configured": signature_status.get("trust_anchors_configured"),
         "signature_claimed_verified": signature_status["claimed_verified"],
         "signature_cryptographically_verified": signature_status["cryptographically_verified"],
         "signature_verifier": signature_status.get("verifier"),

@@ -88,9 +88,20 @@ and surfaces `signature_verifier`, `transparency_log_verified`, `attestation_sub
 metadata-only claim then yields a **high** `signature_not_verified` finding, and a present-but-invalid
 signature yields a **high** `signature_invalid` finding regardless of policy. When the `cryptography`
 lib is absent the verifier reports `verifier_unavailable` rather than silently passing.
-Verified: 6 new crypto tests (`tests/test_model_intake_signature_crypto.py` — Ed25519/RSA-PSS/digest-hex
-pass; tampered + wrong-key blocked; claim-only flagged high) + the existing 29 `test_model_intake`
-green; live HuggingFace (`nex-agi/Nex-N2-mini`) intake runs the path cleanly.
+
+**Trust-root enforcement (2026-06-24 follow-up).** A valid signature alone no longer renders as
+`verified`: the signing key must chain to an **operator-configured** trust anchor — supplied via the
+`signature_trusted_keys` / `signature_trusted_key_sha256` scan options or the
+`MODEL_INTAKE_TRUSTED_SIGNING_KEYS` / `MODEL_INTAKE_TRUSTED_KEY_SHA256` environment variables, and
+**never** sourced from the artifact's own metadata (closing the self-signing hole). A cryptographically
+valid signature whose key is not a configured anchor is reported as `untrusted_key` (anchors configured,
+key not among them) or `untrusted_root` (no anchors configured) — `signature_valid` is true but
+`cryptographically_verified` is false, and under `require_*_verification` it raises a **high**
+`signature_not_verified` finding. The signing-key SHA-256 (`signature_key_fingerprint`) is surfaced.
+Verified: 9 crypto tests (`tests/test_model_intake_signature_crypto.py` — Ed25519/RSA-PSS/digest-hex
+verify with a trust anchor; tampered + wrong-key blocked; claim-only flagged high; self-signed →
+`untrusted_root`; wrong anchor → `untrusted_key`; fingerprint anchor verifies) + the existing
+`test_model_intake` suite green; live HuggingFace (`nex-agi/Nex-N2-mini`) intake runs the path cleanly.
 Optional follow-on: a `cosign verify-blob` / Sigstore-rekor transparency-log integration can layer on
 top when those binaries are present; the cryptography-based verifier is the shipped baseline.
 

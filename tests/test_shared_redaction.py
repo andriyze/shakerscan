@@ -109,3 +109,29 @@ def test_scrub_text_off_by_default_preserves_free_text():
     # Default (redact_strings only) does NOT scrub inline free-text tokens.
     out = redact_sensitive({"response": "api_key=SECRET"}, redact_strings=True)
     assert out["response"] == "api_key=SECRET"
+
+
+def test_redact_text_scrubs_json_style_secret_assignments():
+    # Transcript bodies embed JSON as TEXT; the `=`-only patterns missed these.
+    assert '"api_key": "***"' in redact_text('{"api_key": "SECRETVALUE"}')
+    assert "SECRETVALUE" not in redact_text('{"api_key": "SECRETVALUE"}')
+    assert '"password":"***"' in redact_text('{"password":"hunter2"}')
+    assert "hunter2" not in redact_text('{"password":"hunter2"}')
+    # single-quoted dict literal + a prefixed/suffixed key name
+    assert "topsecret" not in redact_text("{'x_access_token': 'topsecret'}")
+    assert "'authorization': 'Bearer abc'" not in redact_text("{'authorization': 'Bearer abc'}")
+    # JSON authorization value is masked whole
+    assert "Bearer abc" not in redact_text('{"authorization": "Bearer abc"}')
+
+
+def test_redact_text_preserves_non_secret_json_fields():
+    # Numeric/benign fields must stay readable (no false redaction).
+    assert redact_text('{"tokens_used": 42}') == '{"tokens_used": 42}'
+    assert redact_text('{"name": "alice"}') == '{"name": "alice"}'
+
+
+def test_scrub_text_redacts_json_secret_in_transcript_body():
+    transcript = {"response": 'upstream said {"api_key":"LEAKED123","ok":true}'}
+    out = redact_sensitive(transcript, redact_strings=True, scrub_text=True)
+    assert "LEAKED123" not in out["response"]
+    assert '"ok":true' in out["response"]

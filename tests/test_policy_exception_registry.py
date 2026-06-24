@@ -65,3 +65,51 @@ def test_db_policy_profile_overrides_block_threshold():
     overridden = api_module.build_deployment_decision(scan, db_policy_profiles=db_profiles)
     assert not overridden["blocking_findings"]
     assert overridden["policy_profile"] == "staging"
+
+
+def test_profile_disallowing_active_exceptions_keeps_block():
+    # A profile with allow_active_exceptions=False must ignore active exceptions.
+    scan = {
+        "id": "s3", "status": "completed", "scan_type": "smart", "run_kind": "web_dast",
+        "result": {"findings": [{"id": "f-high", "severity": "high", "title": "x"}]},
+        "options": json.dumps({"environment": "staging"}),
+    }
+    exc = [{"finding_id": "f-high", "status": "active", "approver": "sec", "expires_at": FUTURE}]
+    db_profiles = {"staging": {
+        "name": "no-exceptions-staging", "environment": "staging",
+        "minimum_block_severity": "high", "expires_days": 7, "id": "staging",
+        "allow_active_exceptions": False,
+    }}
+    d = api_module.build_deployment_decision(scan, db_policy_profiles=db_profiles, db_exceptions=exc)
+    assert any(f["id"] == "f-high" for f in d["blocking_findings"])
+    assert not d["applied_exceptions"]
+    assert d["exceptions_disabled_by_profile"] is True
+
+    # Same profile but exceptions allowed -> the exception covers the finding.
+    db_profiles["staging"]["allow_active_exceptions"] = True
+    covered = api_module.build_deployment_decision(scan, db_policy_profiles=db_profiles, db_exceptions=exc)
+    assert not covered["blocking_findings"]
+    assert any(f["id"] == "f-high" for f in covered["applied_exceptions"])
+    assert covered["exceptions_disabled_by_profile"] is False
+
+
+def test_fingerprint_only_exception_covers_blocking_finding():
+    # An exception keyed only on fingerprint (no finding_id) must cover a finding
+    # carrying that fingerprint, even when the row ids differ.
+    scan = {
+        "id": "s4", "status": "completed", "scan_type": "smart", "run_kind": "web_dast",
+        "result": {"findings": [{"id": "f-xyz", "fingerprint": "fp-abc", "severity": "high", "title": "x"}]},
+    }
+    base = api_module.build_deployment_decision(scan)
+    assert any(f.get("fingerprint") == "fp-abc" for f in base["blocking_findings"])
+
+    exc = [{"finding_id": None, "fingerprint": "fp-abc", "status": "active", "approver": "sec", "expires_at": FUTURE}]
+    covered = api_module.build_deployment_decision(scan, db_exceptions=exc)
+    assert not covered["blocking_findings"]
+    assert any(f.get("fingerprint") == "fp-abc" for f in covered["applied_exceptions"])
+
+    # A non-matching fingerprint must not cover it.
+    other = [{"fingerprint": "fp-other", "status": "active", "approver": "sec", "expires_at": FUTURE}]
+    not_covered = api_module.build_deployment_decision(scan, db_exceptions=other)
+    assert any(f.get("fingerprint") == "fp-abc" for f in not_covered["blocking_findings"])
+    assert not not_covered["applied_exceptions"]

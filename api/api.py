@@ -3515,6 +3515,7 @@ def _deployment_gate_findings(findings: Any, *, minimum: str = "high", limit: in
             continue
         selected.append({
             "id": finding.get("id") or finding.get("source_finding_id"),
+            "fingerprint": finding.get("fingerprint"),
             "title": finding.get("title"),
             "severity": severity,
             "tool": finding.get("tool"),
@@ -3655,12 +3656,21 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return parsed
 
 
-def _active_exception_ids(exceptions: list[dict[str, Any]]) -> set[str]:
+def _active_exception_keys(exceptions: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
+    """Return the (finding_id, fingerprint) keys of currently-effective exceptions.
+
+    An exception may be keyed on a concrete ``finding_id`` and/or a durable
+    ``fingerprint`` (the registry accepts either). Both forms are honored so a
+    fingerprint-scoped exception covers a matching finding even when its row id
+    differs across scans.
+    """
     now = datetime.now(timezone.utc)
-    active: set[str] = set()
+    active_ids: set[str] = set()
+    active_fingerprints: set[str] = set()
     for item in exceptions:
         finding_id = str(item.get("finding_id") or item.get("id") or "").strip()
-        if not finding_id:
+        fingerprint = str(item.get("fingerprint") or "").strip()
+        if not finding_id and not fingerprint:
             continue
         status = str(item.get("status") or item.get("decision") or "active").strip().lower()
         if status not in {"active", "approved", "accepted_risk"}:
@@ -3670,22 +3680,28 @@ def _active_exception_ids(exceptions: list[dict[str, Any]]) -> set[str]:
             continue
         if not item.get("approved_by") and not item.get("approver"):
             continue
-        active.add(finding_id)
-    return active
+        if finding_id:
+            active_ids.add(finding_id)
+        if fingerprint:
+            active_fingerprints.add(fingerprint)
+    return active_ids, active_fingerprints
 
 
 def _apply_policy_exceptions(
     blocking_findings: list[dict[str, Any]],
     exceptions: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    active_ids = _active_exception_ids(exceptions)
-    if not active_ids:
+    active_ids, active_fingerprints = _active_exception_keys(exceptions)
+    if not active_ids and not active_fingerprints:
         return blocking_findings, []
     remaining: list[dict[str, Any]] = []
     applied: list[dict[str, Any]] = []
     for finding in blocking_findings:
         finding_id = str(finding.get("id") or "")
-        if finding_id in active_ids:
+        fingerprint = str(finding.get("fingerprint") or "")
+        if (finding_id and finding_id in active_ids) or (
+            fingerprint and fingerprint in active_fingerprints
+        ):
             applied.append(finding)
         else:
             remaining.append(finding)
@@ -3751,7 +3767,13 @@ def build_deployment_decision(
         minimum=str(policy_profile.get("minimum_block_severity") or "high"),
     )
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
-    blocking_findings, applied_exceptions = _apply_policy_exceptions(blocking_findings, exceptions)
+    exceptions_disabled = policy_profile.get("allow_active_exceptions", True) is False
+    if exceptions_disabled:
+        # The active policy profile forbids exception-based suppression: blocking
+        # findings stay blocking no matter how many active exceptions cover them.
+        applied_exceptions: list[dict[str, Any]] = []
+    else:
+        blocking_findings, applied_exceptions = _apply_policy_exceptions(blocking_findings, exceptions)
     if blocking_findings and raw_decision == "allow":
         raw_decision = "block"
         rationale = f"{len(blocking_findings)} finding(s) meet the {policy_profile['id']} block threshold."
@@ -3769,6 +3791,7 @@ def build_deployment_decision(
         "rationale": rationale,
         "blocking_findings": blocking_findings,
         "applied_exceptions": applied_exceptions,
+        "exceptions_disabled_by_profile": exceptions_disabled,
         "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
         "required_evidence_missing": missing,
         "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),
@@ -8797,7 +8820,9 @@ async def sync_ai_surfaces():
     surfaces_upserted = 0
     attempts_written = 0
     async with db_pool.acquire() as conn:
-        targets = await conn.fetch("SELECT * FROM ai_targets WHERE COALESCE(is_active, true) = true")
+        # Durable inventory: include every AI target ever registered (active or
+        # soft-deleted) so the ledger does not silently drop historical surfaces.
+        targets = await conn.fetch("SELECT * FROM ai_targets")
         target_to_surface: dict[Any, Any] = {}
         for t in targets:
             md = _decode_json_value(t["metadata_json"]) or {}
@@ -8827,50 +8852,69 @@ async def sync_ai_surfaces():
             target_to_surface[t["id"]] = row["id"]
             surfaces_upserted += 1
 
-        scans = await conn.fetch(
-            """
-            SELECT id, ai_target_id, options, result, created_at, completed_at
-            FROM scans
-            WHERE run_kind LIKE 'ai_%' AND status = 'completed' AND ai_target_id IS NOT NULL
-            ORDER BY completed_at DESC NULLS LAST
-            LIMIT 500
-            """
-        )
-        for s in scans:
-            surface_id = target_to_surface.get(s["ai_target_id"])
-            if not surface_id:
-                continue
-            opts = _decode_json_value(s["options"]) or {}
-            res = _decode_json_value(s["result"]) or {}
-            findings = res.get("findings") if isinstance(res, dict) else []
-            findings = findings if isinstance(findings, list) else []
-            crit_high = sum(1 for f in findings if str(f.get("severity") or "").lower() in ("critical", "high"))
-            families = sorted({
-                str(f.get("family") or f.get("category"))
-                for f in findings if (f.get("family") or f.get("category"))
-            })
-            ai_gate = res.get("ai_gate") if isinstance(res.get("ai_gate"), dict) else {}
-            decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
-            await conn.execute(
+        # Backfill the attempt ledger from ALL completed AI Gate scans, paginated,
+        # so larger/older installs are not silently truncated at 500 rows. A hard
+        # safety cap bounds one sync; if it is hit the ledger is reported partial.
+        BACKFILL_BATCH = 1000
+        MAX_BACKFILL_SCANS = 100_000
+        offset = 0
+        attempts_skipped_no_surface = 0
+        partial = False
+        while True:
+            scans = await conn.fetch(
                 """
-                INSERT INTO ai_surface_attempts
-                    (surface_id, scan_id, probe_pack, scan_profile, environment, families,
-                     status, proof_state, findings_count, critical_high_count, started_at, completed_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                ON CONFLICT (surface_id, scan_id) DO UPDATE SET
-                    findings_count=EXCLUDED.findings_count, critical_high_count=EXCLUDED.critical_high_count,
-                    families=EXCLUDED.families, status=EXCLUDED.status, proof_state=EXCLUDED.proof_state,
-                    completed_at=EXCLUDED.completed_at
+                SELECT id, ai_target_id, options, result, created_at, completed_at
+                FROM scans
+                WHERE run_kind LIKE 'ai_%' AND status = 'completed' AND ai_target_id IS NOT NULL
+                ORDER BY completed_at DESC NULLS LAST, id
+                LIMIT $1 OFFSET $2
                 """,
-                surface_id, s["id"],
-                opts.get("probe_pack") or opts.get("ai_probe_pack"),
-                opts.get("scan_profile") or opts.get("ai_scan_profile"),
-                opts.get("environment") or (decision.get("environment") if isinstance(decision, dict) else None),
-                families, "completed",
-                str(decision.get("decision")) if isinstance(decision, dict) and decision.get("decision") else None,
-                len(findings), crit_high, s["created_at"], s["completed_at"],
+                BACKFILL_BATCH, offset,
             )
-            attempts_written += 1
+            if not scans:
+                break
+            for s in scans:
+                surface_id = target_to_surface.get(s["ai_target_id"])
+                if not surface_id:
+                    attempts_skipped_no_surface += 1
+                    continue
+                opts = _decode_json_value(s["options"]) or {}
+                res = _decode_json_value(s["result"]) or {}
+                findings = res.get("findings") if isinstance(res, dict) else []
+                findings = findings if isinstance(findings, list) else []
+                crit_high = sum(1 for f in findings if str(f.get("severity") or "").lower() in ("critical", "high"))
+                families = sorted({
+                    str(f.get("family") or f.get("category"))
+                    for f in findings if (f.get("family") or f.get("category"))
+                })
+                ai_gate = res.get("ai_gate") if isinstance(res.get("ai_gate"), dict) else {}
+                decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
+                await conn.execute(
+                    """
+                    INSERT INTO ai_surface_attempts
+                        (surface_id, scan_id, probe_pack, scan_profile, environment, families,
+                         status, proof_state, findings_count, critical_high_count, started_at, completed_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                    ON CONFLICT (surface_id, scan_id) DO UPDATE SET
+                        findings_count=EXCLUDED.findings_count, critical_high_count=EXCLUDED.critical_high_count,
+                        families=EXCLUDED.families, status=EXCLUDED.status, proof_state=EXCLUDED.proof_state,
+                        completed_at=EXCLUDED.completed_at
+                    """,
+                    surface_id, s["id"],
+                    opts.get("probe_pack") or opts.get("ai_probe_pack"),
+                    opts.get("scan_profile") or opts.get("ai_scan_profile"),
+                    opts.get("environment") or (decision.get("environment") if isinstance(decision, dict) else None),
+                    families, "completed",
+                    str(decision.get("decision")) if isinstance(decision, dict) and decision.get("decision") else None,
+                    len(findings), crit_high, s["created_at"], s["completed_at"],
+                )
+                attempts_written += 1
+            offset += len(scans)
+            if len(scans) < BACKFILL_BATCH:
+                break
+            if offset >= MAX_BACKFILL_SCANS:
+                partial = True
+                break
 
         await conn.execute(
             """
@@ -8879,7 +8923,13 @@ async def sync_ai_surfaces():
             WHERE s.id = sub.surface_id AND sub.mx IS NOT NULL
             """
         )
-    return {"surfaces_upserted": surfaces_upserted, "attempts_written": attempts_written}
+    return {
+        "surfaces_upserted": surfaces_upserted,
+        "attempts_written": attempts_written,
+        "attempts_skipped_no_surface": attempts_skipped_no_surface,
+        "scans_scanned": offset,
+        "partial": partial,
+    }
 
 
 @app.get("/ai/surfaces")

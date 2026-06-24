@@ -19,7 +19,11 @@ from ai_gate.adaptive import (
     select_recon_probes,
 )
 from ai_gate.planner import normalize_scan_profile as normalize_ai_scan_profile
-from ai_gate.planner import plan_probe_pack, resolve_max_turns_per_conversation
+from ai_gate.planner import (
+    classify_production_safety,
+    plan_probe_pack,
+    resolve_max_turns_per_conversation,
+)
 from ai_gate.probe_registry import (
     AGENT_TOOL_ABUSE_PROBES,
     MCP_SECURITY_PROBES,
@@ -5481,6 +5485,26 @@ def _active_principals(target: dict[str, Any]) -> list[dict[str, Any]]:
     return principals
 
 
+def _production_safe_principal_probes(
+    principal_probes: "tuple[Probe, ...] | list[Probe]",
+) -> tuple[list[Probe], list[str]]:
+    """Partition generated principal-pair probes into production-safe and blocked.
+
+    These probes are generated AFTER plan_probe_pack() ran the production-safety
+    filter, so they must be classified here too — otherwise a generated
+    non_production_only probe (e.g. tool_abuse admin impersonation) slips into a
+    production scan unfiltered.
+    """
+    safe: list[Probe] = []
+    blocked_ids: list[str] = []
+    for probe in principal_probes:
+        if classify_production_safety(probe) == "non_production_only":
+            blocked_ids.append(probe.id)
+        else:
+            safe.append(probe)
+    return safe, blocked_ids
+
+
 def _cross_principal_probe_extensions(
     target_type: str,
     principals: list[dict[str, str]],
@@ -5877,6 +5901,15 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     probes = probe_plan.probes
     principals = _active_principals(target)
     principal_probes = _cross_principal_probe_extensions(target_type, principals, scan_profile)
+    if production_scan and principal_probes:
+        safe_principal_probes, blocked_principal_ids = _production_safe_principal_probes(principal_probes)
+        principal_probes = tuple(safe_principal_probes)
+        if blocked_principal_ids:
+            existing_blocked = list(probe_plan.manifest.get("blocked_for_production_probe_ids") or [])
+            probe_plan.manifest["blocked_for_production_probe_ids"] = existing_blocked + blocked_principal_ids
+            probe_plan.manifest["blocked_for_production_count"] = len(
+                probe_plan.manifest["blocked_for_production_probe_ids"]
+            )
     if principal_probes:
         probes = principal_probes + probes
         probe_plan.manifest["principal_probe_count"] = len(principal_probes)
