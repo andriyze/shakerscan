@@ -1,4 +1,7 @@
 {
+  "artifact_type": "benchmark_scorecard_run",
+  "artifact_status": "failed_benchmark_scorecard",
+  "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
   "fleet": {
     "count": 16,
     "current": 16,

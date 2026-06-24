@@ -81,6 +81,16 @@ def test_apply_gates_fails_report_trust_signals():
     assert "retest_settled" in failed
 
 
+def test_benchmark_artifact_metadata_is_explicit_about_pass_fail():
+    failed = b.artifact_metadata(False)
+    passed = b.artifact_metadata(True)
+
+    assert failed["artifact_type"] == "benchmark_scorecard_run"
+    assert failed["artifact_status"] == "failed_benchmark_scorecard"
+    assert passed["artifact_status"] == "passed_benchmark_scorecard"
+    assert "not a success claim" in failed["artifact_note"]
+
+
 def test_retest_settle_returns_true_when_drained(monkeypatch):
     monkeypatch.setattr(b, "_get", lambda *a, **k: {
         "retest_pending": 0, "retest_queued": 0, "retest_running": 0,

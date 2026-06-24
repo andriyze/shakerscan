@@ -287,6 +287,19 @@ def apply_gates(card, fixture):
     return results
 
 
+def artifact_metadata(passed: bool) -> dict:
+    status = "passed_benchmark_scorecard" if passed else "failed_benchmark_scorecard"
+    return {
+        "artifact_type": "benchmark_scorecard_run",
+        "artifact_status": status,
+        "artifact_note": (
+            "Tracked benchmark scorecard. A tracked file is not a success claim: "
+            "passed=true means every configured gate passed; passed=false means "
+            "at least one configured gate failed."
+        ),
+    }
+
+
 def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False, retest_wait=600):
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     report = None
@@ -423,6 +436,7 @@ def main():
         for g in card.get("gates", []):
             print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
     run = {
+        **artifact_metadata(bool(overall_ok)),
         "fleet": fleet, "fleet_uniform": uniform,
         "rescore_after_retest": args.rescore_after_retest,
         "targets": cards, "passed": overall_ok,
