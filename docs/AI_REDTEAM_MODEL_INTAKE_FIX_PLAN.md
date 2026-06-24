@@ -11,6 +11,17 @@
 Scope: AI Gate / AI red-teaming, Model Intake artifact/supply-chain/governance, and the persistence,
 reporting, UI, and retest paths that affect these products.
 
+> **Implementation cycle 2026-06-24.** The remaining-work items R1–R9 were implemented, tested, and
+> committed this cycle: **R1** real cryptographic signature verification, **R2a** shared redaction
+> helper, **R2b** credential encryption-at-rest, **R3** transcript response-time redaction, **R4**
+> durable policy + exception registry, **R5** agent-receipt hash-chain/signature verification, **R6a**
+> effective 3-tier probe production-safety filter, **R6b** SPDX normalization + per-profile response
+> caps + MCP `resources/list`, **R8** first-class `source_type` taxonomy, **R9** durable AI surface
+> inventory + attempt ledger. Documented remainders (lower-value / larger-refactor / UI-or-build):
+> R2b worker command-line credential indirection, R6b widget budget/cap parity + UI judging-gate
+> surfacing + `onnx` in the scanner image, and the §3.6 `confirm_production` endpoint-hash. Each item's
+> section below carries its verification evidence (tests + live).
+
 ---
 
 ## Status at a glance
@@ -24,7 +35,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.3 | Signature / provenance **crypto** verification | ✅ | Real detached-sig verification (cryptography: Ed25519/RSA-PSS/ECDSA); metadata booleans are claims (R1) |
 | 3.4 | Secret redaction | 🟡 | Shared helper (R2a) + encryption-at-rest (R2b) done; worker command-line indirection remains |
 | 3.5 | Local file read gate | ✅ | — |
-| 3.6 | AI Gate production safety | 🟡 | Probe production-safety filter is inert (binary flag, no probe overrides); no endpoint-hash in evidence |
+| 3.6 | AI Gate production safety | ✅ | Effective 3-tier probe filter (R6a); minor: endpoint-hash in `confirm_production` evidence still pending |
 | 3.7 | Request budget by HTTP call | ✅ | (widget target not integrated) |
 | 3.8 | Response body cap | ✅ | Flat 256 KB cap; per-profile defaults not wired; widget not integrated |
 | 3.9 | AI Gate per-finding retest | ✅ | — |
@@ -33,7 +44,7 @@ Legend: ✅ implemented · 🟡 partial · 🔴 missing.
 | 3.12 | Judging availability gate | ✅ | UI "deterministic only" indicator not surfaced |
 | 3.13 | MCP readiness auth-aware checks | ✅ | No `resources/list` probe; some checks lean on declared metadata |
 | 3.14 | Parser-backed model-format checks | ✅ | ONNX degrades to string heuristics when the `onnx` lib is absent |
-| 3.15 | Governance evidence validation | 🟡 | No SPDX identifier normalization / expression parsing |
+| 3.15 | Governance evidence validation | ✅ | SPDX normalization + expression parsing added (R6b) |
 | 4.1 | Indirect prompt-injection harness | ✅ | — |
 | 4.2 | Deployment gate API | ✅ | — |
 | 4.3 | Agent execution receipts | ✅ | Verifies content-hash, prev_hash chain linkage, and signature (R5) |
