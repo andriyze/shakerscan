@@ -681,6 +681,7 @@ limited with per-tool timeouts and a global deadline.
 | Smart scan budgets, SLOs, release gates | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | AI red teaming + model intake (engineering onboarding) | [`AI_REDTEAM_AND_MODEL_INTAKE.md`](AI_REDTEAM_AND_MODEL_INTAKE.md) |
+| AI red teaming + model intake — implemented-vs-remaining backlog | [`AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md`](AI_REDTEAM_MODEL_INTAKE_FIX_PLAN.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
 | Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
 | Parallel scan architecture | [`parallel-scan-architecture.md`](parallel-scan-architecture.md) |
