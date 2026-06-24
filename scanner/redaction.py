@@ -102,12 +102,32 @@ _SENSITIVE_TEXT_KEY = (
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
     r"refresh[_-]?token|bearer)[a-z0-9_-]*"
 )
+# Same key set for the bare `key: value` (YAML/config) shape, minus authorization/
+# bearer — those are owned by the dedicated Authorization header rule below, and
+# letting this rule also match them would clobber its "Bearer ***" output.
+_SENSITIVE_COLON_KEY = (
+    r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|"
+    r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
+    r"refresh[_-]?token)[a-z0-9_-]*"
+)
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?i)(authorization:\s*bearer)\s+[A-Za-z0-9._-]+"), r"\1 ***"),
-    (re.compile(r"(?i)(api[-_ ]?key|token|secret)=([^&\s]+)"), r"\1=***"),
+    # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
+    (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
+    # Cookie / Set-Cookie / X-API-Key / X-Auth-Token header lines (mask value to EOL)
+    (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^\r\n]+"), r"\1\2***"),
+    # key=value (query / env / form) for any sensitive key name (password family included)
+    (re.compile(rf"(?i)\b({_SENSITIVE_TEXT_KEY})\s*=\s*([^&\s,;]+)"), r"\1=***"),
+    # bare key: value (YAML/config), unquoted value of 4+ chars
+    (re.compile(rf"(?i)\b({_SENSITIVE_COLON_KEY})(\s*:\s*)([^\s,;\"']{{4,}})"), r"\1\2***"),
+    # JSON / dict-literal "key": "value"
     (
         re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']*(["\'])'),
         r"\1\2***\3",
+    ),
+    # connection strings  scheme://user:password@host
+    (
+        re.compile(r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb|redis|amqp|https?|ftp)://[^\s:@/]+:)([^\s@/]+)(@)"),
+        r"\1***\3",
     ),
 )
 

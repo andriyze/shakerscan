@@ -113,6 +113,13 @@ TRACE_CONFIG_SECRET_PATTERN = re.compile(
     r"\b(?:db|database|dsn|connection[-_ ]?string|conn)[\"'=:]+[^\s,;]{4,}",
     re.IGNORECASE,
 )
+# Authorization / cookie header VALUES in free text (Bearer/Basic tokens, session
+# cookies). Captures the header name + delimiter so the value is masked but the
+# shape stays legible to the judge.
+AUTH_HEADER_VALUE_PATTERN = re.compile(
+    r"(?i)\b((?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token|x-amz-security-token)"
+    r"(\s*[:=]\s*)[^\r\n,;]+"
+)
 AGENT_TRACE_TOOL_MARKERS = (
     "http_request",
     "send_email",
@@ -4298,8 +4305,21 @@ def _extract_judge_response_json(response_data: dict[str, Any]) -> Any | None:
 
 
 def _redact_secrets_for_judge(text: str) -> str:
-    """Strip credential patterns before sending evidence to external LLM."""
+    """Strip credential patterns before persisting evidence OR sending it to the
+    external LLM judge.
+
+    Applies EVERY credential detector defined above — not just TOKEN_PATTERN/PII.
+    The secret-assignment, DB/DSN connection-string, trace-config, and auth-header
+    detectors exist (and are used for detection), but were previously not applied
+    here, so `password=…`, `api_key=…`, `client_secret: …`, `mysql://user:pw@…`,
+    and `Authorization: Bearer …` leaked into both the stored transcript and the
+    third-party judge prompt.
+    """
     redacted = TOKEN_PATTERN.sub("[REDACTED_TOKEN]", text)
+    redacted = DB_CONNECTION_PATTERN.sub("[REDACTED_DB_URI]", redacted)
+    redacted = TRACE_CONFIG_SECRET_PATTERN.sub("[REDACTED_SECRET]", redacted)
+    redacted = SECRET_ASSIGNMENT_PATTERN.sub("[REDACTED_SECRET]", redacted)
+    redacted = AUTH_HEADER_VALUE_PATTERN.sub(r"\1\2[REDACTED]", redacted)
     for _, pattern, _ in PII_PATTERNS:
         redacted = pattern.sub("[REDACTED_PII]", redacted)
     return redacted

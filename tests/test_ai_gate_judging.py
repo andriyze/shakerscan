@@ -22,8 +22,23 @@ from ai_gate_scan import (  # noqa: E402
     _agent_execution_receipt_findings,
     _classify_response,
     _cross_principal_probe_extensions,
+    _redact_secrets_for_judge,
     _semantic_review_priority,
 )
+
+
+def test_judge_redactor_strips_credential_assignments_and_dsn():
+    # These reach both the persisted transcript AND the external LLM judge prompt,
+    # so credential-assignment / DB-DSN / auth-header shapes must not survive.
+    for raw, secret in [
+        ("password=hunter2SECRET", "hunter2SECRET"),
+        ("api_key=APIKEYSECRET999", "APIKEYSECRET999"),
+        ("client_secret: CLIENTSECRETxyz", "CLIENTSECRETxyz"),
+        ("mysql://root:MYSQLSECRET@10.0.0.5/db", "MYSQLSECRET"),
+        ("dsn=postgres://u:DSNSECRET@h/db", "DSNSECRET"),
+        ("Authorization: Bearer abc.def.ghi", "abc.def.ghi"),
+    ]:
+        assert secret not in _redact_secrets_for_judge(raw), raw
 from ai_gate.budget import RequestBudget  # noqa: E402
 from ai_gate.planner import plan_probe_pack  # noqa: E402
 from ai_gate.targets.rest_json import RestJsonConversationTarget, extract_calibration_metadata, extract_response_text  # noqa: E402

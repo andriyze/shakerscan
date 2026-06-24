@@ -135,3 +135,21 @@ def test_scrub_text_redacts_json_secret_in_transcript_body():
     out = redact_sensitive(transcript, redact_strings=True, scrub_text=True)
     assert "LEAKED123" not in out["response"]
     assert '"ok":true' in out["response"]
+
+
+def test_redact_text_covers_password_family_basic_cookie_and_dsn():
+    # Shapes the `=`/bearer-only patterns missed (under-redaction).
+    assert redact_text("password=hunter2SECRET") == "password=***"
+    assert redact_text("pwd=hunter2SECRET") == "pwd=***"
+    assert "CLIENTSECRETxyz" not in redact_text("client_secret: CLIENTSECRETxyz")   # bare key: value
+    assert "MYSQLSECRET" not in redact_text("mysql://root:MYSQLSECRET@10.0.0.5/db")  # connection string
+    assert "dXNlcjpwYXNz" not in redact_text("Authorization: Basic dXNlcjpwYXNz")    # Basic auth
+    assert "SECRETSESS" not in redact_text("Cookie: session=SECRETSESS; csrf=z")     # cookie header
+    # existing bearer behaviour preserved exactly
+    assert redact_text("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
+
+
+def test_redact_text_does_not_over_redact_benign_colon_lines():
+    # "token:"/"key:" only redact a real value of 4+ chars; benign prose is kept.
+    assert redact_text('{"tokens_used": 42}') == '{"tokens_used": 42}'
+    assert redact_text("status: ok") == "status: ok"
