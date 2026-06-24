@@ -4700,7 +4700,11 @@ def _ledger_status_from_endpoint_attempt(attempt: dict[str, Any]) -> tuple[str, 
     return 'partial', str(reason or status or 'partial')
 
 
-def _apply_campaign_coverage_rollup(merged: dict[str, Any], campaign_coverage: dict[str, Any]) -> bool:
+def _apply_campaign_coverage_rollup(
+    merged: dict[str, Any],
+    campaign_coverage: dict[str, Any],
+    worklist_meta: dict[str, Any] | None = None,
+) -> bool:
     """Overlay parent smart coverage with campaign attempt-ledger facts."""
     if not isinstance(campaign_coverage, dict) or int(campaign_coverage.get('attempted') or 0) <= 0:
         return False
@@ -4710,6 +4714,12 @@ def _apply_campaign_coverage_rollup(merged: dict[str, Any], campaign_coverage: d
         agg_cov['endpoint_assignment_rollup'] = assignment_rollup
     agg_cov['endpoints'] = campaign_coverage
     agg_cov['coverage_basis'] = 'attempt_ledger'
+    # Carry the worklist-truncation facts so a capped worklist is not presented as
+    # full coverage (endpoints beyond the cap were discovered but never tested).
+    if isinstance(worklist_meta, dict) and worklist_meta.get('truncated'):
+        agg_cov['worklist_truncated'] = True
+        agg_cov['worklist_raw_discovered'] = worklist_meta.get('raw_discovered')
+        agg_cov['worklist_tested_cap'] = worklist_meta.get('cap')
     merged['smart_coverage'] = agg_cov
     return True
 
@@ -5088,7 +5098,20 @@ async def process_scan_plan_job(job_data: dict):
             )
         except (TypeError, ValueError):
             harvest_limit = parallel_scan.COVERAGE_WORKLIST_MAX
-        harvested = parallel_scan.harvest_endpoints(recon_result, max_endpoints=harvest_limit)
+        harvested, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
+            recon_result, max_endpoints=harvest_limit
+        )
+        # Surface the worklist cap so "Full Coverage" never reports ~100% over a
+        # silently truncated surface: endpoints beyond the cap were discovered but
+        # will not be tested.
+        parent_options['coverage_worklist_raw_discovered'] = harvest_meta['raw_discovered']
+        parent_options['coverage_worklist_cap'] = harvest_meta['cap']
+        parent_options['coverage_worklist_truncated'] = harvest_meta['truncated']
+        if harvest_meta['truncated']:
+            print(f"[{parent_id[:8]}] coverage: WORKLIST TRUNCATED — discovered "
+                  f"{harvest_meta['raw_discovered']} endpoints, testing only "
+                  f"{harvest_meta['cap']} (cap). Raise custom_budget.active_worklist_max "
+                  f"for full coverage.", flush=True)
         # Drop spec/OPTIONS-derived phantom endpoints (declared but 404) before they
         # feed the shard plan and the ASM inventory. Filter recon-discovered only;
         # user-supplied custom_endpoints are always kept.
@@ -6106,7 +6129,12 @@ async def process_scan_merge_job(job_data: dict):
                     check_families=parent_options.get('coverage_check_families') if family_aware else None,
                     family_aware=family_aware,
                 )
-                if _apply_campaign_coverage_rollup(merged, campaign_coverage):
+                worklist_meta = {
+                    'truncated': bool(parent_options.get('coverage_worklist_truncated')),
+                    'raw_discovered': parent_options.get('coverage_worklist_raw_discovered'),
+                    'cap': parent_options.get('coverage_worklist_cap'),
+                }
+                if _apply_campaign_coverage_rollup(merged, campaign_coverage, worklist_meta):
                     filepath = save_result_file(merged, parent_job_id)
                     await conn.execute(
                         "UPDATE scans SET result = $1 WHERE id = $2",

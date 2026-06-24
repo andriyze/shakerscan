@@ -524,11 +524,15 @@ def build_ai_inventory(
             if not existing or float(candidate.get("confidence") or 0) > float(existing.get("confidence") or 0):
                 candidates_by_url[key] = candidate
 
-    candidates = sorted(
+    CANDIDATE_DISPLAY_CAP = 100
+    candidates_ranked = sorted(
         candidates_by_url.values(),
         key=lambda item: (float(item.get("confidence") or 0), item.get("endpoint_url") or ""),
         reverse=True,
-    )[:100]
+    )
+    total_candidates = len(candidates_ranked)
+    candidates = candidates_ranked[:CANDIDATE_DISPLAY_CAP]
+    candidates_truncated = total_candidates > len(candidates)
     for candidate in candidates:
         by_type[candidate["target_type"]] = by_type.get(candidate["target_type"], 0) + 1
 
@@ -551,6 +555,8 @@ def build_ai_inventory(
             "saved_ai_targets": len(ai_targets),
             "model_artifacts": len([asset for asset in assets if asset.get("kind") == "model_artifact"]),
             "candidate_count": len(candidates),
+            "total_candidates": total_candidates,
+            "candidates_truncated": candidates_truncated,
             "by_type": by_type,
             "highest_blast_radius_score": highest_score,
             "coverage_gaps": coverage_gaps,

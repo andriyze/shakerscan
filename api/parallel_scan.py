@@ -654,11 +654,11 @@ def _finalize_shards(
     return shards
 
 
-def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLIST_MAX) -> list[str]:
-    """Extract a testable endpoint worklist ("METHOD /path?query" strings) from a
-    discover-once recon scan result. Endpoints that carry query params (the ones
-    worth active injection testing) are ordered first. Defensive against the many
-    discovery shapes the scanner emits."""
+def _collect_endpoint_worklist(recon_result: Any) -> list[str]:
+    """Extract the full (uncapped) testable endpoint worklist ("METHOD /path?query"
+    strings) from a discover-once recon scan result. Endpoints that carry query
+    params (the ones worth active injection testing) are ordered first. Defensive
+    against the many discovery shapes the scanner emits."""
     from urllib.parse import urlparse
 
     rep = recon_result or {}
@@ -764,7 +764,32 @@ def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLI
     for endpoint in with_params + without_params:
         add_endpoint(endpoint)
 
-    return harvested[:max_endpoints]
+    return harvested
+
+
+def harvest_endpoints_with_meta(
+    recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLIST_MAX
+) -> tuple[list[str], dict[str, Any]]:
+    """Like :func:`harvest_endpoints` but also returns truncation metadata so the
+    worklist cap is never silent: ``raw_discovered`` (pre-cap), ``returned``,
+    ``cap``, and ``truncated``. When ``truncated`` is True, endpoints beyond the cap
+    were discovered but will NOT be tested — callers must surface that rather than
+    let the capped count masquerade as full coverage."""
+    harvested = _collect_endpoint_worklist(recon_result)
+    raw = len(harvested)
+    capped = harvested[: max_endpoints] if max_endpoints and raw > max_endpoints else harvested
+    return capped, {
+        "raw_discovered": raw,
+        "returned": len(capped),
+        "cap": int(max_endpoints) if max_endpoints else None,
+        "truncated": bool(max_endpoints) and raw > int(max_endpoints),
+    }
+
+
+def harvest_endpoints(recon_result: Any, *, max_endpoints: int = COVERAGE_WORKLIST_MAX) -> list[str]:
+    """Capped testable endpoint worklist (see :func:`harvest_endpoints_with_meta`
+    for the truncation-aware variant)."""
+    return harvest_endpoints_with_meta(recon_result, max_endpoints=max_endpoints)[0]
 
 
 def plan_coverage_shards(

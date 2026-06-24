@@ -6316,6 +6316,7 @@ async def get_ai_inventory(
     limit_scans: int = Query(150, ge=1, le=300),
 ):
     """Return AI assets, discovered AI-surface candidates, and blast-radius summaries."""
+    AI_INVENTORY_INPUT_CAP = 500
     async with db_pool.acquire() as conn:
         targets_query = """
             SELECT
@@ -6381,12 +6382,26 @@ async def get_ai_inventory(
             for row in await conn.fetch(findings_query, include_resolved, root_domain)
         ]
 
-    return build_ai_inventory(
+    inventory = build_ai_inventory(
         targets=targets,
         ai_targets=ai_targets,
         scans=scans,
         findings=findings,
     )
+    # Surface input-list truncation so a capped inventory is not read as complete
+    # (mirrors the candidate-list truncation flag inside build_ai_inventory).
+    truncated_inputs = [
+        name for name, rows in (
+            ("targets", targets), ("ai_targets", ai_targets), ("findings", findings),
+        ) if len(rows) >= AI_INVENTORY_INPUT_CAP
+    ]
+    summary = inventory.get("summary")
+    if isinstance(summary, dict):
+        summary["inputs_truncated"] = bool(truncated_inputs) or bool(summary.get("candidates_truncated"))
+        if truncated_inputs:
+            summary["truncated_inputs"] = truncated_inputs
+            summary["input_cap"] = AI_INVENTORY_INPUT_CAP
+    return inventory
 
 
 @app.get("/ai/targets")
