@@ -1,0 +1,58 @@
+name: e2e
+
+# Hard gate: a red end-to-end run blocks. These exercise the REAL stack against
+# real targets (HuggingFace fetch, honey apps) — the seams unit tests mock out.
+# See docs/E2E_TEST_PLAN.md.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start ShakerScan stack
+        run: |
+          docker compose -p shakerscan up -d --wait || docker compose -p shakerscan up -d
+          # Wait for the API to answer health.
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/health && break
+            sleep 5
+          done
+          curl -sf http://localhost:8080/health
+
+      - name: Start honey target (Juice Shop) on the stack network
+        run: |
+          docker run -d --name juice-shop \
+            --network shakerscan_default --network-alias juice-shop \
+            -p 3001:3000 bkimminich/juice-shop
+          # Wait until the worker can reach it by its network alias.
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:3001/ >/dev/null && break
+            sleep 5
+          done
+
+      - name: Run e2e suite (hard gate)
+        env:
+          SHAKERSCAN_API: http://localhost:8080
+          # Targets are resolved by the WORKER (inside the compose network), so
+          # use the juice-shop network alias on its internal port 3000.
+          SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
+          SHAKERSCAN_E2E_AI_ENDPOINT: http://juice-shop:3000/rest/chatbot/respond
+        run: |
+          # No pipe to tail/grep — the runner's non-zero exit must fail the job.
+          python3 tests/e2e/run_e2e.py --area all
+
+      - name: Dump stack logs on failure
+        if: failure()
+        run: docker compose -p shakerscan logs --tail=200 api worker || true
