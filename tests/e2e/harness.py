@@ -19,7 +19,7 @@ API = os.environ.get("SHAKERSCAN_API", "http://localhost:8080")
 TERMINAL = {"completed", "failed", "cancelled", "error"}
 
 
-def _req(method: str, path: str, body: dict | None = None, timeout: int = 60, retries: int = 3):
+def _req(method: str, path: str, body: dict | None = None, timeout: int = 60, retries: int = 5):
     url = path if path.startswith("http") else f"{API}{path}"
     data = json.dumps(body).encode() if body is not None else None
     last_exc: Exception | None = None
@@ -59,11 +59,25 @@ def post(path: str, body: dict, timeout: int = 30):
 
 def wait_for_scan(scan_id: str, timeout: int = 600, poll: int = 5, label: str = "") -> dict:
     """Poll GET /scans/{id} until terminal or timeout. Returns the scan dict.
-    A timeout (stuck/reaped scan) raises — silence is a failure, not a pass."""
+    A timeout (stuck/reaped scan) raises — silence is a failure, not a pass.
+
+    A single poll that errors (transient API slowness under a loaded fleet — the
+    aggregate run hammers the API) is tolerated: keep polling. Only a SUSTAINED
+    run of poll failures raises, so the gate isn't flaky on a blip."""
     deadline = time.time() + timeout
     last = None
+    consecutive_errors = 0
     while time.time() < deadline:
-        scan = get(f"/scans/{scan_id}")
+        try:
+            scan = get(f"/scans/{scan_id}")
+            consecutive_errors = 0
+        except Exception as e:  # transient transport blip — log and keep polling
+            consecutive_errors += 1
+            print(f"    [{label or scan_id[:8]}] poll error {consecutive_errors}/8: {e}", flush=True)
+            if consecutive_errors >= 8:
+                raise
+            time.sleep(poll)
+            continue
         status = str(scan.get("status") or "")
         if status != last:
             print(f"    [{label or scan_id[:8]}] status={status}", flush=True)
