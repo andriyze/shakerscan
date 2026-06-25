@@ -5256,6 +5256,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "approval_checks.py": "/workspace/scanner/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/workspace/scanner/scanner_tools/access_control_checks.py",
         "infrastructure_checks.py": "/workspace/scanner/scanner_tools/infrastructure_checks.py",
+        "model_intake.py": "/workspace/scanner/scanner_tools/model_intake.py",
+        "redaction.py": "/workspace/scanner/redaction.py",
+        "ai_gate_scan.py": "/workspace/api/ai_gate_scan.py",
     }
     if all(os.path.exists(p) for p in workspace.values()):
         return _hash_source_files(workspace)
@@ -5274,6 +5277,9 @@ def expected_build_fingerprint() -> Optional[str]:
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
         "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
+        "model_intake.py": "/app/scanner_tools/model_intake.py",
+        "redaction.py": "/app/redaction.py",
+        "ai_gate_scan.py": "/app/ai_gate_scan.py",
     })
 
 

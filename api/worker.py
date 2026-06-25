@@ -6896,6 +6896,9 @@ def _worker_build_fingerprint() -> str | None:
         "approval_checks.py": "/app/scanner_tools/approval_checks.py",
         "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
         "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
+        "model_intake.py": "/app/scanner_tools/model_intake.py",
+        "redaction.py": "/app/redaction.py",
+        "ai_gate_scan.py": "/app/ai_gate_scan.py",
     }
     h = hashlib.sha256()
     hashed = 0

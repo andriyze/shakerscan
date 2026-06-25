@@ -125,6 +125,12 @@ SCANNER_FINGERPRINT_FILES = {
     "approval_checks.py": "/app/scanner_tools/approval_checks.py",
     "access_control_checks.py": "/app/scanner_tools/access_control_checks.py",
     "infrastructure_checks.py": "/app/scanner_tools/infrastructure_checks.py",
+    # AI-gate / model-intake / redaction paths run in the worker too; include them
+    # so a stale copy of these (the skew that caused intermittent false mismatches)
+    # is reported as build_current=false instead of slipping through.
+    "model_intake.py": "/app/scanner_tools/model_intake.py",
+    "redaction.py": "/app/redaction.py",
+    "ai_gate_scan.py": "/app/ai_gate_scan.py",
 }
 SCANNER_BUILD_FINGERPRINT = _compute_source_fingerprint(SCANNER_FINGERPRINT_FILES)
 CHECKPOINT_FILE = os.environ.get("SCAN_CHECKPOINT_FILE")

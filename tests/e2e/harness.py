@@ -114,10 +114,24 @@ class Scorecard:
 
 
 def preflight(require_honey: list[str] | None = None) -> None:
-    """Fail loudly if the stack or required honey targets are not reachable."""
+    """Fail loudly if the stack is unhealthy, the worker fleet is build-skewed, or
+    required honey targets are unreachable."""
     h = get("/health")
     if not h:
         raise RuntimeError(f"API not healthy at {API}")
+    # A build-skewed fleet (mixed worker code) makes scans nondeterministic — the
+    # exact failure that flapped MI-1 (stale model_intake.py on API-scaled workers).
+    # The build_fingerprint now covers model_intake/ai_gate_scan/redaction, so a
+    # skewed fleet is detectable here. Refuse to run e2e on one.
+    workers = get("/workers")
+    if isinstance(workers, dict):
+        uniform = workers.get("fleet_uniform")
+        stale = workers.get("stale_count") or len(workers.get("stale_workers") or [])
+        if uniform is False or stale:
+            raise RuntimeError(
+                f"worker fleet is NOT uniform (fleet_uniform={uniform}, stale={stale}, "
+                f"distinct={workers.get('distinct_fingerprints')}) — refresh ALL workers "
+                "(docker restart every shakerscan-worker-*, not just compose replicas) before running e2e")
     for url in (require_honey or []):
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
