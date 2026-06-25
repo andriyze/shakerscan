@@ -64,7 +64,7 @@ For a full map of product capabilities and pointers to the architecture/policy d
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
 - **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
-- **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, signature, model card, approval flags, timeout, and download cap.
+- **Model Intake (`/settings/model-intake`)**: use model-intake presets and queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, policy profile, model card, approval flags, timeout, and download cap.
 
 ## Your Role
 
@@ -625,6 +625,9 @@ curl -X POST http://localhost:8080/model-intake/scan \
     "metadata_url": "https://example.com/models/model.metadata.json",
     "expected_sha256": "optional-known-good-sha256",
     "signature_url": "https://example.com/models/model.sig",
+    "signature_public_key_url": "https://example.com/models/signing-key.pem",
+    "signature_trusted_key_sha256": ["optional-trusted-key-fingerprint"],
+    "policy_profile": "production",
     "model_card_url": "https://example.com/models/model-card.md",
     "deployment_approved": true,
     "metadata_json": {

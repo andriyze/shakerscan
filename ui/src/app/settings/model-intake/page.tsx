@@ -41,8 +41,9 @@ const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
   commit_sha: '0123456789abcdef',
   training_data_ref: 'internal-approved-dataset:v1',
-  signed_by: 'sigstore',
-  sigstore_verified: true,
+  signed_by: 'release-signing-key-v1',
+  signature_policy: 'operator-trust-anchor-required',
+  attestation_url: 'https://example.com/model-release/attestation.json',
   license: 'apache-2.0',
   sbom: { components: [{ name: 'transformers', version: '4.x' }] },
   malware_scan_result: { status: 'clean', scanned_at: '2026-05-19T00:00:00Z' },
@@ -149,6 +150,19 @@ function optionalText(value: string): string | undefined {
   return trimmed || undefined
 }
 
+function optionalList(value: string): string[] | undefined {
+  const items = value
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return items.length ? items : undefined
+}
+
+function listFieldText(value: string | string[] | undefined): string {
+  if (!value) return ''
+  return Array.isArray(value) ? value.join('\n') : value
+}
+
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i
 const ARTIFACT_PROTOCOLS = ['http:', 'https:', 'hf:', 's3:', 'gs:', 'azure:', 'oci:']
 
@@ -188,6 +202,14 @@ function validateSha256Field(raw: string): string | undefined {
   return undefined
 }
 
+function validateSha256ListField(raw: string): string | undefined {
+  const values = optionalList(raw)
+  if (!values) return undefined
+  const invalid = values.find((value) => !SHA256_PATTERN.test(value))
+  if (invalid) return 'Each trusted key fingerprint must be a 64-character hex SHA-256 digest'
+  return undefined
+}
+
 function invalidFieldClass(base: string) {
   return base.replace('border-gray-700', 'border-red-500/50')
 }
@@ -196,6 +218,8 @@ interface IntakeFormErrors {
   artifactUrl?: string
   metadataUrl?: string
   signatureUrl?: string
+  signaturePublicKeyUrl?: string
+  signatureTrustedKeySha256?: string
   modelCardUrl?: string
   expectedSha256?: string
 }
@@ -243,6 +267,14 @@ export default function ModelIntakeSettingsPage() {
   const [metadataJson, setMetadataJson] = useState('')
   const [expectedSha256, setExpectedSha256] = useState('')
   const [signatureUrl, setSignatureUrl] = useState('')
+  const [signaturePublicKeyUrl, setSignaturePublicKeyUrl] = useState('')
+  const [signaturePublicKey, setSignaturePublicKey] = useState('')
+  const [signatureValue, setSignatureValue] = useState('')
+  const [signatureTrustedKeys, setSignatureTrustedKeys] = useState('')
+  const [signatureTrustedKeySha256, setSignatureTrustedKeySha256] = useState('')
+  const [signatureRsaPadding, setSignatureRsaPadding] = useState('pss')
+  const [signatureHash, setSignatureHash] = useState('sha256')
+  const [signaturePayload, setSignaturePayload] = useState('artifact')
   const [modelCardUrl, setModelCardUrl] = useState('')
   const [deploymentApproved, setDeploymentApproved] = useState(false)
   const [requireDeploymentApproval, setRequireDeploymentApproval] = useState(true)
@@ -299,6 +331,14 @@ export default function ModelIntakeSettingsPage() {
     setMetadataJson(payload.metadata_json ? JSON.stringify(payload.metadata_json, null, 2) : '')
     setExpectedSha256(payload.expected_sha256 || '')
     setSignatureUrl(payload.signature_url || '')
+    setSignaturePublicKeyUrl(payload.signature_public_key_url || '')
+    setSignaturePublicKey(payload.signature_public_key || '')
+    setSignatureValue(payload.signature_value || '')
+    setSignatureTrustedKeys(listFieldText(payload.signature_trusted_keys))
+    setSignatureTrustedKeySha256(listFieldText(payload.signature_trusted_key_sha256))
+    setSignatureRsaPadding(payload.signature_rsa_padding || 'pss')
+    setSignatureHash(payload.signature_hash || 'sha256')
+    setSignaturePayload(payload.signature_payload || 'artifact')
     setModelCardUrl(payload.model_card_url || '')
     setDeploymentApproved(Boolean(payload.deployment_approved ?? payload.metadata_json?.deployment_approved))
     setRequireDeploymentApproval(payload.require_deployment_approval ?? true)
@@ -308,6 +348,9 @@ export default function ModelIntakeSettingsPage() {
     setRequireModelGovernance(payload.require_model_governance ?? true)
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
+    if (payload.policy_profile && POLICY_PROFILES.some((profile) => profile.value === payload.policy_profile)) {
+      setPolicyProfile(payload.policy_profile as PolicyProfile)
+    }
   }
 
   function validateField(field: keyof IntakeFormErrors) {
@@ -320,9 +363,13 @@ export default function ModelIntakeSettingsPage() {
             ? validateHttpUrlField(metadataUrl)
             : field === 'signatureUrl'
               ? validateHttpUrlField(signatureUrl)
-              : field === 'modelCardUrl'
-                ? validateHttpUrlField(modelCardUrl)
-                : validateSha256Field(expectedSha256),
+              : field === 'signaturePublicKeyUrl'
+                ? validateHttpUrlField(signaturePublicKeyUrl)
+                : field === 'signatureTrustedKeySha256'
+                  ? validateSha256ListField(signatureTrustedKeySha256)
+                  : field === 'modelCardUrl'
+                    ? validateHttpUrlField(modelCardUrl)
+                    : validateSha256Field(expectedSha256),
     }))
   }
 
@@ -331,6 +378,8 @@ export default function ModelIntakeSettingsPage() {
       artifactUrl: validateArtifactUrlField(artifactUrl),
       metadataUrl: validateHttpUrlField(metadataUrl),
       signatureUrl: validateHttpUrlField(signatureUrl),
+      signaturePublicKeyUrl: validateHttpUrlField(signaturePublicKeyUrl),
+      signatureTrustedKeySha256: validateSha256ListField(signatureTrustedKeySha256),
       modelCardUrl: validateHttpUrlField(modelCardUrl),
       expectedSha256: validateSha256Field(expectedSha256),
     }
@@ -350,6 +399,14 @@ export default function ModelIntakeSettingsPage() {
       metadata_json: parseOptionalJsonObject(metadataJson),
       expected_sha256: optionalText(expectedSha256),
       signature_url: optionalText(signatureUrl),
+      signature_public_key: optionalText(signaturePublicKey),
+      signature_public_key_url: optionalText(signaturePublicKeyUrl),
+      signature_value: optionalText(signatureValue),
+      signature_rsa_padding: optionalText(signatureRsaPadding),
+      signature_hash: optionalText(signatureHash),
+      signature_payload: optionalText(signaturePayload),
+      signature_trusted_keys: optionalText(signatureTrustedKeys),
+      signature_trusted_key_sha256: optionalList(signatureTrustedKeySha256),
       model_card_url: optionalText(modelCardUrl),
       deployment_approved: deploymentApproved,
       require_deployment_approval: requireDeploymentApproval,
@@ -357,6 +414,7 @@ export default function ModelIntakeSettingsPage() {
       require_signature_verification: requireSignatureVerification,
       require_hash: requireHash,
       require_model_governance: requireModelGovernance,
+      policy_profile: policyProfile,
       max_download_bytes: maxBytes,
       timeout_seconds: timeout,
     }
@@ -374,6 +432,14 @@ export default function ModelIntakeSettingsPage() {
       metadata_json: preset.metadata_json,
       expected_sha256: preset.expected_sha256,
       signature_url: preset.signature_url,
+      signature_public_key: preset.signature_public_key,
+      signature_public_key_url: preset.signature_public_key_url,
+      signature_value: preset.signature_value,
+      signature_rsa_padding: preset.signature_rsa_padding,
+      signature_hash: preset.signature_hash,
+      signature_payload: preset.signature_payload,
+      signature_trusted_keys: preset.signature_trusted_keys,
+      signature_trusted_key_sha256: preset.signature_trusted_key_sha256,
       model_card_url: preset.model_card_url,
       deployment_approved: preset.deployment_approved,
       require_deployment_approval: preset.require_deployment_approval,
@@ -381,6 +447,7 @@ export default function ModelIntakeSettingsPage() {
       require_signature_verification: preset.require_signature_verification,
       require_hash: preset.require_hash,
       require_model_governance: preset.require_model_governance,
+      policy_profile: preset.policy_profile,
       max_download_bytes: preset.max_download_bytes,
       timeout_seconds: preset.timeout_seconds,
     })
@@ -502,7 +569,9 @@ export default function ModelIntakeSettingsPage() {
     ...(parsedMetadata || {}),
     artifact_url: artifactUrl.trim(),
     expected_sha256: expectedSha256.trim() || (metadataUrl.trim() ? 'manifest' : ''),
-    signature_url: signatureUrl.trim() || (parsedMetadata?.signature_url as string | undefined),
+    signature_url: signatureUrl.trim() || signatureValue.trim() || (parsedMetadata?.signature_url as string | undefined),
+    signature_public_key: signaturePublicKey.trim() || signaturePublicKeyUrl.trim() || (parsedMetadata?.signature_public_key as string | undefined),
+    signature_trusted_keys: signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || (parsedMetadata?.signature_trusted_keys as string | undefined),
     model_card_url: modelCardUrl.trim() || (parsedMetadata?.model_card_url as string | undefined),
     deployment_approved: deploymentApproved || parsedMetadata?.deployment_approved,
   }
@@ -516,6 +585,11 @@ export default function ModelIntakeSettingsPage() {
       metadataJson.trim() ||
       expectedSha256.trim() ||
       signatureUrl.trim() ||
+      signaturePublicKey.trim() ||
+      signaturePublicKeyUrl.trim() ||
+      signatureValue.trim() ||
+      signatureTrustedKeys.trim() ||
+      signatureTrustedKeySha256.trim() ||
       modelCardUrl.trim() ||
       deploymentApproved
   )
@@ -777,6 +851,96 @@ export default function ModelIntakeSettingsPage() {
             />
             {fieldErrors.modelCardUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.modelCardUrl}</span>}
           </label>
+        </div>
+
+        <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+            <ShieldCheck className="h-4 w-4 text-cyan-300" />
+            Signature verification
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1 text-sm text-gray-300">
+              Public key URL
+              <input
+                value={signaturePublicKeyUrl}
+                onChange={(e) => setSignaturePublicKeyUrl(e.target.value)}
+                onBlur={() => validateField('signaturePublicKeyUrl')}
+                aria-invalid={fieldErrors.signaturePublicKeyUrl ? true : undefined}
+                className={fieldErrors.signaturePublicKeyUrl ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="https://.../signing-key.pem"
+              />
+              {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
+            </label>
+            <label className="grid gap-1 text-sm text-gray-300">
+              Trusted key SHA-256
+              <input
+                value={signatureTrustedKeySha256}
+                onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
+                onBlur={() => validateField('signatureTrustedKeySha256')}
+                aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
+                className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
+                placeholder="one or more fingerprints"
+              />
+              {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
+            </label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1 text-sm text-gray-300">
+              Public key PEM
+              <textarea
+                value={signaturePublicKey}
+                onChange={(e) => setSignaturePublicKey(e.target.value)}
+                className={textareaClass}
+                rows={5}
+                placeholder="-----BEGIN PUBLIC KEY-----"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-gray-300">
+              Signature value
+              <textarea
+                value={signatureValue}
+                onChange={(e) => setSignatureValue(e.target.value)}
+                className={textareaClass}
+                rows={5}
+                placeholder="base64 detached signature"
+              />
+            </label>
+          </div>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Trusted key PEM
+            <textarea
+              value={signatureTrustedKeys}
+              onChange={(e) => setSignatureTrustedKeys(e.target.value)}
+              className={textareaClass}
+              rows={4}
+              placeholder="Optional operator trust anchor PEM"
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="grid gap-1 text-sm text-gray-300">
+              Payload
+              <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
+                <option value="artifact">Artifact bytes</option>
+                <option value="digest_hex">SHA-256 hex digest</option>
+                <option value="digest_raw">SHA-256 raw digest</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-sm text-gray-300">
+              Hash
+              <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
+                <option value="sha256">SHA-256</option>
+                <option value="sha384">SHA-384</option>
+                <option value="sha512">SHA-512</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-sm text-gray-300">
+              RSA padding
+              <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
+                <option value="pss">PSS</option>
+                <option value="pkcs1v15">PKCS#1 v1.5</option>
+              </select>
+            </label>
+          </div>
         </div>
 
         <div className="grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">

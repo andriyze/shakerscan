@@ -1,10 +1,10 @@
 # Implementation Plan — Roadmap Review (2026-06-25)
 
-The review is accurate (spot-verified: Juice Shop benchmark `artifact_status:
-failed_benchmark_scorecard`; no `evidence_objects`/`storage_uri` anywhere; worker
-reports but never refuses on submit-time fingerprint; UI `buildPayload` omits
-`policy_profile`; receipts verified against self-supplied keys). This sequences the
-findings into phases with honest scope. **Bottom line ordering (per the review):
+The review was accurate when written (spot-verified then: Juice Shop benchmark
+`artifact_status: failed_benchmark_scorecard`; no `evidence_objects`/`storage_uri`
+anywhere; worker reports but never refuses on submit-time fingerprint; UI
+`buildPayload` omits `policy_profile`; receipts verified against self-supplied keys).
+This document tracks what has since been fixed and what remains. **Bottom line ordering (per the review):
 trust the measurements → P0 depth (evidence, graph, recall) → make it usable (UI +
 skills).**
 
@@ -17,6 +17,10 @@ skills).**
   non-skippable.
 - **P3-13** worker fail-closed on build-stale jobs before execution (requeue → fail-closed).
 - **P2-11** e2e plan doc corrected: fast gate = integration/hardening; recall = nightly.
+- **P1-6** Model Intake UI now sends `policy_profile`, public-key URL/PEM,
+  detached signature value, trusted-key PEM, trusted-key SHA-256 fingerprints, and
+  signature payload/hash/padding controls instead of leaving the trusted path API-only;
+  the complete metadata example no longer asserts claim-only `sigstore_verified: true`.
 
 ## Review corrections (2026-06-25, second review of this cycle)
 A follow-up review caught real defects in the first cut — all fixed + validated:
@@ -78,9 +82,9 @@ execution from the registry instead of direct module/task calls. Multi-session.
 
 ## Phase F — Close UI + skill gaps (make existing backend usable)
 Backend exists; UI/skill don't drive it. Each bounded:
-- Model Intake UI: send `policy_profile`; add trusted-key / public-key / signature
-  controls; make the "complete" example cryptographic, not `sigstore_verified: true`
-  claim-only (P1-6).
+- Model Intake UI: **done for request wiring** — `policy_profile` and trusted-key /
+  public-key / signature controls now submit through the public UI, and the complete
+  metadata example no longer asserts claim-only signature verification (P1-6).
 - Policy/exception UI + live deployment-decision refresh on the scan page (P1-5).
 - AI principals management UI (attacker/victim/admin/service, tenant, credential,
   rotation, principal-pair preview) (P1-7).

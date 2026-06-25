@@ -41,9 +41,10 @@ report, ai-ops) has explicit input/output/proof/telemetry/failure/redaction/test
 target layering: continuous inventory → application/resource graph → campaign planner → modular
 check registry → deterministic check modules → proof engine → evidence object store → canonical
 finding model → retest loop → AI planner/analyst → continuous-ASM improvement loop. We have the
-inventory, ledger, coverage, proof taxonomy, and canonical totals; the missing pieces are the
-**application graph**, the **evidence object store**, and the **registry-driven execution** that
-turn detectors into a durable, audit-grade platform.
+inventory, ledger, coverage, proof taxonomy, canonical totals, first durable graph slice, and first
+inline evidence-object slice; the remaining platform gaps are **graph consumers**, **externalized
+evidence storage**, and **registry-driven execution** that turn detectors into a durable,
+audit-grade platform.
 
 ## Remaining work (impact-ordered, verified)
 
@@ -58,18 +59,19 @@ must be captured/exercised, and the NoSQL operator probe routed to the reviews b
 **Done when:** a two-user benchmark proves `sqli-login` and `nosqli-reviews` as deterministic
 findings (recall ≥ 7/9), not merely "tested."
 
-### 2. Application / resource graph (the big missing layer)
-**Status: MISSING.** There is no durable graph (0 `%graph%`/`%resource%`/`%workflow%` tables).
-Object-ID and cross-user primitives exist *per scan* (`access_control_checks` object-id
+### 2. Application / resource graph (consumer integration is the big missing layer)
+**Status: PHASE 1 DONE, CONSUMERS MISSING.** `application_graph_nodes` /
+`application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
+from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
+Object-ID and cross-user primitives also exist *per scan* (`access_control_checks` object-id
 extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_exploit` /
-`verification_engine`), but nothing persists **producer→consumer→object-id**, roles, workflows,
-sensitive fields, or trust boundaries. This is what unlocks bug-bounty-class authz/business-logic
-bugs (BOLA, BFLA, BOPLA, tenant isolation, mass assignment, workflow/payment bypass) instead of
-one-off parameter fuzzing. **Do:** build an `ApplicationGraph` per target from discovery + HAR +
-attempt facts: routes/params/resources/object-ids and which endpoint *produces* vs *consumes* an
-id, plus auth boundary. Drive BOLA/BFLA hypotheses from it. **Done when:** the scanner can state
+`verification_engine`). The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
+do not read the durable graph as their source of hypotheses, and the graph does not yet model roles,
+tenants, workflow state, parameters, or expected access policies. **Do:** make an `ApplicationGraph`
+consumer that drives BOLA/BFLA hypotheses from persisted producer→consumer→object-id facts, then
+add params/resources/roles/tenants/workflow nodes. **Done when:** the scanner can state
 "`GET /api/orders` produces `order.id` owned by user1; `GET /api/orders/{id}` consumes it →
-test user2 read/mutate" from a persisted graph, not from per-scan heuristics.
+test user2 read/mutate" from a persisted graph and schedule the deterministic campaign from it.
 
 ### 3. Auth / principal / role matrix
 **Status: PARTIAL.** `target_endpoints.auth_state` exists but only `anonymous / user1 / user2`.

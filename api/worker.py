@@ -6959,8 +6959,8 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     require_current_workers (or SHAKERSCAN_WORKER_FAIL_CLOSED) and THIS worker's
     build fingerprint does not match the submit-time expected one, do NOT run stale
     code — running it silently corrupts results (the worker-skew class). Requeue so
-    a current worker takes it; after STALE_JOB_MAX_REQUEUE bounces (no current
-    worker available) fail the scan rather than loop. Returns True if refused."""
+    a current worker takes it; if no current worker accepts it within the stale
+    fail-closed window, fail the scan rather than loop. Returns True if refused."""
     options = job_data.get('options') if isinstance(job_data.get('options'), dict) else {}
     expected_fp = options.get('expected_build_fingerprint_at_submit')
     require_current = bool(options.get('require_current_workers')) or \

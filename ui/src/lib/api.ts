@@ -146,6 +146,14 @@ export interface ModelIntakeScanRequest {
   metadata_json?: Record<string, unknown>
   expected_sha256?: string
   signature_url?: string
+  signature_public_key?: string
+  signature_public_key_url?: string
+  signature_value?: string
+  signature_rsa_padding?: string
+  signature_hash?: string
+  signature_payload?: string
+  signature_trusted_keys?: string | string[]
+  signature_trusted_key_sha256?: string | string[]
   model_card_url?: string
   deployment_approved?: boolean
   require_deployment_approval?: boolean
@@ -153,6 +161,7 @@ export interface ModelIntakeScanRequest {
   require_signature_verification?: boolean
   require_hash?: boolean
   require_model_governance?: boolean
+  policy_profile?: string
   max_download_bytes?: number
   timeout_seconds?: number
 }
@@ -237,6 +246,14 @@ export interface ModelIntakePreset {
   metadata_json?: Record<string, unknown>
   expected_sha256?: string
   signature_url?: string
+  signature_public_key?: string
+  signature_public_key_url?: string
+  signature_value?: string
+  signature_rsa_padding?: string
+  signature_hash?: string
+  signature_payload?: string
+  signature_trusted_keys?: string | string[]
+  signature_trusted_key_sha256?: string | string[]
   model_card_url?: string
   deployment_approved?: boolean
   require_deployment_approval?: boolean
@@ -244,6 +261,7 @@ export interface ModelIntakePreset {
   require_signature_verification?: boolean
   require_hash?: boolean
   require_model_governance?: boolean
+  policy_profile?: string
   max_download_bytes?: number
   timeout_seconds?: number
   should_pass?: boolean
