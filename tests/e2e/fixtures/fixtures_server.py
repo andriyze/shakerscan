@@ -30,6 +30,14 @@ GOOD = _safetensors()
 GOOD_SHA = hashlib.sha256(GOOD).hexdigest()
 WRONG_SHA = "0" * 64
 
+# A "large" artifact served as 206 Partial Content with NO Content-Range total —
+# the exact CDN shape that produced the false sha256 mismatch. LARGE_SHA is the
+# FULL-artifact digest; a capped range fetch yields a different (prefix) hash, so
+# the scan must report known_unverified_truncated, not a mismatch. Deterministic
+# local replacement for the real multi-GB HuggingFace fetch in the hard gate.
+LARGE = _safetensors(payload=b"\x00" * 16384)
+LARGE_SHA = hashlib.sha256(LARGE).hexdigest()
+
 # ed25519 material generated once (in a container, host lacks cryptography) over
 # GOOD's exact bytes. The fixtures GOOD is byte-identical (same construction), so
 # the signature verifies when the worker fetches /models/good.safetensors.
@@ -82,6 +90,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         if p == "/models/dangerous.pkl":
             self._send(200, DANGEROUS_PICKLE, "application/octet-stream")
+            return
+        if p == "/models/large.safetensors":
+            rng = self.headers.get("Range")
+            if rng and rng.lstrip().startswith("bytes="):
+                try:
+                    end = int(rng.split("=", 1)[1].split("-")[1])
+                except Exception:
+                    end = len(LARGE) - 1
+                chunk = LARGE[: end + 1]
+                # 206 with NO Content-Range total — the bug-shape: the client got
+                # a capped prefix and cannot prove it is the whole file.
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(chunk)))
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+            self._send(200, LARGE, "application/octet-stream")
             return
         self._send(404, {"error": "not found"})
 

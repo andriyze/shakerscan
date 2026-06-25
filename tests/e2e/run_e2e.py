@@ -40,37 +40,9 @@ def run_model_intake() -> H.Scorecard:
     sc = H.Scorecard("model_intake")
     print("\n== Model Intake e2e ==", flush=True)
 
-    # MI-1: a real large multi-shard HF artifact must NOT false-mismatch.
-    try:
-        _, resp = H.post("/model-intake/scan", {
-            "artifact_url": NEX_N2_SHARD,
-            "expected_sha256": NEX_N2_FULL_SHA,
-            "metadata_json": {"license": "apache-2.0"},
-        })
-        scan_id = resp.get("scan_id")
-        sc.check("MI-1 submit accepted", bool(scan_id), str(resp)[:120])
-        if scan_id:
-            H.wait_for_scan(scan_id, timeout=300, label="MI-1")
-            res = H.scan_result(scan_id)
-            summary = ((res.get("model_intake") or {}).get("summary")) or {}
-            findings = res.get("findings") or []
-            fids = {str(f.get("id")) for f in findings}
-            status = summary.get("checksum_status")
-            scope = summary.get("sha256_scope")
-            sc.check("MI-1 truncated download flagged (not mismatch)",
-                     status == "known_unverified_truncated", f"checksum_status={status}")
-            sc.check("MI-1 sha256 scope is inspected_bytes",
-                     scope == "inspected_bytes", f"sha256_scope={scope}")
-            sc.check("MI-1 no false sha256_mismatch finding",
-                     "model_intake:sha256_mismatch" not in fids, f"findings={sorted(fids)[:6]}")
-            crit = [f for f in findings if str(f.get("severity")).lower() == "critical"
-                    and "checksum" in str(f.get("id")).lower() or str(f.get("id")) == "model_intake:sha256_mismatch"]
-            sc.check("MI-1 no critical checksum block", not crit, f"critical_checksum={[f.get('id') for f in crit]}")
-    except Exception as e:
-        sc.error("MI-1 real HF intake", e)
-
     fx_good = f"{FIXTURES_BASE}/models/good.safetensors"
     fx_pickle = f"{FIXTURES_BASE}/models/dangerous.pkl"
+    fx_large = f"{FIXTURES_BASE}/models/large.safetensors"
 
     def _mi_scan(opts: dict, label: str, timeout: int = 180) -> dict:
         _, r = H.post("/model-intake/scan", opts)
@@ -79,6 +51,41 @@ def run_model_intake() -> H.Scorecard:
             raise RuntimeError(f"submit rejected: {r}")
         H.wait_for_scan(sid, timeout=timeout, label=label)
         return H.scan_result(sid)
+
+    # MI-1 (deterministic hard gate): a 206 partial download capped below the full
+    # artifact must report known_unverified_truncated, NOT a false sha256_mismatch
+    # against the full-artifact digest. Local fixture — no network flakiness.
+    try:
+        res = _mi_scan({"artifact_url": fx_large, "expected_sha256": FX.LARGE_SHA,
+                        "max_download_bytes": 4096}, "MI-1")
+        s = (res.get("model_intake") or {}).get("summary") or {}
+        fids = {str(f.get("id")) for f in (res.get("findings") or [])}
+        sc.check("MI-1 206 partial download flagged truncated (not mismatch)",
+                 s.get("checksum_status") == "known_unverified_truncated",
+                 f"checksum_status={s.get('checksum_status')}")
+        sc.check("MI-1 sha256 scope is inspected_bytes",
+                 s.get("sha256_scope") == "inspected_bytes", f"sha256_scope={s.get('sha256_scope')}")
+        sc.check("MI-1 no false sha256_mismatch finding",
+                 "model_intake:sha256_mismatch" not in fids, f"findings={sorted(fids)[:6]}")
+    except Exception as e:
+        sc.error("MI-1 local 206 truncation", e)
+
+    # MI-1-HF (opt-in / nightly): the real multi-GB HuggingFace shard — useful
+    # coverage for the original 206 bug, but an external dependency, so NOT a hard
+    # PR gate. Runs only when SHAKERSCAN_E2E_HF=1.
+    if os.environ.get("SHAKERSCAN_E2E_HF") == "1":
+        try:
+            s = (_mi_scan({"artifact_url": NEX_N2_SHARD, "expected_sha256": NEX_N2_FULL_SHA,
+                           "metadata_json": {"license": "apache-2.0"}}, "MI-1-HF", timeout=300)
+                 .get("model_intake") or {}).get("summary") or {}
+            sc.check("MI-1-HF real HF shard not false-mismatched",
+                     s.get("checksum_status") == "known_unverified_truncated",
+                     f"checksum_status={s.get('checksum_status')}")
+        except Exception as e:
+            sc.error("MI-1-HF real HF intake", e)
+    else:
+        sc.skip("MI-1-HF real HuggingFace shard",
+                "external dependency; set SHAKERSCAN_E2E_HF=1 (nightly/manual)")
 
     # MI-2: correct digest on a fully-downloadable artifact -> verified.
     try:
@@ -202,9 +209,16 @@ def run_ai_gate() -> H.Scorecard:
             if scan_id:
                 scan = H.wait_for_scan(scan_id, timeout=420, label="AI-1")
                 status = str(scan.get("status"))
-                if status != "completed":
+                using_fixture = AI_ENDPOINT.startswith(FIXTURES_BASE)
+                if status != "completed" and not using_fixture:
+                    # Only an OVERRIDDEN external endpoint may legitimately skip.
                     sc.skip("AI-1/AI-2 live scan + transcript redaction",
-                            f"AI scan status={status}; no responsive AI endpoint at {AI_ENDPOINT}")
+                            f"AI scan status={status}; external endpoint {AI_ENDPOINT} not completed")
+                elif status != "completed":
+                    # The local fixture is deterministic and always responsive — a
+                    # non-completed scan is a REAL failure, never a passing skip.
+                    sc.check("AI-1 smoke scan completed (deterministic fixture)", False,
+                             f"status={status} endpoint={AI_ENDPOINT}")
                 else:
                     sc.check("AI-1 smoke scan completed", True, f"status={status}")
                     tr = H.get(f"/ai/scans/{scan_id}/transcript")
