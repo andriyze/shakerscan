@@ -1518,6 +1518,72 @@ export async function getFinding(id: string): Promise<Finding> {
   return res.json()
 }
 
+export interface EvidenceObject {
+  id: string
+  scan_id?: string
+  finding_id?: string
+  object_type: string
+  content_sha256?: string
+  size_bytes?: number
+  storage_uri?: string
+  redaction_profile?: string
+  retention_class?: string
+  content?: unknown
+  created_at?: string
+}
+
+// Durable, first-class evidence objects (hash / redaction profile / retention class /
+// storage URI) for a finding — distinct from the embedded `finding.evidence` blob.
+export async function getFindingEvidence(
+  id: string
+): Promise<{ finding_id: string; evidence_objects: EvidenceObject[] }> {
+  const res = await fetch(`${API_URL}/findings/${id}/evidence`)
+  if (!res.ok) throw new Error('Failed to fetch finding evidence objects')
+  return res.json()
+}
+
+export interface ApplicationGraphNode {
+  id: string
+  node_type: string
+  node_key: string
+  label?: string
+  attributes?: Record<string, unknown>
+  scan_id?: string
+  first_seen_at?: string
+  last_seen_at?: string
+}
+
+export interface ApplicationGraphEdge {
+  id: string
+  src_key: string
+  dst_key: string
+  edge_type: string
+  attributes?: Record<string, unknown>
+  scan_id?: string
+  first_seen_at?: string
+  last_seen_at?: string
+}
+
+export interface ApplicationGraph {
+  target_id: string
+  nodes: ApplicationGraphNode[]
+  edges: ApplicationGraphEdge[]
+  summary: {
+    node_count: number
+    edge_count: number
+    by_node_type: Record<string, number>
+    by_edge_type: Record<string, number>
+  }
+}
+
+// First-class application graph for a target: routes, objects, and
+// producer/consumer/auth-boundary edges persisted from scans.
+export async function getApplicationGraph(targetId: string): Promise<ApplicationGraph> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/graph`)
+  if (!res.ok) throw new Error('Failed to fetch application graph')
+  return res.json()
+}
+
 export async function retestFinding(
   id: string,
   params: {

@@ -9,12 +9,14 @@ import {
   extractFindingTriage,
   getFinding,
   getFindingRetests,
+  getFindingEvidence,
   retestFinding,
   retestAiFinding,
   updateFinding,
   deleteFinding,
   type Finding,
-  type RetestRecord
+  type RetestRecord,
+  type EvidenceObject
 } from '@/lib/api'
 import { FINDING_STATUSES, RETEST_VERDICT_LABELS } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
@@ -161,6 +163,12 @@ const ANALYST_VERDICTS = [
   { value: 'retest_needed', label: 'Retest needed', status: 'active' },
 ] as const
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   if (!rawEvidence) return null
   try {
@@ -216,6 +224,7 @@ function FindingDetailContent() {
   const toast = useToast()
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
+  const [evidenceObjects, setEvidenceObjects] = useState<EvidenceObject[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
@@ -241,14 +250,16 @@ function FindingDetailContent() {
 
   const fetchFinding = useCallback(async () => {
     try {
-      const [data, retestData] = await Promise.all([
+      const [data, retestData, evidenceData] = await Promise.all([
         getFinding(findingId),
-        getFindingRetests(findingId, 10).catch(() => null)
+        getFindingRetests(findingId, 10).catch(() => null),
+        getFindingEvidence(findingId).catch(() => null)
       ])
       setFinding(data)
       if (retestData) {
         setRetestHistory(retestData.retests || [])
       }
+      setEvidenceObjects(evidenceData?.evidence_objects || [])
       setError(null)
     } catch {
       setError('Failed to load finding details')
@@ -969,6 +980,64 @@ function FindingDetailContent() {
                 <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{rawEvidence}</pre>
               </details>
             )}
+          </div>
+        </SectionCard>
+      )}
+
+      {evidenceObjects.length > 0 && (
+        <SectionCard title="Durable Evidence Objects">
+          <p className="text-xs text-gray-500 mb-3">
+            First-class evidence records — content hash, redaction profile, retention class, and storage URI.
+            These persist independently of the embedded evidence above and survive worker churn.
+          </p>
+          <div className="space-y-2">
+            {evidenceObjects.map((eo) => (
+              <div key={eo.id} className="bg-gray-800/60 rounded-lg p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-gray-200">{eo.object_type}</span>
+                  <div className="flex items-center gap-2">
+                    {eo.retention_class && (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          eo.retention_class === 'sensitive'
+                            ? 'bg-amber-900/50 text-amber-300'
+                            : 'bg-gray-700 text-gray-300'
+                        }`}
+                      >
+                        {eo.retention_class}
+                      </span>
+                    )}
+                    {typeof eo.size_bytes === 'number' && (
+                      <span className="text-xs text-gray-400">{formatBytes(eo.size_bytes)}</span>
+                    )}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                  {eo.content_sha256 && (
+                    <div className="flex gap-2 min-w-0">
+                      <span className="text-gray-500 shrink-0">sha256</span>
+                      <span className="text-gray-300 font-mono break-all">{eo.content_sha256}</span>
+                    </div>
+                  )}
+                  {eo.storage_uri && (
+                    <div className="flex gap-2 min-w-0">
+                      <span className="text-gray-500 shrink-0">storage</span>
+                      <span className="text-gray-300 font-mono break-all">{eo.storage_uri}</span>
+                    </div>
+                  )}
+                  {eo.redaction_profile && (
+                    <div className="flex gap-2 min-w-0">
+                      <span className="text-gray-500 shrink-0">redaction</span>
+                      <span className="text-gray-300">{eo.redaction_profile}</span>
+                    </div>
+                  )}
+                  <div className="flex gap-2 min-w-0">
+                    <span className="text-gray-500 shrink-0">id</span>
+                    <span className="text-gray-400 font-mono break-all">{eo.id}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </SectionCard>
       )}

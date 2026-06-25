@@ -522,6 +522,14 @@ function TargetsContent() {
                           {(domain.root_target.asm_coverage.coverage * 100).toFixed(0)}% covered
                         </Link>
                       )}
+                      <Link
+                        href={`/targets/${domain.root_target.id}/graph`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-purple-400 hover:text-purple-300 transition-colors"
+                        title="Application graph"
+                      >
+                        graph
+                      </Link>
                     </div>
                     {domain.root_target.last_grade && (
                       <span className={`text-xl font-bold ${getGradeColor(domain.root_target.last_grade)}`}>
@@ -718,6 +726,13 @@ function TargetsContent() {
                             {(subdomain.asm_coverage.coverage * 100).toFixed(0)}% covered
                           </Link>
                         )}
+                        <Link
+                          href={`/targets/${subdomain.id}/graph`}
+                          className="text-purple-400 hover:text-purple-300 transition-colors"
+                          title="Application graph"
+                        >
+                          graph
+                        </Link>
                       </div>
 
                       {subdomain.last_grade && (
