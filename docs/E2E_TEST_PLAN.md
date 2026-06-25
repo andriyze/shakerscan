@@ -1,6 +1,6 @@
 # ShakerScan End-to-End Test Plan
 
-**Status:** harness + matrices live (model_intake 9/10, ai_gate 8/8, dast 8/8; `make e2e` exit 0). A local fixtures server (`tests/e2e/fixtures/`) makes the AI-redaction and Model-Intake rows deterministic. Remaining: P2 prove the GitHub gate runs on a Linux runner; P3 worker-build-uniformity guard; MI-6 (trusted-anchor) needs `MODEL_INTAKE_TRUSTED_KEY_SHA256` on the worker. **Gate:** hard CI gate — a red e2e run blocks.
+**Status:** harness + matrices live (model_intake 9/10, ai_gate 8/8, dast 8/8; `make e2e` exit 0). A local fixtures server (`tests/e2e/fixtures/`) makes the AI-redaction and Model-Intake rows deterministic. **P2** the workflow is Linux-runnable (`host-gateway` extra_hosts; targets = host.docker.internal) and validated locally — its first real GitHub Actions run is the remaining step. **P3 done** — the build fingerprint now covers model_intake/ai_gate_scan/redaction and the preflight refuses to run on a build-skewed fleet. Remaining: MI-6 (trusted-anchor) needs `MODEL_INTAKE_TRUSTED_KEY_SHA256` on the worker; deepen rows (XSS + crAPI dual-user BOLA, AI-3/5/6). **Gate:** hard CI gate — a red e2e run blocks.
 
 ## Why this exists
 
