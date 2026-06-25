@@ -1,15 +1,19 @@
 name: e2e
 
 # Hard gate: a red end-to-end run blocks. These exercise the REAL stack against
-# real targets (HuggingFace fetch, honey apps) — the seams unit tests mock out.
-# See docs/E2E_TEST_PLAN.md.
+# real targets (HuggingFace fetch, Juice Shop, local fixtures) — the seams unit
+# tests mock out. See docs/E2E_TEST_PLAN.md.
+#
+# Networking note: the e2e runner and its fixtures server run on the runner HOST;
+# the worker container reaches them (and host-published Juice Shop) via
+# host.docker.internal, which docker-compose maps to host-gateway (works on the
+# Linux runner, no-op on Docker Desktop). This makes CI identical to a local run.
 
 on:
   pull_request:
   push:
     branches: [main, master]
 
-# Cancel superseded runs on the same ref.
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
@@ -17,42 +21,32 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
       - name: Start ShakerScan stack
         run: |
-          docker compose -p shakerscan up -d --wait || docker compose -p shakerscan up -d
-          # Wait for the API to answer health.
-          for i in $(seq 1 60); do
+          docker compose up -d --build
+          for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5
           done
           curl -sf http://localhost:8080/health
 
-      - name: Start honey target (Juice Shop) on the stack network
+      - name: Start Juice Shop (host-published; worker reaches it via host.docker.internal)
         run: |
-          docker run -d --name juice-shop \
-            --network shakerscan_default --network-alias juice-shop \
-            -p 3001:3000 bkimminich/juice-shop
-          # Wait until the worker can reach it by its network alias.
+          docker run -d --name juice-shop -p 3001:3000 bkimminich/juice-shop
           for i in $(seq 1 40); do
             curl -sf http://localhost:3001/ >/dev/null && break
             sleep 5
           done
 
       - name: Run e2e suite (hard gate)
-        env:
-          SHAKERSCAN_API: http://localhost:8080
-          # Targets are resolved by the WORKER (inside the compose network), so
-          # use the juice-shop network alias on its internal port 3000.
-          SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
-          SHAKERSCAN_E2E_AI_ENDPOINT: http://juice-shop:3000/rest/chatbot/respond
-        run: |
-          # No pipe to tail/grep — the runner's non-zero exit must fail the job.
-          python3 tests/e2e/run_e2e.py --area all
+        # No pipe to tail/grep — the runner's non-zero exit must fail the job.
+        # Defaults (host.docker.internal targets) match a local run; no overrides.
+        run: python3 tests/e2e/run_e2e.py --area all
 
       - name: Dump stack logs on failure
         if: failure()
-        run: docker compose -p shakerscan logs --tail=200 api worker || true
+        run: docker compose logs --tail=200 api worker || true
