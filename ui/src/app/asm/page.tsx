@@ -672,6 +672,7 @@ function CoverageAdvisorCard({
   const toast = useToast()
   const [busy, setBusy] = useState<'improve' | 'recon' | null>(null)
   const [checkFamily, setCheckFamily] = useState('all')
+  const [endpointFilter, setEndpointFilter] = useState('')
   const [checkFamilyOptions, setCheckFamilyOptions] = useState<AsmCheckFamilyOption[]>(FALLBACK_ASM_CHECK_FAMILY_OPTIONS)
 
   useEffect(() => {
@@ -694,7 +695,10 @@ function CoverageAdvisorCard({
   const queueImprove = async () => {
     setBusy('improve')
     try {
-      const res = await improveAsmTarget(targetId, checkFamily === 'all' ? undefined : { check_family: checkFamily })
+      const opts: { check_family?: string; endpoint_filter?: string } = {}
+      if (checkFamily !== 'all') opts.check_family = checkFamily
+      if (endpointFilter) opts.endpoint_filter = endpointFilter
+      const res = await improveAsmTarget(targetId, Object.keys(opts).length ? opts : undefined)
       if (res.action === 'wait') {
         toast.success(res.reason || 'ASM work is already active for this target')
       } else {
@@ -875,6 +879,17 @@ function CoverageAdvisorCard({
                   {option.label}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="space-y-1 text-xs text-gray-500">
+            <span>Endpoint filter</span>
+            <select
+              value={endpointFilter}
+              onChange={(e) => setEndpointFilter(e.target.value)}
+              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+            >
+              <option value="">All endpoints</option>
+              <option value="api">API-like only</option>
             </select>
           </label>
           {selectedFamilyOption && (

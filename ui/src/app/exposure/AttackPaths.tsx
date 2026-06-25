@@ -94,8 +94,8 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
             <div className="mb-3 rounded border border-amber-500/20 bg-amber-500/5 p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-amber-300">Missing to complete</div>
               <div className="mt-1 flex flex-wrap gap-1.5">
-                {(path.missing_required || []).map((item) => (
-                  <span key={item} className="rounded bg-gray-900 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
+                {(path.missing_required || []).map((item, i) => (
+                  <span key={`${i}-${item}`} className="rounded bg-gray-900 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
                     {item}
                   </span>
                 ))}
@@ -146,8 +146,8 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
             <div className="mt-3 rounded border border-emerald-500/20 bg-emerald-500/5 p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-emerald-400">Remediation</div>
               <ul className="mt-1 space-y-1 text-xs text-gray-300">
-                {remediation.map((item) => (
-                  <li key={item}>{item}</li>
+                {remediation.map((item, i) => (
+                  <li key={`${i}-${item}`}>{item}</li>
                 ))}
               </ul>
             </div>
@@ -213,7 +213,7 @@ export function AttackPaths({
     return Array.from(byType.entries())
       .map(([type, items]) => ({
         type,
-        label: items[0]?.name || titleize(type),
+        label: titleize(type),
         count: items.length,
         complete: items.filter((p) => p.status === 'complete').length,
         worst: items.reduce<string | null>(
@@ -280,7 +280,20 @@ export function AttackPaths({
                   active ? 'border-teal-400/50 bg-teal-500/15 text-teal-100' : 'border-gray-800 bg-gray-950 text-gray-300 hover:border-gray-700'
                 }`}
               >
-                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${g.worst === 'critical' ? 'bg-red-500' : g.worst === 'high' ? 'bg-orange-500' : 'bg-yellow-500'}`} aria-hidden="true" />
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    g.worst === 'critical'
+                      ? 'bg-red-500'
+                      : g.worst === 'high'
+                      ? 'bg-orange-500'
+                      : g.worst === 'medium'
+                      ? 'bg-yellow-500'
+                      : g.worst === 'low'
+                      ? 'bg-blue-500'
+                      : 'bg-gray-500'
+                  }`}
+                  aria-hidden="true"
+                />
                 <span className="max-w-[16rem] truncate">{g.label}</span>
                 <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
                   {g.count}

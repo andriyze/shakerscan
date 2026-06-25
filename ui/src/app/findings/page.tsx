@@ -542,7 +542,7 @@ function FindingsContent() {
             onChange={(e) => setFilter('verified_only', e.target.checked ? 'true' : undefined)}
             className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
           />
-          exploited only
+          verified only
         </label>
 
         {/* Search */}
@@ -691,7 +691,7 @@ function FindingsContent() {
                       <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                         {finding.tool && <span>Tool: {finding.tool}</span>}
                         {finding.cwe && <span>CWE: {finding.cwe}</span>}
-                        {finding.cvss_score && <span>CVSS: {finding.cvss_score}</span>}
+                        {finding.cvss_score !== undefined && finding.cvss_score !== null && <span>CVSS: {finding.cvss_score}</span>}
                       </div>
                       <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                         <span>First seen: {formatDate(finding.first_seen_at)}</span>

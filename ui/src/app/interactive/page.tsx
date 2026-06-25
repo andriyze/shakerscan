@@ -72,13 +72,13 @@ function getOriginFromUrl(url: string): string {
 
 export default function InteractiveSessionPage() {
   const toast = useToast()
-  const [target, setTarget] = useState('https://cr.shakerscan.com')
+  const [target, setTarget] = useState('')
   const [sessionInput, setSessionInput] = useState('')
   const [session, setSession] = useState<InteractiveSessionState | null>(null)
   const [activeSessions, setActiveSessions] = useState<InteractiveSessionSummary[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
 
-  const [endpoint, setEndpoint] = useState('/identity/api/v2/user/dashboard')
+  const [endpoint, setEndpoint] = useState('')
   const [method, setMethod] = useState('GET')
   const [asUser, setAsUser] = useState<UserKey>('user1')
   const [allowOutOfScope, setAllowOutOfScope] = useState(false)
@@ -492,7 +492,10 @@ export default function InteractiveSessionPage() {
             <p><span className="text-gray-500">Current URL:</span> {session.current_url || '-'}</p>
             <p><span className="text-gray-500">Network Entries:</span> {session.network_log_count}</p>
             <p><span className="text-gray-500">Discovered Endpoints:</span> {session.discovered_endpoints_count}</p>
-            <p><span className="text-gray-500">Last Activity:</span> {new Date(session.last_activity).toLocaleString()}</p>
+            <p><span className="text-gray-500">Last Activity:</span> {(() => {
+              const d = session.last_activity ? new Date(session.last_activity) : null
+              return d && !isNaN(d.getTime()) ? d.toLocaleString() : '—'
+            })()}</p>
           </div>
         )}
       </Card>

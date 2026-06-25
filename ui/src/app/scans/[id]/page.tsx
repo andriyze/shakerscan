@@ -502,6 +502,56 @@ function ShardCard({ shard }: { shard: any }) {
   )
 }
 
+// Plain-language explanation for a failed scan: which phase it died in, whether
+// any partial baseline/discovery data was recovered, that there is no final
+// score/grade, and what to do next. Rendered above any results.
+function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialResults: boolean }) {
+  const failurePhase = String(
+    scan?.result?.scan_metadata?.terminated_at_phase ||
+    scan?.current_phase ||
+    ''
+  )
+    .replace(/_/g, ' ')
+    .trim()
+  const failureMessage =
+    scan?.result?.scan_metadata?.terminated_reason ||
+    scan?.error_message ||
+    scan?.error ||
+    'No specific error was reported.'
+
+  return (
+    <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
+      <div className="flex items-start gap-3">
+        <svg className="w-5 h-5 text-red-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <div className="min-w-0">
+          <h2 className="text-red-300 font-semibold">Scan failed</h2>
+          <p className="text-red-200/90 text-sm mt-1">
+            {failurePhase
+              ? <>This scan stopped during the <span className="font-medium">{failurePhase}</span> phase and did not finish.</>
+              : 'This scan stopped before it finished.'}
+          </p>
+          <p className="text-red-200/70 text-sm mt-1">{failureMessage}</p>
+          <ul className="mt-3 space-y-1 text-sm text-red-200/80 list-disc list-inside">
+            {hasPartialResults ? (
+              <li>Partial baseline / discovery data was recovered and is shown below, but the scan is incomplete.</li>
+            ) : (
+              <li>No baseline or discovery data could be recovered from this run.</li>
+            )}
+            <li>No final score or grade was produced, so this scan should not be used as a pass/fail verdict.</li>
+          </ul>
+          <p className="text-amber-300/90 text-sm mt-3">
+            Recommended next step: retry the scan. If it keeps failing, check worker health
+            (<span className="font-mono text-amber-200/90">curl http://localhost:8080/workers</span>) and rebuild the
+            workers (<span className="font-mono text-amber-200/90">./scanner.sh rebuild</span>).
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ScanDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
@@ -517,6 +567,10 @@ function ScanDetailContent() {
   const [deploymentDecision, setDeploymentDecision] = useState<DeploymentDecision | null>(null)
   const [deploymentDecisionLoading, setDeploymentDecisionLoading] = useState(false)
   const logsRef = useRef<HTMLDivElement | null>(null)
+  // Latest known scan status, read inside the polling interval so the "should we
+  // keep polling?" decision always sees the current value (not a stale closure
+  // capture). Kept in sync with `scan?.status` below.
+  const statusRef = useRef<string | null>(null)
 
   // Build back URL with preserved filters
   const buildBackUrl = () => {
@@ -547,6 +601,9 @@ function ScanDetailContent() {
     async function fetchScanAndLogs() {
       try {
         const data = await getScan(scanId)
+        // Track the freshest status so the interval below polls correctly even
+        // though this effect only runs once per scanId/retry.
+        statusRef.current = data?.status ?? null
         setScan(data)
         setError(null)
         if (data?.status === 'completed' || data?.status === 'failed') {
@@ -569,13 +626,15 @@ function ScanDetailContent() {
     }
 
     fetchScanAndLogs()
+    // Read the live status from the ref (not a captured closure value) so polling
+    // keeps running through status transitions and stops once terminal.
     const interval = setInterval(() => {
-      if (scan?.status === 'running' || scan?.status === 'pending') {
+      if (statusRef.current === 'running' || statusRef.current === 'pending') {
         fetchScanAndLogs()
       }
     }, 5000)
     return () => clearInterval(interval)
-  }, [scanId, scan?.status, retryNonce])
+  }, [scanId, retryNonce])
 
   useEffect(() => {
     getHealth()
@@ -691,24 +750,7 @@ function ScanDetailContent() {
             </Link>
             <span className="text-gray-500">Back to scans</span>
           </div>
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 mb-6">
-            <div className="flex items-start gap-3">
-              <svg className="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-              <div>
-                <h3 className="text-amber-400 font-semibold">Partial Results</h3>
-                <p className="text-amber-300/80 text-sm mt-1">
-                  {scan.result?.scan_metadata?.terminated_reason || scan.error_message || 'Scan was terminated before completion.'}
-                  {scan.result?.scan_metadata?.terminated_at_phase && (
-                    <span className="block mt-1 text-amber-300/60">
-                      Last checkpoint: {scan.result.scan_metadata.terminated_at_phase}
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
-          </div>
+          <FailedScanPanel scan={scan} hasPartialResults={true} />
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
           <DeploymentDecisionCard
@@ -736,10 +778,7 @@ function ScanDetailContent() {
           </Link>
           <h1 className="text-2xl font-bold text-white">{scan.target_url}</h1>
         </div>
-        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-6 text-red-400">
-          <h2 className="text-lg font-semibold mb-2">Scan Failed</h2>
-          <p>{scan.error_message || 'An unknown error occurred during the scan.'}</p>
-        </div>
+        <FailedScanPanel scan={scan} hasPartialResults={false} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
       </div>

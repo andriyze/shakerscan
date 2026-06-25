@@ -427,12 +427,107 @@ function ScansContent() {
             {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans found. Start a new scan to get started.'}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Mobile / tablet card layout (below lg): the desktop table scrolls
+              the important columns off-screen on a phone, so render each scan as
+              a stacked card with everything visible in the first viewport. */}
+          <div className="lg:hidden space-y-3 p-3">
+            {scans.map((scan) => {
+              const isAIScan = scan.scan_type === 'ai_gate' || scan.run_kind?.startsWith('ai_')
+              const authenticated = isAuthenticatedScan(scan)
+              const aiTargetType = formatAITargetType(scan.ai_target_type)
+              const scanTypeLabel = formatScanTypeLabel(scan)
+              const parallelParent = isParallelParent(scan)
+              const asmBatch = scan.scan_role === 'asm_batch'
+              const asmRecon = scan.scan_role === 'asm_recon'
+              const variantLabel = asmBatch
+                ? 'ASM batch'
+                : asmRecon
+                  ? 'ASM recon'
+                  : parallelParent
+                    ? 'Parallel'
+                    : aiTargetType || (authenticated ? 'Authenticated' : null)
+              const canCancel = scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued'
+              return (
+                <div key={scan.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <Link
+                      href={buildUrl(`/scans/${scan.id}`, {
+                        return_status: statusFilter,
+                        return_domain: domainFilter,
+                        return_search: searchQuery,
+                        return_page: page > 1 ? page : undefined,
+                        return_include_internal: includeInternal ? 'true' : undefined
+                      })}
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-400 hover:text-blue-300"
+                      title={scan.target_url}
+                    >
+                      {scan.target_url}
+                    </Link>
+                    <ScanStatusBadge status={scan.status} />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                    {scan.grade ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
+                        <span className="text-gray-500">{scan.score}/100</span>
+                      </div>
+                    ) : (
+                      <span className="text-gray-500">No score</span>
+                    )}
+                    {(scan.findings_count || 0) > 0 ? (
+                      <Link
+                        href={`/findings?scan_id=${scan.id}`}
+                        className="text-blue-400 hover:text-blue-300"
+                      >
+                        {scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}
+                      </Link>
+                    ) : (
+                      <span className="text-gray-400">0 findings</span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                    <span className="text-gray-300">{scanTypeLabel}</span>
+                    {variantLabel && (
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">{variantLabel}</span>
+                    )}
+                    <span aria-hidden="true">·</span>
+                    <span>{getDurationLabel(scan)}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{formatDate(scan.created_at)}</span>
+                  </div>
+                  {(canCancel || isAIScan) && (
+                    <div className="mt-3 flex items-center gap-2">
+                      {canCancel ? (
+                        <button
+                          onClick={() => setConfirmCancelId(scan.id)}
+                          disabled={cancelling.has(scan.id)}
+                          className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                        >
+                          {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
+                        </button>
+                      ) : isAIScan ? (
+                        <Link
+                          href="/settings/ai-gate"
+                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        >
+                          AI Gate
+                        </Link>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Desktop table layout (lg and up) */}
+          <div className="hidden lg:block overflow-x-auto">
           <table className="w-full min-w-[760px] 2xl:min-w-full">
             <thead className="bg-gray-800/50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Target</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
+                <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
                 <th className="hidden 2xl:table-cell px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
@@ -593,6 +688,7 @@ function ScansContent() {
             </tbody>
           </table>
           </div>
+          </>
         )}
       </Card>
       )}

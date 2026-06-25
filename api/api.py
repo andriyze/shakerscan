@@ -7056,7 +7056,8 @@ async def dashboard():
         """)
         recent_findings = await conn.fetch("""
             SELECT id, title, severity, status, tool, first_seen_at
-            FROM findings WHERE status = 'active'
+            FROM findings
+            WHERE status = 'active' AND severity IN ('critical', 'high')
             ORDER BY
                 CASE severity
                     WHEN 'critical' THEN 1

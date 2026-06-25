@@ -35,9 +35,10 @@ import {
 } from '@/lib/api'
 
 const inputClass =
-  'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const textareaClass =
-  'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
 
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
@@ -289,6 +290,7 @@ export default function ModelIntakeSettingsPage() {
   const [policyProfile, setPolicyProfile] = useState<string>('production')
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
+  const [policyProfilesError, setPolicyProfilesError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<IntakeFormErrors>({})
@@ -316,8 +318,10 @@ export default function ModelIntakeSettingsPage() {
     try {
       const payload = await getPolicyProfiles()
       setSavedPolicyProfiles(payload.policy_profiles || [])
-    } catch {
+      setPolicyProfilesError(null)
+    } catch (err) {
       setSavedPolicyProfiles([])
+      setPolicyProfilesError(err instanceof Error ? err.message : 'Failed to load saved policy profiles')
     } finally {
       setPolicyProfilesLoading(false)
     }
@@ -509,7 +513,9 @@ export default function ModelIntakeSettingsPage() {
     const current = parsedMetadata || {}
     const next = { ...current }
     if (value.trim()) {
-      next[key] = key === 'training_data_ref' || key === 'deployment_restrictions'
+      // deployment_restrictions is a genuine list; training_data_ref is a single
+      // reference that may legitimately contain commas, so keep it as a string.
+      next[key] = key === 'deployment_restrictions'
         ? value.split(',').map((item) => item.trim()).filter(Boolean)
         : value
     } else {
@@ -632,7 +638,7 @@ export default function ModelIntakeSettingsPage() {
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 max-w-full space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
@@ -648,14 +654,14 @@ export default function ModelIntakeSettingsPage() {
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
-      <Card className="p-4">
+      <Card className="min-w-0 p-4">
         <div className="flex items-center gap-2 text-white">
           <Wand2 className="h-4 w-4 text-cyan-300" />
           <h2 className="text-sm font-semibold">1. Model Reference</h2>
         </div>
 
-        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_0.35fr_0.45fr_auto]">
-          <label className="grid gap-1 text-sm text-gray-300">
+        <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(9rem,0.35fr)_minmax(10rem,0.45fr)_auto]">
+          <label className={fieldClass}>
             Model reference
             <input
               value={sourceRef}
@@ -668,11 +674,11 @@ export default function ModelIntakeSettingsPage() {
               placeholder={selectedPlatform.placeholder}
             />
           </label>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Revision
             <input value={revision} onChange={(e) => setRevision(e.target.value)} className={inputClass} placeholder="main or commit" />
           </label>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Artifact file
             <input value={filename} onChange={(e) => setFilename(e.target.value)} className={inputClass} placeholder="optional" />
           </label>
@@ -680,14 +686,14 @@ export default function ModelIntakeSettingsPage() {
             type="button"
             onClick={() => resolveReference()}
             disabled={resolving || !sourceRef.trim()}
-            className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center gap-2 self-end whitespace-nowrap rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
           >
             {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
             Resolve
           </button>
         </div>
 
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {[AUTO_PLATFORM_OPTION, ...PLATFORM_OPTIONS].map((option) => {
             const Icon = option.icon
             const active = option.value === platform
@@ -699,35 +705,35 @@ export default function ModelIntakeSettingsPage() {
                   setPlatform(option.value)
                   setResolverResult(null)
                 }}
-                className={`rounded-lg border p-3 text-left transition ${
+                className={`min-w-0 rounded-lg border p-3 text-left transition ${
                   active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                 }`}
               >
-                <div className="flex items-center gap-2 text-sm font-medium text-white">
-                  <Icon className="h-4 w-4 text-cyan-300" />
-                  {option.label}
+                <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-white">
+                  <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
+                  <span className="min-w-0 break-words">{option.label}</span>
                 </div>
-                <div className="mt-1 text-xs text-gray-500">{option.helper}</div>
+                <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
               </button>
             )
           })}
         </div>
 
         {resolverResult && (
-          <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr]">
-            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+          <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+            <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
               <div className="text-sm font-medium text-white">Resolved artifact</div>
               <div className="mt-2 break-all rounded border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
                 {resolverResult.normalized_ref}
               </div>
-              <div className="mt-3 grid gap-2 text-xs text-gray-400 sm:grid-cols-2">
-                <div>Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
-                <div>Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
-                <div>Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
-                <div>File: <span className="text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
-                <div>License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
-                <div>Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
-                <div>Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
+              <div className="mt-3 grid min-w-0 gap-2 text-xs text-gray-400 sm:grid-cols-2">
+                <div className="min-w-0 break-words">Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
+                <div className="min-w-0 break-words">Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
+                <div className="min-w-0 break-words">Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
+                <div className="min-w-0 break-words">File: <span className="break-all text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
+                <div className="min-w-0 break-words">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
+                <div className="min-w-0 break-words">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
+                <div className="min-w-0 break-words">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
               </div>
               {resolverResult.warnings.length > 0 && (
                 <div className="mt-3 space-y-2">
@@ -741,10 +747,10 @@ export default function ModelIntakeSettingsPage() {
               )}
             </div>
 
-            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
               <div className="text-sm font-medium text-white">Candidate files</div>
               {resolverResult.candidate_files.length === 0 ? (
-                <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+                <div className="mt-3 break-words rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
                   No artifact list was available. Enter a direct artifact URL or file path before queueing.
                 </div>
               ) : (
@@ -756,17 +762,17 @@ export default function ModelIntakeSettingsPage() {
                         key={file.path}
                         type="button"
                         onClick={() => resolveReference(file.path)}
-                        className={`rounded border px-3 py-2 text-left text-xs ${
+                        className={`min-w-0 rounded border px-3 py-2 text-left text-xs ${
                           selected ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                         }`}
                       >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="font-mono text-gray-200">{file.path}</span>
+                        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                          <span className="min-w-0 break-all font-mono text-gray-200">{file.path}</span>
                           <span className={file.risk === 'lower' ? 'text-green-300' : 'text-orange-300'}>
                             {file.risk === 'lower' ? 'lower risk' : 'review'}
                           </span>
                         </div>
-                        <div className="mt-1 text-gray-500">
+                        <div className="mt-1 break-words text-gray-500">
                           {file.extension || 'unknown'} - {formatBytes(file.size_bytes)}{file.sha256 ? ' - registry SHA-256 available' : ''}
                         </div>
                       </button>
@@ -779,7 +785,7 @@ export default function ModelIntakeSettingsPage() {
         )}
       </Card>
 
-      <Card className="p-4">
+      <Card className="min-w-0 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-white">
             <ShieldCheck className="h-4 w-4 text-cyan-300" />
@@ -789,18 +795,18 @@ export default function ModelIntakeSettingsPage() {
             Manage
           </Link>
         </div>
-        <div className="mt-4 grid gap-2 md:grid-cols-4">
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {POLICY_PROFILES.map((profile) => (
             <button
               key={profile.value}
               type="button"
               onClick={() => applyPolicyProfile(profile.value)}
-              className={`rounded-lg border p-3 text-left ${
+              className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
             >
-              <div className="text-sm font-medium text-white">{profile.label}</div>
-              <div className="mt-1 text-xs text-gray-500">{profile.helper}</div>
+              <div className="break-words text-sm font-medium text-white">{profile.label}</div>
+              <div className="mt-1 break-words text-xs text-gray-500">{profile.helper}</div>
             </button>
           ))}
           {activeSavedPolicyProfiles.map((profile) => (
@@ -808,31 +814,36 @@ export default function ModelIntakeSettingsPage() {
               key={profile.id}
               type="button"
               onClick={() => applyPolicyProfile(profile.environment)}
-              className={`rounded-lg border p-3 text-left ${
+              className={`min-w-0 rounded-lg border p-3 text-left ${
                 policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
               }`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium text-white">{profile.name}</div>
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0 break-words text-sm font-medium text-white">{profile.name}</div>
                 <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
               </div>
-              <div className="mt-1 text-xs text-gray-500">
+              <div className="mt-1 break-words text-xs text-gray-500">
                 Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
               </div>
             </button>
           ))}
         </div>
         {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
+        {!policyProfilesLoading && policyProfilesError && (
+          <div role="alert" className="mt-3 break-words text-xs text-red-400">
+            {policyProfilesError} — showing built-in profiles only.
+          </div>
+        )}
       </Card>
 
-      <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
+      <form onSubmit={handleSubmit} className="min-w-0 space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="flex items-center gap-2 text-white">
           <Play className="h-4 w-4 text-cyan-300" />
           <h2 className="text-sm font-semibold">3. Review Scan Payload</h2>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-[1.3fr_0.7fr]">
-          <label className="grid gap-1 text-sm text-gray-300">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.7fr)]">
+          <label className={fieldClass}>
             Artifact URL
             <input
               value={artifactUrl}
@@ -846,14 +857,14 @@ export default function ModelIntakeSettingsPage() {
             {fieldErrors.artifactUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.artifactUrl}</span>}
             <span className="text-xs text-gray-500">Resolved HTTP(S), hf://, and public cloud object references are supported. Use signed HTTPS URLs for private artifacts.</span>
           </label>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Name
             <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="Release model v1" />
           </label>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="grid gap-1 text-sm text-gray-300">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <label className={fieldClass}>
             Metadata URL
             <input
               value={metadataUrl}
@@ -865,7 +876,7 @@ export default function ModelIntakeSettingsPage() {
             />
             {fieldErrors.metadataUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.metadataUrl}</span>}
           </label>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Expected SHA-256
             <input
               value={expectedSha256}
@@ -879,8 +890,8 @@ export default function ModelIntakeSettingsPage() {
           </label>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="grid gap-1 text-sm text-gray-300">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <label className={fieldClass}>
             Signature URL
             <input
               value={signatureUrl}
@@ -892,7 +903,7 @@ export default function ModelIntakeSettingsPage() {
             />
             {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
           </label>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Model Card URL
             <input
               value={modelCardUrl}
@@ -906,13 +917,13 @@ export default function ModelIntakeSettingsPage() {
           </label>
         </div>
 
-        <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+        <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
           <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
             <ShieldCheck className="h-4 w-4 text-cyan-300" />
             Signature verification
           </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="grid gap-1 text-sm text-gray-300">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className={fieldClass}>
               Public key URL
               <input
                 value={signaturePublicKeyUrl}
@@ -924,7 +935,7 @@ export default function ModelIntakeSettingsPage() {
               />
               {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
             </label>
-            <label className="grid gap-1 text-sm text-gray-300">
+            <label className={fieldClass}>
               Trusted key SHA-256
               <input
                 value={signatureTrustedKeySha256}
@@ -937,8 +948,8 @@ export default function ModelIntakeSettingsPage() {
               {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
             </label>
           </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="grid gap-1 text-sm text-gray-300">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className={fieldClass}>
               Public key PEM
               <textarea
                 value={signaturePublicKey}
@@ -948,7 +959,7 @@ export default function ModelIntakeSettingsPage() {
                 placeholder="-----BEGIN PUBLIC KEY-----"
               />
             </label>
-            <label className="grid gap-1 text-sm text-gray-300">
+            <label className={fieldClass}>
               Signature value
               <textarea
                 value={signatureValue}
@@ -959,7 +970,7 @@ export default function ModelIntakeSettingsPage() {
               />
             </label>
           </div>
-          <label className="grid gap-1 text-sm text-gray-300">
+          <label className={fieldClass}>
             Trusted key PEM
             <textarea
               value={signatureTrustedKeys}
@@ -969,8 +980,8 @@ export default function ModelIntakeSettingsPage() {
               placeholder="Optional operator trust anchor PEM"
             />
           </label>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <label className="grid gap-1 text-sm text-gray-300">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+            <label className={fieldClass}>
               Payload
               <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
                 <option value="artifact">Artifact bytes</option>
@@ -978,7 +989,7 @@ export default function ModelIntakeSettingsPage() {
                 <option value="digest_raw">SHA-256 raw digest</option>
               </select>
             </label>
-            <label className="grid gap-1 text-sm text-gray-300">
+            <label className={fieldClass}>
               Hash
               <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
                 <option value="sha256">SHA-256</option>
@@ -986,7 +997,7 @@ export default function ModelIntakeSettingsPage() {
                 <option value="sha512">SHA-512</option>
               </select>
             </label>
-            <label className="grid gap-1 text-sm text-gray-300">
+            <label className={fieldClass}>
               RSA padding
               <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
                 <option value="pss">PSS</option>
@@ -996,34 +1007,34 @@ export default function ModelIntakeSettingsPage() {
           </div>
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <FileJson className="h-4 w-4 text-cyan-300" />
               Evidence fields
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm text-gray-300">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
                 Source repo
                 <input value={metadataString(parsedMetadata, 'source_repo')} onChange={(e) => updateMetadataField('source_repo', e.target.value)} className={inputClass} placeholder="https://github.com/org/repo" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 License
                 <input value={metadataString(parsedMetadata, 'license')} onChange={(e) => updateMetadataField('license', e.target.value)} className={inputClass} placeholder="apache-2.0" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 Base model
                 <input value={metadataString(parsedMetadata, 'base_model')} onChange={(e) => updateMetadataField('base_model', e.target.value)} className={inputClass} placeholder="org/base-model" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 Training data
-                <input value={metadataString(parsedMetadata, 'training_data_ref')} onChange={(e) => updateMetadataField('training_data_ref', e.target.value)} className={inputClass} placeholder="dataset-a, dataset-b" />
+                <input value={metadataString(parsedMetadata, 'training_data_ref')} onChange={(e) => updateMetadataField('training_data_ref', e.target.value)} className={inputClass} placeholder="internal-approved-dataset:v1" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 Security evals
                 <input value={metadataString(parsedMetadata, 'security_evals')} onChange={(e) => updateMetadataField('security_evals', e.target.value)} className={inputClass} placeholder="eval report URL or suite" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 Monitoring plan
                 <input value={metadataString(parsedMetadata, 'monitoring_plan')} onChange={(e) => updateMetadataField('monitoring_plan', e.target.value)} className={inputClass} placeholder="model-monitoring-v1" />
               </label>
@@ -1046,48 +1057,48 @@ export default function ModelIntakeSettingsPage() {
             </div>
           </div>
 
-          <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+          <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <FileJson className="h-4 w-4 text-cyan-300" />
               Requirements and raw metadata
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require checksum
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require signature
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Verify signature
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require approval
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Require governance
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300">
+              <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                 <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
                 Mark approved
               </label>
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm text-gray-300">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
                 Download limit (bytes)
                 <input value={maxDownloadBytes} onChange={(e) => setMaxDownloadBytes(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
+              <label className={fieldClass}>
                 Timeout (seconds)
                 <input value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} className={inputClass} inputMode="numeric" />
               </label>
             </div>
-            <label className="grid gap-1 text-sm text-gray-300">
+            <label className={fieldClass}>
               Metadata JSON
               <textarea
                 value={metadataJson}
@@ -1100,7 +1111,7 @@ export default function ModelIntakeSettingsPage() {
           </div>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
           <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
             {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
             {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}

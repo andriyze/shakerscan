@@ -64,6 +64,7 @@ function TargetsContent() {
   const scanMenuRef = useRef<HTMLDivElement>(null)
   const scanAllMenuRef = useRef<HTMLDivElement>(null)
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const discoverTimeouts = useRef<Set<NodeJS.Timeout>>(new Set())
 
   const searchQuery = filters.search || ''
   const discoverySourceFilter = filters.discovery_source || ''
@@ -87,6 +88,16 @@ function TargetsContent() {
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Clear any pending discovery-refresh timers on unmount so they don't
+  // fire setState on an unmounted component.
+  useEffect(() => {
+    const timeouts = discoverTimeouts.current
+    return () => {
+      timeouts.forEach(clearTimeout)
+      timeouts.clear()
+    }
   }, [])
 
   // Sync searchInput with URL when filters change externally (e.g., browser back)
@@ -222,13 +233,34 @@ function TargetsContent() {
 
     try {
       const options = getScanOptions(scanType)
-      // Submit scans for all targets in parallel
-      const results = await Promise.all(allTargets.map(target => scanTarget(target.id, options)))
-      const scanId = allTargets.length === 1 ? results[0]?.scan_id : undefined
-      toast.success(
-        `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`,
-        scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
-      )
+      // Submit scans for all targets, tolerating per-target failures.
+      const results = await Promise.allSettled(allTargets.map(target => scanTarget(target.id, options)))
+      const succeeded = results.filter((r): r is PromiseFulfilledResult<{ scan_id?: string }> => r.status === 'fulfilled')
+      const failedCount = results.length - succeeded.length
+
+      if (succeeded.length === 0) {
+        console.error('Failed to start domain set scan:', results.find(r => r.status === 'rejected'))
+        toast.error(`Failed to start scans for ${domain.root_domain}`)
+        setScanningDomains(prev => {
+          const next = new Set(prev)
+          next.delete(domain.root_domain)
+          return next
+        })
+        return
+      }
+
+      const scanId = allTargets.length === 1 ? succeeded[0]?.value?.scan_id : undefined
+      const message = failedCount > 0
+        ? `Started ${succeeded.length} of ${allTargets.length} scans for ${domain.root_domain}`
+        : `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`
+      if (failedCount > 0) {
+        toast.info(message)
+      } else {
+        toast.success(
+          message,
+          scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
+        )
+      }
       router.push('/scans')
     } catch (err) {
       console.error('Failed to start domain set scan:', err)
@@ -246,8 +278,10 @@ function TargetsContent() {
     try {
       await discoverSubdomains(rootDomain)
       toast.success(`Subdomain discovery started for ${rootDomain}`)
-      // Refresh targets after a short delay to allow discovery to start
-      setTimeout(() => {
+      // Refresh targets after a short delay to allow discovery to start.
+      // Track the timer so it can be cleared if the component unmounts first.
+      const timeoutId = setTimeout(() => {
+        discoverTimeouts.current.delete(timeoutId)
         fetchTargets()
         setDiscoveringDomains(prev => {
           const next = new Set(prev)
@@ -255,6 +289,7 @@ function TargetsContent() {
           return next
         })
       }, 2000)
+      discoverTimeouts.current.add(timeoutId)
     } catch (err) {
       console.error('Failed to start discovery:', err)
       toast.error(`Failed to start discovery for ${rootDomain}`)

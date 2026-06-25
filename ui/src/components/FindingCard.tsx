@@ -259,6 +259,61 @@ function RemediationList({ steps }: { steps: string[] }) {
   )
 }
 
+const RAW_EVIDENCE_MAX_CHARS = 2000
+
+// Simple, human-readable summary fields we can lift out of an arbitrary
+// evidence object so the analyst isn't forced to read the raw JSON wall.
+const RAW_EVIDENCE_SUMMARY_KEYS = ['source', 'file', 'url', 'location', 'line'] as const
+
+function RawEvidence({ value }: { value: object }) {
+  const fullRaw = JSON.stringify(value, null, 2)
+  const isTruncated = fullRaw.length > RAW_EVIDENCE_MAX_CHARS
+  const displayRaw = isTruncated
+    ? `${fullRaw.slice(0, RAW_EVIDENCE_MAX_CHARS)}… (truncated, ${fullRaw.length} chars)`
+    : fullRaw
+
+  const record = value as Record<string, unknown>
+  const summary = RAW_EVIDENCE_SUMMARY_KEYS
+    .map((key) => {
+      const raw = record[key]
+      if (raw === undefined || raw === null) return null
+      if (typeof raw === 'object') return null
+      const text = String(raw)
+      if (text.length === 0) return null
+      return { key: String(key), text }
+    })
+    .filter((entry): entry is { key: string; text: string } => entry !== null)
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h4 className="text-sm font-medium text-gray-400">Evidence</h4>
+        <CopyButton text={fullRaw} label="Copy raw evidence" />
+      </div>
+
+      {summary.length > 0 && (
+        <dl className="mb-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs">
+          {summary.map(({ key, text }) => (
+            <React.Fragment key={key}>
+              <dt className="text-gray-500 capitalize">{key}</dt>
+              <dd className="text-gray-300 font-mono break-all min-w-0">{text}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      )}
+
+      <details className="group">
+        <summary className="cursor-pointer text-xs text-blue-400 hover:text-blue-300 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+          Show raw evidence
+        </summary>
+        <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap break-all max-h-96">
+          {displayRaw}
+        </pre>
+      </details>
+    </div>
+  )
+}
+
 export default function FindingCard({ finding, defaultExpanded = false }: FindingCardProps) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
   const severityConfig = getSeverityConfig(finding.severity)
@@ -459,12 +514,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
 
           {/* Evidence as JSON if available and not parsed */}
           {finding.evidence && typeof finding.evidence === 'object' && !hasUrls && !hasPayloads && (
-            <div className="mb-4">
-              <h4 className="text-sm font-medium text-gray-400 mb-2">Evidence</h4>
-              <pre className="text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap">
-                {JSON.stringify(finding.evidence, null, 2)}
-              </pre>
-            </div>
+            <RawEvidence value={finding.evidence} />
           )}
 
           {(finding.ai_rationale || finding.ai_recommendations) && (

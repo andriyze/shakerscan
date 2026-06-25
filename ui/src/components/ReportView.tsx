@@ -668,15 +668,47 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     URL.revokeObjectURL(url)
   }
 
+  // For Model Intake scans the "target" is a long artifact URL (e.g. a HF resolve
+  // link with a commit hash) that otherwise dominates the header on mobile and
+  // pushes the block decision/rationale below the fold. Show a short label instead
+  // and keep the full URL in a collapsed, copyable field.
+  const fullArtifactUrl = scan.url || scan.target_url || input.target || ''
+  const modelIntakeArtifactLabel = (() => {
+    const named = modelIntakeArtifact?.name || modelIntakeSummary?.artifact_name
+    if (named) return String(named)
+    try {
+      const u = new URL(fullArtifactUrl)
+      const segs = u.pathname.split('/').filter(Boolean)
+      if (u.hostname.includes('huggingface') && segs.length >= 2) return `${segs[0]}/${segs[1]}`
+      return segs[segs.length - 1] || u.hostname
+    } catch {
+      return fullArtifactUrl || 'Model artifact'
+    }
+  })()
+
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Scan Summary */}
       <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
         <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold mb-2 break-words">
-              {scan.url || scan.target_url || input.target || 'Unknown Target'}
-            </h1>
+            {isModelIntakeScan ? (
+              <>
+                <h1 className="text-2xl sm:text-3xl font-bold mb-1 break-words">{modelIntakeArtifactLabel}</h1>
+                {fullArtifactUrl && (
+                  <details className="mb-2">
+                    <summary className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer select-none">
+                      Show full artifact URL
+                    </summary>
+                    <p className="mt-1 text-xs text-gray-400 font-mono break-all">{fullArtifactUrl}</p>
+                  </details>
+                )}
+              </>
+            ) : (
+              <h1 className="text-3xl font-bold mb-2 break-words">
+                {scan.url || scan.target_url || input.target || 'Unknown Target'}
+              </h1>
+            )}
             <p className="text-gray-400">
               Scanned on {new Date(scan.created_at).toLocaleDateString()} at {new Date(scan.created_at).toLocaleTimeString()}
             </p>

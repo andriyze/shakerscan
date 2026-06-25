@@ -22,7 +22,9 @@ const DAYS_OF_WEEK = [
 ]
 
 function formatRelativeTime(dateStr: string): string {
+  if (!dateStr) return '—'
   const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return '—'
   const now = new Date()
   const diffMs = date.getTime() - now.getTime()
   const absDiffMs = Math.abs(diffMs)

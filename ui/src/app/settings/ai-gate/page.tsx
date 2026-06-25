@@ -128,9 +128,9 @@ type RunConfig = {
 }
 
 const inputClass =
-  'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 const textareaClass =
-  'w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
 
 function jsonText(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -294,9 +294,11 @@ export default function AIGateSettingsPage() {
   const [confirmDisableTarget, setConfirmDisableTarget] = useState<AITarget | null>(null)
   const [disabling, setDisabling] = useState(false)
   const [confirmProductionTarget, setConfirmProductionTarget] = useState<AITarget | null>(null)
+  const [confirmingProduction, setConfirmingProduction] = useState(false)
   const [runConfigs, setRunConfigs] = useState<Record<string, RunConfig>>({})
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
   const [inventory, setInventory] = useState<AIInventory | null>(null)
+  const [inventoryError, setInventoryError] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [showAddTarget, setShowAddTarget] = useState(false)
@@ -351,8 +353,10 @@ export default function AIGateSettingsPage() {
   const loadInventory = useCallback(async () => {
     try {
       setInventory(await getAIInventory())
-    } catch {
+      setInventoryError(null)
+    } catch (err) {
       setInventory(null)
+      setInventoryError(err instanceof Error ? err.message : 'Failed to load AI inventory')
     }
   }, [])
 
@@ -744,10 +748,28 @@ export default function AIGateSettingsPage() {
         </div>
       )}
 
+      {!inventory && inventoryError && (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-white">
+                <Bot className="h-4 w-4 text-purple-300" />
+                <h2 className="text-sm font-semibold">AI Inventory</h2>
+              </div>
+              <p role="alert" className="mt-2 break-words text-xs text-red-400">{inventoryError}</p>
+            </div>
+            <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              <RefreshCw className="h-4 w-4" />
+              Retry
+            </button>
+          </div>
+        </Card>
+      )}
+
       {inventory && (
         <Card className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2 text-white">
                 <Bot className="h-4 w-4 text-purple-300" />
                 <h2 className="text-sm font-semibold">AI Inventory</h2>
@@ -767,22 +789,29 @@ export default function AIGateSettingsPage() {
             </button>
           </div>
           {inventoryCandidates.length > 0 && (
-            <div className="mt-4 grid gap-2 lg:grid-cols-2">
-              {inventoryCandidates.map((candidate) => (
-                <button
-                  key={candidate.candidate_id}
-                  type="button"
-                  onClick={() => applyInventoryCandidate(candidate)}
-                  className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-white">{candidate.method} {candidate.endpoint_url}</span>
-                    <span className="rounded bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
-                    <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{Math.round(candidate.confidence * 100)}%</span>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
-                </button>
-              ))}
+            <div className="mt-4 grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
+              {inventoryCandidates.map((candidate) => {
+                const confidencePct = Number.isFinite(candidate.confidence)
+                  ? Math.round(candidate.confidence * 100)
+                  : null
+                return (
+                  <button
+                    key={candidate.candidate_id}
+                    type="button"
+                    onClick={() => applyInventoryCandidate(candidate)}
+                    className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="min-w-0 break-all text-sm font-medium text-white">{candidate.method} {candidate.endpoint_url}</span>
+                      <span className="rounded bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
+                      {confidencePct !== null && (
+                        <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{confidencePct}%</span>
+                      )}
+                    </div>
+                    <div className="mt-2 break-words text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
+                  </button>
+                )
+              })}
             </div>
           )}
         </Card>
@@ -1021,7 +1050,7 @@ export default function AIGateSettingsPage() {
                     return (
                       <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
                         <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
-                        <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
+                        <span className={`min-w-0 break-words ${present ? 'text-gray-300' : 'text-yellow-200'}`}>{control.label}</span>
                       </div>
                     )
                   })}
@@ -1091,7 +1120,7 @@ export default function AIGateSettingsPage() {
                         {isDemoTarget && <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
                         {target.production_mode && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
                       </div>
-                      <div className="mt-1 truncate text-sm text-gray-500">{target.method} {target.endpoint_url}</div>
+                      <div className="mt-1 break-all text-sm text-gray-500">{target.method} {target.endpoint_url}</div>
                       <div className="mt-1 text-xs text-gray-500">
                         Auth: {target.credential.auth_kind}
                         {target.credential.secret_configured ? ` (${target.credential.secret_preview || 'configured'})` : ''}
@@ -1116,22 +1145,22 @@ export default function AIGateSettingsPage() {
                           )}
                         </div>
                       )}
-                      <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                      <div className="mt-3 grid gap-2 text-xs grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Endpoint</div>
-                          <div className="mt-1 truncate text-gray-200">{target.method} {target.endpoint_url}</div>
+                          <div className="mt-1 break-all text-gray-200">{target.method} {target.endpoint_url}</div>
                         </div>
-                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Prompt field</div>
-                          <div className="mt-1 truncate text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
+                          <div className="mt-1 break-words text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
                         </div>
-                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Response field</div>
-                          <div className="mt-1 truncate font-mono text-gray-200">{target.response_path || '$'}</div>
+                          <div className="mt-1 break-all font-mono text-gray-200">{target.response_path || '$'}</div>
                         </div>
-                        <div className="rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Last scan</div>
-                          <div className="mt-1 truncate text-gray-200">
+                          <div className="mt-1 break-words text-gray-200">
                             {target.last_scan_id ? (
                               <Link className="text-blue-400 hover:text-blue-300" href={`/scans/${target.last_scan_id}`}>Open result</Link>
                             ) : (
@@ -1224,7 +1253,7 @@ export default function AIGateSettingsPage() {
                         {(mcpReadinessResults[target.id].checks || []).slice(0, 8).map((check) => (
                           <div key={check.id} className="flex min-w-0 items-center gap-2">
                             <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${check.status === 'pass' ? 'text-emerald-300' : 'text-yellow-300'}`} />
-                            <span className="truncate text-gray-200">{check.label}</span>
+                            <span className="min-w-0 break-words text-gray-200">{check.label}</span>
                           </div>
                         ))}
                       </div>
@@ -1342,12 +1371,21 @@ export default function AIGateSettingsPage() {
             : undefined
         }
         confirmLabel="Run Scan"
-        onConfirm={() => {
+        busy={confirmingProduction}
+        onConfirm={async () => {
           const target = confirmProductionTarget
-          setConfirmProductionTarget(null)
-          if (target) executeRun(target)
+          if (!target || confirmingProduction) return
+          setConfirmingProduction(true)
+          try {
+            await executeRun(target)
+          } finally {
+            setConfirmingProduction(false)
+            setConfirmProductionTarget(null)
+          }
         }}
-        onCancel={() => setConfirmProductionTarget(null)}
+        onCancel={() => {
+          if (!confirmingProduction) setConfirmProductionTarget(null)
+        }}
       />
     </div>
   )
