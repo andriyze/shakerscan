@@ -11151,6 +11151,28 @@ async def list_findings(
     }
 
 
+@app.get("/findings/{finding_id}/evidence")
+async def list_finding_evidence(finding_id: str):
+    """Durable evidence objects (hash, redaction profile, retention class, storage
+    URI) for a finding. Registered before the greedy {finding_id:path} route."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM evidence_objects WHERE finding_id = $1 ORDER BY created_at, object_type",
+            uuid.UUID(finding_id),
+        )
+    return {"finding_id": finding_id, "evidence_objects": [row_to_dict(r) for r in rows]}
+
+
+@app.get("/evidence/{evidence_id}")
+async def get_evidence_object(evidence_id: str):
+    """A single durable evidence object (content already redaction-profiled)."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM evidence_objects WHERE id = $1", uuid.UUID(evidence_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Evidence object not found")
+    return row_to_dict(row)
+
+
 @app.get("/findings/{finding_id:path}")
 async def get_finding(finding_id: str):
     """Get finding details by ID or fingerprint."""

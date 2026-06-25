@@ -1644,6 +1644,39 @@ def _strip_null_bytes(value):
     return value
 
 
+async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted) -> None:
+    """Best-effort: persist a finding's (already null-stripped + redacted) evidence as
+    a first-class durable evidence_object. NEVER raises — an evidence-object write must
+    not fail or roll back the scan; findings.evidence stays the back-compat source of
+    truth. Inline storage for now (storage_uri=inline:); a later phase can externalize."""
+    if not finding_id:
+        return
+    try:
+        content = evidence_redacted if evidence_redacted else None
+        raw = json.dumps(content, sort_keys=True, default=str) if content is not None else None
+        sha = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest() if raw else None
+        tool = finding.get("tool")
+        object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
+        retention = "sensitive" if (
+            finding.get("request") or finding.get("response")
+            or tool in ("ai_gate", "ai_session", "model_intake")
+        ) else "standard"
+        await conn.execute("""
+            INSERT INTO evidence_objects
+                (scan_id, finding_id, object_type, content_sha256, size_bytes,
+                 storage_uri, redaction_profile, retention_class, content)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (finding_id, object_type) DO UPDATE SET
+                content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
+                storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
+                retention_class=EXCLUDED.retention_class, created_at=NOW()
+        """, scan_uuid, finding_id, object_type, sha,
+             len(raw.encode("utf-8", "ignore")) if raw else 0,
+             "inline:evidence_objects", "redact_sensitive_v1", retention, raw)
+    except Exception as e:
+        print(f"[evidence] persist failed for finding {finding_id}: {type(e).__name__}: {e}", flush=True)
+
+
 async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     """Save findings to database with deduplication. Returns count of saved findings."""
     if not findings:
@@ -1666,6 +1699,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             finding_tool = finding.get('tool')
             finding_source = finding.get('source') or ('model_intake' if finding_tool == 'model_intake' else None)
             scan_verification_status, scan_verification_verdict, scan_verification_confidence = _scan_time_verification_fields(finding)
+            evidence_finding_id = None
 
             # Wrap each finding in a transaction so the SELECT-then-INSERT race
             # between concurrent workers (e.g. a retest + scheduled scan) is
@@ -1800,6 +1834,7 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                             existing['id'],
                         )
                     saved += 1
+                    evidence_finding_id = existing['id']
                 else:
                     # Use ON CONFLICT as a belt-and-braces guard: if a
                     # concurrent worker inserted the same (target_id, fingerprint)
@@ -1848,6 +1883,11 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     )
                     if result:
                         saved += 1
+                        evidence_finding_id = result
+
+                # Persist evidence as a first-class durable object (best-effort,
+                # OUTSIDE the finding transaction so it never rolls the finding back).
+                await _persist_evidence_object(conn, scan_uuid, evidence_finding_id, finding, evidence_with_triage)
 
     return saved
 

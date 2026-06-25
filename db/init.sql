@@ -223,6 +223,27 @@ CREATE TABLE findings (
 );
 
 -- ============================================================
+-- EVIDENCE OBJECTS - First-class durable evidence (hash, redaction
+-- profile, retention class, storage URI, scan/finding links)
+-- ============================================================
+CREATE TABLE evidence_objects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_id UUID,
+    finding_id UUID REFERENCES findings(id) ON DELETE CASCADE,
+    object_type TEXT NOT NULL DEFAULT 'finding_evidence',
+    content_sha256 TEXT,
+    size_bytes INTEGER,
+    storage_uri TEXT,
+    redaction_profile TEXT,
+    retention_class TEXT NOT NULL DEFAULT 'standard',
+    content JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+);
+CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
+CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
+
+-- ============================================================
 -- FINDING VERIFICATIONS - Retest attempts and proof history
 -- ============================================================
 CREATE TABLE finding_verifications (

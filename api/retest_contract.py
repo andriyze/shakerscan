@@ -1323,6 +1323,27 @@ async def run_schema_migrations(pool) -> None:
                     ON findings(target_id, fingerprint)
                     WHERE target_id IS NOT NULL
             """)
+            # First-class durable evidence objects (hash, redaction profile, retention
+            # class, storage URI, scan/finding links) — evidence is no longer only an
+            # embedded JSONB column on the finding.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence_objects (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    scan_id UUID,
+                    finding_id UUID REFERENCES findings(id) ON DELETE CASCADE,
+                    object_type TEXT NOT NULL DEFAULT 'finding_evidence',
+                    content_sha256 TEXT,
+                    size_bytes INTEGER,
+                    storage_uri TEXT,
+                    redaction_profile TEXT,
+                    retention_class TEXT NOT NULL DEFAULT 'standard',
+                    content JSONB,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
