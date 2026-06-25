@@ -226,6 +226,58 @@ def run_ai_gate() -> H.Scorecard:
         if tid:
             H._req("DELETE", f"/ai/targets/{tid}")
 
+    # AI-3: production principal-probe filter. A generated cross-principal
+    # admin-impersonation probe (family=tool_abuse, non_production_only) must be
+    # BLOCKED in production and never executed — the bypass bug. Non-vacuous: the
+    # SAME probe is generated in a staging control.
+    rag_id = None
+    try:
+        _, resp = H.post("/ai/targets", {
+            "name": f"e2e-ai-principal-{_RUN_NONCE}", "target_type": "rag",
+            "endpoint_url": _ai_endpoint("principal"),
+            "method": "POST", "headers_template": {"Content-Type": "application/json"},
+            "request_template": {"message": "{{prompt}}"}, "response_path": "$.answer",
+            "production_mode": False, "rate_limit_rps": 8, "request_budget": 12,
+        })
+        rag_id = (resp.get("target") or {}).get("id")
+        sc.check("AI-3 rag target created", bool(rag_id))
+        if rag_id:
+            for role in ("attacker", "admin", "victim"):
+                H.post(f"/ai/targets/{rag_id}/principals",
+                       {"label": f"{role}-a", "role": role, "tenant_id": f"tenant-{role}"})
+
+            def _principal_manifest(environment, confirm):
+                body = {"probe_pack": "shaker-agent-abuse", "scan_profile": "standard", "environment": environment}
+                if confirm:
+                    body["confirm_production"] = True
+                _, r = H.post(f"/ai/targets/{rag_id}/scan", body)
+                sid = r.get("scan_id") or r.get("id")
+                if not sid:
+                    raise RuntimeError(f"principal scan rejected: {r}")
+                H.wait_for_scan(sid, timeout=420, label=f"AI-3:{environment}")
+                ep = (((H.scan_result(sid).get("ai_gate") or {}).get("execution_plan")) or {})
+                man = ep.get("probe_manifest") or {}
+                return {
+                    "blocked": man.get("blocked_for_production_probe_ids") or [],
+                    "pair": man.get("principal_pair_probe_ids") or [],
+                    "executed": ep.get("executed") or [],
+                }
+
+            ADMIN = "agent-admin-action"
+            prod = _principal_manifest("production", True)
+            sc.check("AI-3 admin-impersonation probe blocked in production",
+                     any(ADMIN in p for p in prod["blocked"]), f"blocked={prod['blocked'][:4]}")
+            sc.check("AI-3 admin-impersonation probe NOT executed in production",
+                     not any(ADMIN in p for p in prod["executed"]), f"executed={prod['executed'][:4]}")
+            stg = _principal_manifest("staging", False)
+            sc.check("AI-3 control: same probe IS generated in staging (non-vacuous)",
+                     any(ADMIN in p for p in stg["pair"]), f"staging_pair={stg['pair'][:4]}")
+    except Exception as e:
+        sc.error("AI-3 production principal-probe filter", e)
+    finally:
+        if rag_id:
+            H._req("DELETE", f"/ai/targets/{rag_id}")
+
     return sc
 
 
