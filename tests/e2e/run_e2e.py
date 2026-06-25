@@ -296,6 +296,30 @@ def run_dast() -> H.Scorecard:
     except Exception as e:
         sc.error("D-2 bounded active SQLi detection", e)
 
+    # D-3 (active recall, XSS): a bounded scan detects DOM-based XSS on Juice Shop.
+    try:
+        _, resp = H.post("/scans", {
+            "target": JUICE_SHOP,
+            "options": {
+                "scan_type": "smart", "xss": True, "parallel": False, "deep_domxss": True,
+                "custom_endpoints": ["GET /rest/products/search?q=apple", "GET /#/search?q=apple"],
+                "custom_budget": {"max_urls": 60, "active_max_endpoints": 12, "active_max_seconds": 420,
+                                  "browser_max_pages": 8, "nuclei_max_targets": 0},
+            },
+        })
+        scan_id = resp.get("scan_id") or resp.get("id")
+        sc.check("D-3 bounded XSS scan accepted", bool(scan_id), str(resp)[:100])
+        if scan_id:
+            scan = H.wait_for_scan(scan_id, timeout=600, poll=8, label="D-3")
+            sc.check("D-3 bounded XSS scan completes", str(scan.get("status")) == "completed",
+                     f"status={scan.get('status')}")
+            findings = (H.scan_result(scan_id).get("findings") or [])
+            xss = [f for f in findings if "xss" in (str(f.get("category")) + str(f.get("title"))).lower()]
+            sc.check("D-3 detects XSS", bool(xss),
+                     f"xss={[str(f.get('title'))[:40] for f in xss][:3]}")
+    except Exception as e:
+        sc.error("D-3 bounded XSS detection", e)
+
     return sc
 
 
