@@ -6,15 +6,21 @@ import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   formatDate,
+  createFindingException,
+  deleteFindingException,
   extractFindingTriage,
   getFinding,
+  getFindingExceptions,
   getFindingRetests,
   getFindingEvidence,
+  getPolicyProfiles,
   retestFinding,
   retestAiFinding,
   updateFinding,
   deleteFinding,
   type Finding,
+  type FindingException,
+  type PolicyProfile,
   type RetestRecord,
   type EvidenceObject
 } from '@/lib/api'
@@ -191,6 +197,22 @@ function evidenceStringList(evidence: Record<string, unknown> | null, key: strin
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
+function evidenceObjectContentText(content: unknown): string {
+  if (content === undefined || content === null) return ''
+  if (typeof content === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2)
+    } catch {
+      return content
+    }
+  }
+  try {
+    return JSON.stringify(content, null, 2)
+  } catch {
+    return String(content)
+  }
+}
+
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -235,6 +257,17 @@ function FindingDetailContent() {
   const [retestMode, setRetestMode] = useState<'tiered' | 'deterministic' | 'ai' | 'same_probe' | 'same_family' | 'strict_replay'>('tiered')
   const [retestHistory, setRetestHistory] = useState<RetestRecord[]>([])
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  const [findingExceptions, setFindingExceptions] = useState<FindingException[]>([])
+  const [policyProfiles, setPolicyProfiles] = useState<PolicyProfile[]>([])
+  const [exceptionSaving, setExceptionSaving] = useState(false)
+  const [exceptionForm, setExceptionForm] = useState({
+    owner: '',
+    approver: '',
+    reason: '',
+    compensating_controls: '',
+    policy_id: '',
+    expires_days: '30',
+  })
 
   // Build back URL with preserved filters
   const backUrl = useMemo(() => {
@@ -250,16 +283,23 @@ function FindingDetailContent() {
 
   const fetchFinding = useCallback(async () => {
     try {
-      const [data, retestData, evidenceData] = await Promise.all([
-        getFinding(findingId),
+      const data = await getFinding(findingId)
+      const [retestData, evidenceData, exceptionData, policyData] = await Promise.all([
         getFindingRetests(findingId, 10).catch(() => null),
-        getFindingEvidence(findingId).catch(() => null)
+        getFindingEvidence(findingId).catch(() => null),
+        getFindingExceptions(data.target_id ? { target_id: data.target_id } : undefined).catch(() => null),
+        getPolicyProfiles().catch(() => null),
       ])
       setFinding(data)
       if (retestData) {
         setRetestHistory(retestData.retests || [])
       }
       setEvidenceObjects(evidenceData?.evidence_objects || [])
+      const exceptions = (exceptionData?.finding_exceptions || []).filter((item) =>
+        item.finding_id === data.id || (data.fingerprint && item.fingerprint === data.fingerprint)
+      )
+      setFindingExceptions(exceptions)
+      setPolicyProfiles(policyData?.policy_profiles || [])
       setError(null)
     } catch {
       setError('Failed to load finding details')
@@ -329,6 +369,63 @@ function FindingDetailContent() {
       toast.error('Failed to update analyst verdict')
     } finally {
       setStatusUpdating(false)
+    }
+  }
+
+  async function handleCreateException(event: React.FormEvent) {
+    event.preventDefault()
+    if (!finding || exceptionSaving) return
+    const owner = exceptionForm.owner.trim()
+    const approver = exceptionForm.approver.trim()
+    if (!owner && !approver) {
+      toast.error('Owner or approver is required')
+      return
+    }
+    const days = Number(exceptionForm.expires_days || 30)
+    if (!Number.isFinite(days) || days < 1) {
+      toast.error('Expiry must be at least 1 day')
+      return
+    }
+    const expiresAt = new Date(Date.now() + Math.round(days) * 24 * 60 * 60 * 1000).toISOString()
+    try {
+      setExceptionSaving(true)
+      await createFindingException({
+        finding_id: finding.id,
+        fingerprint: finding.fingerprint || null,
+        target_id: finding.target_id || null,
+        policy_id: exceptionForm.policy_id || null,
+        scope: finding.title,
+        owner: owner || null,
+        approver: approver || null,
+        reason: exceptionForm.reason.trim() || null,
+        compensating_controls: exceptionForm.compensating_controls.trim() || null,
+        status: 'active',
+        expires_at: expiresAt,
+      })
+      setExceptionForm({
+        owner: '',
+        approver: '',
+        reason: '',
+        compensating_controls: '',
+        policy_id: '',
+        expires_days: '30',
+      })
+      await fetchFinding()
+      toast.success('Policy exception created')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create exception')
+    } finally {
+      setExceptionSaving(false)
+    }
+  }
+
+  async function handleDeleteException(exceptionId: string) {
+    try {
+      await deleteFindingException(exceptionId)
+      setFindingExceptions((prev) => prev.filter((item) => item.id !== exceptionId))
+      toast.success('Policy exception deleted')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete exception')
     }
   }
 
@@ -651,6 +748,121 @@ function FindingDetailContent() {
           {finding.resurfaced_count !== undefined && (
             <InfoItem label="Resurfaced count">{finding.resurfaced_count}</InfoItem>
           )}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Policy Exceptions">
+        <div className="space-y-4">
+          {findingExceptions.length > 0 ? (
+            <div className="space-y-2">
+              {findingExceptions.map((item) => (
+                <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className={`rounded px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
+                          {item.status}
+                        </span>
+                        {item.expires_at && <span className="text-gray-500">expires {formatDate(item.expires_at)}</span>}
+                        {item.policy_id && <span className="font-mono text-gray-500">policy {item.policy_id}</span>}
+                      </div>
+                      {item.reason && <p className="mt-2 text-sm text-gray-300">{item.reason}</p>}
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                        {item.owner && <span>owner: <span className="text-gray-300">{item.owner}</span></span>}
+                        {item.approver && <span>approver: <span className="text-gray-300">{item.approver}</span></span>}
+                        {item.compensating_controls && <span>controls: <span className="text-gray-300">{item.compensating_controls}</span></span>}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteException(item.id)}
+                      className="rounded border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+              No active exception is recorded for this finding.
+            </div>
+          )}
+
+          <form onSubmit={handleCreateException} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Owner
+                <input
+                  value={exceptionForm.owner}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, owner: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="team or person"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Approver
+                <input
+                  value={exceptionForm.approver}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, approver: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="security approver"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Policy
+                <select
+                  value={exceptionForm.policy_id}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, policy_id: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                >
+                  <option value="">Any policy</option>
+                  {policyProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Expires in days
+                <input
+                  value={exceptionForm.expires_days}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, expires_days: e.target.value }))}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  inputMode="numeric"
+                />
+              </label>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-sm text-gray-300">
+                Reason
+                <textarea
+                  value={exceptionForm.reason}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="Risk acceptance rationale"
+                />
+              </label>
+              <label className="grid gap-1 text-sm text-gray-300">
+                Compensating controls
+                <textarea
+                  value={exceptionForm.compensating_controls}
+                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, compensating_controls: e.target.value }))}
+                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  placeholder="Controls, monitoring, or rollout constraints"
+                />
+              </label>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button
+                type="submit"
+                disabled={exceptionSaving}
+                className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {exceptionSaving ? 'Creating...' : 'Create Exception'}
+              </button>
+            </div>
+          </form>
         </div>
       </SectionCard>
 
@@ -991,53 +1203,67 @@ function FindingDetailContent() {
             These persist independently of the embedded evidence above and survive worker churn.
           </p>
           <div className="space-y-2">
-            {evidenceObjects.map((eo) => (
-              <div key={eo.id} className="bg-gray-800/60 rounded-lg p-3 space-y-2">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <span className="text-sm font-medium text-gray-200">{eo.object_type}</span>
-                  <div className="flex items-center gap-2">
-                    {eo.retention_class && (
-                      <span
-                        className={`px-2 py-0.5 rounded text-xs font-medium ${
-                          eo.retention_class === 'sensitive'
-                            ? 'bg-amber-900/50 text-amber-300'
-                            : 'bg-gray-700 text-gray-300'
-                        }`}
-                      >
-                        {eo.retention_class}
-                      </span>
-                    )}
-                    {typeof eo.size_bytes === 'number' && (
-                      <span className="text-xs text-gray-400">{formatBytes(eo.size_bytes)}</span>
-                    )}
+            {evidenceObjects.map((eo) => {
+              const contentText = evidenceObjectContentText(eo.content)
+              return (
+                <div key={eo.id} className="bg-gray-800/60 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-200">{eo.object_type}</span>
+                    <div className="flex items-center gap-2">
+                      {eo.retention_class && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            eo.retention_class === 'sensitive'
+                              ? 'bg-amber-900/50 text-amber-300'
+                              : 'bg-gray-700 text-gray-300'
+                          }`}
+                        >
+                          {eo.retention_class}
+                        </span>
+                      )}
+                      {typeof eo.size_bytes === 'number' && (
+                        <span className="text-xs text-gray-400">{formatBytes(eo.size_bytes)}</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                  {eo.content_sha256 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    {eo.content_sha256 && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">sha256</span>
+                        <span className="text-gray-300 font-mono break-all">{eo.content_sha256}</span>
+                      </div>
+                    )}
+                    {eo.storage_uri && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">storage</span>
+                        <span className="text-gray-300 font-mono break-all">{eo.storage_uri}</span>
+                      </div>
+                    )}
+                    {eo.redaction_profile && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">redaction</span>
+                        <span className="text-gray-300">{eo.redaction_profile}</span>
+                      </div>
+                    )}
                     <div className="flex gap-2 min-w-0">
-                      <span className="text-gray-500 shrink-0">sha256</span>
-                      <span className="text-gray-300 font-mono break-all">{eo.content_sha256}</span>
+                      <span className="text-gray-500 shrink-0">id</span>
+                      <span className="text-gray-400 font-mono break-all">{eo.id}</span>
                     </div>
-                  )}
-                  {eo.storage_uri && (
-                    <div className="flex gap-2 min-w-0">
-                      <span className="text-gray-500 shrink-0">storage</span>
-                      <span className="text-gray-300 font-mono break-all">{eo.storage_uri}</span>
-                    </div>
-                  )}
-                  {eo.redaction_profile && (
-                    <div className="flex gap-2 min-w-0">
-                      <span className="text-gray-500 shrink-0">redaction</span>
-                      <span className="text-gray-300">{eo.redaction_profile}</span>
-                    </div>
-                  )}
-                  <div className="flex gap-2 min-w-0">
-                    <span className="text-gray-500 shrink-0">id</span>
-                    <span className="text-gray-400 font-mono break-all">{eo.id}</span>
                   </div>
+                  {contentText && (
+                    <details className="rounded border border-gray-800 bg-gray-950 p-2">
+                      <summary className="cursor-pointer text-xs font-medium text-gray-300">Object content</summary>
+                      <div className="mt-2 flex justify-end">
+                        <CopyButton text={contentText} label="Copy evidence object content" />
+                      </div>
+                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs text-gray-300">
+                        {contentText}
+                      </pre>
+                    </details>
+                  )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </SectionCard>
       )}

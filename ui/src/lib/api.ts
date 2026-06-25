@@ -1584,6 +1584,146 @@ export async function getApplicationGraph(targetId: string): Promise<Application
   return res.json()
 }
 
+export interface DeploymentDecision {
+  decision?: string
+  deploy_decision?: string
+  policy_profile?: string
+  policy_name?: string
+  rationale?: string
+  reason?: string
+  blocking_findings?: unknown[]
+  exceptions_applied?: unknown[]
+  expires_at?: string
+  [key: string]: unknown
+}
+
+export async function getScanDeploymentDecision(scanId: string): Promise<DeploymentDecision> {
+  const res = await fetch(`${API_URL}/scans/${scanId}/deployment-decision`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch deployment decision'))
+  return res.json()
+}
+
+export interface PolicyProfile {
+  id: string
+  name: string
+  product_area: string
+  environment: string
+  minimum_block_severity: string
+  expires_days: number
+  strict_model_intake: boolean
+  allow_active_exceptions: boolean
+  owner?: string | null
+  version?: string | null
+  is_active: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PolicyProfilePayload {
+  name: string
+  product_area: string
+  environment: string
+  minimum_block_severity: string
+  expires_days: number
+  strict_model_intake: boolean
+  allow_active_exceptions: boolean
+  owner?: string | null
+  version?: string | null
+  is_active: boolean
+}
+
+export async function getPolicyProfiles(): Promise<{ policy_profiles: PolicyProfile[] }> {
+  const res = await fetch(`${API_URL}/policy-profiles`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch policy profiles'))
+  return res.json()
+}
+
+export async function createPolicyProfile(data: PolicyProfilePayload): Promise<PolicyProfile> {
+  const res = await fetch(`${API_URL}/policy-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create policy profile'))
+  return res.json()
+}
+
+export async function updatePolicyProfile(id: string, data: PolicyProfilePayload): Promise<PolicyProfile> {
+  const res = await fetch(`${API_URL}/policy-profiles/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update policy profile'))
+  return res.json()
+}
+
+export async function deletePolicyProfile(id: string): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/policy-profiles/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete policy profile'))
+  return res.json()
+}
+
+export interface FindingException {
+  id: string
+  finding_id?: string | null
+  fingerprint?: string | null
+  policy_id?: string | null
+  target_id?: string | null
+  scope?: string | null
+  owner?: string | null
+  approver?: string | null
+  reason?: string | null
+  compensating_controls?: string | null
+  status: string
+  expires_at?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface FindingExceptionPayload {
+  finding_id?: string | null
+  fingerprint?: string | null
+  policy_id?: string | null
+  target_id?: string | null
+  scope?: string | null
+  owner?: string | null
+  approver?: string | null
+  reason?: string | null
+  compensating_controls?: string | null
+  status: string
+  expires_at?: string | null
+}
+
+export async function getFindingExceptions(params?: {
+  target_id?: string
+  status?: string
+}): Promise<{ finding_exceptions: FindingException[] }> {
+  const searchParams = new URLSearchParams()
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
+  if (params?.status) searchParams.set('status', params.status)
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/finding-exceptions${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch finding exceptions'))
+  return res.json()
+}
+
+export async function createFindingException(data: FindingExceptionPayload): Promise<FindingException> {
+  const res = await fetch(`${API_URL}/finding-exceptions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create finding exception'))
+  return res.json()
+}
+
+export async function deleteFindingException(id: string): Promise<{ deleted: boolean; id: string }> {
+  const res = await fetch(`${API_URL}/finding-exceptions/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete finding exception'))
+  return res.json()
+}
+
 export async function retestFinding(
   id: string,
   params: {

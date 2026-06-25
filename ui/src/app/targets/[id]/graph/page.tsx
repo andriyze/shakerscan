@@ -30,6 +30,10 @@ function GraphContent() {
   const [graph, setGraph] = useState<ApplicationGraph | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [nodeType, setNodeType] = useState('all')
+  const [edgeType, setEdgeType] = useState('all')
+  const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null)
 
   const fetchGraph = useCallback(async () => {
     try {
@@ -47,17 +51,59 @@ function GraphContent() {
     fetchGraph()
   }, [fetchGraph])
 
+  const visibleNodes = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return (graph?.nodes || []).filter((node) => {
+      if (nodeType !== 'all' && node.node_type !== nodeType) return false
+      if (!q) return true
+      const haystack = [
+        node.node_type,
+        node.node_key,
+        node.label,
+        JSON.stringify(node.attributes || {}),
+      ].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [graph, nodeType, search])
+  const visibleNodeKeys = useMemo(() => new Set(visibleNodes.map((node) => node.node_key)), [visibleNodes])
+  const visibleEdges = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return (graph?.edges || []).filter((edge) => {
+      if (edgeType !== 'all' && edge.edge_type !== edgeType) return false
+      if (!visibleNodeKeys.has(edge.src_key) && !visibleNodeKeys.has(edge.dst_key)) return false
+      if (!q) return true
+      const haystack = [
+        edge.edge_type,
+        edge.src_key,
+        edge.dst_key,
+        JSON.stringify(edge.attributes || {}),
+      ].join(' ').toLowerCase()
+      return haystack.includes(q) || visibleNodeKeys.has(edge.src_key) || visibleNodeKeys.has(edge.dst_key)
+    })
+  }, [edgeType, graph, search, visibleNodeKeys])
   const routes = useMemo(
-    () => (graph?.nodes || []).filter((n) => n.node_type === 'route'),
-    [graph]
+    () => visibleNodes.filter((n) => n.node_type === 'route'),
+    [visibleNodes]
   )
   const objects = useMemo(
-    () => (graph?.nodes || []).filter((n) => n.node_type === 'object'),
-    [graph]
+    () => visibleNodes.filter((n) => n.node_type === 'object'),
+    [visibleNodes]
+  )
+  const otherNodes = useMemo(
+    () => visibleNodes.filter((n) => n.node_type !== 'route' && n.node_type !== 'object'),
+    [visibleNodes]
   )
   const authBoundaries = useMemo(
-    () => (graph?.edges || []).filter((e) => e.edge_type === 'auth_boundary'),
-    [graph]
+    () => visibleEdges.filter((e) => e.edge_type === 'auth_boundary'),
+    [visibleEdges]
+  )
+  const selectedNode = useMemo(
+    () => (graph?.nodes || []).find((node) => node.node_key === selectedNodeKey) || null,
+    [graph, selectedNodeKey]
+  )
+  const selectedNodeEdges = useMemo(
+    () => (graph?.edges || []).filter((edge) => edge.src_key === selectedNodeKey || edge.dst_key === selectedNodeKey),
+    [graph, selectedNodeKey]
   )
 
   if (loading) {
@@ -116,6 +162,83 @@ function GraphContent() {
         )}
       </SectionCard>
 
+      <SectionCard title="Filters">
+        <div className="grid gap-3 md:grid-cols-[1fr_0.3fr_0.3fr]">
+          <label className="grid gap-1 text-sm text-gray-300">
+            Search
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              placeholder="route, object, principal, field"
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Node type
+            <select
+              value={nodeType}
+              onChange={(e) => setNodeType(e.target.value)}
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="all">All nodes</option>
+              {Object.keys(summary.by_node_type || {}).map((type) => <option key={type} value={type}>{type}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm text-gray-300">
+            Edge type
+            <select
+              value={edgeType}
+              onChange={(e) => setEdgeType(e.target.value)}
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="all">All edges</option>
+              {Object.keys(summary.by_edge_type || {}).map((type) => <option key={type} value={type}>{type}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="mt-3 text-xs text-gray-500">
+          Showing {visibleNodes.length} of {summary.node_count} nodes and {visibleEdges.length} of {summary.edge_count} edges.
+        </div>
+      </SectionCard>
+
+      {selectedNode && (
+        <SectionCard
+          title="Selected Node"
+          actions={
+            <button type="button" onClick={() => setSelectedNodeKey(null)} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              Clear
+            </button>
+          }
+        >
+          <div className="space-y-3">
+            <div>
+              <div className="font-mono text-sm text-gray-200 break-all">{nodeLabel(selectedNode)}</div>
+              <div className="mt-1 text-xs text-gray-500">{selectedNode.node_type} · {selectedNode.node_key}</div>
+            </div>
+            {selectedNode.attributes && Object.keys(selectedNode.attributes).length > 0 && (
+              <pre className="max-h-56 overflow-auto rounded border border-gray-800 bg-gray-950 p-2 text-xs text-gray-300">
+                {JSON.stringify(selectedNode.attributes, null, 2)}
+              </pre>
+            )}
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-gray-400">Connected edges ({selectedNodeEdges.length})</div>
+              {selectedNodeEdges.length === 0 ? (
+                <div className="text-xs text-gray-500">No connected edges yet.</div>
+              ) : (
+                selectedNodeEdges.slice(0, 12).map((edge) => (
+                  <div key={edge.id} className="rounded border border-gray-800 bg-gray-950 px-2 py-1 text-xs text-gray-300">
+                    <span className="text-purple-300">{edge.edge_type}</span>{' '}
+                    <span className="font-mono break-all">{keyLabel(edge.src_key)}</span>
+                    <span className="mx-1 text-gray-500">→</span>
+                    <span className="font-mono break-all">{keyLabel(edge.dst_key)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </SectionCard>
+      )}
+
       {authBoundaries.length > 0 && (
         <SectionCard title="Auth boundaries (cross-principal access surface)">
           <div className="space-y-2">
@@ -165,9 +288,11 @@ function GraphContent() {
           ) : (
             <div className="space-y-1 max-h-96 overflow-y-auto">
               {routes.map((n) => (
-                <div
+                <button
+                  type="button"
                   key={n.id}
-                  className="flex items-center justify-between gap-2 text-xs py-1 border-b border-gray-800/60"
+                  onClick={() => setSelectedNodeKey(n.node_key)}
+                  className="flex w-full items-center justify-between gap-2 border-b border-gray-800/60 py-1 text-left text-xs hover:bg-gray-800/40"
                 >
                   <span className="font-mono text-gray-300 break-all">{nodeLabel(n)}</span>
                   {n.attributes?.role ? (
@@ -175,7 +300,7 @@ function GraphContent() {
                       {String(n.attributes.role)}
                     </span>
                   ) : null}
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -189,18 +314,69 @@ function GraphContent() {
               {objects.map((n) => {
                 const sensitive = asStringList(n.attributes?.sensitive_fields)
                 return (
-                  <div key={n.id} className="text-xs py-1 border-b border-gray-800/60">
+                  <button
+                    type="button"
+                    key={n.id}
+                    onClick={() => setSelectedNodeKey(n.node_key)}
+                    className="w-full border-b border-gray-800/60 py-1 text-left text-xs hover:bg-gray-800/40"
+                  >
                     <span className="font-mono text-gray-300">{nodeLabel(n)}</span>
                     {sensitive.length > 0 ? (
                       <span className="ml-2 text-amber-300">[{sensitive.join(', ')}]</span>
                     ) : null}
-                  </div>
+                  </button>
                 )
               })}
             </div>
           )}
         </SectionCard>
       </div>
+
+      {otherNodes.length > 0 && (
+        <SectionCard title={`Other Nodes (${otherNodes.length})`}>
+          <div className="grid gap-1 sm:grid-cols-2">
+            {otherNodes.map((node) => (
+              <button
+                key={node.id}
+                type="button"
+                onClick={() => setSelectedNodeKey(node.node_key)}
+                className="rounded border border-gray-800 bg-gray-950 px-2 py-1 text-left text-xs hover:bg-gray-800/60"
+              >
+                <span className="text-gray-500">{node.node_type}</span>{' '}
+                <span className="font-mono text-gray-300 break-all">{nodeLabel(node)}</span>
+              </button>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      <SectionCard title={`Edges (${visibleEdges.length})`}>
+        {visibleEdges.length === 0 ? (
+          <p className="text-xs text-gray-500">No edges match the current filters.</p>
+        ) : (
+          <div className="space-y-1 max-h-[32rem] overflow-y-auto">
+            {visibleEdges.map((edge) => (
+              <div key={edge.id} className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded bg-purple-900/40 px-1.5 py-0.5 text-purple-200">{edge.edge_type}</span>
+                  <button type="button" onClick={() => setSelectedNodeKey(edge.src_key)} className="font-mono text-gray-200 hover:text-blue-300 break-all">
+                    {keyLabel(edge.src_key)}
+                  </button>
+                  <span className="text-gray-500">→</span>
+                  <button type="button" onClick={() => setSelectedNodeKey(edge.dst_key)} className="font-mono text-gray-200 hover:text-blue-300 break-all">
+                    {keyLabel(edge.dst_key)}
+                  </button>
+                </div>
+                {edge.attributes && Object.keys(edge.attributes).length > 0 && (
+                  <pre className="mt-2 max-h-40 overflow-auto rounded bg-gray-900 p-2 text-gray-400">
+                    {JSON.stringify(edge.attributes, null, 2)}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
     </div>
   )
 }

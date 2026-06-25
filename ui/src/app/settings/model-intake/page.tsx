@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import {
   getAITestScenarios,
+  getPolicyProfiles,
   resolveModelIntakeReference,
   submitModelIntakeScan,
   type AITestReadinessControl,
@@ -30,6 +31,7 @@ import {
   type ModelIntakePreset,
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
+  type PolicyProfile as SavedPolicyProfile,
 } from '@/lib/api'
 
 const inputClass =
@@ -126,9 +128,9 @@ const PLATFORM_OPTIONS: Array<{
   },
 ]
 
-type PolicyProfile = 'research' | 'staging' | 'production' | 'strict'
+type BuiltinPolicyProfile = 'research' | 'staging' | 'production' | 'strict'
 
-const POLICY_PROFILES: Array<{ value: PolicyProfile; label: string; helper: string }> = [
+const POLICY_PROFILES: Array<{ value: BuiltinPolicyProfile; label: string; helper: string }> = [
   { value: 'research', label: 'Research', helper: 'Format and provenance review without approval gating' },
   { value: 'staging', label: 'Staging', helper: 'Require checksum, signature evidence, and governance basics' },
   { value: 'production', label: 'Production', helper: 'Require approval, evidence, and deployment controls' },
@@ -284,7 +286,9 @@ export default function ModelIntakeSettingsPage() {
   const [requireModelGovernance, setRequireModelGovernance] = useState(true)
   const [maxDownloadBytes, setMaxDownloadBytes] = useState('10000000')
   const [timeoutSeconds, setTimeoutSeconds] = useState('20')
-  const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('production')
+  const [policyProfile, setPolicyProfile] = useState<string>('production')
+  const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
+  const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<IntakeFormErrors>({})
@@ -307,9 +311,22 @@ export default function ModelIntakeSettingsPage() {
     }
   }, [])
 
+  const loadPolicyProfiles = useCallback(async () => {
+    setPolicyProfilesLoading(true)
+    try {
+      const payload = await getPolicyProfiles()
+      setSavedPolicyProfiles(payload.policy_profiles || [])
+    } catch {
+      setSavedPolicyProfiles([])
+    } finally {
+      setPolicyProfilesLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadScenario()
-  }, [loadScenario])
+    loadPolicyProfiles()
+  }, [loadScenario, loadPolicyProfiles])
 
   const selectedPlatform = platform === 'auto'
     ? AUTO_PLATFORM_OPTION
@@ -322,6 +339,10 @@ export default function ModelIntakeSettingsPage() {
     }
   }, [metadataJson])
   const metadataPreview = parsedMetadata ? Object.keys(parsedMetadata).length : metadataJson.trim() ? null : 0
+  const activeSavedPolicyProfiles = useMemo(
+    () => savedPolicyProfiles.filter((profile) => profile.is_active),
+    [savedPolicyProfiles]
+  )
 
   function applyScanPayload(payload: ModelIntakeScanRequest) {
     setFieldErrors({})
@@ -348,9 +369,7 @@ export default function ModelIntakeSettingsPage() {
     setRequireModelGovernance(payload.require_model_governance ?? true)
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
-    if (payload.policy_profile && POLICY_PROFILES.some((profile) => profile.value === payload.policy_profile)) {
-      setPolicyProfile(payload.policy_profile as PolicyProfile)
-    }
+    if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
   }
 
   function validateField(field: keyof IntakeFormErrors) {
@@ -457,8 +476,18 @@ export default function ModelIntakeSettingsPage() {
     setMetadataJson(JSON.stringify(example === 'complete' ? COMPLETE_METADATA_EXAMPLE : MINIMAL_METADATA_EXAMPLE, null, 2))
   }
 
-  function applyPolicyProfile(profile: PolicyProfile) {
+  function applyPolicyProfile(profile: string) {
     setPolicyProfile(profile)
+    const saved = activeSavedPolicyProfiles.find((item) => item.environment === profile)
+    if (saved) {
+      setRequireHash(true)
+      setRequireSignature(true)
+      setRequireModelGovernance(true)
+      setRequireDeploymentApproval(saved.product_area === 'model_intake' || saved.minimum_block_severity !== 'info')
+      setRequireSignatureVerification(Boolean(saved.strict_model_intake))
+      setMaxDownloadBytes(saved.strict_model_intake ? '50000000' : '10000000')
+      return
+    }
     if (profile === 'research') {
       setRequireDeploymentApproval(false)
       setRequireSignature(false)
@@ -751,9 +780,14 @@ export default function ModelIntakeSettingsPage() {
       </Card>
 
       <Card className="p-4">
-        <div className="flex items-center gap-2 text-white">
-          <ShieldCheck className="h-4 w-4 text-cyan-300" />
-          <h2 className="text-sm font-semibold">2. Policy Profile</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-white">
+            <ShieldCheck className="h-4 w-4 text-cyan-300" />
+            <h2 className="text-sm font-semibold">2. Policy Profile</h2>
+          </div>
+          <Link href="/settings/policy-profiles" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+            Manage
+          </Link>
         </div>
         <div className="mt-4 grid gap-2 md:grid-cols-4">
           {POLICY_PROFILES.map((profile) => (
@@ -769,7 +803,26 @@ export default function ModelIntakeSettingsPage() {
               <div className="mt-1 text-xs text-gray-500">{profile.helper}</div>
             </button>
           ))}
+          {activeSavedPolicyProfiles.map((profile) => (
+            <button
+              key={profile.id}
+              type="button"
+              onClick={() => applyPolicyProfile(profile.environment)}
+              className={`rounded-lg border p-3 text-left ${
+                policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-medium text-white">{profile.name}</div>
+                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
+              </div>
+            </button>
+          ))}
         </div>
+        {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
       </Card>
 
       <form onSubmit={handleSubmit} className="space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">

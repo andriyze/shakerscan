@@ -21,6 +21,12 @@ skills).**
   detached signature value, trusted-key PEM, trusted-key SHA-256 fingerprints, and
   signature payload/hash/padding controls instead of leaving the trusted path API-only;
   the complete metadata example no longer asserts claim-only `sigstore_verified: true`.
+- **P1-5/P1-6 UI follow-through**: policy profile CRUD is available at
+  `/settings/policy-profiles`, saved profiles are selectable from Model Intake, durable
+  evidence object content is visible on finding detail, finding exceptions can be created
+  and deleted from finding detail, and `/targets/{id}/graph` has node/edge filters plus
+  selected-node inspection. Scan detail now refreshes `/scans/{id}/deployment-decision`
+  live instead of relying only on embedded scan result state.
 
 ## Review corrections (2026-06-25, second review of this cycle)
 A follow-up review caught real defects in the first cut — all fixed + validated:
@@ -81,11 +87,13 @@ Add `proof_contract` + `severity_rules` + telemetry schema + permissions to
 execution from the registry instead of direct module/task calls. Multi-session.
 
 ## Phase F — Close UI + skill gaps (make existing backend usable)
-Backend exists; UI/skill don't drive it. Each bounded:
+Backend exists; some UI/skill paths still need to drive it. Each bounded:
 - Model Intake UI: **done for request wiring** — `policy_profile` and trusted-key /
-  public-key / signature controls now submit through the public UI, and the complete
-  metadata example no longer asserts claim-only signature verification (P1-6).
-- Policy/exception UI + live deployment-decision refresh on the scan page (P1-5).
+  public-key / signature controls now submit through the public UI, saved policy profiles
+  are selectable, and the complete metadata example no longer asserts claim-only signature
+  verification (P1-6).
+- Policy profile UI: **done for CRUD** at `/settings/policy-profiles`; exception-from-finding
+  and live deployment-decision refresh are also wired on the finding/scan detail pages (P1-5).
 - AI principals management UI (attacker/victim/admin/service, tenant, credential,
   rotation, principal-pair preview) (P1-7).
 - AI surfaces ledger page (sync, attempts, coverage by family, runtime risk,

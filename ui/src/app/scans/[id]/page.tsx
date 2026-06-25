@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getScan, getScanLogs, getHealth, formatDuration } from '@/lib/api'
+import { getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -177,6 +177,58 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             return null
           })()}
         </div>
+      </div>
+    </Card>
+  )
+}
+
+function DeploymentDecisionCard({
+  decision,
+  loading,
+  onRefresh,
+}: {
+  decision: DeploymentDecision | null
+  loading: boolean
+  onRefresh: () => void
+}) {
+  if (!decision && !loading) return null
+  const verdict = String(decision?.decision || decision?.deploy_decision || 'unknown').toLowerCase()
+  const blockingCount = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings.length : 0
+  const exceptionCount = Array.isArray(decision?.exceptions_applied) ? decision.exceptions_applied.length : 0
+  const verdictClass =
+    verdict === 'block'
+      ? 'bg-red-900/50 text-red-200'
+      : verdict === 'allow'
+        ? 'bg-green-900/50 text-green-200'
+        : 'bg-amber-900/50 text-amber-200'
+
+  return (
+    <Card className="p-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-300">Deployment Decision</h2>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className={`rounded px-2 py-1 text-xs font-medium ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
+            {decision?.policy_profile && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{String(decision.policy_profile)}</span>}
+            {decision?.policy_name && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{String(decision.policy_name)}</span>}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+        >
+          {loading ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+      {(decision?.rationale || decision?.reason) && (
+        <p className="mt-3 text-sm text-gray-300">{String(decision.rationale || decision.reason)}</p>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+        <span>{blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}</span>
+        <span>{exceptionCount} exception{exceptionCount === 1 ? '' : 's'} applied</span>
+        {decision?.expires_at && <span>expires {String(decision.expires_at)}</span>}
       </div>
     </Card>
   )
@@ -462,6 +514,8 @@ function ScanDetailContent() {
   const [logsError, setLogsError] = useState<string | null>(null)
   const [buildVersion, setBuildVersion] = useState<string | null>(null)
   const [buildFingerprint, setBuildFingerprint] = useState<string | null>(null)
+  const [deploymentDecision, setDeploymentDecision] = useState<DeploymentDecision | null>(null)
+  const [deploymentDecisionLoading, setDeploymentDecisionLoading] = useState(false)
   const logsRef = useRef<HTMLDivElement | null>(null)
 
   // Build back URL with preserved filters
@@ -478,12 +532,26 @@ function ScanDetailContent() {
 
   const backUrl = buildBackUrl()
 
+  async function refreshDeploymentDecision() {
+    setDeploymentDecisionLoading(true)
+    try {
+      setDeploymentDecision(await getScanDeploymentDecision(scanId))
+    } catch {
+      setDeploymentDecision(null)
+    } finally {
+      setDeploymentDecisionLoading(false)
+    }
+  }
+
   useEffect(() => {
     async function fetchScanAndLogs() {
       try {
         const data = await getScan(scanId)
         setScan(data)
         setError(null)
+        if (data?.status === 'completed' || data?.status === 'failed') {
+          refreshDeploymentDecision()
+        }
         if (data?.status === 'running' || data?.status === 'pending') {
           try {
             const logData = await getScanLogs(scanId, 200)
@@ -643,6 +711,11 @@ function ScanDetailContent() {
           </div>
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
+          <DeploymentDecisionCard
+            decision={deploymentDecision}
+            loading={deploymentDecisionLoading}
+            onRefresh={refreshDeploymentDecision}
+          />
           <ReportView
             scan={scan}
             isAuthenticated={true}
@@ -687,6 +760,11 @@ function ScanDetailContent() {
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
+      <DeploymentDecisionCard
+        decision={deploymentDecision}
+        loading={deploymentDecisionLoading}
+        onRefresh={refreshDeploymentDecision}
+      />
       <ReportView
         scan={scan}
         isAuthenticated={true}
