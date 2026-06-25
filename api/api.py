@@ -6274,6 +6274,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
             target_id = await conn.fetchval("""
                 INSERT INTO targets (url, name, root_domain, discovery_source)
                 VALUES ($1, $2, $3, 'model-intake')
+                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, artifact_ref, target_name, extract_root_domain(artifact_ref))
 
@@ -8437,6 +8438,7 @@ async def submit_scan(request: ScanRequest):
             target_id = await conn.fetchval("""
                 INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target),
                  _default_asm_enabled_for_new_web_target("manual"),
@@ -9721,21 +9723,25 @@ async def create_target(request: TargetCreate):
 
     async with db_pool.acquire() as conn:
         try:
-            target_id = await conn.fetchval("""
+            # Canonical find-or-create: a scheme/trailing-slash variant of an existing
+            # origin reuses that target instead of creating a duplicate. xmax = 0 is
+            # true only for a freshly INSERTed row, so we can report created vs reused.
+            row = await conn.fetchrow("""
                 INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                RETURNING id
+                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                RETURNING id, url, (xmax = 0) AS created
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
             response = {
-                'id': str(target_id),
-                'url': normalized_target,
+                'id': str(row['id']),
+                'url': row['url'],
                 'root_domain': root_domain,
                 'is_root': is_root,
-                'status': 'created'
+                'status': 'created' if row['created'] else 'already_exists'
             }
             # Surface warning if path/query was stripped
             if target_note:
@@ -12369,6 +12375,7 @@ async def create_manual_finding(request: ManualFindingCreate):
             target_id = await conn.fetchval("""
                 INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, 'manual', $4, $5)
+                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
                  _default_asm_enabled_for_new_web_target("manual"),
@@ -13880,6 +13887,7 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
             target_id = await conn.fetchval("""
                 INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, 'ai_session', $4, $5)
+                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
                  _default_asm_enabled_for_new_web_target("ai_session"),

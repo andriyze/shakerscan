@@ -14,6 +14,9 @@ CREATE TABLE targets (
 
     -- Target identification
     url TEXT UNIQUE NOT NULL,
+    -- Scheme/trailing-slash-insensitive canonical origin (auto-maintained by the
+    -- trg_targets_canonical_key trigger below); UNIQUE so duplicate origins can't form.
+    canonical_key TEXT,
     name TEXT,
     root_domain TEXT,
     is_root BOOLEAN DEFAULT false,  -- true for root domains, false for subdomains
@@ -50,6 +53,20 @@ CREATE TABLE targets (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Canonical de-dupe: keep canonical_key in sync with url (must match the Python
+-- _canonical_target_key in api.py), and forbid two rows sharing a canonical origin.
+CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+BEGIN
+    NEW.canonical_key := rtrim(
+        regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_targets_canonical_key
+    BEFORE INSERT OR UPDATE OF url ON targets
+    FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key();
+CREATE UNIQUE INDEX idx_targets_canonical_key ON targets(canonical_key);
 
 -- ============================================================
 -- SCANS - Individual scan runs

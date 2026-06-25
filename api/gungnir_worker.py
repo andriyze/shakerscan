@@ -76,7 +76,7 @@ async def store_subdomain(subdomain: str, root_domain: str) -> bool:
             row = await conn.fetchrow("""
                 INSERT INTO targets (url, root_domain, is_root, discovery_source)
                 VALUES ($1, $2, false, 'gungnir-monitor')
-                ON CONFLICT (url) DO NOTHING
+                ON CONFLICT (canonical_key) DO NOTHING
                 RETURNING id
             """, f"https://{subdomain}", root_domain)
             if not row:

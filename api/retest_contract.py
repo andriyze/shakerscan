@@ -1376,6 +1376,39 @@ async def run_schema_migrations(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_nodes_target ON application_graph_nodes(target_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_edges_target ON application_graph_edges(target_id)")
+
+            # Canonical de-dupe PREVENTION: a scheme/trailing-slash-insensitive key on
+            # targets, auto-maintained by a trigger, with a UNIQUE index so duplicate
+            # origins can't re-form. Must stay byte-identical to the Python
+            # _canonical_target_key in api.py (strip scheme, lowercase, strip trailing /).
+            await conn.execute("ALTER TABLE targets ADD COLUMN IF NOT EXISTS canonical_key TEXT")
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+                BEGIN
+                    NEW.canonical_key := rtrim(
+                        regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', ''), '/');
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await conn.execute("DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets")
+            await conn.execute("""
+                CREATE TRIGGER trg_targets_canonical_key
+                    BEFORE INSERT OR UPDATE OF url ON targets
+                    FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key()
+            """)
+            await conn.execute("""
+                UPDATE targets
+                SET canonical_key = rtrim(regexp_replace(lower(btrim(url)), '^https?://', ''), '/')
+                WHERE url IS NOT NULL AND (canonical_key IS NULL OR canonical_key = '')
+            """)
+            try:
+                await conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
+                )
+            except Exception as canon_err:  # pragma: no cover - only if residual dupes
+                print(f"[schema] canonical_key unique index not created (run POST "
+                      f"/targets/dedupe?dry_run=false, then restart): {canon_err}", flush=True)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

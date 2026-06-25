@@ -4764,7 +4764,7 @@ async def process_discovery_job(job_data: dict):
                     await conn.execute("""
                         INSERT INTO targets (url, root_domain, is_root, discovery_source)
                         VALUES ($1, $2, false, 'subfinder')
-                        ON CONFLICT (url) DO NOTHING
+                        ON CONFLICT (canonical_key) DO NOTHING
                     """, f"https://{subdomain}", root_domain)
                 except Exception:
                     pass
