@@ -8714,16 +8714,24 @@ async def get_scan_deployment_decision(scan_id: str):
               AND (expires_at IS NULL OR expires_at > NOW())
               AND (target_id IS NULL OR target_id = $1)
         """, target_id)
-        # Unresolved (active) critical/high findings on the SAME target — these gate
-        # deploy even if the current scan did not re-detect them (merged in
-        # build_deployment_decision; fail-closed).
+        # Unresolved (active) critical/high findings on the SAME canonical origin —
+        # these gate deploy even if the current scan did not re-detect them and even if
+        # the origin is split across scheme/slash duplicate target rows (so scanning a
+        # zero-finding duplicate cannot hide a sibling's criticals). Fail-closed.
+        sibling_ids: list = [target_id] if target_id else []
+        if target_id:
+            this_target = await conn.fetchrow("SELECT url FROM targets WHERE id = $1", target_id)
+            if this_target:
+                canon = _canonical_target_key(this_target["url"])
+                all_targets = await conn.fetch("SELECT id, url FROM targets")
+                sibling_ids = [r["id"] for r in all_targets if _canonical_target_key(r["url"]) == canon] or [target_id]
         taf_rows = await conn.fetch("""
             SELECT id, fingerprint, title, severity, tool, url
             FROM findings
-            WHERE target_id = $1 AND status = 'active'
+            WHERE target_id = ANY($1::uuid[]) AND status = 'active'
               AND severity IN ('critical', 'high')
             LIMIT 200
-        """, target_id) if target_id else []
+        """, sibling_ids) if sibling_ids else []
 
     target_active_findings = [{
         "id": str(r["id"]),
@@ -9370,6 +9378,115 @@ def _dedupe_canonical_target_rows(rows: list) -> list:
         elif rank(row) > rank(survivors[key]):
             survivors[key] = row
     return [survivors[k] for k in order]
+
+
+# target_id-bearing tables with a UNIQUE(target_id, ...) constraint — reassigning a
+# duplicate's rows can collide, so colliding rows are dropped first (keep one per key).
+_TARGET_MERGE_UNIQUE_TABLES: list[tuple[str, list[str]]] = [
+    ("findings", ["fingerprint"]),
+    ("target_endpoints", ["fingerprint"]),
+    ("application_graph_nodes", ["node_type", "node_key"]),
+    ("application_graph_edges", ["src_key", "dst_key", "edge_type"]),
+]
+# target_id-bearing tables with no target_id unique constraint — plain reassignment.
+_TARGET_MERGE_PLAIN_TABLES: list[str] = [
+    "scans", "scan_campaigns", "schedules", "finding_exceptions", "finding_verifications",
+]
+
+
+async def _merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
+    """Reassign every child row of the duplicate targets to the survivor, then delete
+    the duplicates. Runs inside the caller's transaction. For UNIQUE(target_id, …)
+    tables, a duplicate row is dropped when its key already exists on the survivor OR
+    on a lower-id sibling row (so dupe-vs-dupe collisions are resolved too); NULL keys
+    never collide and are simply reassigned."""
+    for table, key_cols in _TARGET_MERGE_UNIQUE_TABLES:
+        key_match = " AND ".join(f"o.{c} = d.{c}" for c in key_cols)
+        await conn.execute(f"""
+            DELETE FROM {table} d
+            WHERE d.target_id = ANY($1::uuid[])
+              AND EXISTS (
+                SELECT 1 FROM {table} o
+                WHERE {key_match}
+                  AND (o.target_id = $2 OR (o.target_id = ANY($1::uuid[]) AND o.id < d.id))
+              )
+        """, dupe_ids, survivor_id)
+        await conn.execute(
+            f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
+            dupe_ids, survivor_id,
+        )
+    for table in _TARGET_MERGE_PLAIN_TABLES:
+        await conn.execute(
+            f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
+            dupe_ids, survivor_id,
+        )
+    # Subdomains whose parent was a duplicate now point at the survivor.
+    await conn.execute(
+        "UPDATE targets SET parent_target_id = $2 WHERE parent_target_id = ANY($1::uuid[])",
+        dupe_ids, survivor_id,
+    )
+    await conn.execute("DELETE FROM targets WHERE id = ANY($1::uuid[])", dupe_ids)
+    # Recompute the survivor's denormalized counts from the merged child rows.
+    await conn.execute("""
+        UPDATE targets SET
+            active_findings_count = (SELECT count(*) FROM findings WHERE target_id = $1 AND status = 'active'),
+            total_scans = (SELECT count(*) FROM scans WHERE target_id = $1)
+        WHERE id = $1
+    """, survivor_id)
+
+
+@app.post("/targets/dedupe")
+async def dedupe_targets(dry_run: bool = True):
+    """Merge scheme/trailing-slash duplicate target rows that share a canonical origin
+    into one survivor (active > most findings > most scans > https), reassigning all
+    scans/findings/endpoints/graph/schedules/exceptions and deleting the duplicates.
+    Defaults to a dry run; pass dry_run=false to execute. Idempotent and per-group
+    transactional."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, url, is_active, total_scans, active_findings_count, created_at FROM targets"
+        )
+        groups: dict[str, list] = {}
+        for r in rows:
+            groups.setdefault(_canonical_target_key(r["url"]), []).append(r)
+
+        plan: list[dict[str, Any]] = []
+        for key, members in groups.items():
+            if len(members) < 2:
+                continue
+            ranked = sorted(members, key=lambda r: (
+                1 if r["is_active"] else 0,
+                int(r["active_findings_count"] or 0),
+                int(r["total_scans"] or 0),
+                1 if str(r["url"] or "").lower().startswith("https://") else 0,
+            ), reverse=True)
+            survivor, dupes = ranked[0], ranked[1:]
+            plan.append({
+                "canonical": key,
+                "survivor": {"id": str(survivor["id"]), "url": survivor["url"],
+                             "active_findings_count": survivor["active_findings_count"],
+                             "total_scans": survivor["total_scans"]},
+                "merged": [{"id": str(d["id"]), "url": d["url"],
+                            "active_findings_count": d["active_findings_count"],
+                            "total_scans": d["total_scans"]} for d in dupes],
+            })
+
+        executed = 0
+        if not dry_run:
+            for item in plan:
+                survivor_id = uuid.UUID(item["survivor"]["id"])
+                dupe_ids = [uuid.UUID(m["id"]) for m in item["merged"]]
+                async with conn.transaction():
+                    await _merge_target_group(conn, survivor_id, dupe_ids)
+                executed += 1
+
+        return {
+            "dry_run": dry_run,
+            "groups_found": len(plan),
+            "targets_merged": sum(len(p["merged"]) for p in plan),
+            "groups_executed": executed,
+            "plan": plan,
+        }
 
 
 @app.get("/targets/grouped")
