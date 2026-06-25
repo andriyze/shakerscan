@@ -18,11 +18,27 @@ skills).**
 - **P3-13** worker fail-closed on build-stale jobs before execution (requeue → fail-closed).
 - **P2-11** e2e plan doc corrected: fast gate = integration/hardening; recall = nightly.
 
+## Review corrections (2026-06-25, second review of this cycle)
+A follow-up review caught real defects in the first cut — all fixed + validated:
+- **worker freshness failed OPEN**: an unknown fingerprint (`None`) was treated as
+  safe-to-run. Now only a *provably current* worker runs; unknown ⇒ refuse. Test
+  `test_unknown_fingerprint_fails_closed`. Requeue is now time-based (a current
+  worker in a mixed fleet takes it in seconds; only a sustained fully-stale window
+  fails closed) instead of bounce-count-based.
+- **evidence write was INSIDE the finding txn** (the doc claimed outside). Dedented
+  to the loop body so it runs after commit — a poisoned txn can't roll the finding back.
+- **AI Gate findings had no evidence objects**: `save_ai_findings` now writes
+  `ai_gate_evidence` objects (sensitive retention). Live-validated.
+- **evidence API 500'd on a non-UUID**: `GET /findings/{id}/evidence` now resolves
+  id-or-fingerprint (404 on unknown); `GET /evidence/{id}` 400s on a bad UUID.
+- **Model-Intake trusted-key API fields** now accept scalar-or-list (match the scanner).
+
 ## Phase B — Evidence object store (P0-3) — ✅ DONE (complete vertical slice)
-Shipped: `evidence_objects` table + migration; `save_findings` writes one hashed,
-redaction-profiled, retention-classed object per finding (best-effort, outside the
-finding txn so it never rolls the scan back); `GET /findings/{id}/evidence` +
-`GET /evidence/{id}`. Live-validated (a real scan wrote 4 objects) + unit tests.
+Shipped: `evidence_objects` table + migration; `save_findings` AND `save_ai_findings`
+each write one hashed, redaction-profiled, retention-classed object per finding
+(best-effort, AFTER the per-finding txn commits so it can't roll the scan back);
+`GET /findings/{id}/evidence` (id-or-fingerprint) + `GET /evidence/{id}`.
+Live-validated (DAST + AI findings both get objects) + unit tests.
 Next phase here: externalize inline content to an object store (file://) for large
 blobs + a retention sweeper. Original slice spec below.
 
@@ -37,12 +53,17 @@ A complete vertical slice, not an orphaned table:
 4. Care: `save_findings` is fragile (the NUL-byte finalize-hang lived here) — strip
    control bytes, wrap in try/except, never let evidence-object writes fail the scan.
 
-## Phase C — Application graph (P0-2) — biggest
-First-class `ApplicationGraph` per target: `graph_nodes` (routes, params, object IDs,
-sensitive fields, roles, tenants, workflow states) + `graph_edges` (producer/consumer,
-auth boundary). Populate by persisting the in-memory `resource_map`
-(access_control_checks.py:2419/2564); consumers = BOLA/IDOR planning reads the durable
-graph. Multi-session; improves BOLA recall (feeds Phase D).
+## Phase C — Application graph (P0-2) — ✅ PHASE 1 DONE (write+read; consumer pending)
+Shipped: `application_graph_nodes` + `application_graph_edges` tables + migration; a pure
+`build_application_graph(result)` transform (route nodes from discovery; object nodes +
+produces/consumed_by/auth_boundary edges with the principal pair + sensitive fields from the
+BOLA `resource_map`, found recursively); best-effort `persist_application_graph` hooked into
+scan finalization; `GET /targets/{id}/graph` (node_type/edge_type filters + summary).
+**Live-validated:** a real scan wrote 8 route nodes; the read endpoint returns them. Edge
+population (producer/consumer/auth-boundary) is unit-tested on the transform but only emits on a
+dual-user BOLA pass — a live dual-user run is the remaining validation. **Phase 2 (consumer):**
+BOLA/IDOR planning reads the durable graph instead of rebuilding it per-scan (improves recall,
+feeds Phase D); add params/roles/tenants/workflow-state node types.
 
 ## Phase D — Broad DAST recall (P0-1) — open-ended quality
 Drive the nightly Juice Shop benchmark to its gates (min_verified_high_critical ≥ 6,

@@ -244,6 +244,38 @@ CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
 CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
 
 -- ============================================================
+-- APPLICATION GRAPH - First-class per-target graph of routes,
+-- objects, producer/consumer links, auth boundaries, sensitive
+-- fields (persisted from the BOLA resource_map + discovery)
+-- ============================================================
+CREATE TABLE application_graph_nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    node_type TEXT NOT NULL,        -- route | object | principal
+    node_key TEXT NOT NULL,         -- canonical, type-prefixed id
+    label TEXT,
+    attributes JSONB,
+    scan_id UUID,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT app_graph_node_unique UNIQUE (target_id, node_type, node_key)
+);
+CREATE TABLE application_graph_edges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    src_key TEXT NOT NULL,
+    dst_key TEXT NOT NULL,
+    edge_type TEXT NOT NULL,        -- produces | consumed_by | auth_boundary
+    attributes JSONB,
+    scan_id UUID,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT app_graph_edge_unique UNIQUE (target_id, src_key, dst_key, edge_type)
+);
+CREATE INDEX idx_app_graph_nodes_target ON application_graph_nodes(target_id);
+CREATE INDEX idx_app_graph_edges_target ON application_graph_edges(target_id);
+
+-- ============================================================
 -- FINDING VERIFICATIONS - Retest attempts and proof history
 -- ============================================================
 CREATE TABLE finding_verifications (

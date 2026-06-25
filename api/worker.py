@@ -1644,7 +1644,8 @@ def _strip_null_bytes(value):
     return value
 
 
-async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted) -> None:
+async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted,
+                                   *, tool_override: str | None = None) -> None:
     """Best-effort: persist a finding's (already null-stripped + redacted) evidence as
     a first-class durable evidence_object. NEVER raises — an evidence-object write must
     not fail or roll back the scan; findings.evidence stays the back-compat source of
@@ -1655,7 +1656,7 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
         content = evidence_redacted if evidence_redacted else None
         raw = json.dumps(content, sort_keys=True, default=str) if content is not None else None
         sha = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest() if raw else None
-        tool = finding.get("tool")
+        tool = tool_override or finding.get("tool")
         object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
         retention = "sensitive" if (
             finding.get("request") or finding.get("response")
@@ -1675,6 +1676,112 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
              "inline:evidence_objects", "redact_sensitive_v1", retention, raw)
     except Exception as e:
         print(f"[evidence] persist failed for finding {finding_id}: {type(e).__name__}: {e}", flush=True)
+
+
+def build_application_graph(result: dict) -> tuple[dict, dict]:
+    """Pure transform: scan result -> (nodes, edges) for the first-class application
+    graph. nodes: node_key -> {node_type,label,attributes}; edges: (src,dst,type) ->
+    attributes. Producer/consumer/object/auth-boundary structure comes from the BOLA
+    resource_map (found recursively, wherever it lands in the report); route nodes
+    also come from discovery so the graph has context even without a dual-user pass."""
+    nodes: dict = {}
+    edges: dict = {}
+    if not isinstance(result, dict):
+        return nodes, edges
+
+    def add_route(method_path, attrs=None):
+        mp = str(method_path or "").strip()
+        if not mp:
+            return None
+        key = f"route:{mp}"
+        node = nodes.setdefault(key, {"node_type": "route", "label": mp, "attributes": {}})
+        if attrs:
+            node["attributes"].update({k: v for k, v in attrs.items() if v is not None})
+        return key
+
+    def add_object(obj_key, attrs=None):
+        ok = str(obj_key or "object_id").strip() or "object_id"
+        key = f"object:{ok}"
+        node = nodes.setdefault(key, {"node_type": "object", "label": ok, "attributes": {}})
+        if attrs:
+            node["attributes"].update({k: v for k, v in attrs.items() if v is not None})
+        return key
+
+    resource_maps: list = []
+
+    def _walk(o, depth=0):
+        if depth > 30:
+            return
+        if isinstance(o, dict):
+            if o.get("producer_endpoint") and o.get("consumer_candidates") is not None:
+                resource_maps.append(o)
+            for v in o.values():
+                _walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o[:4096]:
+                _walk(v, depth + 1)
+
+    _walk(result)
+
+    for rm in resource_maps:
+        producer = add_route(rm.get("producer_endpoint"), {"role": "producer"})
+        if not producer:
+            continue
+        sensitive = rm.get("sensitive_fields") or []
+        obj = add_object(rm.get("object_id_key"),
+                         {"location": rm.get("object_id_location"), "sensitive_fields": sensitive})
+        edges[(producer, obj, "produces")] = {"source_principal": rm.get("source_principal")}
+        for cons in (rm.get("consumer_candidates") or [])[:50]:
+            c = add_route(cons, {"role": "consumer"})
+            if not c:
+                continue
+            edges[(obj, c, "consumed_by")] = {}
+            edges[(producer, c, "auth_boundary")] = {
+                "object_id_key": str(rm.get("object_id_key") or ""),
+                "source_principal": rm.get("source_principal"),
+                "excluded_principal": rm.get("excluded_from_principal"),
+                "sensitive_fields": sensitive,
+            }
+
+    disc = result.get("discovery") if isinstance(result.get("discovery"), dict) else {}
+    for ep in (disc.get("browser_api_endpoints") or [])[:500]:
+        url = ep.get("url") if isinstance(ep, dict) else ep
+        add_route(url, {"discovered": True})
+
+    return nodes, edges
+
+
+async def persist_application_graph(target_id: str, scan_id: str, result: dict) -> dict:
+    """Best-effort: persist the application graph for a scan. Never raises (a graph
+    write must not fail the scan)."""
+    try:
+        nodes, edges = build_application_graph(result)
+        if not nodes:
+            return {}
+        tgt = uuid.UUID(target_id)
+        sid = uuid.UUID(scan_id)
+        async with db_pool.acquire() as conn:
+            for key, n in nodes.items():
+                await conn.execute("""
+                    INSERT INTO application_graph_nodes
+                        (target_id, node_type, node_key, label, attributes, scan_id, last_seen_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,NOW())
+                    ON CONFLICT (target_id, node_type, node_key) DO UPDATE SET
+                        label=EXCLUDED.label, attributes=EXCLUDED.attributes,
+                        scan_id=EXCLUDED.scan_id, last_seen_at=NOW()
+                """, tgt, n["node_type"], key, n["label"], json.dumps(n["attributes"]), sid)
+            for (src, dst, etype), attrs in edges.items():
+                await conn.execute("""
+                    INSERT INTO application_graph_edges
+                        (target_id, src_key, dst_key, edge_type, attributes, scan_id, last_seen_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,NOW())
+                    ON CONFLICT (target_id, src_key, dst_key, edge_type) DO UPDATE SET
+                        attributes=EXCLUDED.attributes, scan_id=EXCLUDED.scan_id, last_seen_at=NOW()
+                """, tgt, src, dst, etype, json.dumps(attrs), sid)
+        return {"nodes": len(nodes), "edges": len(edges)}
+    except Exception as e:
+        print(f"[graph] persist failed: {type(e).__name__}: {e}", flush=True)
+        return {}
 
 
 async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
@@ -1885,9 +1992,11 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                         saved += 1
                         evidence_finding_id = result
 
-                # Persist evidence as a first-class durable object (best-effort,
-                # OUTSIDE the finding transaction so it never rolls the finding back).
-                await _persist_evidence_object(conn, scan_uuid, evidence_finding_id, finding, evidence_with_triage)
+            # Persist evidence as a first-class durable object — dedented to the loop
+            # body so it runs AFTER the per-finding transaction commits. A Postgres
+            # error inside a transaction poisons it even when caught, so the evidence
+            # write must be outside (and best-effort) to never roll the finding back.
+            await _persist_evidence_object(conn, scan_uuid, evidence_finding_id, finding, evidence_with_triage)
 
     return saved
 
@@ -1986,6 +2095,8 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
                         WHERE id = $17
                     """, *common_values, existing['id'])
                 saved += 1
+                await _persist_evidence_object(conn, scan_uuid, existing['id'], finding,
+                                               evidence_with_triage, tool_override='ai_gate')
                 continue
 
             result = await conn.fetchval("""
@@ -2018,6 +2129,8 @@ async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> i
             )
             if result:
                 saved += 1
+                await _persist_evidence_object(conn, scan_uuid, result, finding,
+                                               evidence_with_triage, tool_override='ai_gate')
 
     return saved
 
@@ -4517,6 +4630,17 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] ASM inventory error: {e}", flush=True)
 
+        # Persist the first-class application graph (routes, objects, producer/
+        # consumer links, auth boundaries, sensitive fields). Best-effort.
+        if target_id and not error:
+            try:
+                g = await persist_application_graph(target_id, scan_id, result)
+                if g:
+                    print(f"[{job_id[:8]}] application graph: {g.get('nodes', 0)} nodes, "
+                          f"{g.get('edges', 0)} edges", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] application graph error: {e}", flush=True)
+
         # Incremental reachability GC: re-probe a bounded slice of the existing
         # inventory (least-recently-swept first) and retire phantom/dead endpoints
         # to 'gone' so they stop consuming test budget. Best-effort, bounded so it
@@ -6826,7 +6950,8 @@ async def process_exploit_batch_job(job_data: dict):
         await _reconcile_parallel_child_completion(parent_id, r, f"asm {job_id[:8]}")
 
 
-STALE_JOB_MAX_REQUEUE = 5
+STALE_REQUEUE_FAIL_AFTER_SECONDS = int(os.environ.get('SHAKERSCAN_STALE_FAIL_AFTER_SECONDS') or 180)
+STALE_JOB_MAX_REQUEUE_HARD_CAP = 500  # backstop against a pathological tight loop
 
 
 async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
@@ -6843,23 +6968,36 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     if not (expected_fp and require_current):
         return False
     worker_fp = _worker_build_fingerprint()
-    if not worker_fp or worker_fp == expected_fp:
+    # Fail CLOSED: only a worker that can PROVE it is current (fingerprint present
+    # AND equal to the submit-time expected one) may run. An unknown fingerprint
+    # (None) is NOT provably current, so it must be refused — treating "unknown" as
+    # "safe to run" was a fail-OPEN bug.
+    if worker_fp is not None and worker_fp == expected_fp:
         return False
 
     job_id = str(job_data.get('job_id') or 'unknown')
     scan_id = job_data.get('scan_id')
     source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
+    # Time-based, not count-based: a current worker in a MIXED fleet picks up the
+    # requeued job within seconds, so the window never elapses. Only when NO current
+    # worker takes it for the whole window (the fleet is uniformly stale, e.g. a
+    # half-finished deploy) do we fail closed. A bounce count alone would false-fail
+    # a job that merely got picked up by stale workers a few times.
+    now = time.time()
+    first_stale = float(job_data.get('first_stale_requeue_at') or 0) or now
     attempts = int(job_data.get('stale_requeue_attempts') or 0) + 1
-    if attempts <= STALE_JOB_MAX_REQUEUE:
+    if (now - first_stale) < STALE_REQUEUE_FAIL_AFTER_SECONDS and attempts <= STALE_JOB_MAX_REQUEUE_HARD_CAP:
+        job_data['first_stale_requeue_at'] = first_stale
         job_data['stale_requeue_attempts'] = attempts
         get_redis().rpush(source_queue, json.dumps(job_data))
         print(f"[{job_id[:8]}] REFUSED stale build (worker {worker_fp} != submit {expected_fp}); "
-              f"requeued for a current worker ({attempts}/{STALE_JOB_MAX_REQUEUE})", flush=True)
+              f"requeued for a current worker (attempt {attempts}, {now - first_stale:.0f}s waiting)", flush=True)
         await asyncio.sleep(2)
         return True
 
-    msg = (f"No current-build worker available (require_current_workers): worker build {worker_fp} "
-           f"!= submit-time expected {expected_fp}. Restart workers to deploy current code.")
+    msg = (f"No current-build worker available for {STALE_REQUEUE_FAIL_AFTER_SECONDS}s "
+           f"(require_current_workers): worker build {worker_fp} != submit-time expected {expected_fp}. "
+           "Restart ALL workers to deploy current code.")
     if scan_id:
         try:
             async with db_pool.acquire() as conn:
@@ -6870,7 +7008,8 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
         except Exception as e:
             print(f"[{job_id[:8]}] stale-fail DB update error: {e}", flush=True)
     get_redis().hset(f"job:{job_id}", mapping={'status': 'failed', 'current_phase': 'build_stale'})
-    print(f"[{job_id[:8]}] FAILED build-stale after {STALE_JOB_MAX_REQUEUE} requeues", flush=True)
+    print(f"[{job_id[:8]}] FAILED build-stale: no current worker for "
+          f"{STALE_REQUEUE_FAIL_AFTER_SECONDS}s ({attempts} bounces)", flush=True)
     return True
 
 

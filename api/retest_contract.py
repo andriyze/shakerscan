@@ -1344,6 +1344,38 @@ async def run_schema_migrations(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
+            # First-class application graph (routes, objects, producer/consumer,
+            # auth boundaries) persisted from the BOLA resource_map + discovery.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS application_graph_nodes (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    node_type TEXT NOT NULL,
+                    node_key TEXT NOT NULL,
+                    label TEXT,
+                    attributes JSONB,
+                    scan_id UUID,
+                    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT app_graph_node_unique UNIQUE (target_id, node_type, node_key)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS application_graph_edges (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+                    src_key TEXT NOT NULL,
+                    dst_key TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    attributes JSONB,
+                    scan_id UUID,
+                    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+                    CONSTRAINT app_graph_edge_unique UNIQUE (target_id, src_key, dst_key, edge_type)
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_nodes_target ON application_graph_nodes(target_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_edges_target ON application_graph_edges(target_id)")
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

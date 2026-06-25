@@ -80,8 +80,13 @@ vs user vs tenant-B), so BFLA/tenant-isolation can be expressed. **Do:** model p
 principal's access is a finding.
 
 ### 4. Evidence object store
-**Status: MISSING.** Evidence is JSON embedded in findings (0 `%evidence%` tables, no
-`EvidenceObject`/`storage_uri`). **Do:** make evidence first-class — `EvidenceObject {evidence_id,
+**Status: PHASE 1 DONE (inline).** `evidence_objects` table ships (hash, redaction_profile,
+retention_class, storage_uri, scan/finding links); `save_findings` + `save_ai_findings` each
+write one object per finding; `GET /findings/{id}/evidence` + `GET /evidence/{id}` read them
+(see `docs/REVIEW_IMPLEMENTATION_PLAN.md` Phase B). **Phase 2 remaining:** externalize
+`storage_uri` from `inline:` to S3/MinIO (`file://`) for large blobs + central retrieval across
+worker churn, and a retention sweeper.
+**Do (Phase 2):** make evidence first-class — `EvidenceObject {evidence_id,
 campaign_id, scan_id, finding_id, source_type, object_type (http_exchange|screenshot|
 browser_trace|transcript|payload|callback|report_json), storage_uri, sha256, redaction_profile,
 sensitive, node_id, retention_class}` backed by S3/MinIO. This also unblocks production multi-node

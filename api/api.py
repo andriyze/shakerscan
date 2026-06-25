@@ -21,7 +21,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -2727,8 +2727,9 @@ class ModelIntakeScanRequest(BaseModel):
     signature_payload: Optional[str] = None
     # Operator-configured trust anchors. A valid signature only renders as
     # "verified" when its key chains to one of these (or a worker env anchor).
-    signature_trusted_keys: Optional[list[str]] = None
-    signature_trusted_key_sha256: Optional[list[str]] = None
+    # Scalar-or-list, matching the scanner internals (_iter_str_tokens / _iter_pem_blocks).
+    signature_trusted_keys: Optional[Union[str, list[str]]] = None
+    signature_trusted_key_sha256: Optional[Union[str, list[str]]] = None
     model_card_url: Optional[str] = None
     deployment_approved: bool = False
     require_deployment_approval: bool = True
@@ -10208,6 +10209,39 @@ async def _enqueue_asm_recon(
     return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
 
 
+@app.get("/targets/{target_id}/graph")
+async def get_application_graph(target_id: str, node_type: Optional[str] = None, edge_type: Optional[str] = None):
+    """The first-class application graph for a target: routes, objects,
+    producer/consumer links, and auth boundaries persisted from scans."""
+    tgt = uuid.UUID(target_id)
+    async with db_pool.acquire() as conn:
+        node_clause = " AND node_type = $2" if node_type else ""
+        nparams = [tgt] + ([node_type] if node_type else [])
+        nodes = await conn.fetch(
+            f"SELECT * FROM application_graph_nodes WHERE target_id = $1{node_clause} ORDER BY node_type, node_key",
+            *nparams)
+        edge_clause = " AND edge_type = $2" if edge_type else ""
+        eparams = [tgt] + ([edge_type] if edge_type else [])
+        edges = await conn.fetch(
+            f"SELECT * FROM application_graph_edges WHERE target_id = $1{edge_clause} ORDER BY edge_type, src_key",
+            *eparams)
+    node_rows = [row_to_dict(r) for r in nodes]
+    edge_rows = [row_to_dict(r) for r in edges]
+    by_node: dict[str, int] = {}
+    for r in node_rows:
+        by_node[str(r.get("node_type"))] = by_node.get(str(r.get("node_type")), 0) + 1
+    by_edge: dict[str, int] = {}
+    for r in edge_rows:
+        by_edge[str(r.get("edge_type"))] = by_edge.get(str(r.get("edge_type")), 0) + 1
+    return {
+        "target_id": target_id,
+        "nodes": node_rows,
+        "edges": edge_rows,
+        "summary": {"node_count": len(node_rows), "edge_count": len(edge_rows),
+                    "by_node_type": by_node, "by_edge_type": by_edge},
+    }
+
+
 @app.get("/targets/{target_id}/asm/endpoints")
 async def asm_list_endpoints(
     target_id: str,
@@ -11154,20 +11188,28 @@ async def list_findings(
 @app.get("/findings/{finding_id}/evidence")
 async def list_finding_evidence(finding_id: str):
     """Durable evidence objects (hash, redaction profile, retention class, storage
-    URI) for a finding. Registered before the greedy {finding_id:path} route."""
+    URI) for a finding. Accepts a UUID OR a fingerprint, like the finding detail
+    route, and returns 404 for an unknown id rather than 500 on a non-UUID."""
     async with db_pool.acquire() as conn:
+        finding = await get_finding_record(conn, finding_id)
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
         rows = await conn.fetch(
             "SELECT * FROM evidence_objects WHERE finding_id = $1 ORDER BY created_at, object_type",
-            uuid.UUID(finding_id),
+            finding["id"],
         )
-    return {"finding_id": finding_id, "evidence_objects": [row_to_dict(r) for r in rows]}
+    return {"finding_id": str(finding["id"]), "evidence_objects": [row_to_dict(r) for r in rows]}
 
 
 @app.get("/evidence/{evidence_id}")
 async def get_evidence_object(evidence_id: str):
     """A single durable evidence object (content already redaction-profiled)."""
+    try:
+        eid = uuid.UUID(evidence_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid evidence id")
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM evidence_objects WHERE id = $1", uuid.UUID(evidence_id))
+        row = await conn.fetchrow("SELECT * FROM evidence_objects WHERE id = $1", eid)
     if not row:
         raise HTTPException(status_code=404, detail="Evidence object not found")
     return row_to_dict(row)
