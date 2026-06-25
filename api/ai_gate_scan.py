@@ -5704,6 +5704,43 @@ def _verify_receipt_signature(message: bytes, signature_raw: Any, public_key_pem
     return {"available": True, "attempted": True, "verified": True}
 
 
+def _receipt_key_sha256(public_key_pem: Any) -> str | None:
+    """SHA-256 of the DER SubjectPublicKeyInfo — a stable receipt-signing-key id."""
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PublicFormat, load_pem_public_key,
+        )
+    except ImportError:
+        return None
+    try:
+        pem = public_key_pem if isinstance(public_key_pem, (bytes, bytearray)) else str(public_key_pem).encode()
+        der = load_pem_public_key(bytes(pem)).public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    except Exception:  # noqa: BLE001
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def _configured_receipt_trust_anchors() -> set[str]:
+    """Operator-configured trusted receipt-signing key fingerprints, from DEPLOYMENT
+    ENV ONLY (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256 / AI_GATE_TRUSTED_RECEIPT_KEYS) —
+    never from the target/agent-provided metadata, which is the self-attestation
+    hole. A valid receipt signature is only TRUSTED provenance when its key chains
+    to one of these."""
+    fps: set[str] = set()
+    for tok in re.split(r"[,\s]+", str(os.environ.get("AI_GATE_TRUSTED_RECEIPT_KEY_SHA256") or "")):
+        norm = tok.strip().lower().replace(":", "")
+        if norm:
+            fps.add(norm)
+    for pem in re.findall(
+        r"-----BEGIN [^-]+-----.*?-----END [^-]+-----",
+        str(os.environ.get("AI_GATE_TRUSTED_RECEIPT_KEYS") or ""), re.DOTALL,
+    ):
+        fp = _receipt_key_sha256(pem)
+        if fp:
+            fps.add(fp)
+    return fps
+
+
 def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_receipts = metadata_json.get("agent_execution_receipts") or metadata_json.get("execution_receipts")
     receipts = raw_receipts if isinstance(raw_receipts, list) else []
@@ -5869,12 +5906,47 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
             source_suffix="missing_hash_binding",
         ))
 
+    # chain_verified = INTERNAL CONSISTENCY (hashes link, signatures match the
+    # supplied key). It is NOT trusted provenance — the key can come from the same
+    # config that produced the receipts (self-attestation). chain_trusted ALSO
+    # requires the signing key to chain to an operator-configured trust anchor.
     chain_verified = bool(
         hash_verified_count > 0
         and not hash_mismatch
         and not chain_breaks
         and not signature_invalid
     )
+    trust_anchors = _configured_receipt_trust_anchors()
+    key_fingerprint = _receipt_key_sha256(public_key_pem) if public_key_pem else None
+    if not trust_anchors:
+        signature_trusted_root: bool | None = None
+    else:
+        signature_trusted_root = bool(key_fingerprint and key_fingerprint in trust_anchors)
+    chain_trusted = bool(
+        chain_verified and signature_verified_count > 0 and signature_trusted_root is True
+    )
+    # A receipt signature that is cryptographically valid but signed by a key that
+    # is NOT a configured trust anchor proves consistency, not trusted provenance.
+    if signature_verified_count > 0 and signature_trusted_root is not True:
+        reason = ("no receipt trust anchors are configured (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256/"
+                  "_KEYS)" if signature_trusted_root is None
+                  else "the receipt signing key is not among the configured trust anchors")
+        findings.append(_build_finding(
+            probe={"id": "agent.receipt-chain", "family": "tool_abuse", "owasp": "LLM08:2025"},
+            title="Agent execution receipt signature is valid but not from a trusted key",
+            severity="medium",
+            description=(
+                "Receipt signatures verify against a self-supplied public key, so the chain is internally "
+                f"consistent but its provenance is untrusted ({reason}). Internal consistency is not proof "
+                "of a trusted execution record."
+            ),
+            remediation="Configure trusted receipt-signing key fingerprints (AI_GATE_TRUSTED_RECEIPT_KEY_SHA256) "
+                        "and sign receipts with a key that chains to them.",
+            owasp="LLM08:2025",
+            evidence={"signature_key_fingerprint": key_fingerprint,
+                      "trust_anchors_configured": bool(trust_anchors), "judge_layer": "receipt_crypto"},
+            source_suffix="untrusted_signing_key",
+        ))
     return findings, {
         "available": True,
         "receipt_count": len(receipts),
@@ -5883,8 +5955,12 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
         "replayed_approval_count": len(replayed_approvals),
         "unscoped_tool_call_count": len(unscoped_tool_calls),
         "missing_hash_binding_count": len(missing_binding),
-        # Cryptographic verification (R5): claimed vs actually verified.
+        # Cryptographic verification (R5): claimed vs actually verified vs TRUSTED.
         "chain_verified": chain_verified,
+        "chain_trusted": chain_trusted,
+        "signature_trusted_root": signature_trusted_root,
+        "signature_key_fingerprint": key_fingerprint,
+        "trust_anchors_configured": bool(trust_anchors),
         "hash_verified_count": hash_verified_count,
         "hash_mismatch_count": len(hash_mismatch),
         "chain_break_count": len(chain_breaks),

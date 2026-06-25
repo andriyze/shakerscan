@@ -114,6 +114,45 @@ def test_valid_signatures_verify():
     assert summary["chain_verified"] is True
 
 
+def test_valid_signature_without_trust_anchor_is_consistent_but_untrusted():
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    pub_pem = priv.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
+    receipts = _chain(3, priv=priv)
+    findings, summary = ag._agent_execution_receipt_findings({
+        "agent_execution_receipts": receipts, "receipt_public_key": pub_pem,
+    })
+    # Internally consistent, but self-attested: not trusted provenance.
+    assert summary["chain_verified"] is True
+    assert summary["chain_trusted"] is False
+    assert summary["signature_trusted_root"] is None
+    assert "untrusted_signing_key" in _ids(findings)
+
+
+def test_valid_signature_with_configured_trust_anchor_is_trusted(monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    pub_pem = priv.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
+    monkeypatch.setenv("AI_GATE_TRUSTED_RECEIPT_KEY_SHA256", ag._receipt_key_sha256(pub_pem))
+    receipts = _chain(3, priv=priv)
+    findings, summary = ag._agent_execution_receipt_findings({
+        "agent_execution_receipts": receipts, "receipt_public_key": pub_pem,
+    })
+    assert summary["chain_trusted"] is True
+    assert summary["signature_trusted_root"] is True
+    assert "untrusted_signing_key" not in _ids(findings)
+
+
 def test_invalid_signature_is_flagged():
     pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import serialization
