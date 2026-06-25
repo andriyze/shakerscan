@@ -132,8 +132,22 @@ def run_model_intake() -> H.Scorecard:
                  f"status={s.get('signature_verification_status')} valid={s.get('signature_valid')}")
     except Exception as e:
         sc.error("MI-5 trust-root (untrusted)", e)
-    sc.skip("MI-6 trusted-anchor -> verified",
-            "requires MODEL_INTAKE_TRUSTED_KEY_SHA256 on the worker (operator config, not a per-scan option)")
+    # MI-6: a valid signature whose key is supplied as an operator trust anchor in
+    # the SAME request now verifies (F1 — trust anchors reachable via the API, not
+    # just worker env). This is the enforced positive control for MI-5.
+    try:
+        s = (_mi_scan({"artifact_url": fx_good, "expected_sha256": FX.GOOD_SHA,
+                       "signature_public_key": FX.SIGNING_PUB_PEM,
+                       "signature_value": FX.SIGNATURE_B64,
+                       "signature_trusted_keys": [FX.SIGNING_PUB_PEM]}, "MI-6")
+             .get("model_intake") or {}).get("summary") or {}
+        sc.check("MI-6 trusted-anchor signature verifies",
+                 s.get("signature_verification_status") == "verified"
+                 and s.get("signature_verified") is True
+                 and s.get("signature_trusted_root") is True,
+                 f"status={s.get('signature_verification_status')} trusted_root={s.get('signature_trusted_root')}")
+    except Exception as e:
+        sc.error("MI-6 trusted-anchor verify", e)
 
     return sc
 

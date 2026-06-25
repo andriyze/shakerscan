@@ -2716,6 +2716,19 @@ class ModelIntakeScanRequest(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     expected_sha256: Optional[str] = None
     signature_url: Optional[str] = None
+    # Real cryptographic signature material (operator-supplied; the artifact's own
+    # metadata is never trusted for these). Exposing them here is what makes a
+    # trusted signature_verified=True reachable via the public API.
+    signature_public_key: Optional[str] = None
+    signature_public_key_url: Optional[str] = None
+    signature_value: Optional[str] = None
+    signature_rsa_padding: Optional[str] = None
+    signature_hash: Optional[str] = None
+    signature_payload: Optional[str] = None
+    # Operator-configured trust anchors. A valid signature only renders as
+    # "verified" when its key chains to one of these (or a worker env anchor).
+    signature_trusted_keys: Optional[list[str]] = None
+    signature_trusted_key_sha256: Optional[list[str]] = None
     model_card_url: Optional[str] = None
     deployment_approved: bool = False
     require_deployment_approval: bool = True
@@ -6204,6 +6217,14 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "metadata_json": request.metadata_json or {},
         "expected_sha256": request.expected_sha256,
         "signature_url": request.signature_url,
+        "signature_public_key": request.signature_public_key,
+        "signature_public_key_url": request.signature_public_key_url,
+        "signature_value": request.signature_value,
+        "signature_rsa_padding": request.signature_rsa_padding,
+        "signature_hash": request.signature_hash,
+        "signature_payload": request.signature_payload,
+        "signature_trusted_keys": request.signature_trusted_keys,
+        "signature_trusted_key_sha256": request.signature_trusted_key_sha256,
         "model_card_url": request.model_card_url,
         "deployment_approved": request.deployment_approved,
         "require_deployment_approval": request.require_deployment_approval,
