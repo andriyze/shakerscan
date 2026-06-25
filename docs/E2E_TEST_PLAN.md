@@ -49,14 +49,22 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 | AI-6 | AI scan → deployment-decision, `allow_active_exceptions=false` + active exception | stays `block` | exception gating |
 
 ### DAST (Phase 3)
-| # | Scenario | Assertion | Catches |
+
+**The fast PR gate is integration + hardening, NOT broad quality/recall.** Recall %,
+precision, and dual-user BOLA are slow + discovery-heavy and live in the nightly
+benchmark (`tests/benchmark/`), which is a separate quality signal — not this gate.
+What the fast runner (`run_e2e.py`) actually asserts:
+
+| # | Scenario (fast gate) | Assertion | Catches |
 |---|---|---|---|
-| D-1 | authenticated smart scan of Juice Shop (clean-slate) | recall ≥ 70% answer-key crit/high; SQLi login bypass, stored XSS, BOLA basket | core DAST quality |
-| D-2 | crAPI dual-user smart scan (self-minted tokens) | BOLA/IDOR + mass-assignment + JWT findings | access control |
-| D-3 | precision across D-1/D-2 | false-positive rate ≤ gate | over-reporting |
-| D-4 | attack-chain assertions | expected chains built; the 3 removed phantom chains never appear | overclaim regression |
-| D-5 | Full Coverage on >cap-endpoint target | `smart_coverage.worklist_truncated` surfaced; scan completes | silent truncation + crash |
-| D-6 | evidence with NUL bytes | scan finalizes, findings persist | finalize-hang DB crash |
+| D-1 | standard scan of Juice Shop | completes (no hang/crash/reap) + graded + findings persist | finalize-hang / NUL-crash class |
+| D-2 | bounded (un-sharded) active scan of the injectable login | critical SQLi detected | active SQLi recall (spot) |
+| D-3 | bounded active scan of the search | DOM XSS detected | active XSS recall (spot) |
+| D-4 | attack-chain assertions | the 3 removed phantom chains never appear | overclaim regression |
+
+Nightly / benchmark (quality, not the gate): authenticated smart recall ≥ 70% of the
+Juice Shop answer key, crAPI dual-user BOLA/IDOR + mass-assignment + JWT, precision
+(false-positive rate), Full Coverage truncation, and NUL-byte evidence persistence.
 
 ## Every recent bug → the e2e test that catches it
 MI-1 (206) · AI-2 (redaction) · AI-3 (prod bypass) · AI-4 (confirm) · AI-5 (judge guard) · D-5 (truncation + crash) · MI-5/6 (trust root) · D-4 (phantom chains) · AI-6 / MI-7 (policy wiring).
