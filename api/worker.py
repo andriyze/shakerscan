@@ -6786,8 +6786,59 @@ async def process_exploit_batch_job(job_data: dict):
         await _reconcile_parallel_child_completion(parent_id, r, f"asm {job_id[:8]}")
 
 
+STALE_JOB_MAX_REQUEUE = 5
+
+
+async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
+    """Fail-closed worker freshness. If a job was submitted with
+    require_current_workers (or SHAKERSCAN_WORKER_FAIL_CLOSED) and THIS worker's
+    build fingerprint does not match the submit-time expected one, do NOT run stale
+    code — running it silently corrupts results (the worker-skew class). Requeue so
+    a current worker takes it; after STALE_JOB_MAX_REQUEUE bounces (no current
+    worker available) fail the scan rather than loop. Returns True if refused."""
+    options = job_data.get('options') if isinstance(job_data.get('options'), dict) else {}
+    expected_fp = options.get('expected_build_fingerprint_at_submit')
+    require_current = bool(options.get('require_current_workers')) or \
+        str(os.environ.get('SHAKERSCAN_WORKER_FAIL_CLOSED') or '').strip().lower() in ('1', 'true', 'yes')
+    if not (expected_fp and require_current):
+        return False
+    worker_fp = _worker_build_fingerprint()
+    if not worker_fp or worker_fp == expected_fp:
+        return False
+
+    job_id = str(job_data.get('job_id') or 'unknown')
+    scan_id = job_data.get('scan_id')
+    source_queue = RETEST_QUEUE_NAME if job_data.get('type') == 'finding_retest' else QUEUE_NAME
+    attempts = int(job_data.get('stale_requeue_attempts') or 0) + 1
+    if attempts <= STALE_JOB_MAX_REQUEUE:
+        job_data['stale_requeue_attempts'] = attempts
+        get_redis().rpush(source_queue, json.dumps(job_data))
+        print(f"[{job_id[:8]}] REFUSED stale build (worker {worker_fp} != submit {expected_fp}); "
+              f"requeued for a current worker ({attempts}/{STALE_JOB_MAX_REQUEUE})", flush=True)
+        await asyncio.sleep(2)
+        return True
+
+    msg = (f"No current-build worker available (require_current_workers): worker build {worker_fp} "
+           f"!= submit-time expected {expected_fp}. Restart workers to deploy current code.")
+    if scan_id:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW() "
+                    "WHERE id=$1 AND status NOT IN ('completed','cancelled')",
+                    uuid.UUID(scan_id), msg[:500])
+        except Exception as e:
+            print(f"[{job_id[:8]}] stale-fail DB update error: {e}", flush=True)
+    get_redis().hset(f"job:{job_id}", mapping={'status': 'failed', 'current_phase': 'build_stale'})
+    print(f"[{job_id[:8]}] FAILED build-stale after {STALE_JOB_MAX_REQUEUE} requeues", flush=True)
+    return True
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    # Fail-closed: refuse to run a scan on a build-stale worker (see helper).
+    if await _refuse_stale_job_if_needed(job_data):
+        return
     job_type = job_data.get('type', 'scan')
 
     if job_type == 'discovery':
