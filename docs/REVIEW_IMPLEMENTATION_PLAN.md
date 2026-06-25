@@ -18,7 +18,14 @@ skills).**
 - **P3-13** worker fail-closed on build-stale jobs before execution (requeue → fail-closed).
 - **P2-11** e2e plan doc corrected: fast gate = integration/hardening; recall = nightly.
 
-## Phase B — Evidence object store (P0-3) — NEXT, most bounded P0
+## Phase B — Evidence object store (P0-3) — ✅ DONE (complete vertical slice)
+Shipped: `evidence_objects` table + migration; `save_findings` writes one hashed,
+redaction-profiled, retention-classed object per finding (best-effort, outside the
+finding txn so it never rolls the scan back); `GET /findings/{id}/evidence` +
+`GET /evidence/{id}`. Live-validated (a real scan wrote 4 objects) + unit tests.
+Next phase here: externalize inline content to an object store (file://) for large
+blobs + a retention sweeper. Original slice spec below.
+
 A complete vertical slice, not an orphaned table:
 1. Schema + migration: `evidence_objects(id, scan_id, finding_id, object_type,
    content_sha256, size_bytes, storage_uri, redaction_profile, retention_class,
