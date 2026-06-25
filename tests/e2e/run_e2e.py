@@ -19,10 +19,12 @@ import sys
 
 try:
     from . import harness as H
+    from .fixtures import fixtures_server as FX
 except ImportError:  # run as a plain script: python tests/e2e/run_e2e.py
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import harness as H
+    from fixtures import fixtures_server as FX
 
 
 # Full-artifact LFS digest of nex-agi/Nex-N2-mini shard 1 (the artifact that
@@ -67,6 +69,65 @@ def run_model_intake() -> H.Scorecard:
     except Exception as e:
         sc.error("MI-1 real HF intake", e)
 
+    fx_good = f"{FIXTURES_BASE}/models/good.safetensors"
+    fx_pickle = f"{FIXTURES_BASE}/models/dangerous.pkl"
+
+    def _mi_scan(opts: dict, label: str, timeout: int = 180) -> dict:
+        _, r = H.post("/model-intake/scan", opts)
+        sid = r.get("scan_id")
+        if not sid:
+            raise RuntimeError(f"submit rejected: {r}")
+        H.wait_for_scan(sid, timeout=timeout, label=label)
+        return H.scan_result(sid)
+
+    # MI-2: correct digest on a fully-downloadable artifact -> verified.
+    try:
+        s = (_mi_scan({"artifact_url": fx_good, "expected_sha256": FX.GOOD_SHA}, "MI-2")
+             .get("model_intake") or {}).get("summary") or {}
+        sc.check("MI-2 correct digest verifies",
+                 s.get("checksum_status") == "verified" and s.get("sha256_scope") == "full_artifact",
+                 f"checksum_status={s.get('checksum_status')} scope={s.get('sha256_scope')}")
+    except Exception as e:
+        sc.error("MI-2 verified checksum", e)
+
+    # MI-3: a tampered artifact (wrong expected hash, full download) -> critical
+    # sha256_mismatch (the real tamper path, which the 206 false-mismatch masked).
+    try:
+        res = _mi_scan({"artifact_url": fx_good, "expected_sha256": FX.WRONG_SHA}, "MI-3")
+        fids = {str(f.get("id")) for f in (res.get("findings") or [])}
+        sc.check("MI-3 tampered artifact -> critical sha256_mismatch",
+                 "model_intake:sha256_mismatch" in fids, f"findings={sorted(fids)[:6]}")
+    except Exception as e:
+        sc.error("MI-3 tamper detection", e)
+
+    # MI-4: a dangerous pickle (os.system reduce) -> unsafe-serialization finding.
+    try:
+        res = _mi_scan({"artifact_url": fx_pickle, "require_hash": False}, "MI-4")
+        ids = [(str(f.get("id")) + " " + str(f.get("title"))).lower() for f in (res.get("findings") or [])]
+        flagged = any(any(k in x for k in ("pickle", "serial", "unsafe", "risky", "deserial")) for x in ids)
+        sc.check("MI-4 dangerous pickle flagged", flagged,
+                 f"findings={[str(f.get('id')) for f in (res.get('findings') or [])][:6]}")
+    except Exception as e:
+        sc.error("MI-4 unsafe serialization", e)
+
+    # MI-5: a VALID self-signed signature with no configured trust anchor must read
+    # as untrusted_root, never "verified" (the trust-root bug). Signature material
+    # rides in metadata_json (the verifier's metadata fallback); trust anchors are
+    # operator-config only, so MI-6 (anchor -> verified) needs the worker env var.
+    try:
+        s = (_mi_scan({"artifact_url": fx_good, "expected_sha256": FX.GOOD_SHA,
+                       "metadata_json": {"signature_public_key": FX.SIGNING_PUB_PEM,
+                                         "signature_value": FX.SIGNATURE_B64}}, "MI-5")
+             .get("model_intake") or {}).get("summary") or {}
+        sc.check("MI-5 valid self-signed -> untrusted_root (not verified)",
+                 s.get("signature_verification_status") == "untrusted_root"
+                 and s.get("signature_verified") is False,
+                 f"status={s.get('signature_verification_status')} valid={s.get('signature_valid')}")
+    except Exception as e:
+        sc.error("MI-5 trust-root (untrusted)", e)
+    sc.skip("MI-6 trusted-anchor -> verified",
+            "requires MODEL_INTAKE_TRUSTED_KEY_SHA256 on the worker (operator config, not a per-scan option)")
+
     return sc
 
 
@@ -76,8 +137,13 @@ def run_model_intake() -> H.Scorecard:
 # validation). Override SHAKERSCAN_E2E_HONEY_HOST on Linux CI (e.g. the compose
 # service name / bridge IP).
 HONEY_HOST = os.environ.get("SHAKERSCAN_E2E_HONEY_HOST", "host.docker.internal")
-AI_ENDPOINT = os.environ.get(
-    "SHAKERSCAN_E2E_AI_ENDPOINT", f"http://{HONEY_HOST}:3001/rest/chatbot/respond")
+# The local fixtures server (started in main) — worker-reachable, deterministic,
+# and deliberately leaky, so the AI detection/redaction and Model-Intake artifact
+# assertions run without external honey apps. Override SHAKERSCAN_E2E_AI_ENDPOINT
+# to point at a real honey AI app instead.
+FIXTURES_PORT = int(os.environ.get("SHAKERSCAN_E2E_FIXTURES_PORT", "18099"))
+FIXTURES_BASE = f"http://{HONEY_HOST}:{FIXTURES_PORT}"
+AI_ENDPOINT = os.environ.get("SHAKERSCAN_E2E_AI_ENDPOINT", f"{FIXTURES_BASE}/ai/chat")
 
 
 import time as _time
@@ -98,8 +164,8 @@ def _create_ai_target(name: str, production: bool) -> str | None:
         "name": f"{name}-{_RUN_NONCE}", "target_type": "api_chat", "endpoint_url": _ai_endpoint(name),
         "method": "POST", "headers_template": {"Content-Type": "application/json"},
         "request_template": {"action": "query", "query": "{{prompt}}"},
-        "response_path": "$.body", "production_mode": production,
-        "rate_limit_rps": 4, "request_budget": 6,
+        "response_path": "$.answer", "production_mode": production,
+        "rate_limit_rps": 8, "request_budget": 8,
     })
     return (resp.get("target") or {}).get("id")
 
@@ -137,21 +203,23 @@ def run_ai_gate() -> H.Scorecard:
                 scan = H.wait_for_scan(scan_id, timeout=420, label="AI-1")
                 status = str(scan.get("status"))
                 if status != "completed":
-                    # The default Juice Shop chatbot needs auth, so probes fail and
-                    # no transcript is produced. Skip (loud) rather than fake-pass —
-                    # set SHAKERSCAN_E2E_AI_ENDPOINT to a responsive honey AI app to
-                    # exercise the detection + transcript-redaction assertions.
                     sc.skip("AI-1/AI-2 live scan + transcript redaction",
                             f"AI scan status={status}; no responsive AI endpoint at {AI_ENDPOINT}")
                 else:
                     sc.check("AI-1 smoke scan completed", True, f"status={status}")
                     tr = H.get(f"/ai/scans/{scan_id}/transcript")
-                    applied = tr.get("redaction_applied")
                     blob = json.dumps(tr)
-                    leaks = [p for p in ("password=", "api_key=", "client_secret:", "-----BEGIN ")
-                             if p.lower() in blob.lower() and "***" not in blob]
-                    sc.check("AI-2 transcript redaction applied", applied is True, f"redaction_applied={applied}")
-                    sc.check("AI-2 no obvious secret survives transcript", not leaks, f"leaks={leaks}")
+                    # AI-2: the leaky fixture leaks password=/api_key=sk_live_/client_secret:
+                    # in EVERY response. The transcript must have CAPTURED that response
+                    # (non-vacuous) and yet contain NONE of the planted secrets — the
+                    # real judge-redactor-leak regression.
+                    captured = "Internal config dump" in blob  # proves the leaky response was stored
+                    survived = [t for t in FX.PLANTED_TOKENS if t in blob]
+                    sc.check("AI-2 transcript redaction applied", tr.get("redaction_applied") is True,
+                             f"redaction_applied={tr.get('redaction_applied')}")
+                    sc.check("AI-2 leaky response was captured (test not vacuous)", captured, f"captured={captured}")
+                    sc.check("AI-2 no planted secret survives transcript", not survived,
+                             f"survived={survived} redaction_markers={blob.count('***')}")
     except Exception as e:
         sc.error("AI-1/AI-2 smoke scan + redaction", e)
     finally:
@@ -244,6 +312,10 @@ def main() -> int:
     args = ap.parse_args()
 
     H.preflight()
+    # Start the local fixtures server (leaky AI endpoint + model artifacts); the
+    # worker reaches it at host.docker.internal:FIXTURES_PORT.
+    FX.start(FIXTURES_PORT)
+    print(f"fixtures server on :{FIXTURES_PORT} (worker URL {FIXTURES_BASE})", flush=True)
     areas = list(AREAS.values()) if args.area == "all" else [AREAS[args.area]]
     cards = [fn() for fn in areas]
 
