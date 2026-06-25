@@ -3744,6 +3744,7 @@ def build_deployment_decision(
     *,
     db_policy_profiles: dict[str, dict[str, Any]] | None = None,
     db_exceptions: list[dict[str, Any]] | None = None,
+    target_active_findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -3801,6 +3802,28 @@ def build_deployment_decision(
         findings,
         minimum=str(policy_profile.get("minimum_block_severity") or "high"),
     )
+    # A DAST deploy gate must reflect the TARGET's unresolved risk, not just this one
+    # scan's result: an active critical/high from a prior scan that this run did not
+    # re-detect still blocks deploy (fail-closed). Merge the target's active blocking
+    # findings in, deduped by id/fingerprint, for the DAST product only (AI Gate and
+    # Model Intake carry their own decision objects). Exceptions below still apply.
+    if product == "dast" and target_active_findings:
+        seen_keys = {str(f.get("id") or "") for f in blocking_findings if f.get("id")}
+        seen_keys |= {str(f.get("fingerprint") or "") for f in blocking_findings if f.get("fingerprint")}
+        for extra in _deployment_gate_findings(
+            target_active_findings,
+            minimum=str(policy_profile.get("minimum_block_severity") or "high"),
+        ):
+            fid = str(extra.get("id") or "")
+            ffp = str(extra.get("fingerprint") or "")
+            if (fid and fid in seen_keys) or (ffp and ffp in seen_keys):
+                continue
+            extra["from_target_active"] = True
+            blocking_findings.append(extra)
+            if fid:
+                seen_keys.add(fid)
+            if ffp:
+                seen_keys.add(ffp)
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
     # A policy-scoped exception (non-null policy_id) only applies when the scan is
     # evaluated under that exact policy profile — so a lenient-policy waiver cannot
@@ -8691,6 +8714,26 @@ async def get_scan_deployment_decision(scan_id: str):
               AND (expires_at IS NULL OR expires_at > NOW())
               AND (target_id IS NULL OR target_id = $1)
         """, target_id)
+        # Unresolved (active) critical/high findings on the SAME target — these gate
+        # deploy even if the current scan did not re-detect them (merged in
+        # build_deployment_decision; fail-closed).
+        taf_rows = await conn.fetch("""
+            SELECT id, fingerprint, title, severity, tool, url
+            FROM findings
+            WHERE target_id = $1 AND status = 'active'
+              AND severity IN ('critical', 'high')
+            LIMIT 200
+        """, target_id) if target_id else []
+
+    target_active_findings = [{
+        "id": str(r["id"]),
+        "fingerprint": r["fingerprint"],
+        "title": r["title"],
+        "severity": r["severity"],
+        "tool": r["tool"],
+        "url": r["url"],
+        "source": "target_active",
+    } for r in taf_rows]
 
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
@@ -8725,6 +8768,7 @@ async def get_scan_deployment_decision(scan_id: str):
         row_to_dict(scan),
         db_policy_profiles=db_policy_profiles,
         db_exceptions=db_exceptions,
+        target_active_findings=target_active_findings,
     )
 
 
@@ -9293,6 +9337,41 @@ async def list_targets(
     }
 
 
+def _canonical_target_key(url: Any) -> str:
+    """Scheme-and-trailing-slash-insensitive canonical key for a target origin, so
+    'example.com', 'https://example.com' and 'https://example.com/' collapse to one."""
+    raw = str(url or "").strip().lower()
+    raw = re.sub(r"^https?://", "", raw).rstrip("/")
+    return raw
+
+
+def _dedupe_canonical_target_rows(rows: list) -> list:
+    """Collapse target rows that share a canonical key (scheme/trailing-slash variants
+    of the same origin) so grouped targets don't EXPOSE duplicate normalized targets.
+    Keeps one survivor per key — active first, then most active findings, then most
+    scans, then an https URL — preserving first-occurrence order. Display-layer
+    safeguard; a deliberate data merge is the durable fix."""
+    def rank(row) -> tuple:
+        url = str(row['url'] or "")
+        return (
+            1 if row['is_active'] else 0,
+            int(row['active_findings_count'] or 0),
+            int(row['total_scans'] or 0),
+            1 if url.lower().startswith("https://") else 0,
+        )
+
+    survivors: dict[str, Any] = {}
+    order: list[str] = []
+    for row in rows:
+        key = _canonical_target_key(row['url'])
+        if key not in survivors:
+            survivors[key] = row
+            order.append(key)
+        elif rank(row) > rank(survivors[key]):
+            survivors[key] = row
+    return [survivors[k] for k in order]
+
+
 @app.get("/targets/grouped")
 async def list_targets_grouped(
     include_inactive: bool = False,
@@ -9345,6 +9424,9 @@ async def list_targets_grouped(
         query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
 
         rows = await conn.fetch(query, *params)
+        # Collapse scheme/trailing-slash duplicate target rows so the grouped view
+        # doesn't expose the same origin multiple times.
+        rows = _dedupe_canonical_target_rows(rows)
 
         # Per-target ASM coverage (one aggregate query over the persistent inventory).
         asm_by_target: dict[str, dict] = {}

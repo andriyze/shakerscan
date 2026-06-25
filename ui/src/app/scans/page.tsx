@@ -621,7 +621,7 @@ function ScansContent() {
                       <span className="text-sm text-gray-400">0</span>
                     )}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="hidden xl:table-cell px-4 py-3">
                     <span className="text-sm text-gray-400">
                       {getDurationLabel(scan)}
                     </span>
