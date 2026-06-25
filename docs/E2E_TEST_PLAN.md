@@ -1,6 +1,6 @@
 # ShakerScan End-to-End Test Plan
 
-**Status:** in progress (harness-first rollout). **Gate:** hard CI gate — a red e2e run blocks.
+**Status:** harness + matrices live (model_intake 9/10, ai_gate 8/8, dast 8/8; `make e2e` exit 0). A local fixtures server (`tests/e2e/fixtures/`) makes the AI-redaction and Model-Intake rows deterministic. Remaining: P2 prove the GitHub gate runs on a Linux runner; P3 worker-build-uniformity guard; MI-6 (trusted-anchor) needs `MODEL_INTAKE_TRUSTED_KEY_SHA256` on the worker. **Gate:** hard CI gate — a red e2e run blocks.
 
 ## Why this exists
 
