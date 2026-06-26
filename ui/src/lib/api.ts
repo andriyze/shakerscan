@@ -1584,6 +1584,19 @@ export async function getApplicationGraph(targetId: string): Promise<Application
   return res.json()
 }
 
+export interface DeploymentBlockingFinding {
+  id?: string
+  fingerprint?: string
+  title?: string
+  severity?: string
+  tool?: string
+  url?: string
+  // True when the finding is an unresolved active critical/high on the target from a
+  // prior scan (not necessarily re-detected by this scan) — surfaced so the gate's
+  // "block" decision is explainable.
+  from_target_active?: boolean
+}
+
 export interface DeploymentDecision {
   decision?: string
   deploy_decision?: string
@@ -1591,7 +1604,7 @@ export interface DeploymentDecision {
   policy_name?: string
   rationale?: string
   reason?: string
-  blocking_findings?: unknown[]
+  blocking_findings?: DeploymentBlockingFinding[]
   exceptions_applied?: unknown[]
   expires_at?: string
   [key: string]: unknown

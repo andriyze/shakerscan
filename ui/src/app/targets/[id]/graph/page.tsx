@@ -352,7 +352,11 @@ function GraphContent() {
 
       <SectionCard title={`Edges (${visibleEdges.length})`}>
         {visibleEdges.length === 0 ? (
-          <p className="text-xs text-gray-500">No edges match the current filters.</p>
+          <p className="text-xs text-gray-500">
+            {summary.edge_count === 0
+              ? 'No edges yet — producer/consumer and auth-boundary edges populate from a dual-user (BOLA) scan.'
+              : 'No edges match the current filters.'}
+          </p>
         ) : (
           <div className="space-y-1 max-h-[32rem] overflow-y-auto">
             {visibleEdges.map((edge) => (

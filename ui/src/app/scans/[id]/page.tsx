@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, type DeploymentDecision } from '@/lib/api'
+import { getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -193,7 +193,9 @@ function DeploymentDecisionCard({
 }) {
   if (!decision && !loading) return null
   const verdict = String(decision?.decision || decision?.deploy_decision || 'unknown').toLowerCase()
-  const blockingCount = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings.length : 0
+  const blockingFindings = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings : []
+  const blockingCount = blockingFindings.length
+  const targetActiveCount = blockingFindings.filter((f) => f?.from_target_active).length
   const exceptionCount = Array.isArray(decision?.exceptions_applied) ? decision.exceptions_applied.length : 0
   const verdictClass =
     verdict === 'block'
@@ -228,10 +230,63 @@ function DeploymentDecisionCard({
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
         <span>{blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}</span>
         <span>{exceptionCount} exception{exceptionCount === 1 ? '' : 's'} applied</span>
-        {decision?.expires_at && <span>expires {String(decision.expires_at)}</span>}
+        {decision?.expires_at && <span>expires {formatDate(String(decision.expires_at))}</span>}
       </div>
+      {blockingCount > 0 && (
+        <div className="mt-3 border-t border-gray-800 pt-3">
+          {targetActiveCount > 0 && (
+            <p className="mb-2 text-xs text-amber-300/90">
+              {targetActiveCount} of these {targetActiveCount === 1 ? 'is an' : 'are'} unresolved
+              critical/high finding{targetActiveCount === 1 ? '' : 's'} already open on this target
+              (not necessarily detected by this scan). Resolve them or add a policy exception to unblock deploy.
+            </p>
+          )}
+          <ul className="space-y-1">
+            {blockingFindings.slice(0, 8).map((f, i) => (
+              <li key={f.id || i} className="flex items-center gap-2 text-xs">
+                <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${deploySeverityClass(f.severity)}`}>
+                  {String(f.severity || 'finding')}
+                </span>
+                {f.id ? (
+                  <Link href={`/findings/${f.id}`} className="text-gray-300 hover:text-white break-all">
+                    {f.title || 'Untitled finding'}
+                  </Link>
+                ) : (
+                  <span className="text-gray-300 break-all">{f.title || 'Untitled finding'}</span>
+                )}
+                {f.from_target_active && (
+                  <span
+                    className="shrink-0 rounded bg-amber-900/40 px-1.5 py-0.5 text-amber-300"
+                    title="Unresolved on this target from another scan"
+                  >
+                    on target
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {blockingCount > 8 && (
+            <p className="mt-1 text-xs text-gray-500">+{blockingCount - 8} more</p>
+          )}
+        </div>
+      )}
     </Card>
   )
+}
+
+function deploySeverityClass(severity?: string): string {
+  switch (String(severity || '').toLowerCase()) {
+    case 'critical':
+      return 'bg-red-900/50 text-red-200'
+    case 'high':
+      return 'bg-orange-900/50 text-orange-200'
+    case 'medium':
+      return 'bg-yellow-900/40 text-yellow-200'
+    case 'low':
+      return 'bg-blue-900/40 text-blue-200'
+    default:
+      return 'bg-gray-700 text-gray-300'
+  }
 }
 
 function ParentCoverageRollup({ scan }: { scan: any }) {
