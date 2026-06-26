@@ -28,7 +28,7 @@ import asyncpg
 import redis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
@@ -2492,6 +2492,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(ValueError)
+async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """A ValueError escaping a request handler is, in practice, a malformed path/query
+    parameter — most commonly uuid.UUID("not-a-uuid") on a {target_id}/{scan_id}/...
+    route. Those are client errors (400), not 500s. We still log it so a genuine
+    internal ValueError stays debuggable. Pydantic request-validation raises
+    RequestValidationError (422), not ValueError, so this does not shadow it.
+    _uuid_or_400 stays for handlers that want an explicit, well-labelled 400."""
+    print(f"[400] ValueError on {request.method} {request.url.path}: {exc}", flush=True)
+    return JSONResponse(status_code=400, content={"detail": "Invalid request parameter"})
 
 
 # ============================================================
