@@ -568,10 +568,12 @@ export default function AIGateSettingsPage() {
       })
       if (result.scan_id) {
         toast.success('AI Gate scan queued.', { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } })
+        router.push(`/scans/${result.scan_id}`)
       } else {
+        // No scan id came back (e.g. a dry-run/blocked submission) — don't navigate to
+        // /scans/undefined; tell the user it was queued without a viewable scan.
         toast.success('AI Gate scan queued.')
       }
-      router.push(`/scans/${result.scan_id}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to queue AI Gate scan'
       setError(msg)
