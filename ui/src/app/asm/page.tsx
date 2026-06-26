@@ -754,8 +754,8 @@ function CoverageAdvisorCard({
   const plannedFamilyOptions = checkFamilyOptions.filter((option) => option.disabled)
 
   return (
-    <Card className="p-4">
-      <div className="grid gap-4 lg:grid-cols-[1fr_auto]">
+    <Card className="p-4 space-y-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-blue-400" />
@@ -848,25 +848,9 @@ function CoverageAdvisorCard({
               </span>
             </div>
           )}
-          {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
-            <div className="space-y-1">
-              <div className="text-[11px] uppercase text-gray-500">Recommended next campaigns</div>
-              {gaps.recommended_campaigns.slice(0, 5).map((c) => (
-                <div key={c.campaign} className="flex items-start gap-2 text-xs">
-                  <Badge className={
-                    c.priority === 'high' ? 'bg-red-500/15 text-red-300'
-                    : c.priority === 'medium' ? 'bg-yellow-500/15 text-yellow-300'
-                    : 'bg-gray-800 text-gray-400'}>
-                    {c.label || c.campaign}
-                  </Badge>
-                  <span className="text-gray-500">{c.reason}</span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
-        <div className="flex flex-col gap-2 sm:min-w-48">
+        <div className="flex flex-col gap-2">
           <label className="space-y-1 text-xs text-gray-500">
             <span>Next batch focus</span>
             <select
@@ -922,6 +906,24 @@ function CoverageAdvisorCard({
           </Button>
         </div>
       </div>
+      {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
+        <div className="space-y-1.5 border-t border-gray-800 pt-3">
+          <div className="text-[11px] uppercase text-gray-500">Recommended next campaigns</div>
+          <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+            {gaps.recommended_campaigns.slice(0, 6).map((c) => (
+              <div key={c.campaign} className="flex items-start gap-2 rounded border border-gray-800 bg-gray-950/40 p-2 text-xs">
+                <Badge className={
+                  c.priority === 'high' ? 'bg-red-500/15 text-red-300'
+                  : c.priority === 'medium' ? 'bg-yellow-500/15 text-yellow-300'
+                  : 'bg-gray-800 text-gray-400'}>
+                  {c.label || c.campaign}
+                </Badge>
+                <span className="text-gray-500">{c.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </Card>
   )
 }
