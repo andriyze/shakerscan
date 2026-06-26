@@ -1406,9 +1406,25 @@ async def run_schema_migrations(pool) -> None:
                 await conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
                 )
-            except Exception as canon_err:  # pragma: no cover - only if residual dupes
-                print(f"[schema] canonical_key unique index not created (run POST "
-                      f"/targets/dedupe?dry_run=false, then restart): {canon_err}", flush=True)
+            except Exception as canon_err:  # only on a dirty install with residual dupes
+                # The UNIQUE index can't be built while canonical-duplicate targets
+                # exist — and the new ON CONFLICT (canonical_key) insert paths would
+                # then break (no matching constraint). Auto-heal with the same tested
+                # merge, then retry so the install ends up consistent and functional
+                # rather than half-migrated.
+                from target_dedupe import merge_all_canonical_duplicates
+                print(f"[schema] canonical_key unique index blocked by duplicates "
+                      f"({canon_err}); auto-merging…", flush=True)
+                try:
+                    removed = await merge_all_canonical_duplicates(conn)
+                    await conn.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_canonical_key ON targets(canonical_key)"
+                    )
+                    print(f"[schema] auto-merged {removed} duplicate target row(s); "
+                          "idx_targets_canonical_key created", flush=True)
+                except Exception as heal_err:
+                    print(f"[schema] FAILED to auto-heal canonical duplicates: {heal_err}. "
+                          "Run POST /targets/dedupe?dry_run=false then restart.", flush=True)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

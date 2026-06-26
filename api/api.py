@@ -114,6 +114,11 @@ from retest_contract import (
 )
 import parallel_scan
 import asm_inventory
+from target_dedupe import (
+    canonical_target_key as _canonical_target_key,
+    merge_target_group as _merge_target_group,
+    plan_canonical_merges,
+)
 import check_registry
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
@@ -9347,14 +9352,6 @@ async def list_targets(
     }
 
 
-def _canonical_target_key(url: Any) -> str:
-    """Scheme-and-trailing-slash-insensitive canonical key for a target origin, so
-    'example.com', 'https://example.com' and 'https://example.com/' collapse to one."""
-    raw = str(url or "").strip().lower()
-    raw = re.sub(r"^https?://", "", raw).rstrip("/")
-    return raw
-
-
 def _dedupe_canonical_target_rows(rows: list) -> list:
     """Collapse target rows that share a canonical key (scheme/trailing-slash variants
     of the same origin) so grouped targets don't EXPOSE duplicate normalized targets.
@@ -9382,61 +9379,6 @@ def _dedupe_canonical_target_rows(rows: list) -> list:
     return [survivors[k] for k in order]
 
 
-# target_id-bearing tables with a UNIQUE(target_id, ...) constraint — reassigning a
-# duplicate's rows can collide, so colliding rows are dropped first (keep one per key).
-_TARGET_MERGE_UNIQUE_TABLES: list[tuple[str, list[str]]] = [
-    ("findings", ["fingerprint"]),
-    ("target_endpoints", ["fingerprint"]),
-    ("application_graph_nodes", ["node_type", "node_key"]),
-    ("application_graph_edges", ["src_key", "dst_key", "edge_type"]),
-]
-# target_id-bearing tables with no target_id unique constraint — plain reassignment.
-_TARGET_MERGE_PLAIN_TABLES: list[str] = [
-    "scans", "scan_campaigns", "schedules", "finding_exceptions", "finding_verifications",
-]
-
-
-async def _merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
-    """Reassign every child row of the duplicate targets to the survivor, then delete
-    the duplicates. Runs inside the caller's transaction. For UNIQUE(target_id, …)
-    tables, a duplicate row is dropped when its key already exists on the survivor OR
-    on a lower-id sibling row (so dupe-vs-dupe collisions are resolved too); NULL keys
-    never collide and are simply reassigned."""
-    for table, key_cols in _TARGET_MERGE_UNIQUE_TABLES:
-        key_match = " AND ".join(f"o.{c} = d.{c}" for c in key_cols)
-        await conn.execute(f"""
-            DELETE FROM {table} d
-            WHERE d.target_id = ANY($1::uuid[])
-              AND EXISTS (
-                SELECT 1 FROM {table} o
-                WHERE {key_match}
-                  AND (o.target_id = $2 OR (o.target_id = ANY($1::uuid[]) AND o.id < d.id))
-              )
-        """, dupe_ids, survivor_id)
-        await conn.execute(
-            f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
-            dupe_ids, survivor_id,
-        )
-    for table in _TARGET_MERGE_PLAIN_TABLES:
-        await conn.execute(
-            f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
-            dupe_ids, survivor_id,
-        )
-    # Subdomains whose parent was a duplicate now point at the survivor.
-    await conn.execute(
-        "UPDATE targets SET parent_target_id = $2 WHERE parent_target_id = ANY($1::uuid[])",
-        dupe_ids, survivor_id,
-    )
-    await conn.execute("DELETE FROM targets WHERE id = ANY($1::uuid[])", dupe_ids)
-    # Recompute the survivor's denormalized counts from the merged child rows.
-    await conn.execute("""
-        UPDATE targets SET
-            active_findings_count = (SELECT count(*) FROM findings WHERE target_id = $1 AND status = 'active'),
-            total_scans = (SELECT count(*) FROM scans WHERE target_id = $1)
-        WHERE id = $1
-    """, survivor_id)
-
-
 @app.post("/targets/dedupe")
 async def dedupe_targets(dry_run: bool = True):
     """Merge scheme/trailing-slash duplicate target rows that share a canonical origin
@@ -9445,33 +9387,7 @@ async def dedupe_targets(dry_run: bool = True):
     Defaults to a dry run; pass dry_run=false to execute. Idempotent and per-group
     transactional."""
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, url, is_active, total_scans, active_findings_count, created_at FROM targets"
-        )
-        groups: dict[str, list] = {}
-        for r in rows:
-            groups.setdefault(_canonical_target_key(r["url"]), []).append(r)
-
-        plan: list[dict[str, Any]] = []
-        for key, members in groups.items():
-            if len(members) < 2:
-                continue
-            ranked = sorted(members, key=lambda r: (
-                1 if r["is_active"] else 0,
-                int(r["active_findings_count"] or 0),
-                int(r["total_scans"] or 0),
-                1 if str(r["url"] or "").lower().startswith("https://") else 0,
-            ), reverse=True)
-            survivor, dupes = ranked[0], ranked[1:]
-            plan.append({
-                "canonical": key,
-                "survivor": {"id": str(survivor["id"]), "url": survivor["url"],
-                             "active_findings_count": survivor["active_findings_count"],
-                             "total_scans": survivor["total_scans"]},
-                "merged": [{"id": str(d["id"]), "url": d["url"],
-                            "active_findings_count": d["active_findings_count"],
-                            "total_scans": d["total_scans"]} for d in dupes],
-            })
+        plan = await plan_canonical_merges(conn)
 
         executed = 0
         if not dry_run:
@@ -9752,16 +9668,27 @@ async def create_target(request: TargetCreate):
             raise HTTPException(status_code=409, detail="Target already exists")
 
 
+def _uuid_or_400(value: str, label: str = "id") -> uuid.UUID:
+    """Parse a path/query value as a UUID, returning HTTP 400 (not a 500) on garbage.
+    A bad id is a client error — and a GET to a POST-only path like /targets/dedupe
+    that falls through to /targets/{target_id} should 400, not crash."""
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: {value!r}")
+
+
 @app.get("/targets/{target_id}")
 async def get_target(target_id: str):
     """Get target details."""
+    target_uuid = _uuid_or_400(target_id, "target id")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("""
             SELECT t.*, fs.*
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             WHERE t.id = $1
-        """, uuid.UUID(target_id))
+        """, target_uuid)
 
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
@@ -9772,7 +9699,7 @@ async def get_target(target_id: str):
             FROM scans
             WHERE target_id = $1 AND (scan_role IS NULL OR scan_role <> 'shard')
             ORDER BY created_at DESC LIMIT 10
-        """, uuid.UUID(target_id))
+        """, target_uuid)
 
     result = dict(target)
     result['recent_scans'] = [dict(s) for s in scans]

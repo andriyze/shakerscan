@@ -13,3 +13,6 @@ httpx>=0.26.0
 aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 lxml>=5.1.0
+
+# Test runner (so `make test` works in the api/worker image without an ad-hoc install).
+pytest>=8.0.0
