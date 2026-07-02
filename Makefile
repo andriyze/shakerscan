@@ -21,9 +21,11 @@ e2e-dast:
 ## when running against an older image that predates it. The host can't run these (no
 ## asyncpg), so they intentionally run in-container.
 UNIT_TESTS = tests/test_deployment_gate.py tests/test_canonical_dedupe.py \
+	tests/test_api_id_validation.py \
 	tests/test_evidence_objects.py tests/test_worker_freshness.py \
 	tests/test_agent_receipt_verification.py tests/test_application_graph.py
 test:
+	@docker compose exec -T api rm -rf /tmp/tests >/dev/null
 	@docker compose cp tests api:/tmp/tests >/dev/null
 	@docker compose exec -T api sh -lc '\
 		command -v pytest >/dev/null 2>&1 || pip install -q pytest >/dev/null 2>&1; \

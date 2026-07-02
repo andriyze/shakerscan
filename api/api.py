@@ -2496,13 +2496,11 @@ app.add_middleware(
 
 @app.exception_handler(ValueError)
 async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-    """A ValueError escaping a request handler is, in practice, a malformed path/query
-    parameter — most commonly uuid.UUID("not-a-uuid") on a {target_id}/{scan_id}/...
-    route. Those are client errors (400), not 500s. We still log it so a genuine
-    internal ValueError stays debuggable. Pydantic request-validation raises
-    RequestValidationError (422), not ValueError, so this does not shadow it.
-    _uuid_or_400 stays for handlers that want an explicit, well-labelled 400."""
-    print(f"[400] ValueError on {request.method} {request.url.path}: {exc}", flush=True)
+    """Convert raw uuid.UUID parse failures into client errors without masking
+    unrelated internal ValueErrors as bad requests."""
+    if "hexadecimal UUID" not in str(exc):
+        raise exc
+    logger.info("Invalid UUID path/query parameter on %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(status_code=400, content={"detail": "Invalid request parameter"})
 
 
