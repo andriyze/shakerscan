@@ -19,11 +19,13 @@ that ASM should expose as family/proof/workflow gaps.
 [multi-node-architecture.md](multi-node-architecture.md).
 
 **2026-07-05 audit note:** the backend foundations are ahead of the operator workflow. The current
-implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): first-class ASM
-schedule kinds, one target campaign timeline, Action Center remediation CTAs, and broader activity
-surfacing are the next product priorities. First-pass next-action / skip-reason state is now live:
-ASM policy/gaps/improve return `scheduler_state`, and dispatcher/scheduler decisions persist to
-`targets.metadata_json.asm_last_decision`.
+implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): ASM activity
+scheduler-state surfacing, Action Center remediation CTAs, first-class ASM schedule kinds, one
+target campaign timeline, AI red-team campaign UX, and guided Model Intake trust UX are the next
+product priorities. First-pass next-action / skip-reason state is now live: ASM policy/gaps/improve
+return `scheduler_state`, and dispatcher/scheduler decisions persist to
+`targets.metadata_json.asm_last_decision`. The schedules UI has an ASM coverage-wave selector, but
+the API/DB contract still encodes it as `scan_options.kind='asm_improve'`.
 
 ---
 
@@ -46,7 +48,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| ASM scheduling/operator UX | Partial; next-action/skip-reason contract shipped | Unify background policy and recurring ASM waves; surface the decision contract in activity rows, dashboard CTAs, and one target timeline. |
+| ASM scheduling/operator UX | Partial; next-action/skip-reason contract and schedule UI bridge shipped | Surface the decision contract in ASM activity and dashboard CTAs; then make ASM waves a first-class schedule kind and unify background policy, recurring waves, manual actions, and scan rows into one target timeline. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -128,6 +130,9 @@ Shipped pieces:
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
   inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, ASM
   activity, policy presets, local-time window helper, and new-surface feed.
+- `/schedules` gives users a first UI bridge for recurring ASM waves, but it still submits
+  `scan_options.kind='asm_improve'` through the normal schedule API. Treat that as compatibility
+  behavior until a typed schedule-kind contract exists.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 - `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and
   `include_internal=true` expose them for debugging.
@@ -523,9 +528,9 @@ Recommended UI:
   user-facing states instead of silent "nothing happened" behavior.
 - **Continuous policy:** one enable switch plus presets: `Safe`, `Balanced`, `Aggressive lab`.
   Advanced fields stay expandable.
-- **Recurring ASM waves:** model them as first-class schedule kinds, not as a hidden
-  `scan_options.kind='asm_improve'` variant of a normal DAST scan schedule. Keep legacy decoding for
-  old rows.
+- **Recurring ASM waves:** the current UI exposes them, but the API/DB still model them as
+  `scan_options.kind='asm_improve'` on a normal schedule. Move to first-class schedule kinds while
+  keeping legacy decoding for old rows and old clients.
 - **Automation defaults:** fresh installs should enable safe automation by default: auto-shard
   eligible active scans when enough workers exist, and enable passive ASM recon/new-surface tracking
   for new targets. Active ASM exploitation should use small safe batches by default and require an
@@ -738,10 +743,12 @@ New quality gaps to track:
 
 Remaining product work from the 2026-07-05 audit:
 
+- Return and render dispatcher/scheduler decision facts from `/targets/{id}/asm/activity`, reusing
+  the existing `scheduler_state` contract from policy/gaps/improve.
+- Add structured Dashboard Action Center CTAs for ASM gaps, schedule blockers, failed scans, stale
+  workers, exception hygiene, Model Intake trust gaps, and AI control gaps.
 - Make ASM schedule kind first-class in the schedule API/DB while preserving legacy
-  `scan_options.kind='asm_improve'` rows.
-- Persist and expose dispatcher/scheduler decision facts: next eligible time, skip reason, active
-  blocker scan, rate/daily cap state, and missing auth/precondition state.
+  `scan_options.kind='asm_improve'` rows and accepting old schedule clients.
 - Add a target campaign timeline that unifies background ASM policy, recurring ASM waves, manual
   Improve Coverage actions, and implementation scan/activity rows.
 - Add UI tests for ASM schedule creation/editing, advanced batch fields, endpoint filter, focused

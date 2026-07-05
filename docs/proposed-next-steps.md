@@ -1,11 +1,12 @@
 # Proposed Next Steps — DAST & ASM Quality
 
-**Status:** updated 2026-07-05 after the latest-20-commit audit. The contract-first proof layer,
-first app-graph/evidence slices, target de-dupe, policy exceptions, Model Intake trust controls,
-AI Gate hardening, and ASM scheduling foundations are now implemented and wired. This document lists
-only the *verified-remaining* work (gaps and unfinished layers) plus the architectural direction.
-Each remaining item cites the code symbol or UI/API surface that proves its status, so it stays
-auditable. No item below is "already done."
+**Status:** updated 2026-07-05 after reconciling this roadmap with
+`docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
+current code. The contract-first proof layer, first app-graph/evidence slices, target de-dupe,
+policy exceptions, Model Intake trust controls, AI Gate hardening, and ASM scheduling foundations are
+implemented and wired. This document lists only the *verified-remaining* work (gaps and unfinished
+layers) plus the architectural direction. Each remaining item cites the code symbol, route, or UI
+surface that proves its status, so it stays auditable. No item below is "already done."
 
 ## Done (do not re-list as TODO)
 
@@ -50,6 +51,10 @@ called at real sites — verify before re-proposing any of it:
   `scheduler_state`, while the dispatcher/scheduler persist the latest decision under
   `targets.metadata_json.asm_last_decision`. The ASM page renders the live and last recorded
   scheduler decision plus remaining daily/domain budget.
+- **Schedules UI phase 1 for ASM waves** — `/schedules` exposes a "Keep this target covered
+  (ASM coverage wave)" option and submits `scan_options.kind='asm_improve'`. This is a UI bridge,
+  not a finished API contract; `ScheduleCreate.scan_type` is still required and the schedule kind is
+  still encoded inside `scan_options`.
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
@@ -86,6 +91,58 @@ audit-grade platform.
 The next work should be implemented as separate increments. Do not combine UI workflow cleanup,
 ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence storage in one PR.
 
+### Findings from this doc/code reconciliation
+
+The three planning docs agree on the strategic direction, but the canonical next steps needed sharper
+ordering and more exact implementation boundaries:
+
+- `docs/archive/asm-parallel-improvement-plan.md` is correctly archived. It should remain evidence for
+  A4/P6/worker-rebuild history, not a live roadmap.
+- `docs/parallel-scan-architecture.md` is still useful for parent/plan/shard/merge and coverage
+  mechanics, but its next work should be treated as execution hardening only. Product gaps now sit in
+  campaign UX, schedule semantics, and proof-quality family campaigns.
+- `docs/continuous-asm-architecture.md` correctly identifies the target architecture, but the live
+  product still exposes overlapping concepts: background ASM policy, recurring schedules, manual
+  Improve Coverage, and hidden implementation scans.
+- The schedules UI already exposes ASM waves (`ui/src/app/schedules/page.tsx`), but the API/DB still
+  model them as normal schedules with `scan_options.kind='asm_improve'`
+  (`api/api.py::ScheduleCreate`, `/schedules`). The next change is therefore contract cleanup and
+  timeline visibility, not adding another schedule button.
+- `/targets/{id}/asm/activity` returns scan/campaign rows and attempt counts, but not the scheduler
+  decision object. The scheduler contract exists in policy/gaps/improve and target metadata; activity
+  and dashboard CTAs still need to consume it.
+- Model Intake has the low-level trust fields in API/UI, but no guided trust-mode workflow. The next
+  slice should make valid trust configurations obvious rather than adding more fields.
+- AI Gate has transcripts, reports, adaptive probes, MCP readiness, and control evidence, but lacks a
+  campaign review/replay surface that explains planned/executed/skipped probes by risk family.
+
+### Immediate implementation sequence
+
+These are the next commit-sized slices, in order:
+
+1. **ASM activity scheduler state:** return `scheduler_state` from
+   `GET /targets/{id}/asm/activity`, render the last/live decision next to recent ASM activity, and
+   test the API/UI contract. This closes the current "why did/didn't ASM run?" gap without changing
+   scheduling semantics.
+2. **Action Center CTAs:** add structured actions to `/dashboard.action_center` items and render safe
+   links/buttons for stale workers, failed scans, ASM gaps, exception hygiene, Model Intake trust
+   gaps, and AI control gaps. Avoid unsafe one-click state changes until each has a tested
+   confirmation flow.
+3. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
+   `normal_scan` and `asm_improve`, backfill/decode legacy `scan_options.kind`, keep legacy API
+   compatibility, and make `/schedules` create/edit ASM waves without pretending a DAST `scan_type`
+   is the primary action.
+4. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
+   manual Improve Coverage, active implementation scan, last activity, last skip reason, and next
+   eligible time in one target-scoped view.
+5. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
+   preview before broadening artifact/provider support.
+6. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
+   matrix, skipped-probe reasons, transcript/report export, and gated rerun/replay actions.
+7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+   NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
+   graph-driven authz hypotheses.
+
 ### 1. Product-operability layer: one place that explains "what needs action"
 **Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
 `action_center` feed built from worker freshness, deployment blockers, failed scans, exception
@@ -114,19 +171,21 @@ will run next, and which button fixes the next blocker" without reading scan JSO
 ### 2. ASM scheduling and campaign semantics
 **Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
 background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
-live/persisted scheduler decisions. The remaining product problem is that the product still has two
-overlapping automation models: recurring schedules and continuous policy. Schedules encode ASM as
-`scan_options.kind='asm_improve'` while `ScheduleCreate.scan_type` remains required, so ASM waves are
-a hidden variant of a DAST scan schedule rather than a first-class schedule kind.
+live/persisted scheduler decisions. `/schedules` now has a visible ASM coverage-wave option, but the
+contract is still legacy-shaped: schedules encode ASM as `scan_options.kind='asm_improve'` while
+`ScheduleCreate.scan_type` remains required. The remaining product problem is therefore not a missing
+button; it is that recurring schedules, continuous policy, manual Improve Coverage, and internal scan
+rows are still separate mental models.
 
 **Implement:**
 1. Introduce a typed schedule kind (`normal_scan`, `asm_improve`, later `focused_family` /
    `finding_retest`) in the API and DB migration/backfill. Keep backward compatibility by decoding
-   legacy `scan_options.kind`.
+   legacy `scan_options.kind` and accepting old clients that still send only `scan_type`.
 2. Show one unified target timeline: background dispatcher decision, recurring schedule next run,
    current active scan/ASM batch, last activity, and last skip reason.
 3. Let `/schedules` create/edit ASM waves without pretending they have a DAST `scan_type`; expose
-   batch size, stale days, endpoint filter, family, and Lab/deep gating only when relevant.
+   batch size, stale days, endpoint filter, family, and Lab/deep gating only when relevant. The
+   existing UI selector is the starting point, not the final contract.
 4. Add tests for schedule-kind validation, legacy decode, due-run dispatch, target active-scan skip,
    and UI payload shape.
 
