@@ -478,6 +478,17 @@ export interface AsmActivity {
   started_at?: string | null
   completed_at?: string | null
   duration_seconds?: number | null
+  campaign_id?: string | null
+  campaign_mode?: string | null
+  campaign_requested_by?: string | null
+  campaign_status?: string | null
+  campaign_check_families?: string[] | null
+  attempt_status_counts?: Record<string, number>
+}
+
+export interface AsmActivityResponse {
+  activity: AsmActivity[]
+  scheduler_state?: AsmSchedulerState
 }
 
 export interface AsmActionResponse {
@@ -1489,7 +1500,7 @@ export async function getAsmGaps(targetId: string): Promise<AsmGaps> {
 export async function getAsmActivity(
   targetId: string,
   params?: { limit?: number }
-): Promise<{ activity: AsmActivity[] }> {
+): Promise<AsmActivityResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/activity?${searchParams}`)

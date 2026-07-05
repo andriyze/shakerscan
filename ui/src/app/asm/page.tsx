@@ -33,12 +33,14 @@ import {
   updateAsmPolicy,
   formatDate,
   type AsmActivity,
+  type AsmActivityResponse,
   type AsmCheckFamily,
   type AsmConfig,
   type AsmCoverage,
   type AsmEndpoint,
   type AsmGaps,
   type AsmPolicy,
+  type AsmSchedulerState,
   type Target,
 } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -1055,13 +1057,58 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
   )
 }
 
-function ActivityCard({ activity }: { activity: AsmActivity[] }) {
+function ActivityCard({ activity, schedulerState }: { activity: AsmActivity[]; schedulerState?: AsmSchedulerState | null }) {
+  const decision = schedulerState?.decision
+  const lastDecision = schedulerState?.last_decision
+  const activeScanId = decision?.active_scan_id || schedulerState?.active_scan_ids?.[0] || lastDecision?.active_scan_id
+  const decisionLabel = decision?.action
+    ? `${decision.action}${decision.blocked_by ? ` · blocked by ${decision.blocked_by.replace(/_/g, ' ')}` : ''}`
+    : 'No live decision'
+
   return (
     <Card className="p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-5 w-5 text-blue-400" />
         <h2 className="text-sm font-medium text-gray-300">ASM activity</h2>
       </div>
+      {schedulerState && (
+        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] uppercase text-gray-500">Scheduler decision</div>
+              <div className="mt-1 text-sm text-gray-200">{decisionLabel}</div>
+              <div className="mt-1 text-xs text-gray-500">
+                {decision?.reason || lastDecision?.reason || 'No scheduler reason has been recorded yet.'}
+              </div>
+              {decision?.next_eligible_at && (
+                <div className="mt-1 text-xs text-gray-500">Next eligible: {formatDate(decision.next_eligible_at)}</div>
+              )}
+              {lastDecision?.recorded_at && (
+                <div className="mt-1 text-xs text-gray-600">
+                  Last recorded: {formatDate(lastDecision.recorded_at)}
+                  {lastDecision.source ? ` · ${lastDecision.source}` : ''}
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+              <Badge className="bg-gray-800 text-gray-300">
+                claimable: {schedulerState.claimable ?? 0}
+              </Badge>
+              <Badge className="bg-gray-800 text-gray-300">
+                daily: {schedulerState.daily_cap_remaining ?? 'unlimited'}
+              </Badge>
+              <Badge className="bg-gray-800 text-gray-300">
+                domain/hour: {schedulerState.rate_cap_remaining ?? 'unlimited'}
+              </Badge>
+            </div>
+          </div>
+          {activeScanId && (
+            <Link href={`/scans/${activeScanId}`} className="mt-2 inline-flex text-xs text-blue-400 underline hover:text-blue-300">
+              View active ASM scan
+            </Link>
+          )}
+        </div>
+      )}
       {activity.length === 0 ? (
         <EmptyState message="No ASM activity yet" hint="Run discovery or improve coverage to start building the activity history." />
       ) : (
@@ -1104,6 +1151,7 @@ function TargetView({ targetId }: { targetId: string }) {
   const [coverage, setCoverage] = useState<AsmCoverage | null>(null)
   const [gaps, setGaps] = useState<AsmGaps | null>(null)
   const [activity, setActivity] = useState<AsmActivity[]>([])
+  const [activitySchedulerState, setActivitySchedulerState] = useState<AsmSchedulerState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -1116,13 +1164,14 @@ function TargetView({ targetId }: { targetId: string }) {
     Promise.all([
       getAsmEndpoints(targetId, { status: filters.status || undefined, limit: 200 }),
       getAsmGaps(targetId).catch(() => null),
-      getAsmActivity(targetId, { limit: 12 }).catch(() => ({ activity: [] })),
+      getAsmActivity(targetId, { limit: 12 }).catch((): AsmActivityResponse => ({ activity: [] })),
     ])
       .then(([endpointData, gapData, activityData]) => {
         setEndpoints(endpointData.endpoints)
         setCoverage(endpointData.coverage)
         setGaps(gapData)
         setActivity(activityData.activity)
+        setActivitySchedulerState(activityData.scheduler_state || gapData?.scheduler_state || null)
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false))
@@ -1214,7 +1263,7 @@ function TargetView({ targetId }: { targetId: string }) {
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <GapsCard gaps={gaps} loading={loading} />
-        <ActivityCard activity={activity} />
+        <ActivityCard activity={activity} schedulerState={activitySchedulerState} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">

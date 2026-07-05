@@ -51,6 +51,10 @@ called at real sites — verify before re-proposing any of it:
   `scheduler_state`, while the dispatcher/scheduler persist the latest decision under
   `targets.metadata_json.asm_last_decision`. The ASM page renders the live and last recorded
   scheduler decision plus remaining daily/domain budget.
+- **ASM activity scheduler-state surfacing** — `GET /targets/{id}/asm/activity` returns the same
+  `scheduler_state` contract as policy/gaps/improve, and the ASM Activity card renders the live
+  decision, skip reason, last recorded decision, budget/claimable counters, and active scan link
+  alongside recent ASM scan/campaign rows.
 - **Schedules UI phase 1 for ASM waves** — `/schedules` exposes a "Keep this target covered
   (ASM coverage wave)" option and submits `scan_options.kind='asm_improve'`. This is a UI bridge,
   not a finished API contract; `ScheduleCreate.scan_type` is still required and the schedule kind is
@@ -108,9 +112,8 @@ ordering and more exact implementation boundaries:
   model them as normal schedules with `scan_options.kind='asm_improve'`
   (`api/api.py::ScheduleCreate`, `/schedules`). The next change is therefore contract cleanup and
   timeline visibility, not adding another schedule button.
-- `/targets/{id}/asm/activity` returns scan/campaign rows and attempt counts, but not the scheduler
-  decision object. The scheduler contract exists in policy/gaps/improve and target metadata; activity
-  and dashboard CTAs still need to consume it.
+- `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
+  scheduler decision object. Dashboard CTAs still need to consume those facts.
 - Model Intake has the low-level trust fields in API/UI, but no guided trust-mode workflow. The next
   slice should make valid trust configurations obvious rather than adding more fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, and control evidence, but lacks a
@@ -120,26 +123,22 @@ ordering and more exact implementation boundaries:
 
 These are the next commit-sized slices, in order:
 
-1. **ASM activity scheduler state:** return `scheduler_state` from
-   `GET /targets/{id}/asm/activity`, render the last/live decision next to recent ASM activity, and
-   test the API/UI contract. This closes the current "why did/didn't ASM run?" gap without changing
-   scheduling semantics.
-2. **Action Center CTAs:** add structured actions to `/dashboard.action_center` items and render safe
+1. **Action Center CTAs:** add structured actions to `/dashboard.action_center` items and render safe
    links/buttons for stale workers, failed scans, ASM gaps, exception hygiene, Model Intake trust
    gaps, and AI control gaps. Avoid unsafe one-click state changes until each has a tested
    confirmation flow.
-3. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
+2. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
    `normal_scan` and `asm_improve`, backfill/decode legacy `scan_options.kind`, keep legacy API
    compatibility, and make `/schedules` create/edit ASM waves without pretending a DAST `scan_type`
    is the primary action.
-4. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
+3. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
    manual Improve Coverage, active implementation scan, last activity, last skip reason, and next
    eligible time in one target-scoped view.
-5. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
+4. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
    preview before broadening artifact/provider support.
-6. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
+5. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
    matrix, skipped-probe reasons, transcript/report export, and gated rerun/replay actions.
-7. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+6. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
 
@@ -147,8 +146,8 @@ These are the next commit-sized slices, in order:
 **Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
 `action_center` feed built from worker freshness, deployment blockers, failed scans, exception
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
-The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve now expose live
-`scheduler_state`, and dispatcher/scheduler decisions are persisted as
+The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
+expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted as
 `metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
 Exceptions Queue. Remaining work is deeper actionability: wiring those facts into Dashboard CTAs and
 inline one-click remediation for each blocker class.
@@ -156,10 +155,10 @@ inline one-click remediation for each blocker class.
 **Implement:**
 1. Extend Action Center items with direct remediation where safe: restart/rescale worker CTA,
    Improve Coverage CTA with target preselection, exception-renew/revoke CTA, and retry failed scan.
-2. Extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve into
-   `/asm/activity` and Dashboard Action Center CTAs. The first contract is live, including
+2. Extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve/activity
+   into Dashboard Action Center CTAs. The first contract is live, including
    `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and active scan
-   links; activity rows still need to show the decision alongside scan history.
+   links; the remaining gap is dashboard actionability.
 3. DONE: add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired,
    missing owner/approver, no compensating controls, policy-scoped, and target-scoped.
 4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product

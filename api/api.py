@@ -11512,9 +11512,11 @@ async def asm_activity(
     limit: int = Query(25, ge=1, le=100),
 ):
     """Recent ASM recon/test jobs for a target, grouped away from normal scan rows."""
+    r = get_redis()
     async with db_pool.acquire() as conn:
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
             raise HTTPException(status_code=404, detail="Target not found")
+        scheduler_state = await _asm_scheduler_state(conn, r, target_id)
         rows = await conn.fetch(
             """
             SELECT s.id, s.job_id, s.scan_role, s.scan_type, s.status, s.current_phase, s.progress,
@@ -11551,7 +11553,7 @@ async def asm_activity(
         cid = str(row["campaign_id"]) if row["campaign_id"] else None
         item["attempt_status_counts"] = attempt_counts.get(cid, {}) if cid else {}
         activity.append(item)
-    return {"activity": activity}
+    return {"activity": activity, "scheduler_state": scheduler_state}
 
 
 @app.post("/ai/ops/route")
