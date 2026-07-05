@@ -313,14 +313,22 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         ? 'bg-green-900/50 text-green-200'
         : 'bg-amber-900/50 text-amber-200'
 
-  async function queueReplay(label: string, mode: 'skipped' | 'errors' | 'family' | 'all', probeFamily?: string) {
-    setReplayLoading(`${mode}:${probeFamily || ''}`)
+  async function queueReplay(
+    label: string,
+    mode: 'skipped' | 'errors' | 'family' | 'transcript' | 'all',
+    options: { probeFamily?: string; probeId?: string; transcriptIndex?: number } = {}
+  ) {
+    const replayTarget = options.probeFamily || options.probeId || options.transcriptIndex || ''
+    const replayKey = `${mode}:${replayTarget}`
+    setReplayLoading(replayKey)
     setReplayError(null)
     setReplayQueued(null)
     try {
       const result = await replayAiScan(scan.id, {
         mode,
-        probe_family: probeFamily,
+        probe_family: options.probeFamily,
+        probe_id: options.probeId,
+        transcript_index: options.transcriptIndex,
         confirm_production: confirmProductionReplay,
         requested_by: 'ui',
       })
@@ -443,7 +451,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                   </div>
                   <button
                     type="button"
-                    onClick={() => queueReplay(formatAiGateLabel(family.family), 'family', family.family)}
+                    onClick={() => queueReplay(formatAiGateLabel(family.family), 'family', { probeFamily: family.family })}
                     disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
                     className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
                   >
@@ -494,6 +502,41 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                 Export report
               </a>
             </div>
+          </div>
+
+          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Transcript Replay</div>
+            {review.transcripts.length ? (
+              <div className="space-y-2">
+                {review.transcripts.slice(0, 6).map((transcript) => (
+                  <div key={`${transcript.index}-${transcript.probe_id}`} className="rounded bg-gray-900/70 p-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 break-all font-mono text-gray-200">{transcript.probe_id}</span>
+                      {transcript.error && <span className="rounded bg-red-900/50 px-1.5 py-0.5 text-[11px] text-red-200">error</span>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-gray-500">
+                      {transcript.probe_family && <span>{formatAiGateLabel(transcript.probe_family)}</span>}
+                      {transcript.technique && <span>{formatAiGateLabel(transcript.technique)}</span>}
+                      {transcript.status_code ? <span>HTTP {transcript.status_code}</span> : null}
+                      {transcript.turn_count !== null && transcript.turn_count !== undefined && <span>{transcript.turn_count} turn{transcript.turn_count === 1 ? '' : 's'}</span>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => queueReplay(`Transcript ${transcript.probe_id}`, 'transcript', {
+                        probeId: transcript.probe_id || undefined,
+                        transcriptIndex: transcript.index,
+                      })}
+                      disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
+                      className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                    >
+                      {replayLoading === `transcript:${transcript.probe_id || transcript.index}` ? 'Queueing...' : 'Replay transcript'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No replayable transcript probe IDs were stored for this run.</p>
+            )}
           </div>
         </div>
       </div>

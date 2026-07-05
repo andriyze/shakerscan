@@ -3050,8 +3050,10 @@ class AIFindingRetestRequest(BaseModel):
 
 
 class AIScanReplayRequest(BaseModel):
-    mode: str = Field(default="skipped", pattern="^(skipped|errors|family|all)$")
+    mode: str = Field(default="skipped", pattern="^(skipped|errors|family|transcript|all)$")
     probe_family: Optional[str] = None
+    probe_id: Optional[str] = None
+    transcript_index: Optional[int] = Field(default=None, ge=0)
     requested_by: Optional[str] = "api"
     confirm_production: bool = False
 
@@ -5093,9 +5095,11 @@ def _build_ai_scan_replay_plan(
     coverage = ai_gate.get("coverage_matrix") if isinstance(ai_gate.get("coverage_matrix"), dict) else {}
     by_family = coverage.get("by_family") if isinstance(coverage.get("by_family"), dict) else {}
     skipped = coverage.get("skipped") if isinstance(coverage.get("skipped"), list) else []
+    transcripts = ai_gate.get("transcripts") if isinstance(ai_gate.get("transcripts"), list) else []
     mode = request.mode or "skipped"
     focus_probe_ids: list[str] = []
     focus_family = (request.probe_family or "").strip() or None
+    transcript_context: dict[str, Any] | None = None
 
     def _count(value: Any) -> int:
         try:
@@ -5136,6 +5140,42 @@ def _build_ai_scan_replay_plan(
             raise HTTPException(status_code=400, detail="probe_family is required for family replay")
         if by_family and focus_family not in by_family:
             raise HTTPException(status_code=400, detail=f"Probe family {focus_family!r} was not planned in this scan")
+    elif mode == "transcript":
+        requested_probe_id = (request.probe_id or "").strip()
+        selected_index = request.transcript_index
+        selected_transcript: dict[str, Any] | None = None
+        if requested_probe_id:
+            for idx, item in enumerate(transcripts):
+                if isinstance(item, dict) and str(item.get("probe_id") or "").strip() == requested_probe_id:
+                    selected_transcript = item
+                    selected_index = idx
+                    break
+            if selected_transcript is None:
+                raise HTTPException(status_code=400, detail=f"Transcript probe_id {requested_probe_id!r} was not found in this scan")
+        elif selected_index is not None:
+            if selected_index >= len(transcripts):
+                raise HTTPException(status_code=400, detail="transcript_index is out of range")
+            candidate = transcripts[selected_index]
+            selected_transcript = candidate if isinstance(candidate, dict) else None
+        else:
+            raise HTTPException(status_code=400, detail="probe_id or transcript_index is required for transcript replay")
+        if not isinstance(selected_transcript, dict):
+            raise HTTPException(status_code=400, detail="Selected transcript is not replayable")
+        transcript_probe_id = str(selected_transcript.get("probe_id") or "").strip()
+        if not transcript_probe_id:
+            raise HTTPException(status_code=400, detail="Selected transcript is missing probe_id context")
+        focus_probe_ids = [transcript_probe_id]
+        turns = selected_transcript.get("turns")
+        transcript_context = {
+            "transcript_index": selected_index,
+            "probe_id": transcript_probe_id,
+            "probe_family": selected_transcript.get("probe_family") or selected_transcript.get("strategy_id"),
+            "technique": selected_transcript.get("technique"),
+            "status_code": selected_transcript.get("status_code"),
+            "stop_reason": selected_transcript.get("stop_reason"),
+            "turn_count": len(turns) if isinstance(turns, list) else selected_transcript.get("turn_count"),
+            "had_error": bool(selected_transcript.get("error")),
+        }
     elif mode == "all":
         focus_family = None
         focus_probe_ids = []
@@ -5154,6 +5194,7 @@ def _build_ai_scan_replay_plan(
         "probe_pack": ai_gate.get("probe_pack"),
         "scan_profile": ai_gate.get("scan_profile"),
         "environment": (ai_gate.get("decision") or {}).get("environment") if isinstance(ai_gate.get("decision"), dict) else None,
+        "transcript": transcript_context,
     }
 
 
@@ -12881,6 +12922,7 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
         "mode": replay_plan.get("mode"),
         "probe_ids": replay_plan.get("probe_ids") or [],
         "probe_family": replay_plan.get("probe_family"),
+        "transcript": replay_plan.get("transcript"),
         "target_url": target["endpoint_url"],
         "ui_url": f"/scans/{new_scan_id}",
     }

@@ -789,6 +789,55 @@ def test_ai_scan_replay_plan_rejects_non_ai_gate_result():
     assert "AI Gate result" in exc.value.detail
 
 
+def test_ai_scan_replay_plan_selects_transcript_by_index():
+    plan = api_module._build_ai_scan_replay_plan(
+        {
+            "ai_gate": {
+                "coverage_matrix": {"summary": {"planned": 2, "executed": 2}},
+                "transcripts": [
+                    {"probe_id": "rag-1", "probe_family": "rag", "turns": [{"role": "user"}]},
+                    {"probe_id": "mcp-1", "probe_family": "mcp", "status_code": 200, "turn_count": 1},
+                ],
+            }
+        },
+        api_module.AIScanReplayRequest(mode="transcript", transcript_index=1),
+    )
+
+    assert plan["probe_ids"] == ["mcp-1"]
+    assert plan["probe_family"] is None
+    assert plan["transcript"]["transcript_index"] == 1
+    assert plan["transcript"]["probe_family"] == "mcp"
+    assert plan["transcript"]["status_code"] == 200
+
+
+def test_ai_scan_replay_plan_selects_transcript_by_probe_id():
+    plan = api_module._build_ai_scan_replay_plan(
+        {
+            "ai_gate": {
+                "transcripts": [
+                    {"probe_id": "rag-1", "probe_family": "rag"},
+                    {"probe_id": "mcp-1", "probe_family": "mcp"},
+                ],
+            }
+        },
+        api_module.AIScanReplayRequest(mode="transcript", probe_id="rag-1"),
+    )
+
+    assert plan["probe_ids"] == ["rag-1"]
+    assert plan["transcript"]["transcript_index"] == 0
+
+
+def test_ai_scan_replay_plan_rejects_transcript_without_probe_context():
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._build_ai_scan_replay_plan(
+            {"ai_gate": {"transcripts": [{"probe_family": "rag"}]}},
+            api_module.AIScanReplayRequest(mode="transcript", transcript_index=0),
+        )
+
+    assert exc.value.status_code == 400
+    assert "missing probe_id" in exc.value.detail
+
+
 # ----- finding exception queue filters -------------------------------------
 
 class _ExceptionQueueConn:

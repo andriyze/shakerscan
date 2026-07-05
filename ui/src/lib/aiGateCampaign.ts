@@ -16,6 +16,17 @@ export interface AiGateCampaignFinding {
   probe_family?: string | null
 }
 
+export interface AiGateCampaignTranscript {
+  index: number
+  probe_id?: string | null
+  probe_family?: string | null
+  technique?: string | null
+  status_code?: number | null
+  stop_reason?: string | null
+  turn_count?: number | null
+  error?: string | null
+}
+
 export interface AiGateCampaignReview {
   available: boolean
   target_name?: string | null
@@ -45,6 +56,7 @@ export interface AiGateCampaignReview {
   families: AiGateCampaignFamily[]
   skipped_reasons: Array<{ reason: string; count: number; families: string[] }>
   findings: AiGateCampaignFinding[]
+  transcripts: AiGateCampaignTranscript[]
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -92,6 +104,7 @@ export function buildAiGateCampaignReview(result: unknown): AiGateCampaignReview
       families: [],
       skipped_reasons: [],
       findings: [],
+      transcripts: [],
     }
   }
 
@@ -149,6 +162,24 @@ export function buildAiGateCampaignReview(result: unknown): AiGateCampaignReview
       }
     })
 
+  const transcripts = asArray(aiGate.transcripts)
+    .map((raw, index) => ({ transcript: asRecord(raw), index }))
+    .filter(({ transcript }) => Boolean(str(transcript.probe_id)))
+    .slice(0, 8)
+    .map(({ transcript, index }) => {
+      const turns = asArray(transcript.turns)
+      return {
+        index,
+        probe_id: str(transcript.probe_id),
+        probe_family: str(transcript.probe_family || transcript.strategy_id),
+        technique: str(transcript.technique),
+        status_code: transcript.status_code === undefined ? null : num(transcript.status_code),
+        stop_reason: str(transcript.stop_reason),
+        turn_count: turns.length ? turns.length : (transcript.turn_count === undefined ? null : num(transcript.turn_count)),
+        error: str(transcript.error),
+      }
+    })
+
   return {
     available: true,
     target_name: str(aiGate.target_name),
@@ -184,5 +215,6 @@ export function buildAiGateCampaignReview(result: unknown): AiGateCampaignReview
       }))
       .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
     findings,
+    transcripts,
   }
 }

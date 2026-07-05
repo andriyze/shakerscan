@@ -81,6 +81,21 @@ test('summarizes AI Gate campaign matrix, skipped reasons, evidence hashes, and 
       },
       usage: { stopped_by_request_budget: true },
       decision: { decision: 'needs_review', environment: 'staging', rationale: 'Review RAG leakage.' },
+      transcripts: [
+        {
+          probe_id: 'rag-cross-tenant',
+          probe_family: 'rag',
+          technique: 'cross_tenant_retrieval',
+          status_code: 200,
+          turns: [{ role: 'user' }, { role: 'assistant' }],
+        },
+        {
+          probe_id: 'mcp-oauth',
+          strategy_id: 'mcp',
+          error: 'timeout',
+          turn_count: 1,
+        },
+      ],
     },
   })
 
@@ -97,6 +112,11 @@ test('summarizes AI Gate campaign matrix, skipped reasons, evidence hashes, and 
   assert.equal(review.semantic_judge_status, 'completed')
   assert.equal(review.findings[0].id, 'finding-1')
   assert.equal(review.findings[0].probe_family, 'rag')
+  assert.equal(review.transcripts.length, 2)
+  assert.equal(review.transcripts[0].probe_id, 'rag-cross-tenant')
+  assert.equal(review.transcripts[0].turn_count, 2)
+  assert.equal(review.transcripts[1].probe_family, 'mcp')
+  assert.equal(review.transcripts[1].error, 'timeout')
 })
 
 test('returns unavailable review for non AI Gate results', () => {
@@ -105,4 +125,5 @@ test('returns unavailable review for non AI Gate results', () => {
   assert.equal(review.available, false)
   assert.equal(review.families.length, 0)
   assert.equal(review.findings.length, 0)
+  assert.equal(review.transcripts.length, 0)
 })

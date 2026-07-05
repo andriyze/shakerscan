@@ -121,6 +121,11 @@ called at real sites — verify before re-proposing any of it:
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
   campaign, and production targets still require explicit `confirm_production=true`. The scan-detail
   campaign panel exposes these actions.
+- **AI red-team transcript replay phase 1** — the same replay endpoint now supports
+  `mode=transcript` with `probe_id` or `transcript_index`, validates the selected stored transcript,
+  and queues a focused rerun of that exact transcript probe under the original target/profile/pack.
+  The scan-detail campaign panel lists replayable transcript probe IDs with per-transcript replay
+  buttons and the same production confirmation boundary.
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
@@ -181,17 +186,17 @@ ordering and more exact implementation boundaries:
   pre-submit preview. The next slice is saved trust-anchor management and policy-profile integration,
   not more low-level signature fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
-  campaign review surface on scan detail, and scan-level rerun actions for skipped/errors/family/all.
-  Remaining gaps are transcript-level replay, run comparison, and deeper campaign history outside a
-  single scan.
+  campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all, and
+  per-transcript replay actions. Remaining gaps are run comparison and deeper campaign history
+  outside a single scan.
 
 ### Immediate implementation sequence
 
 These are the next commit-sized slices, in order:
 
-1. **AI red-team transcript replay/history:** build on the scan-detail campaign panel with replay of
-   selected transcripts and cross-run campaign comparison. Scan-level skipped/error/family/all rerun
-   is phase 1 done.
+1. **AI red-team campaign history/comparison:** build on the scan-detail campaign panel with
+   cross-run campaign comparison. Scan-level skipped/error/family/all rerun and selected transcript
+   replay are phase 1 done.
 2. **Model Intake saved trust anchors:** add saved trust-anchor management/selection and connect
    strict policy profiles to explicit operator anchors.
 3. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
@@ -213,7 +218,8 @@ Use this order when choosing between otherwise-valid work:
   loops per verified family.
 - **P1: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
   transcript/report links, finding-level replay entry points, scan-level rerun actions, and deploy
-  decisions are phase 1 done. Remaining work is transcript-level replay and cross-run comparison.
+  decisions are phase 1 done. Selected transcript replay is also phase 1 done. Remaining work is
+  cross-run comparison and deeper campaign history.
 - **P2: Model Intake trust UX.** Guided trust modes and pre-submit trust preview are phase 1 done;
   remaining work is saved trust anchors, policy-profile anchor binding, and clearer exception flows.
 - **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
@@ -278,8 +284,8 @@ inventory (`api.ai_assurance`), adaptive logic (`api/ai_gate/adaptive.py`), and 
 export (`GET /scans/{id}/ai-redteam-report` / `api.get_ai_redteam_report`). Completed scan detail
 now renders a campaign review card backed by `ai_gate.coverage_matrix`, `execution_plan`, and
 `evidence_manifest`, and `POST /ai/scans/{scan_id}/replay` queues focused reruns for skipped
-probes, errored families, selected families, or all probes. It still needs transcript-level replay
-and cross-run campaign history.
+probes, errored families, selected families, selected transcript probes, or all probes. It still
+needs cross-run campaign history.
 
 **Implement:**
 1. DONE: add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
@@ -288,13 +294,14 @@ and cross-run campaign history.
    safety profile, finding count, and evidence hash per family.
 3. PARTIAL: finding-level replay entry points link to finding detail, where focused AI Gate replay
    already preserves production confirmation. Scan-level "rerun failed/skipped probes" now exists
-   for skipped/errors/family/all modes and also preserves production confirmation. Still add
-   transcript-level replay actions with explicit budget/production gates.
+   for skipped/errors/family/all modes and also preserves production confirmation. Selected
+   transcript replay now exists through `mode=transcript` and uses the same production gate. Still add
+   cross-run campaign history and comparison.
 4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
    AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
 
-**Done when:** an AI red-team run can be reviewed, rerun, compared, and defended as a campaign
-artifact instead of a loose scan report.
+**Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
+campaign artifact instead of a loose scan report.
 
 ### 4. Model Intake trust UX
 **Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:

@@ -1914,8 +1914,10 @@ export async function retestAiFinding(
 export async function replayAiScan(
   id: string,
   params: {
-    mode?: 'skipped' | 'errors' | 'family' | 'all'
+    mode?: 'skipped' | 'errors' | 'family' | 'transcript' | 'all'
     probe_family?: string
+    probe_id?: string
+    transcript_index?: number
     requested_by?: string
     confirm_production?: boolean
   } = {}
@@ -1927,6 +1929,7 @@ export async function replayAiScan(
   mode?: string
   probe_ids?: string[]
   probe_family?: string | null
+  transcript?: Record<string, unknown> | null
   target_url: string
   ui_url?: string
 }> {
