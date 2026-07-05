@@ -64,6 +64,32 @@ export interface DashboardMetrics {
   avg_score: number
 }
 
+export interface DashboardActionSample {
+  label?: string | null
+  detail?: string | null
+  href?: string | null
+}
+
+export interface DashboardActionItem {
+  id: string
+  priority: 'critical' | 'high' | 'medium' | 'low' | 'info' | string
+  category: string
+  title: string
+  detail: string
+  href?: string | null
+  action_label?: string | null
+  count?: number | null
+  samples?: DashboardActionSample[]
+  metadata?: Record<string, unknown>
+}
+
+export interface DashboardResponse {
+  metrics: DashboardMetrics
+  recent_scans: Scan[]
+  recent_findings: Finding[]
+  action_center?: DashboardActionItem[]
+}
+
 export interface Scan {
   id: string
   target_url: string
@@ -1025,7 +1051,7 @@ export interface ExposureGraph {
 }
 
 // Dashboard
-export async function getDashboard() {
+export async function getDashboard(): Promise<DashboardResponse> {
   const res = await fetch(`${API_URL}/dashboard`)
   if (!res.ok) throw new Error('Failed to fetch dashboard')
   return res.json()

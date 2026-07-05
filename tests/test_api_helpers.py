@@ -32,7 +32,7 @@ if "fastapi" not in sys.modules:
                 return fn
             return wrapper
 
-        get = post = patch = put = delete = on_event = _decorator
+        get = post = patch = put = delete = on_event = exception_handler = _decorator
 
     class _FakeHTTPException(Exception):
         def __init__(self, status_code: int = 500, detail=None):
@@ -72,6 +72,7 @@ if "fastapi" not in sys.modules:
             self.headers = headers or {}
 
     responses_mod.Response = _FakeResponse
+    responses_mod.JSONResponse = _FakeResponse
     sys.modules["fastapi.responses"] = responses_mod
 
 import api as api_module  # noqa: E402
@@ -404,6 +405,96 @@ def test_scan_worker_container_name_filter_excludes_gungnir_worker():
     assert api_module._is_scan_worker_container_name("/shakerscan-worker-5") is True
     assert api_module._is_scan_worker_container_name("shakerscan-gungnir-worker-1") is False
     assert api_module._is_scan_worker_container_name("other-worker-1") is False
+
+
+# ----- dashboard action center -------------------------------------------
+
+class _ActionCenterConn:
+    def __init__(self, *, ai_rows=None):
+        self.ai_rows = ai_rows or []
+
+    async def fetchrow(self, query, *args):
+        if "FROM findings" in query and "severity IN ('critical', 'high')" in query:
+            return {"critical": 2, "high": 1}
+        if "FROM finding_exceptions" in query:
+            return {"expired": 1, "expiring": 2, "weak_records": 3}
+        if "WITH per_target AS" in query:
+            return {
+                "enabled_targets": 4,
+                "no_inventory_targets": 1,
+                "targets_with_gaps": 2,
+                "endpoints_needing_work": 25,
+            }
+        if "FROM schedules" in query:
+            return {
+                "id": uuid.uuid4(),
+                "next_run_at": "2026-07-05T02:00:00",
+                "target_url": "https://app.example.test",
+            }
+        return {}
+
+    async def fetch(self, query, *args):
+        if "FROM scans" in query and "status = 'failed'" in query:
+            return [{
+                "id": uuid.uuid4(),
+                "target_url": "https://broken.example.test",
+                "error_message": "worker exited",
+                "created_at": "2026-07-05T01:00:00",
+            }]
+        if "run_kind = 'model_intake'" in query:
+            return [{
+                "id": uuid.uuid4(),
+                "target_url": "https://models.example.test/model.safetensors",
+                "signature_status": "untrusted_root",
+                "signature_verified": "false",
+                "completed_at": "2026-07-05T01:30:00",
+            }]
+        if "FROM ai_targets" in query:
+            return self.ai_rows
+        return []
+
+
+def test_dashboard_action_center_prioritizes_server_derived_items():
+    conn = _ActionCenterConn()
+    snapshot = {
+        "available": True,
+        "stale_count": 1,
+        "pending_count": 1,
+        "stale_names": ["worker-old"],
+        "pending_names": ["worker-booting"],
+    }
+
+    items = asyncio.run(api_module._build_dashboard_action_center(conn, worker_snapshot=snapshot))
+    by_id = {item["id"]: item for item in items}
+
+    assert items[0]["id"] == "deploy-gate-blockers"
+    assert by_id["deploy-gate-blockers"]["priority"] == "critical"
+    assert by_id["worker-build-freshness"]["count"] == 2
+    assert by_id["policy-exception-hygiene"]["count"] == 6
+    assert by_id["asm-coverage-gaps"]["metadata"] == {}
+    assert by_id["next-asm-schedule"]["priority"] == "info"
+    assert by_id["model-intake-untrusted-signatures"]["samples"][0]["detail"] == "signature status: untrusted_root"
+
+
+def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
+    conn = _ActionCenterConn(ai_rows=[{
+        "id": uuid.uuid4(),
+        "name": "Production RAG",
+        "target_type": "rag",
+        "endpoint_url": "https://ai.example.test/rag",
+        "production_mode": True,
+        "metadata_json": {"risk_tier": "high"},
+    }])
+
+    items = asyncio.run(api_module._build_dashboard_action_center(
+        conn,
+        worker_snapshot={"available": False},
+    ))
+    ai_item = next(item for item in items if item["id"] == "ai-control-baseline-gaps")
+
+    assert ai_item["count"] == 1
+    assert ai_item["href"] == "/settings/ai-gate"
+    assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 
 # ----- run_due_schedules --------------------------------------------------

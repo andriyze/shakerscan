@@ -486,6 +486,9 @@ Current UI/API:
 
 - `/asm` shows coverage posture, new surface, inventory, policy, and manual test actions.
 - `/asm` now leads with a coverage advisor and one-click Improve Coverage action.
+- The Dashboard now includes a server-backed Action Center fed by `/dashboard.action_center`, including
+  ASM coverage/schedule gaps, worker freshness, deploy blockers, failed scans, policy-exception
+  hygiene, Model Intake trust gaps, and AI control-baseline gaps.
 - Policy setup is preset-first (`Safe`, `Balanced`, `Lab`) with raw knobs hidden behind Advanced.
 - New Scan exposes the parallel/coverage path without requiring users to understand every shard knob.
 - `/asm` loads focused batch labels from `/asm/check-families`, so the UI only offers registry-approved
@@ -710,6 +713,10 @@ New quality gaps to track:
 
 - Add `Improve coverage`, `gaps`, and `activity` APIs. **Implemented.**
 - Add UI presets and hide raw knobs by default. **Implemented.**
+- Add a server-backed Dashboard Action Center for cross-product operator attention items.
+  **Implemented:** `/dashboard` returns `action_center`, and the dashboard renders worker freshness,
+  deploy blockers, failed scans, exception hygiene, ASM coverage/schedule gaps, Model Intake trust
+  gaps, and AI control-baseline gaps.
 - Update AGENTS/skills guidance so AI agents use presets instead of hand-crafted budgets.
   **Implemented.**
 - Add a deterministic AI operations router for safe DAST/ASM intent-to-API planning with dry-run

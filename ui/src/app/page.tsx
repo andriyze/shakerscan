@@ -2,8 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type Scan, type Finding, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus } from '@/lib/api'
+import { AlertTriangle, ArrowRight, CalendarClock } from 'lucide-react'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardResponse } from '@/lib/api'
 import {
+  Badge,
   Card,
   ErrorState,
   LastUpdated,
@@ -14,20 +16,6 @@ import {
   useToast,
 } from '@/components/ui'
 
-interface DashboardData {
-  metrics: {
-    total_targets: number
-    total_scans: number
-    running_scans: number
-    active_findings: number
-    critical_findings: number
-    high_findings: number
-    avg_score: number
-  }
-  recent_scans: Scan[]
-  recent_findings: Finding[]
-}
-
 const DASHBOARD_REFRESH_MS = 10000
 const QUEUE_REFRESH_MS = 15000
 const WORKERS_REFRESH_MS = 30000
@@ -37,7 +25,7 @@ const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-b
 
 export default function Dashboard() {
   const toast = useToast()
-  const [data, setData] = useState<DashboardData | null>(null)
+  const [data, setData] = useState<DashboardResponse | null>(null)
   const [queue, setQueue] = useState<QueueStats | null>(null)
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
   const [systemResources, setSystemResources] = useState<SystemResources | null>(null)
@@ -286,6 +274,8 @@ export default function Dashboard() {
         />
       </div>
 
+      <ActionCenter items={data?.action_center || []} loading={dashboardLoading && !data} />
+
       {/* Queue Status & Worker Control */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Queue Status */}
@@ -528,6 +518,133 @@ export default function Dashboard() {
       </div>
     </div>
   )
+}
+
+function ActionCenter({
+  items,
+  loading,
+}: {
+  items: DashboardActionItem[]
+  loading: boolean
+}) {
+  const visibleItems = items.slice(0, 6)
+
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-medium text-white">Action Center</h2>
+          <p className="mt-1 text-sm text-gray-400">Prioritized work from scanner, ASM, policy, AI, and model-intake state</p>
+        </div>
+        {items.length > 0 && (
+          <Badge className="bg-blue-500/15 text-blue-300">{items.length} item{items.length === 1 ? '' : 's'}</Badge>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <Skeleton className="h-20" />
+          <Skeleton className="h-20" />
+        </div>
+      ) : visibleItems.length ? (
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {visibleItems.map((item) => (
+            <ActionCenterRow key={item.id} item={item} />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-gray-400">
+          No high-priority operational actions right now.
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ActionCenterRow({ item }: { item: DashboardActionItem }) {
+  const tone = actionPriorityTone(item.priority)
+  const content = (
+    <>
+      <div className="flex min-w-0 items-start gap-3">
+        <div className={`mt-0.5 rounded-md p-1.5 ${tone.icon}`}>
+          {item.priority === 'info' ? (
+            <CalendarClock className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className={tone.badge}>{item.priority}</Badge>
+            <span className="text-xs text-gray-500">{item.category}</span>
+            {typeof item.count === 'number' && item.count > 1 && (
+              <span className="text-xs text-gray-500">{item.count} affected</span>
+            )}
+          </div>
+          <h3 className="mt-1 text-sm font-medium text-white">{item.title}</h3>
+          <p className="mt-1 text-sm text-gray-400">{item.detail}</p>
+          {item.samples?.length ? (
+            <div className="mt-2 space-y-1">
+              {item.samples.slice(0, 2).map((sample, idx) => (
+                <div key={`${item.id}-sample-${idx}`} className="truncate text-xs text-gray-500">
+                  {sample.href ? (
+                    <Link href={sample.href} className={`text-gray-400 hover:text-gray-200 ${FOCUS_RING}`}>
+                      {sample.label || sample.href}
+                    </Link>
+                  ) : (
+                    <span className="text-gray-400">{sample.label}</span>
+                  )}
+                  {sample.detail ? <span> - {sample.detail}</span> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {item.href && (
+        <Link href={item.href} className={`ml-3 inline-flex shrink-0 items-center gap-1 rounded text-sm text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>
+          {item.action_label || 'Open'}
+          <ArrowRight className="h-4 w-4" aria-hidden="true" />
+        </Link>
+      )}
+    </>
+  )
+
+  return (
+    <div className="flex min-h-24 items-start justify-between gap-3 rounded-md border border-gray-800 bg-gray-950 p-3">
+      {content}
+    </div>
+  )
+}
+
+function actionPriorityTone(priority: DashboardActionItem['priority']) {
+  switch (priority) {
+    case 'critical':
+      return {
+        badge: 'bg-red-500/20 text-red-300',
+        icon: 'bg-red-500/10 text-red-300',
+      }
+    case 'high':
+      return {
+        badge: 'bg-orange-500/20 text-orange-300',
+        icon: 'bg-orange-500/10 text-orange-300',
+      }
+    case 'medium':
+      return {
+        badge: 'bg-yellow-500/20 text-yellow-300',
+        icon: 'bg-yellow-500/10 text-yellow-300',
+      }
+    case 'low':
+      return {
+        badge: 'bg-gray-500/20 text-gray-300',
+        icon: 'bg-gray-500/10 text-gray-300',
+      }
+    default:
+      return {
+        badge: 'bg-blue-500/20 text-blue-300',
+        icon: 'bg-blue-500/10 text-blue-300',
+      }
+  }
 }
 
 function StatCard({

@@ -40,6 +40,10 @@ called at real sites — verify before re-proposing any of it:
   receipt verification, and red-team report export are implemented.
 - **ASM automation foundation** — per-target ASM policy, `/settings/automation`, background
   dispatcher, and recurring ASM-wave schedules exist.
+- **Dashboard Action Center phase 1** — `/dashboard` returns `action_center` items for worker
+  freshness, deployment blockers, failed scans, policy-exception hygiene, ASM gaps/schedules,
+  Model Intake trust gaps, and AI control-baseline gaps; the dashboard renders them as a
+  prioritized operator feed.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -70,19 +74,16 @@ The next work should be implemented as separate increments. Do not combine UI wo
 ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence storage in one PR.
 
 ### 1. Product-operability layer: one place that explains "what needs action"
-**Status: PARTIAL.** The pieces exist but are scattered. Evidence: `/asm` policy and Improve
-Coverage live in `ui/src/app/asm/page.tsx`; recurring ASM waves live in
-`ui/src/app/schedules/page.tsx` via `scan_options.kind='asm_improve'`; automation defaults live in
-`ui/src/components/ScanExecutionSettingsPanel.tsx`; policy exceptions live on finding detail and in
-`api.list_finding_exceptions`; Model Intake trust controls live in
-`ui/src/app/settings/model-intake/page.tsx`; AI Gate red-team evidence is mostly visible through scan
-reports. Users still have to infer what is blocked, what will run next, and what they should fix.
+**Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
+`action_center` feed built from worker freshness, deployment blockers, failed scans, exception
+hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
+The dashboard renders this as a prioritized Action Center. Remaining work is deeper actionability:
+persisted ASM scheduler/dispatcher skip reasons, a dedicated Exceptions Queue page, and inline
+one-click remediation for each blocker class.
 
 **Implement:**
-1. Add a Dashboard or `/asm` "Action Center" feed backed by API facts, not client inference:
-   stale ASM coverage, next scheduled ASM wave, dispatcher skip/block reason, failed partial scans,
-   stale/non-current workers, expiring exceptions, model artifacts without trusted signatures,
-   AI targets missing required controls, and deploy gates blocked by active findings.
+1. Extend Action Center items with direct remediation where safe: restart/rescale worker CTA,
+   Improve Coverage CTA with target preselection, exception-renew/revoke CTA, and retry failed scan.
 2. Add first-class "next action" and "why skipped" facts to ASM policy/activity responses. The
    scheduler (`api.run_due_schedules`) and dispatcher (`api.run_asm_dispatch`) should persist/return
    `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and
