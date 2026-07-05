@@ -5198,6 +5198,130 @@ def _build_ai_scan_replay_plan(
     }
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _ai_campaign_context_from_scan(scan_row: Any) -> dict[str, Any]:
+    options = parse_json_field(_row_value(scan_row, "options")) or {}
+    result = _decode_json_value(_row_value(scan_row, "result")) or {}
+    ai_gate = result.get("ai_gate") if isinstance(result, dict) else {}
+    ai_gate = ai_gate if isinstance(ai_gate, dict) else {}
+    decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
+    return {
+        "probe_pack": str(options.get("ai_probe_pack") or ai_gate.get("probe_pack") or ""),
+        "scan_profile": str(options.get("ai_scan_profile") or ai_gate.get("scan_profile") or ""),
+        "environment": str(options.get("ai_environment") or decision.get("environment") or ""),
+    }
+
+
+def _ai_campaign_history_entry(scan_row: Any, *, current_scan_id: str | None = None) -> dict[str, Any]:
+    result = _decode_json_value(_row_value(scan_row, "result")) or {}
+    ai_gate = result.get("ai_gate") if isinstance(result, dict) else {}
+    ai_gate = ai_gate if isinstance(ai_gate, dict) else {}
+    coverage = ai_gate.get("coverage_matrix") if isinstance(ai_gate.get("coverage_matrix"), dict) else {}
+    summary = coverage.get("summary") if isinstance(coverage.get("summary"), dict) else {}
+    decision = ai_gate.get("decision") if isinstance(ai_gate.get("decision"), dict) else {}
+    evidence_manifest = ai_gate.get("evidence_manifest") if isinstance(ai_gate.get("evidence_manifest"), dict) else {}
+    evidence = evidence_manifest.get("evidence") if isinstance(evidence_manifest.get("evidence"), dict) else {}
+    context = _ai_campaign_context_from_scan(scan_row)
+
+    def _num(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    planned = _num(summary.get("planned"))
+    executed = _num(summary.get("executed"))
+    scan_id = str(_row_value(scan_row, "id") or "")
+    usage = ai_gate.get("usage") if isinstance(ai_gate.get("usage"), dict) else {}
+    return {
+        "id": scan_id,
+        "ui_url": f"/scans/{scan_id}" if scan_id else None,
+        "current": bool(current_scan_id and scan_id == current_scan_id),
+        "status": _row_value(scan_row, "status"),
+        "target_url": _row_value(scan_row, "target_url"),
+        "created_at": _iso_or_none(_row_value(scan_row, "created_at")),
+        "completed_at": _iso_or_none(_row_value(scan_row, "completed_at")),
+        "score": _row_value(scan_row, "score"),
+        "grade": _row_value(scan_row, "grade"),
+        "findings_count": _num(_row_value(scan_row, "findings_count")),
+        "decision": decision.get("decision"),
+        "rationale": decision.get("rationale"),
+        "probe_pack": context["probe_pack"] or None,
+        "scan_profile": context["scan_profile"] or None,
+        "environment": context["environment"] or None,
+        "planned": planned,
+        "executed": executed,
+        "skipped": _num(summary.get("skipped")),
+        "errors": _num(summary.get("errors")),
+        "with_transcripts": _num(summary.get("with_transcripts")),
+        "with_findings": _num(summary.get("with_findings")),
+        "coverage_pct": round((executed / planned) * 100) if planned else 0,
+        "stopped_by_request_budget": bool(summary.get("stopped_by_request_budget") or usage.get("stopped_by_request_budget")),
+        "transcripts_hash": evidence.get("transcripts_hash"),
+        "manifest_hash": evidence_manifest.get("manifest_hash"),
+    }
+
+
+def _build_ai_campaign_history(current_scan: Any, scan_rows: list[Any], *, limit: int = 6) -> dict[str, Any]:
+    current_id = str(_row_value(current_scan, "id") or "")
+    context = _ai_campaign_context_from_scan(current_scan)
+    all_entries = [_ai_campaign_history_entry(row, current_scan_id=current_id) for row in scan_rows]
+
+    def _matches_context(entry: dict[str, Any]) -> bool:
+        return (
+            (entry.get("probe_pack") or "") == context["probe_pack"]
+            and (entry.get("scan_profile") or "") == context["scan_profile"]
+            and (entry.get("environment") or "") == context["environment"]
+        )
+
+    comparable = [entry for entry in all_entries if _matches_context(entry)]
+    if not any(entry["current"] for entry in comparable):
+        comparable.insert(0, _ai_campaign_history_entry(current_scan, current_scan_id=current_id))
+    comparable = comparable[:limit]
+    current_entry = next((entry for entry in comparable if entry["current"]), _ai_campaign_history_entry(current_scan, current_scan_id=current_id))
+    previous_entry = next((entry for entry in comparable if not entry["current"]), None)
+    deltas = None
+    if previous_entry:
+        deltas = {
+            "findings_count": current_entry["findings_count"] - previous_entry["findings_count"],
+            "executed": current_entry["executed"] - previous_entry["executed"],
+            "skipped": current_entry["skipped"] - previous_entry["skipped"],
+            "errors": current_entry["errors"] - previous_entry["errors"],
+            "coverage_pct": current_entry["coverage_pct"] - previous_entry["coverage_pct"],
+            "decision_changed": current_entry.get("decision") != previous_entry.get("decision"),
+        }
+    return {
+        "scan_id": current_id,
+        "ai_target_id": str(_row_value(current_scan, "ai_target_id") or ""),
+        "target_url": _row_value(current_scan, "target_url"),
+        "context": {
+            "probe_pack": context["probe_pack"] or None,
+            "scan_profile": context["scan_profile"] or None,
+            "environment": context["environment"] or None,
+        },
+        "runs": comparable,
+        "previous_run": previous_entry,
+        "deltas": deltas,
+        "total_same_target_runs": len(all_entries),
+    }
+
+
 def _mask_ai_headers_for_preview(headers: dict[str, str]) -> dict[str, str]:
     masked: dict[str, str] = {}
     for key, value in headers.items():
@@ -12767,6 +12891,43 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
         "probe_family": replay_plan.get("probe_family"),
         "ui_url": f"/scans/{scan_id}",
     }
+
+
+@app.get("/ai/scans/{scan_id}/campaign-history")
+async def get_ai_scan_campaign_history(scan_id: str, limit: int = Query(6, ge=2, le=12)):
+    """Compare a completed AI Gate scan against recent same-target campaign runs."""
+    async with db_pool.acquire() as conn:
+        current_scan = await conn.fetchrow(
+            """
+            SELECT id, ai_target_id, target_url, options, result, run_kind, status,
+                   score, grade, findings_count, created_at, completed_at
+            FROM scans
+            WHERE id = $1
+            """,
+            uuid.UUID(scan_id),
+        )
+        if not current_scan:
+            raise HTTPException(status_code=404, detail="AI Gate scan not found")
+        if not str(current_scan["run_kind"] or "").startswith("ai_") or not current_scan["ai_target_id"]:
+            raise HTTPException(status_code=400, detail="Scan is not an AI Gate target scan")
+        if current_scan["status"] != "completed":
+            raise HTTPException(status_code=409, detail="Only completed AI Gate scans have campaign history")
+
+        rows = await conn.fetch(
+            """
+            SELECT id, ai_target_id, target_url, options, result, run_kind, status,
+                   score, grade, findings_count, created_at, completed_at
+            FROM scans
+            WHERE ai_target_id = $1
+              AND status = 'completed'
+              AND run_kind LIKE 'ai_%'
+              AND result IS NOT NULL
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+            LIMIT 40
+            """,
+            current_scan["ai_target_id"],
+        )
+    return _build_ai_campaign_history(current_scan, list(rows), limit=limit)
 
 
 @app.post("/ai/scans/{scan_id}/replay")

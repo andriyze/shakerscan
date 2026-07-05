@@ -838,6 +838,92 @@ def test_ai_scan_replay_plan_rejects_transcript_without_probe_context():
     assert "missing probe_id" in exc.value.detail
 
 
+def _ai_history_row(
+    scan_id: str,
+    *,
+    pack: str = "shaker-rag-lite",
+    profile: str = "standard",
+    environment: str = "staging",
+    decision: str = "needs_review",
+    planned: int = 4,
+    executed: int = 3,
+    skipped: int = 1,
+    errors: int = 0,
+    findings_count: int = 1,
+) -> dict:
+    return {
+        "id": scan_id,
+        "ai_target_id": "target-ai",
+        "target_url": "https://ai.example/rag",
+        "run_kind": "ai_rag",
+        "status": "completed",
+        "score": 80,
+        "grade": "B",
+        "findings_count": findings_count,
+        "created_at": f"2026-07-05T0{scan_id[-1]}:00:00Z",
+        "completed_at": f"2026-07-05T0{scan_id[-1]}:05:00Z",
+        "options": {
+            "ai_probe_pack": pack,
+            "ai_scan_profile": profile,
+            "ai_environment": environment,
+        },
+        "result": {
+            "ai_gate": {
+                "probe_pack": pack,
+                "scan_profile": profile,
+                "decision": {"decision": decision, "environment": environment},
+                "coverage_matrix": {
+                    "summary": {
+                        "planned": planned,
+                        "executed": executed,
+                        "skipped": skipped,
+                        "errors": errors,
+                        "with_transcripts": executed,
+                        "with_findings": findings_count,
+                    },
+                },
+                "evidence_manifest": {"evidence": {"transcripts_hash": f"hash-{scan_id}"}},
+            },
+        },
+    }
+
+
+def test_ai_campaign_history_filters_context_and_computes_deltas():
+    current = _ai_history_row("scan-3", executed=4, skipped=0, errors=0, findings_count=2)
+    previous = _ai_history_row("scan-2", executed=2, skipped=2, errors=1, findings_count=1)
+    unrelated_pack = _ai_history_row("scan-1", pack="shaker-agent-abuse", executed=4, findings_count=9)
+
+    history = api_module._build_ai_campaign_history(
+        current,
+        [current, previous, unrelated_pack],
+        limit=6,
+    )
+
+    assert history["scan_id"] == "scan-3"
+    assert history["context"] == {
+        "probe_pack": "shaker-rag-lite",
+        "scan_profile": "standard",
+        "environment": "staging",
+    }
+    assert [run["id"] for run in history["runs"]] == ["scan-3", "scan-2"]
+    assert history["previous_run"]["id"] == "scan-2"
+    assert history["deltas"]["findings_count"] == 1
+    assert history["deltas"]["executed"] == 2
+    assert history["deltas"]["skipped"] == -2
+    assert history["deltas"]["errors"] == -1
+    assert history["deltas"]["coverage_pct"] == 50
+
+
+def test_ai_campaign_history_reports_decision_change():
+    current = _ai_history_row("scan-4", decision="allow", findings_count=0)
+    previous = _ai_history_row("scan-3", decision="block", findings_count=2)
+
+    history = api_module._build_ai_campaign_history(current, [current, previous], limit=6)
+
+    assert history["deltas"]["decision_changed"] is True
+    assert history["previous_run"]["decision"] == "block"
+
+
 # ----- finding exception queue filters -------------------------------------
 
 class _ExceptionQueueConn:

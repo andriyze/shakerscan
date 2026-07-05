@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, replayAiScan, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -294,12 +294,52 @@ function formatAiGateLabel(value: string | null | undefined): string {
   return String(value || 'unknown').replace(/_/g, ' ')
 }
 
+function formatDelta(value: number | undefined, suffix: string = ''): string {
+  const num = Number(value || 0)
+  if (num > 0) return `+${num}${suffix}`
+  return `${num}${suffix}`
+}
+
+function deltaClass(value: number | undefined, invert: boolean = false): string {
+  const num = Number(value || 0)
+  if (num === 0) return 'text-gray-400'
+  const good = invert ? num < 0 : num > 0
+  return good ? 'text-green-300' : 'text-red-300'
+}
+
 function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   const review: AiGateCampaignReview = buildAiGateCampaignReview(scan?.result)
   const [replayLoading, setReplayLoading] = useState<string | null>(null)
   const [replayError, setReplayError] = useState<string | null>(null)
   const [replayQueued, setReplayQueued] = useState<{ scan_id: string; ui_url?: string; label: string } | null>(null)
   const [confirmProductionReplay, setConfirmProductionReplay] = useState(false)
+  const [campaignHistory, setCampaignHistory] = useState<AiScanCampaignHistory | null>(null)
+  const [campaignHistoryError, setCampaignHistoryError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!review.available || !scan?.id || scan.status !== 'completed') {
+      setCampaignHistory(null)
+      setCampaignHistoryError(null)
+      return
+    }
+    getAiScanCampaignHistory(scan.id)
+      .then((history) => {
+        if (!cancelled) {
+          setCampaignHistory(history)
+          setCampaignHistoryError(null)
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCampaignHistory(null)
+          setCampaignHistoryError(err instanceof Error ? err.message : 'Failed to load campaign history')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [review.available, scan?.id, scan?.status])
   if (!review.available) return null
 
   const coveragePct = review.planned > 0 ? Math.round((review.executed / review.planned) * 100) : 0
@@ -359,6 +399,71 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       </div>
 
       {review.rationale && <p className="mt-3 text-sm text-gray-300">{review.rationale}</p>}
+
+      <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign History</div>
+            <p className="mt-1 text-xs text-gray-500">
+              Compares recent completed runs with the same target, probe pack, profile, and environment.
+            </p>
+          </div>
+          {campaignHistory?.previous_run && (
+            <Link href={campaignHistory.previous_run.ui_url || `/scans/${campaignHistory.previous_run.id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              Previous run
+            </Link>
+          )}
+        </div>
+        {campaignHistoryError && <p role="alert" className="mt-2 text-xs text-amber-300">{campaignHistoryError}</p>}
+        {campaignHistory?.deltas ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-5">
+            <CoverageMetric label="Findings delta" value={formatDelta(campaignHistory.deltas.findings_count)} accent={deltaClass(campaignHistory.deltas.findings_count, true)} />
+            <CoverageMetric label="Coverage delta" value={formatDelta(campaignHistory.deltas.coverage_pct, '%')} accent={deltaClass(campaignHistory.deltas.coverage_pct)} />
+            <CoverageMetric label="Executed delta" value={formatDelta(campaignHistory.deltas.executed)} accent={deltaClass(campaignHistory.deltas.executed)} />
+            <CoverageMetric label="Skipped delta" value={formatDelta(campaignHistory.deltas.skipped)} accent={deltaClass(campaignHistory.deltas.skipped, true)} />
+            <CoverageMetric label="Errors delta" value={formatDelta(campaignHistory.deltas.errors)} accent={deltaClass(campaignHistory.deltas.errors, true)} />
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-gray-500">
+            {campaignHistory ? 'No comparable previous campaign was found for this target/profile.' : 'Loading campaign history...'}
+          </p>
+        )}
+        {campaignHistory?.deltas?.decision_changed && (
+          <p className="mt-2 text-xs text-amber-300">
+            Deployment decision changed from {formatAiGateLabel(campaignHistory.previous_run?.decision)} to {formatAiGateLabel(review.decision)}.
+          </p>
+        )}
+        {campaignHistory?.runs && campaignHistory.runs.length > 0 && (
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-full text-left text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">Run</th>
+                  <th className="py-1 pr-3 font-medium">Decision</th>
+                  <th className="py-1 pr-3 font-medium">Coverage</th>
+                  <th className="py-1 pr-3 font-medium">Findings</th>
+                  <th className="py-1 pr-3 font-medium">Completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {campaignHistory.runs.slice(0, 6).map((run) => (
+                  <tr key={run.id} className="border-t border-gray-800">
+                    <td className="py-1 pr-3">
+                      <Link href={run.ui_url || `/scans/${run.id}`} className="font-mono text-blue-300 hover:underline">
+                        {run.current ? 'current' : run.id.slice(0, 8)}
+                      </Link>
+                    </td>
+                    <td className="py-1 pr-3 text-gray-300">{formatAiGateLabel(run.decision)}</td>
+                    <td className="py-1 pr-3 text-gray-300">{run.coverage_pct}%</td>
+                    <td className="py-1 pr-3 text-gray-300">{run.findings_count}</td>
+                    <td className="py-1 pr-3 text-gray-500">{run.completed_at ? formatDate(run.completed_at) : '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">

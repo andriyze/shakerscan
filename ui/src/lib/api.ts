@@ -1944,6 +1944,64 @@ export async function replayAiScan(
   return res.json()
 }
 
+export interface AiScanCampaignHistoryRun {
+  id: string
+  ui_url?: string | null
+  current: boolean
+  status?: string | null
+  target_url?: string | null
+  created_at?: string | null
+  completed_at?: string | null
+  score?: number | null
+  grade?: string | null
+  findings_count: number
+  decision?: string | null
+  rationale?: string | null
+  probe_pack?: string | null
+  scan_profile?: string | null
+  environment?: string | null
+  planned: number
+  executed: number
+  skipped: number
+  errors: number
+  with_transcripts: number
+  with_findings: number
+  coverage_pct: number
+  stopped_by_request_budget?: boolean
+  transcripts_hash?: string | null
+  manifest_hash?: string | null
+}
+
+export interface AiScanCampaignHistory {
+  scan_id: string
+  ai_target_id: string
+  target_url?: string | null
+  context: {
+    probe_pack?: string | null
+    scan_profile?: string | null
+    environment?: string | null
+  }
+  runs: AiScanCampaignHistoryRun[]
+  previous_run?: AiScanCampaignHistoryRun | null
+  deltas?: {
+    findings_count: number
+    executed: number
+    skipped: number
+    errors: number
+    coverage_pct: number
+    decision_changed: boolean
+  } | null
+  total_same_target_runs: number
+}
+
+export async function getAiScanCampaignHistory(id: string, limit: number = 6): Promise<AiScanCampaignHistory> {
+  const res = await fetch(`${API_URL}/ai/scans/${id}/campaign-history?limit=${limit}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate campaign history'))
+  }
+  return res.json()
+}
+
 export async function getFindingRetests(id: string, limit: number = 20): Promise<{
   finding_id: string
   retests: RetestRecord[]
