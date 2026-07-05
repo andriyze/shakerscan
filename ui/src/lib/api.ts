@@ -139,6 +139,28 @@ export interface ArsenalCommandsResponse {
   result_schema: Record<string, unknown>
 }
 
+export interface ArsenalContractDefinition {
+  status: string
+  description: string
+  required?: string[]
+  fields?: Record<string, unknown>
+  invariants?: string[]
+  forbidden_fields?: string[]
+}
+
+export interface ArsenalContractsResponse {
+  schema_version: string
+  maturity: string
+  execution_enabled: boolean
+  secret_policy: {
+    default: string
+    never_inline: string[]
+    allowed_refs: string[]
+  }
+  contract_names: string[]
+  contracts: Record<string, ArsenalContractDefinition>
+}
+
 export interface ArsenalTool {
   tool_name: string
   family: string
@@ -1209,6 +1231,12 @@ export async function getDashboard(): Promise<DashboardResponse> {
 export async function getArsenalCommands(): Promise<ArsenalCommandsResponse> {
   const res = await fetch(`${API_URL}/arsenal/commands`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch Command Arsenal schema'))
+  return res.json()
+}
+
+export async function getArsenalContracts(): Promise<ArsenalContractsResponse> {
+  const res = await fetch(`${API_URL}/arsenal/contracts`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch mission contracts'))
   return res.json()
 }
 

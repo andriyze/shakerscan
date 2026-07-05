@@ -133,6 +133,11 @@ called at real sites — verify before re-proposing any of it:
   redaction rules, and evidence contracts. `/arsenal/tools` exposes integrated scanner/tool adapter
   status with optional read-only version probes. `/settings/arsenal` renders both surfaces without
   adding a state-changing execution path.
+- **Mission contract schema phase 1** — `/arsenal/contracts` now exposes read-only schemas for
+  `OperationPlan`, `AgentContextPack`, `AgentDecisionTrace`, `ScopeReceipt`, `ApprovalReceipt`,
+  `ToolReceipt`, `CampaignAction`, `Hypothesis`, and `EvidenceInstance`, including secret-handling
+  policy and safety invariants. `/settings/arsenal` renders these contracts without adding planning,
+  approval, or execution power.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -230,10 +235,11 @@ roadmap as an operating model, not a separate product direction. Borrow mission 
 schemas, scope/approval receipts, lead boards, tool receipts, and integrity ledgers; do **not** borrow
 raw shell execution or LLM-produced verified findings.
 
-1. **Mission/command contracts:** define `OperationPlan`, `AgentContextPack`,
-   `AgentDecisionTrace`, Command Arsenal schemas, command result schema, risk tiers, scope receipt,
-   approval receipt, tool receipt, campaign action, hypothesis, and `EvidenceInstance` schemas. This
-   is contract/read-only first; it adds no new execution power.
+1. **Mission/command contracts:** DONE phase 1 for read-only schema discovery:
+   `OperationPlan`, `AgentContextPack`, `AgentDecisionTrace`, Command Arsenal schemas, command result
+   schema, risk tiers, scope receipt, approval receipt, tool receipt, campaign action, hypothesis, and
+   `EvidenceInstance` schemas. Remaining work is persistence plus validators around those contracts;
+   it still must add no new execution power until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -343,32 +349,34 @@ blocked, and provide safe remediation links without making users infer state fro
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: READ-ONLY ARSENAL PHASE 1 DONE; MISSION/RECEIPT CONTRACTS STILL NEEDED.** The T3MP3ST
-adoption plan correctly identifies the missing operating model: ShakerScan has many safe/productized
-primitives, but no single mission contract that can be shared by UI, REST, scheduler, AI Ops Router,
-local-agent planners, and future MCP. The near-term goal is not broad agent execution. It is
-schema-first planning, read-only command discovery, durable scope receipts, approval receipts, and
-audit traces.
+**Status: READ-ONLY SCHEMA DISCOVERY PHASE 1 DONE; DURABLE VALIDATORS/RECEIPTS STILL NEEDED.** The
+T3MP3ST adoption plan correctly identifies the missing operating model: ShakerScan has many
+safe/productized primitives, but no persisted mission contract yet shared by UI, REST, scheduler,
+AI Ops Router, local-agent planners, and future MCP. The near-term goal is not broad agent execution.
+It is schema-first planning, read-only command discovery, durable scope receipts, approval receipts,
+and audit traces.
 
 **Implement:**
-1. Define `OperationPlan` with objective, planner metadata, context hash, target scope, allowed hosts,
-   environment, allowed/disallowed families, budget/rate/window constraints, missing inputs,
-   confirmations, actions, stop conditions, and success criteria.
-2. Define `AgentContextPack` as a bounded redacted summary: target summary, current surface, ASM/family
-   gaps, hypothesis summary, active findings with proof state/evidence IDs, allowed/disallowed
-   commands, known preconditions, worker freshness, and `context_hash`. Prefer evidence IDs over raw
-   evidence bodies; never send secrets or full transcripts by default.
-3. Define `AgentDecisionTrace` for durable operational trace: planner kind/version, context hash,
-   command schema version, proposed/rejected actions, missing inputs, approvals/denials, result
-   summaries, evidence refs, and final rationale. Do not store hidden chain-of-thought or raw secrets.
+1. DONE phase 1: define read-only `OperationPlan` schema with objective, planner metadata, context
+   hash, target scope, allowed hosts, environment, allowed/disallowed families, budget/rate/window
+   constraints, missing inputs, confirmations, actions, stop conditions, and success criteria.
+2. DONE phase 1: define read-only `AgentContextPack` schema as a bounded redacted summary: target
+   summary, current surface, ASM/family gaps, hypothesis summary, active findings with proof
+   state/evidence IDs, allowed/disallowed commands, known preconditions, worker freshness, and
+   `context_hash`. Prefer evidence IDs over raw evidence bodies; never send secrets or full
+   transcripts by default.
+3. DONE phase 1: define read-only `AgentDecisionTrace` schema for durable operational trace:
+   planner kind/version, context hash, command schema version, proposed/rejected actions, missing
+   inputs, approvals/denials, result summaries, evidence refs, and final rationale. Do not store
+   hidden chain-of-thought or raw secrets.
 4. DONE phase 1: add a read-only Command Arsenal schema for product actions, not shell commands.
    `/arsenal/commands` currently includes the initial read-only commands plus gated placeholders for
    state-changing actions such as ASM improve, focused family scans, finding retest, AI probe replay,
    and Model Intake scans.
-5. Add risk tiers: `read_only`, `passive`, `active`, `intrusive`, `credential`, and `dangerous`.
-   Every command must declare status (`contract`, `read_only`, `dry_run`, `gated`, `proof_backed`,
-   `experimental`, `catalog_only`, `out_of_scope`), required confirmations, scope fields, redaction
-   contract, and evidence contract.
+5. DONE phase 1: add risk tiers: `read_only`, `passive`, `active`, `intrusive`, `credential`, and
+   `dangerous`. Every command declares status (`contract`, `read_only`, `dry_run`, `gated`,
+   `proof_backed`, `experimental`, `catalog_only`, `out_of_scope`), required confirmations, scope
+   fields, redaction contract, and evidence contract.
 6. Add central `ActionScopeGuard` and durable `ScopeReceipt` / `ApprovalReceipt` records before any
    new state-changing Command Arsenal execution path. Scope checks must fail closed for malformed
    URLs, scheme-relative URLs, userinfo tricks, punycode/Unicode confusion, trailing-dot hosts,

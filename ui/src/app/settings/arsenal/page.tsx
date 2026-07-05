@@ -4,9 +4,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
 import {
   getArsenalCommands,
+  getArsenalContracts,
   getArsenalTools,
   type ArsenalCommand,
   type ArsenalCommandsResponse,
+  type ArsenalContractDefinition,
+  type ArsenalContractsResponse,
   type ArsenalTool,
   type ArsenalToolsResponse,
 } from '@/lib/api'
@@ -139,8 +142,63 @@ function ToolRow({ tool }: { tool: ArsenalTool }) {
   )
 }
 
+function ContractRow({
+  name,
+  contract,
+}: {
+  name: string
+  contract: ArsenalContractDefinition
+}) {
+  const required = contract.required || []
+  const invariants = contract.invariants || []
+  const forbidden = contract.forbidden_fields || []
+  const fieldNames = Object.keys(contract.fields || {})
+
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-sm text-white">{name}</span>
+            <Badge className={statusClass(contract.status)}>{contract.status}</Badge>
+          </div>
+          <p className="mt-2 text-sm text-gray-400">{contract.description}</p>
+        </div>
+        <div className="shrink-0 rounded bg-gray-900 px-2 py-1 text-xs text-gray-400">
+          {fieldNames.length} fields
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+        <div className="min-w-0">
+          <span className="text-gray-400">required: </span>
+          <span className="text-gray-300">{required.length ? required.slice(0, 6).join(', ') : 'none'}</span>
+        </div>
+        <div className="min-w-0">
+          <span className="text-gray-400">fields: </span>
+          <span className="text-gray-300">{fieldNames.slice(0, 6).join(', ')}</span>
+        </div>
+      </div>
+      {invariants.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {invariants.slice(0, 3).map((invariant) => (
+            <Badge key={invariant} className="bg-blue-500/15 text-blue-300">
+              {invariant}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {forbidden.length > 0 && (
+        <p className="mt-2 text-xs text-red-300">
+          forbidden: {forbidden.join(', ')}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export default function ArsenalSettingsPage() {
   const [commands, setCommands] = useState<ArsenalCommandsResponse | null>(null)
+  const [contracts, setContracts] = useState<ArsenalContractsResponse | null>(null)
   const [tools, setTools] = useState<ArsenalToolsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
@@ -151,11 +209,13 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, toolData] = await Promise.all([
+      const [commandData, contractData, toolData] = await Promise.all([
         getArsenalCommands(),
+        getArsenalContracts(),
         getArsenalTools({ probeVersions }),
       ])
       setCommands(commandData)
+      setContracts(contractData)
       setTools(toolData)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
@@ -177,6 +237,10 @@ export default function ArsenalSettingsPage() {
   const readOnlyCommands = useMemo(
     () => (commands?.commands || []).filter((command) => command.status === 'read_only'),
     [commands]
+  )
+  const contractEntries = useMemo(
+    () => contracts?.contract_names.map((name) => [name, contracts.contracts[name]] as const).filter((entry) => Boolean(entry[1])) || [],
+    [contracts]
   )
   const visibleTools = tools?.tools || []
 
@@ -215,8 +279,40 @@ export default function ArsenalSettingsPage() {
           <Stat label="commands" value={commands?.commands.length || 0} />
           <Stat label="read-only" value={commandCounts.read_only || 0} tone="text-green-300" />
           <Stat label="gated" value={commandCounts.gated || 0} tone="text-blue-300" />
+          <Stat label="contracts" value={contracts?.contract_names.length || 0} tone="text-cyan-300" />
         </div>
       )}
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-green-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Mission Contracts</h2>
+          </div>
+          {contracts && <Badge className="bg-gray-800 text-gray-300">execution disabled</Badge>}
+        </div>
+        {contracts && (
+          <div className="mb-3 rounded-md border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+            Secret policy: <span className="text-gray-200">{contracts.secret_policy.default}</span>
+            <span className="mx-2 text-gray-700">|</span>
+            never inline: <span className="text-gray-300">{contracts.secret_policy.never_inline.slice(0, 6).join(', ')}</span>
+          </div>
+        )}
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : contractEntries.length === 0 ? (
+          <EmptyState message="No mission contracts are registered." />
+        ) : (
+          <div className="grid gap-3 xl:grid-cols-2">
+            {contractEntries.map(([name, contract]) => (
+              <ContractRow key={name} name={name} contract={contract} />
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Card className="p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

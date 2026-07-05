@@ -128,11 +128,13 @@ from target_dedupe import (
 import check_registry
 
 try:
+    from command_arsenal import describe_contracts as describe_arsenal_contracts
     from command_arsenal import describe_commands as describe_arsenal_commands
     from command_arsenal import describe_tools as describe_arsenal_tools
 except ModuleNotFoundError as exc:
     if exc.name != "command_arsenal":
         raise
+    from api.command_arsenal import describe_contracts as describe_arsenal_contracts
     from api.command_arsenal import describe_commands as describe_arsenal_commands
     from api.command_arsenal import describe_tools as describe_arsenal_tools
 
@@ -11561,6 +11563,12 @@ async def asm_check_families():
 async def arsenal_commands():
     """Read-only Command Arsenal schema for UI, REST clients, AI Ops, and future MCP."""
     return describe_arsenal_commands()
+
+
+@app.get("/arsenal/contracts")
+async def arsenal_contracts():
+    """Read-only mission, context, trace, receipt, hypothesis, and evidence-instance contracts."""
+    return describe_arsenal_contracts()
 
 
 @app.get("/arsenal/tools")
