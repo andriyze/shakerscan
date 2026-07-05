@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, replayAiScan, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -296,17 +296,41 @@ function formatAiGateLabel(value: string | null | undefined): string {
 
 function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   const review: AiGateCampaignReview = buildAiGateCampaignReview(scan?.result)
+  const [replayLoading, setReplayLoading] = useState<string | null>(null)
+  const [replayError, setReplayError] = useState<string | null>(null)
+  const [replayQueued, setReplayQueued] = useState<{ scan_id: string; ui_url?: string; label: string } | null>(null)
+  const [confirmProductionReplay, setConfirmProductionReplay] = useState(false)
   if (!review.available) return null
 
   const coveragePct = review.planned > 0 ? Math.round((review.executed / review.planned) * 100) : 0
   const transcriptUrl = `${API_URL}/ai/scans/${scan.id}/transcript`
   const reportUrl = `${API_URL}/scans/${scan.id}/ai-redteam-report`
+  const isProduction = review.environment === 'production'
   const decisionClass =
     review.decision === 'block'
       ? 'bg-red-900/50 text-red-200'
       : review.decision === 'allow'
         ? 'bg-green-900/50 text-green-200'
         : 'bg-amber-900/50 text-amber-200'
+
+  async function queueReplay(label: string, mode: 'skipped' | 'errors' | 'family' | 'all', probeFamily?: string) {
+    setReplayLoading(`${mode}:${probeFamily || ''}`)
+    setReplayError(null)
+    setReplayQueued(null)
+    try {
+      const result = await replayAiScan(scan.id, {
+        mode,
+        probe_family: probeFamily,
+        confirm_production: confirmProductionReplay,
+        requested_by: 'ui',
+      })
+      setReplayQueued({ scan_id: result.scan_id, ui_url: result.ui_url, label })
+    } catch (err) {
+      setReplayError(err instanceof Error ? err.message : 'Failed to queue AI Gate replay')
+    } finally {
+      setReplayLoading(null)
+    }
+  }
 
   return (
     <Card className="p-4 mb-6">
@@ -327,6 +351,63 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       </div>
 
       {review.rationale && <p className="mt-3 text-sm text-gray-300">{review.rationale}</p>}
+
+      <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign replay</div>
+            <p className="mt-1 text-xs text-gray-500">
+              Queue a focused AI Gate run using the original target, probe pack, profile, and environment.
+            </p>
+          </div>
+          {isProduction && (
+            <label className="flex items-center gap-2 text-xs text-amber-200">
+              <input
+                type="checkbox"
+                checked={confirmProductionReplay}
+                onChange={(event) => setConfirmProductionReplay(event.target.checked)}
+                className="h-4 w-4 rounded border-gray-700 bg-gray-800"
+              />
+              Confirm production replay
+            </label>
+          )}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => queueReplay('Skipped probes', 'skipped')}
+            disabled={replayLoading !== null || review.skipped === 0 || (isProduction && !confirmProductionReplay)}
+            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+          >
+            {replayLoading === 'skipped:' ? 'Queueing...' : 'Rerun skipped'}
+          </button>
+          <button
+            type="button"
+            onClick={() => queueReplay('Errored families', 'errors')}
+            disabled={replayLoading !== null || review.errors === 0 || (isProduction && !confirmProductionReplay)}
+            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+          >
+            {replayLoading === 'errors:' ? 'Queueing...' : 'Rerun errors'}
+          </button>
+          <button
+            type="button"
+            onClick={() => queueReplay('Full campaign', 'all')}
+            disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
+            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+          >
+            {replayLoading === 'all:' ? 'Queueing...' : 'Rerun all'}
+          </button>
+        </div>
+        {replayError && <p role="alert" className="mt-2 text-xs text-red-300">{replayError}</p>}
+        {replayQueued && (
+          <p className="mt-2 text-xs text-green-300">
+            Queued {replayQueued.label}.{' '}
+            <Link href={replayQueued.ui_url || `/scans/${replayQueued.scan_id}`} className="underline hover:text-green-100">
+              View scan
+            </Link>
+          </p>
+        )}
+      </div>
 
       <div className="mt-4 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
         <CoverageMetric label="Planned probes" value={review.planned} />
@@ -360,6 +441,14 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                     {family.skipped > 0 && <span>{family.skipped} skipped</span>}
                     {family.errors > 0 && <span className="text-red-300">{family.errors} errors</span>}
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => queueReplay(formatAiGateLabel(family.family), 'family', family.family)}
+                    disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
+                    className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    {replayLoading === `family:${family.family}` ? 'Queueing...' : 'Rerun family'}
+                  </button>
                 </div>
               ))}
             </div>

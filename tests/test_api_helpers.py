@@ -715,6 +715,80 @@ def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
     assert any(event["detail"] == "daily cap reached" for event in timeline)
 
 
+def test_ai_scan_replay_plan_selects_skipped_probe_ids():
+    plan = api_module._build_ai_scan_replay_plan(
+        {
+            "ai_gate": {
+                "probe_pack": "shaker-rag-lite",
+                "scan_profile": "standard",
+                "decision": {"environment": "staging"},
+                "coverage_matrix": {
+                    "summary": {"planned": 3, "executed": 1, "skipped": 2, "errors": 0},
+                    "skipped": [
+                        {"probe_id": "rag-1", "family": "rag", "reason": "request_budget"},
+                        {"probe_id": "mcp-1", "family": "mcp", "reason": "request_budget"},
+                    ],
+                },
+            }
+        },
+        api_module.AIScanReplayRequest(mode="skipped"),
+    )
+
+    assert plan["probe_ids"] == ["rag-1", "mcp-1"]
+    assert plan["probe_family"] is None
+    assert plan["probe_pack"] == "shaker-rag-lite"
+    assert plan["environment"] == "staging"
+
+
+def test_ai_scan_replay_plan_selects_errored_family():
+    plan = api_module._build_ai_scan_replay_plan(
+        {
+            "ai_gate": {
+                "coverage_matrix": {
+                    "by_family": {
+                        "rag": {"planned": 2, "executed": 2, "errors": 0},
+                        "mcp": {"planned": 1, "executed": 0, "errors": 1},
+                    },
+                    "summary": {"errors": 1},
+                    "skipped": [{"probe_id": "mcp-1", "family": "mcp", "reason": "error"}],
+                },
+            }
+        },
+        api_module.AIScanReplayRequest(mode="errors"),
+    )
+
+    assert plan["probe_family"] == "mcp"
+    assert plan["probe_ids"] == []
+
+
+def test_ai_scan_replay_plan_rejects_unknown_family():
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._build_ai_scan_replay_plan(
+            {
+                "ai_gate": {
+                    "coverage_matrix": {
+                        "by_family": {"rag": {"planned": 1}},
+                    },
+                }
+            },
+            api_module.AIScanReplayRequest(mode="family", probe_family="mcp"),
+        )
+
+    assert exc.value.status_code == 400
+    assert "was not planned" in exc.value.detail
+
+
+def test_ai_scan_replay_plan_rejects_non_ai_gate_result():
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._build_ai_scan_replay_plan(
+            {"result": {"score": 90}},
+            api_module.AIScanReplayRequest(mode="skipped"),
+        )
+
+    assert exc.value.status_code == 400
+    assert "AI Gate result" in exc.value.detail
+
+
 # ----- finding exception queue filters -------------------------------------
 
 class _ExceptionQueueConn:

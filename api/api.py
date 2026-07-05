@@ -3049,6 +3049,13 @@ class AIFindingRetestRequest(BaseModel):
     confirm_production: bool = False
 
 
+class AIScanReplayRequest(BaseModel):
+    mode: str = Field(default="skipped", pattern="^(skipped|errors|family|all)$")
+    probe_family: Optional[str] = None
+    requested_by: Optional[str] = "api"
+    confirm_production: bool = False
+
+
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
@@ -5074,6 +5081,80 @@ def _build_ai_finding_retest_scan_options(
     worker_options["ai_finding_retest"] = replay_plan
     storage_options["ai_finding_retest"] = replay_plan
     return worker_options, storage_options, replay_plan
+
+
+def _build_ai_scan_replay_plan(
+    scan_result: dict[str, Any],
+    request: AIScanReplayRequest,
+) -> dict[str, Any]:
+    ai_gate = scan_result.get("ai_gate") if isinstance(scan_result, dict) else {}
+    if not isinstance(ai_gate, dict) or not ai_gate:
+        raise HTTPException(status_code=400, detail="Scan does not contain an AI Gate result")
+    coverage = ai_gate.get("coverage_matrix") if isinstance(ai_gate.get("coverage_matrix"), dict) else {}
+    by_family = coverage.get("by_family") if isinstance(coverage.get("by_family"), dict) else {}
+    skipped = coverage.get("skipped") if isinstance(coverage.get("skipped"), list) else []
+    mode = request.mode or "skipped"
+    focus_probe_ids: list[str] = []
+    focus_family = (request.probe_family or "").strip() or None
+
+    def _count(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    if mode == "skipped":
+        focus_probe_ids = [
+            str(item.get("probe_id"))
+            for item in skipped
+            if isinstance(item, dict) and item.get("probe_id")
+        ]
+        if not focus_probe_ids:
+            raise HTTPException(status_code=400, detail="AI Gate scan has no skipped probe ids to replay")
+    elif mode == "errors":
+        error_families = [
+            family
+            for family, bucket in by_family.items()
+            if isinstance(bucket, dict) and _count(bucket.get("errors")) > 0
+        ]
+        if not error_families:
+            raise HTTPException(status_code=400, detail="AI Gate scan has no errored families to rerun")
+        if len(error_families) == 1:
+            focus_family = str(error_families[0])
+        else:
+            focus_probe_ids = [
+                str(item.get("probe_id"))
+                for item in skipped
+                if isinstance(item, dict)
+                and item.get("probe_id")
+                and str(item.get("family") or "") in {str(f) for f in error_families}
+            ]
+            if not focus_probe_ids:
+                focus_family = str(error_families[0])
+    elif mode == "family":
+        if not focus_family:
+            raise HTTPException(status_code=400, detail="probe_family is required for family replay")
+        if by_family and focus_family not in by_family:
+            raise HTTPException(status_code=400, detail=f"Probe family {focus_family!r} was not planned in this scan")
+    elif mode == "all":
+        focus_family = None
+        focus_probe_ids = []
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported AI Gate replay mode")
+
+    summary = coverage.get("summary") if isinstance(coverage.get("summary"), dict) else {}
+    return {
+        "mode": mode,
+        "probe_ids": focus_probe_ids,
+        "probe_family": focus_family,
+        "source_planned": summary.get("planned"),
+        "source_executed": summary.get("executed"),
+        "source_skipped": summary.get("skipped"),
+        "source_errors": summary.get("errors"),
+        "probe_pack": ai_gate.get("probe_pack"),
+        "scan_profile": ai_gate.get("scan_profile"),
+        "environment": (ai_gate.get("decision") or {}).get("environment") if isinstance(ai_gate.get("decision"), dict) else None,
+    }
 
 
 def _mask_ai_headers_for_preview(headers: dict[str, str]) -> dict[str, str]:
@@ -12644,6 +12725,164 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
         "probe_id": replay_plan.get("probe_id"),
         "probe_family": replay_plan.get("probe_family"),
         "ui_url": f"/scans/{scan_id}",
+    }
+
+
+@app.post("/ai/scans/{scan_id}/replay")
+async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = None):
+    """Queue a focused replay/rerun from a completed AI Gate scan campaign."""
+    request = request or AIScanReplayRequest()
+    r = get_redis()
+    try:
+        r.ping()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
+
+    new_scan_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+
+    async with db_pool.acquire() as conn:
+        original_scan = await conn.fetchrow(
+            """
+            SELECT id, ai_target_id, target_url, options, result, run_kind, status
+            FROM scans
+            WHERE id = $1
+            """,
+            uuid.UUID(scan_id),
+        )
+        if not original_scan:
+            raise HTTPException(status_code=404, detail="AI Gate scan not found")
+        if not str(original_scan["run_kind"] or "").startswith("ai_") or not original_scan["ai_target_id"]:
+            raise HTTPException(status_code=400, detail="Scan is not an AI Gate target scan")
+        if original_scan["status"] != "completed":
+            raise HTTPException(status_code=409, detail="Only completed AI Gate scans can be replayed")
+
+        original_result = _decode_json_value(original_scan["result"]) or {}
+        replay_plan = _build_ai_scan_replay_plan(original_result, request)
+
+        target_row = await conn.fetchrow(
+            "SELECT * FROM ai_targets WHERE id = $1",
+            original_scan["ai_target_id"],
+        )
+        if not target_row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        if not target_row["is_active"]:
+            raise HTTPException(status_code=409, detail="AI target is inactive")
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id = $1",
+            original_scan["ai_target_id"],
+        )
+        principal_rows = await conn.fetch(
+            """
+            SELECT * FROM ai_target_principals
+            WHERE ai_target_id = $1 AND is_active = true
+            ORDER BY role, label
+            """,
+            original_scan["ai_target_id"],
+        )
+
+        target = row_to_dict(target_row)
+        for key in ("headers_template", "request_template", "metadata_json"):
+            target[key] = _decode_json_value(target.get(key)) or {}
+        credential = _runtime_credential_from_row(dict(credential_row) if credential_row else None)
+        original_options = _ai_scan_options_from_row(original_scan)
+        original_confirmation = original_options.get("production_confirmation")
+        original_confirmed = isinstance(original_confirmation, dict) and original_confirmation.get("confirmed") is True
+
+        scan_request = AITargetScanRequest(
+            probe_pack=str(original_options.get("ai_probe_pack") or replay_plan.get("probe_pack") or "shaker-ai-smoke"),
+            scan_profile=str(original_options.get("ai_scan_profile") or replay_plan.get("scan_profile") or "smoke"),
+            environment=str(original_options.get("ai_environment") or replay_plan.get("environment") or "preview"),
+            confirm_production=bool(request.confirm_production or original_confirmed),
+            ai_judge_enabled=original_options.get("ai_judge_enabled"),
+            semantic_judge_enabled=original_options.get("semantic_judge_enabled"),
+        )
+        worker_options, storage_options = _build_ai_worker_options(
+            target=target,
+            credential=credential,
+            request=scan_request,
+            principals=list(principal_rows),
+        )
+        metadata_json = worker_options["ai_target"].setdefault("metadata_json", {})
+        if replay_plan.get("probe_ids"):
+            worker_options["ai_focus_probe_ids"] = replay_plan["probe_ids"]
+            storage_options["ai_focus_probe_ids"] = replay_plan["probe_ids"]
+            metadata_json["ai_focus_probe_ids"] = replay_plan["probe_ids"]
+        if replay_plan.get("probe_family"):
+            worker_options["ai_focus_probe_family"] = replay_plan["probe_family"]
+            storage_options["ai_focus_probe_family"] = replay_plan["probe_family"]
+            metadata_json["ai_focus_probe_family"] = replay_plan["probe_family"]
+
+        replay_plan = {
+            **replay_plan,
+            "source_scan_id": scan_id,
+            "requested_by": request.requested_by or "api",
+            "queued_scan_id": new_scan_id,
+        }
+        worker_options["ai_scan_replay"] = replay_plan
+        storage_options["ai_scan_replay"] = replay_plan
+        production_scan = bool(target.get("production_mode")) or storage_options.get("ai_environment") == "production"
+        confirmed = bool((storage_options.get("production_confirmation") or {}).get("confirmed"))
+        if production_scan and not confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail="AI Gate scan replay targets production. Re-submit with confirm_production=true.",
+            )
+
+        run_kind = storage_options["run_kind"]
+        await conn.execute("""
+            INSERT INTO scans (
+                id, target_id, ai_target_id, target_url, job_id, status,
+                options, scan_type, run_kind, subject_ref
+            ) VALUES ($1, NULL, $2, $3, $4, 'pending', $5, 'ai_gate', $6, $7)
+        """,
+            uuid.UUID(new_scan_id),
+            original_scan["ai_target_id"],
+            target["endpoint_url"],
+            job_id,
+            json.dumps(storage_options),
+            run_kind,
+            f"ai_scan_replay:{scan_id}",
+        )
+
+    job_data = {
+        "job_id": job_id,
+        "scan_id": new_scan_id,
+        "target": target["endpoint_url"],
+        "options": worker_options,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r.rpush(QUEUE_NAME, json.dumps(job_data))
+        r.hset(
+            f"job:{job_id}",
+            mapping={
+                "status": "queued",
+                "target": target["endpoint_url"],
+                "scan_id": new_scan_id,
+                "source_scan_id": scan_id,
+            },
+        )
+        r.expire(f"job:{job_id}", 86400)
+    except Exception as e:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW() WHERE id=$1",
+                uuid.UUID(new_scan_id),
+                f"AI Gate scan replay queue enqueue failed: {type(e).__name__}: {e}",
+            )
+        raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
+
+    return {
+        "scan_id": new_scan_id,
+        "job_id": job_id,
+        "status": "queued",
+        "source_scan_id": scan_id,
+        "mode": replay_plan.get("mode"),
+        "probe_ids": replay_plan.get("probe_ids") or [],
+        "probe_family": replay_plan.get("probe_family"),
+        "target_url": target["endpoint_url"],
+        "ui_url": f"/scans/{new_scan_id}",
     }
 
 

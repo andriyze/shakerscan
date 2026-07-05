@@ -1911,6 +1911,36 @@ export async function retestAiFinding(
   return res.json()
 }
 
+export async function replayAiScan(
+  id: string,
+  params: {
+    mode?: 'skipped' | 'errors' | 'family' | 'all'
+    probe_family?: string
+    requested_by?: string
+    confirm_production?: boolean
+  } = {}
+): Promise<{
+  scan_id: string
+  job_id: string
+  status: string
+  source_scan_id: string
+  mode?: string
+  probe_ids?: string[]
+  probe_family?: string | null
+  target_url: string
+  ui_url?: string
+}> {
+  const res = await fetch(`${API_URL}/ai/scans/${id}/replay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to queue AI Gate scan replay'))
+  }
+  return res.json()
+}
+
 export async function getFindingRetests(id: string, limit: number = 20): Promise<{
   finding_id: string
   retests: RetestRecord[]
