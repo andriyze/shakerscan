@@ -2921,6 +2921,10 @@ class ModelIntakeScanRequest(BaseModel):
     policy_exceptions: Optional[list[dict[str, Any]]] = None
     max_download_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on the queued Model Intake scan.",
+    )
 
 
 class ModelIntakeResolveRequest(BaseModel):
@@ -3040,6 +3044,10 @@ class AITargetScanRequest(BaseModel):
     confirm_production: bool = False
     ai_judge_enabled: Optional[bool] = None
     semantic_judge_enabled: Optional[bool] = None
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on the queued AI Gate scan.",
+    )
 
 
 class AITargetConnectivityTestRequest(BaseModel):
@@ -3090,12 +3098,20 @@ class FindingRetestRequest(BaseModel):
     method: Optional[str] = None
     request_body: Optional[str] = None
     requested_by: Optional[str] = "api"
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on the queued retest job.",
+    )
 
 
 class AIFindingRetestRequest(BaseModel):
     mode: str = Field(default="same_probe", pattern="^(same_probe|same_family|strict_replay)$")
     requested_by: Optional[str] = "api"
     confirm_production: bool = False
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on the queued AI Gate finding replay.",
+    )
 
 
 class AIScanReplayRequest(BaseModel):
@@ -3105,6 +3121,10 @@ class AIScanReplayRequest(BaseModel):
     transcript_index: Optional[int] = Field(default=None, ge=0)
     requested_by: Optional[str] = "api"
     confirm_production: bool = False
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on the queued AI Gate campaign replay.",
+    )
 
 
 class ScopePreviewRequest(BaseModel):
@@ -3137,6 +3157,10 @@ class FindingsBulkRetestRequest(BaseModel):
     finding_type: Optional[str] = None
     requested_by: Optional[str] = "api"
     mode: Optional[str] = None  # "ai" or "deterministic"; None = tiered
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on each queued retest job.",
+    )
 
 
 class ManualFindingCreate(BaseModel):
@@ -3651,6 +3675,11 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             """,
             uuid.UUID(target_id),
         )
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target_row["endpoint_url"],
+        )
 
         target = row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
@@ -3662,6 +3691,9 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             request=request,
             principals=list(principal_rows),
         )
+        if approval_context:
+            worker_options.update(approval_context)
+            storage_options.update(approval_context)
         run_kind = storage_options["run_kind"]
 
         await conn.execute("""
@@ -3689,7 +3721,7 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target["endpoint_url"], "scan_id": scan_id})
 
-    return {
+    response = {
         "scan_id": scan_id,
         "job_id": job_id,
         "status": "queued",
@@ -3700,6 +3732,10 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
         "scan_profile": request.scan_profile,
         "ui_url": f"/scans/{scan_id}",
     }
+    if storage_options.get("approval_receipt_id"):
+        response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
+        response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    return response
 
 
 def _graph_node(
@@ -7073,6 +7109,15 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
                 RETURNING id
             """, artifact_ref, target_name, extract_root_domain(artifact_ref))
 
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=artifact_ref,
+            target_id=target_id,
+        )
+        if approval_context:
+            options.update(approval_context)
+
         await conn.execute("""
             INSERT INTO scans (
                 id, target_id, target_url, job_id, status, options, scan_type, run_kind, subject_ref
@@ -7096,7 +7141,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     r.rpush(QUEUE_NAME, json.dumps(job_data))
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
-    return {
+    response = {
         "scan_id": scan_id,
         "job_id": job_id,
         "status": "queued",
@@ -7105,6 +7150,10 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "run_kind": "model_intake",
         "ui_url": f"/scans/{scan_id}",
     }
+    if options.get("approval_receipt_id"):
+        response["approval_receipt_id"] = options.get("approval_receipt_id")
+        response["scope_receipt_id"] = options.get("scope_receipt_id")
+    return response
 
 
 @app.post("/model-intake/targets/{target_id}/rescan")
@@ -13862,6 +13911,13 @@ async def retest_finding(
                 detail="Finding is missing target URL context required for retest"
             )
 
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=retest_inputs.get("target_url"),
+            target_id=finding_data.get("target_id"),
+        )
+
         retest_id, job_id = await enqueue_finding_retest(
             conn,
             finding_data,
@@ -13879,6 +13935,8 @@ async def retest_finding(
     # Pass mode through to the worker
     if mode:
         job_data["mode"] = mode
+    if approval_context:
+        job_data.update(approval_context)
     valid, reason = validate_retest_job_payload(job_data)
     if not valid:
         async with db_pool.acquire() as conn:
@@ -13931,6 +13989,8 @@ async def retest_finding(
         "finding_type": retest_inputs["finding_type"],
         "target_url": retest_inputs["target_url"],
         "replay_commands": build_replay_commands(retest_inputs),
+        "approval_receipt_id": approval_context.get("approval_receipt_id") if approval_context else None,
+        "scope_receipt_id": approval_context.get("scope_receipt_id") if approval_context else None,
     }
 
 
@@ -13978,6 +14038,11 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
             """,
             finding_data["ai_target_id"],
         )
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target_row["endpoint_url"],
+        )
         original_scan = None
         if finding_data.get("scan_id"):
             original_scan = await conn.fetchrow(
@@ -13999,6 +14064,11 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
             verification_id=verification_id,
             principals=list(principal_rows),
         )
+        if approval_context:
+            worker_options.update(approval_context)
+            storage_options.update(approval_context)
+            replay_plan["approval_receipt_id"] = approval_context.get("approval_receipt_id")
+            replay_plan["scope_receipt_id"] = approval_context.get("scope_receipt_id")
 
         production_scan = bool(target.get("production_mode")) or storage_options.get("ai_environment") == "production"
         confirmed = bool((storage_options.get("production_confirmation") or {}).get("confirmed"))
@@ -14087,7 +14157,7 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
             )
         raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
 
-    return {
+    response = {
         "retest_id": str(verification_id),
         "job_id": job_id,
         "scan_id": scan_id,
@@ -14100,6 +14170,10 @@ async def retest_ai_finding(finding_id: str, request: AIFindingRetestRequest | N
         "probe_family": replay_plan.get("probe_family"),
         "ui_url": f"/scans/{scan_id}",
     }
+    if storage_options.get("approval_receipt_id"):
+        response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
+        response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    return response
 
 
 @app.get("/ai/scans/{scan_id}/campaign-history")
@@ -14191,6 +14265,11 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
             """,
             original_scan["ai_target_id"],
         )
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target_row["endpoint_url"],
+        )
 
         target = row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
@@ -14232,6 +14311,11 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
         }
         worker_options["ai_scan_replay"] = replay_plan
         storage_options["ai_scan_replay"] = replay_plan
+        if approval_context:
+            worker_options.update(approval_context)
+            storage_options.update(approval_context)
+            replay_plan["approval_receipt_id"] = approval_context.get("approval_receipt_id")
+            replay_plan["scope_receipt_id"] = approval_context.get("scope_receipt_id")
         production_scan = bool(target.get("production_mode")) or storage_options.get("ai_environment") == "production"
         confirmed = bool((storage_options.get("production_confirmation") or {}).get("confirmed"))
         if production_scan and not confirmed:
@@ -14284,7 +14368,7 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
             )
         raise HTTPException(status_code=503, detail=f"AI Gate scan queue unavailable: {e}")
 
-    return {
+    response = {
         "scan_id": new_scan_id,
         "job_id": job_id,
         "status": "queued",
@@ -14296,6 +14380,10 @@ async def replay_ai_scan(scan_id: str, request: AIScanReplayRequest | None = Non
         "target_url": target["endpoint_url"],
         "ui_url": f"/scans/{new_scan_id}",
     }
+    if storage_options.get("approval_receipt_id"):
+        response["approval_receipt_id"] = storage_options.get("approval_receipt_id")
+        response["scope_receipt_id"] = storage_options.get("scope_receipt_id")
+    return response
 
 
 @app.get("/retests/finding/{finding_id:path}")
@@ -14481,6 +14569,19 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                     "reason": "missing_target_url",
                 })
                 continue
+            try:
+                approval_context = await _validate_approval_receipt_for_action(
+                    conn,
+                    request.approval_receipt_id,
+                    target_url=retest_inputs.get("target_url"),
+                    target_id=finding_data.get("target_id"),
+                )
+            except HTTPException as exc:
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": f"approval_receipt_invalid:{exc.detail}",
+                })
+                continue
 
             retest_id, job_id = await enqueue_finding_retest(
                 conn,
@@ -14498,6 +14599,8 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
             )
             if request.mode:
                 job_data["mode"] = request.mode
+            if approval_context:
+                job_data.update(approval_context)
             valid, reason = validate_retest_job_payload(job_data)
             if not valid:
                 await mark_retest_enqueue_failed(
@@ -14548,6 +14651,8 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 "job_id": job_id,
                 "finding_type": retest_inputs["finding_type"],
                 "replay_commands": build_replay_commands(retest_inputs),
+                "approval_receipt_id": approval_context.get("approval_receipt_id") if approval_context else None,
+                "scope_receipt_id": approval_context.get("scope_receipt_id") if approval_context else None,
             })
 
         if queue_failed_at is not None:

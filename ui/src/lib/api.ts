@@ -333,6 +333,7 @@ export interface ModelIntakeScanRequest {
   policy_profile?: string
   max_download_bytes?: number
   timeout_seconds?: number
+  approval_receipt_id?: string
 }
 
 export interface ModelIntakeTrustAnchor {
@@ -356,6 +357,8 @@ export interface ModelIntakeScanResponse {
   scan_type: 'model_intake'
   run_kind: 'model_intake'
   ui_url: string
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }
 
 export type ModelIntakePlatform = 'auto' | 'huggingface' | 'http' | 's3' | 'gcs' | 'azure' | 'oci' | 'mlflow'
@@ -2125,6 +2128,7 @@ export async function retestFinding(
     method?: string
     request_body?: string
     requested_by?: string
+    approval_receipt_id?: string
   } = {},
   mode?: 'ai' | 'deterministic'
 ): Promise<{
@@ -2136,6 +2140,8 @@ export async function retestFinding(
   finding_type: string
   target_url: string
   replay_commands?: string[]
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }> {
   const query = mode ? `?mode=${mode}` : ''
   const res = await fetch(`${API_URL}/findings/${id}/retest${query}`, {
@@ -2155,6 +2161,7 @@ export async function retestAiFinding(
     mode?: 'same_probe' | 'same_family' | 'strict_replay'
     requested_by?: string
     confirm_production?: boolean
+    approval_receipt_id?: string
   } = {}
 ): Promise<{
   retest_id: string
@@ -2168,6 +2175,8 @@ export async function retestAiFinding(
   probe_id?: string
   probe_family?: string
   ui_url?: string
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }> {
   const res = await fetch(`${API_URL}/ai/findings/${id}/retest`, {
     method: 'POST',
@@ -2189,6 +2198,7 @@ export async function replayAiScan(
     transcript_index?: number
     requested_by?: string
     confirm_production?: boolean
+    approval_receipt_id?: string
   } = {}
 ): Promise<{
   scan_id: string
@@ -2201,6 +2211,8 @@ export async function replayAiScan(
   transcript?: Record<string, unknown> | null
   target_url: string
   ui_url?: string
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }> {
   const res = await fetch(`${API_URL}/ai/scans/${id}/replay`, {
     method: 'POST',
@@ -2698,6 +2710,7 @@ export async function scanAITarget(
     scan_profile: AIScanProfile
     environment: AIEnvironment
     confirm_production?: boolean
+    approval_receipt_id?: string
   }
 ): Promise<{
   scan_id: string
@@ -2708,6 +2721,8 @@ export async function scanAITarget(
   ai_target_id: string
   probe_pack: string
   scan_profile: string
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }> {
   const res = await fetch(`${API_URL}/ai/targets/${id}/scan`, {
     method: 'POST',

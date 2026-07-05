@@ -154,6 +154,12 @@ called at real sites — verify before re-proposing any of it:
   non-blocked scope, and compatible with the requested target host/id, then stamp
   `approval_receipt_id` / `scope_receipt_id` into queued scan options. Legacy submissions without a
   receipt still work; mandatory enforcement is the remaining rollout step.
+- **Approval receipt validation phase 2** — AI Gate scans, AI Gate finding replay, AI Gate campaign
+  replay, Model Intake scans, single finding retest, and bulk finding retest now also accept optional
+  `approval_receipt_id`. They validate the same approval/scope invariants against the saved AI target,
+  model artifact reference, or finding retest target before queueing, then stamp receipt IDs into
+  queued scan/retest metadata where that route has a durable job/options record. Legacy submissions
+  without a receipt still work; mandatory enforcement is still a policy rollout step.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -267,9 +273,9 @@ raw shell execution or LLM-produced verified findings.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
    `ActionScopeGuard`, persisted `ScopeReceipt` previews, and durable `ApprovalReceipt` records.
    DONE phase 1 for optional receipt validation on `/scans` and Continuous ASM recon/test/improve.
-   Remaining work is making receipts mandatory by policy and extending enforcement to focused family
-   campaigns, AI Gate scans/replay, Model Intake artifact fetches, retests, and future command/MCP
-   adapters.
+   DONE phase 2 for optional receipt validation on AI Gate scans/replay, Model Intake scans, and
+   finding retests. Remaining work is making receipts mandatory by policy and extending enforcement
+   to future command/MCP adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -403,8 +409,9 @@ and audit traces.
    provided allowed scope, and supplied redirect destinations that leave scope. DONE phase 1 for
    durable `ApprovalReceipt` recording: approvals require `confirm_authorized`, needs-approval scopes
    require `confirm_scope_reviewed`, and blocked scopes cannot be approved. DONE phase 1 for optional
-   route validation on scan submission and Continuous ASM actions. Remaining work is policy-based
-   mandatory enforcement across all existing state-changing routes.
+   route validation on scan submission and Continuous ASM actions. DONE phase 2 for optional route
+   validation on AI Gate scans/replay, Model Intake scans, and finding retests. Remaining work is
+   policy-based mandatory enforcement across existing state-changing routes.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.

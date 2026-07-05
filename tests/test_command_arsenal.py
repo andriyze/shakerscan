@@ -87,7 +87,13 @@ def test_gated_commands_advertise_approval_receipts():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}
 
-    for name in ("asm.improve", "scan.focused_family"):
+    for name in (
+        "asm.improve",
+        "scan.focused_family",
+        "finding.retest",
+        "ai_gate.replay_probe",
+        "model_intake.scan",
+    ):
         assert "approval_receipt_id" in commands[name]["parameters_schema"]
 
 

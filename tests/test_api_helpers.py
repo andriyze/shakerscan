@@ -1242,6 +1242,23 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
     assert non_strict.trust_anchor_ids is None
 
 
+def test_state_changing_request_models_accept_approval_receipt_id():
+    receipt_id = "11111111-1111-4111-8111-111111111111"
+
+    assert api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        approval_receipt_id=receipt_id,
+    ).approval_receipt_id == receipt_id
+    assert api_module.AITargetScanRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert api_module.FindingRetestRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert api_module.AIFindingRetestRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert api_module.AIScanReplayRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert api_module.FindingsBulkRetestRequest(
+        finding_ids=[receipt_id],
+        approval_receipt_id=receipt_id,
+    ).approval_receipt_id == receipt_id
+
+
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
     req = api_module.PolicyProfileRequest(
         name="strict",
