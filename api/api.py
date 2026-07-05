@@ -7182,10 +7182,18 @@ def _action_center_item(
     detail: str,
     href: str | None = None,
     action_label: str | None = None,
+    actions: list[dict[str, Any]] | None = None,
     count: int | None = None,
     samples: list[dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_actions = actions or []
+    if not normalized_actions and href:
+        normalized_actions = [{
+            "label": action_label or "Open",
+            "href": href,
+            "variant": "primary",
+        }]
     return {
         "id": item_id,
         "priority": priority if priority in ACTION_CENTER_PRIORITY_ORDER else "info",
@@ -7194,6 +7202,7 @@ def _action_center_item(
         "detail": detail,
         "href": href,
         "action_label": action_label,
+        "actions": normalized_actions,
         "count": count,
         "samples": samples or [],
         "metadata": metadata or {},
@@ -7268,6 +7277,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 ),
                 href="/",
                 action_label="Review workers",
+                actions=[
+                    {"label": "Adjust workers", "href": "/", "variant": "primary"},
+                    {"label": "Queue state", "href": "/scans?status=pending", "variant": "secondary"},
+                ],
                 count=stale + pending,
                 metadata={
                     "stale_workers": snapshot.get("stale_names") or [],
@@ -7297,6 +7310,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 detail=f"{critical} critical and {high} high active finding(s) are still unresolved.",
                 href=href,
                 action_label="Review findings",
+                actions=[
+                    {"label": "Review blockers", "href": href, "variant": "primary"},
+                    {"label": "Policy profiles", "href": "/settings/policy-profiles", "variant": "secondary"},
+                ],
                 count=critical + high,
             ))
     except Exception:
@@ -7328,6 +7345,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 detail="Open failed scans to review partial results, logs, and retry readiness.",
                 href="/scans?status=failed",
                 action_label="Review failures",
+                actions=[
+                    {"label": "Review failures", "href": "/scans?status=failed", "variant": "primary"},
+                    {"label": "Latest failed scan", "href": samples[0]["href"] if samples else "/scans?status=failed", "variant": "secondary"},
+                ],
                 count=len(failed_scans),
                 samples=samples,
             ))
@@ -7368,8 +7389,13 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     f"{expired} expired, {expiring} expiring within 7 days, "
                     f"{weak_records} missing owner/approver or compensating controls."
                 ),
-                href="/settings/policy-profiles",
-                action_label="Review policy",
+                href="/settings/exceptions",
+                action_label="Review exceptions",
+                actions=[
+                    {"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"},
+                    {"label": "Expiring", "href": "/settings/exceptions?queue_filter=expiring", "variant": "secondary"},
+                    {"label": "Missing controls", "href": "/settings/exceptions?queue_filter=missing_controls", "variant": "secondary"},
+                ],
                 count=expired + expiring + weak_records,
             ))
     except Exception:
@@ -7394,7 +7420,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 COUNT(*) AS enabled_targets,
                 COUNT(*) FILTER (WHERE total = 0) AS no_inventory_targets,
                 COUNT(*) FILTER (WHERE needs_work > 0) AS targets_with_gaps,
-                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work
+                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work,
+                MIN(id::text) FILTER (WHERE total = 0 OR needs_work > 0) AS sample_target_id
             FROM per_target
         """)
         asm_map = _record_map(asm_state)
@@ -7403,6 +7430,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
         targets_with_gaps = int(asm_map.get("targets_with_gaps") or 0)
         endpoints_needing_work = int(asm_map.get("endpoints_needing_work") or 0)
         if enabled_targets and (no_inventory or targets_with_gaps):
+            sample_target_id = str(asm_map.get("sample_target_id") or "")
+            asm_href = f"/asm?target_id={sample_target_id}" if sample_target_id else "/asm"
             items.append(_action_center_item(
                 item_id="asm-coverage-gaps",
                 priority="medium",
@@ -7412,8 +7441,12 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     f"{no_inventory} target(s) need inventory and {targets_with_gaps} target(s) "
                     f"have {endpoints_needing_work} endpoint(s) untested, stale, or partial."
                 ),
-                href="/asm",
+                href=asm_href,
                 action_label="Improve coverage",
+                actions=[
+                    {"label": "Improve coverage", "href": asm_href, "variant": "primary"},
+                    {"label": "All ASM targets", "href": "/asm", "variant": "secondary"},
+                ],
                 count=no_inventory + targets_with_gaps,
             ))
     except Exception:
@@ -7442,6 +7475,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 detail=detail,
                 href="/schedules",
                 action_label="View schedules",
+                actions=[
+                    {"label": "View schedules", "href": "/schedules", "variant": "primary"},
+                    {"label": "Create schedule", "href": "/schedules?create=true", "variant": "secondary"},
+                ],
                 count=1,
             ))
     except Exception:
@@ -7480,6 +7517,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 detail="Latest model-intake scans include artifacts that are not verified against an operator trust root.",
                 href="/settings/model-intake",
                 action_label="Review intake",
+                actions=[
+                    {"label": "Model Intake", "href": "/settings/model-intake", "variant": "primary"},
+                    {"label": "Latest scan", "href": samples[0]["href"] if samples else "/settings/model-intake", "variant": "secondary"},
+                ],
                 count=len(model_rows),
                 samples=samples,
             ))
@@ -7527,6 +7568,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 detail="Production, high-risk, or baseline-enforced AI targets are missing required governance/control metadata.",
                 href="/settings/ai-gate",
                 action_label="Review AI targets",
+                actions=[
+                    {"label": "AI Gate", "href": "/settings/ai-gate", "variant": "primary"},
+                    {"label": "AI findings", "href": "/findings?source_type=ai&status=active", "variant": "secondary"},
+                ],
                 count=len(missing_targets),
                 samples=samples,
             ))

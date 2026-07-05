@@ -45,6 +45,10 @@ called at real sites — verify before re-proposing any of it:
   freshness, deployment blockers, failed scans, policy-exception hygiene, ASM gaps/schedules,
   Model Intake trust gaps, and AI control-baseline gaps; the dashboard renders them as a
   prioritized operator feed.
+- **Dashboard Action Center CTAs** — `action_center` items now include structured `actions[]`
+  alongside legacy `href/action_label`, and the dashboard renders safe direct links for worker
+  controls, deployment blockers, failed scans, exception queues, target-preselected ASM coverage,
+  ASM schedules, Model Intake trust gaps, and AI Gate control gaps.
 - **ASM next-action / skip-reason contract phase 1** — `asm_inventory.decide_asm_action` now returns
   `blocked_by`, `next_eligible_at`, `daily_cap_remaining`, `rate_cap_remaining`, `claimable`, and
   `tested_today`; `/targets/{id}/asm/policy`, `/asm/gaps`, and `/asm/improve` expose
@@ -113,7 +117,8 @@ ordering and more exact implementation boundaries:
   (`api/api.py::ScheduleCreate`, `/schedules`). The next change is therefore contract cleanup and
   timeline visibility, not adding another schedule button.
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
-  scheduler decision object. Dashboard CTAs still need to consume those facts.
+  scheduler decision object. Dashboard Action Center items now expose structured safe CTAs; the next
+  dashboard gap is richer product counts/quick links, not the base action contract.
 - Model Intake has the low-level trust fields in API/UI, but no guided trust-mode workflow. The next
   slice should make valid trust configurations obvious rather than adding more fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, and control evidence, but lacks a
@@ -123,22 +128,18 @@ ordering and more exact implementation boundaries:
 
 These are the next commit-sized slices, in order:
 
-1. **Action Center CTAs:** add structured actions to `/dashboard.action_center` items and render safe
-   links/buttons for stale workers, failed scans, ASM gaps, exception hygiene, Model Intake trust
-   gaps, and AI control gaps. Avoid unsafe one-click state changes until each has a tested
-   confirmation flow.
-2. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
+1. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
    `normal_scan` and `asm_improve`, backfill/decode legacy `scan_options.kind`, keep legacy API
    compatibility, and make `/schedules` create/edit ASM waves without pretending a DAST `scan_type`
    is the primary action.
-3. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
+2. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
    manual Improve Coverage, active implementation scan, last activity, last skip reason, and next
    eligible time in one target-scoped view.
-4. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
+3. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
    preview before broadening artifact/provider support.
-5. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
+4. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
    matrix, skipped-probe reasons, transcript/report export, and gated rerun/replay actions.
-6. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+5. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
 
@@ -149,16 +150,15 @@ hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI contr
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
 expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted as
 `metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
-Exceptions Queue. Remaining work is deeper actionability: wiring those facts into Dashboard CTAs and
-inline one-click remediation for each blocker class.
+Exceptions Queue. Dashboard items now expose structured safe CTAs. Remaining work is deeper
+product-level actionability: richer product counts/quick links and state-changing remediation only
+after each flow has a tested confirmation boundary.
 
 **Implement:**
-1. Extend Action Center items with direct remediation where safe: restart/rescale worker CTA,
-   Improve Coverage CTA with target preselection, exception-renew/revoke CTA, and retry failed scan.
-2. Extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve/activity
-   into Dashboard Action Center CTAs. The first contract is live, including
-   `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and active scan
-   links; the remaining gap is dashboard actionability.
+1. DONE: extend Action Center items with safe CTAs for workers, failed scans, target-preselected ASM
+   coverage, exception queues, Model Intake trust gaps, and AI control gaps.
+2. DONE: extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve/activity
+   into Dashboard Action Center CTAs where target/action links are safe.
 3. DONE: add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired,
    missing owner/approver, no compensating controls, policy-scoped, and target-scoped.
 4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product

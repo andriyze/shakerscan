@@ -19,9 +19,9 @@ that ASM should expose as family/proof/workflow gaps.
 [multi-node-architecture.md](multi-node-architecture.md).
 
 **2026-07-05 audit note:** the backend foundations are ahead of the operator workflow. The current
-implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): Action Center
-remediation CTAs, first-class ASM schedule kinds, one target campaign timeline, AI red-team campaign
-UX, and guided Model Intake trust UX are the next product priorities. First-pass next-action /
+implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): first-class ASM
+schedule kinds, one target campaign timeline, AI red-team campaign UX, and guided Model Intake trust
+UX are the next product priorities. First-pass next-action /
 skip-reason state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
 dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. The schedules UI
 has an ASM coverage-wave selector, but the API/DB contract still encodes it as
@@ -48,7 +48,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| ASM scheduling/operator UX | Partial; next-action/skip-reason contract, ASM activity surfacing, and schedule UI bridge shipped | Add Action Center CTAs; then make ASM waves a first-class schedule kind and unify background policy, recurring waves, manual actions, and scan rows into one target timeline. |
+| ASM scheduling/operator UX | Partial; next-action/skip-reason contract, ASM activity surfacing, Action Center CTAs, and schedule UI bridge shipped | Make ASM waves a first-class schedule kind and unify background policy, recurring waves, manual actions, and scan rows into one target timeline. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -743,8 +743,6 @@ New quality gaps to track:
 
 Remaining product work from the 2026-07-05 audit:
 
-- Add structured Dashboard Action Center CTAs for ASM gaps, schedule blockers, failed scans, stale
-  workers, exception hygiene, Model Intake trust gaps, and AI control gaps.
 - Make ASM schedule kind first-class in the schedule API/DB while preserving legacy
   `scan_options.kind='asm_improve'` rows and accepting old schedule clients.
 - Add a target campaign timeline that unifies background ASM policy, recurring ASM waves, manual

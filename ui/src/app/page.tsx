@@ -563,6 +563,11 @@ function ActionCenter({
 
 function ActionCenterRow({ item }: { item: DashboardActionItem }) {
   const tone = actionPriorityTone(item.priority)
+  const actions = item.actions?.length
+    ? item.actions
+    : item.href
+      ? [{ label: item.action_label || 'Open', href: item.href, variant: 'primary' }]
+      : []
   const content = (
     <>
       <div className="flex min-w-0 items-start gap-3">
@@ -601,17 +606,32 @@ function ActionCenterRow({ item }: { item: DashboardActionItem }) {
           ) : null}
         </div>
       </div>
-      {item.href && (
-        <Link href={item.href} className={`ml-3 inline-flex shrink-0 items-center gap-1 rounded text-sm text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>
-          {item.action_label || 'Open'}
-          <ArrowRight className="h-4 w-4" aria-hidden="true" />
-        </Link>
+      {actions.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {actions.slice(0, 3).map((action, idx) => {
+            const primary = (action.variant || (idx === 0 ? 'primary' : 'secondary')) === 'primary'
+            return (
+              <Link
+                key={`${item.id}-action-${idx}`}
+                href={action.href}
+                className={`inline-flex min-h-8 items-center gap-1 rounded border px-2.5 py-1.5 text-xs font-medium transition-colors ${FOCUS_RING} ${
+                  primary
+                    ? 'border-blue-500/40 bg-blue-500/15 text-blue-200 hover:border-blue-400/60 hover:bg-blue-500/25'
+                    : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-600 hover:text-gray-100'
+                }`}
+              >
+                {action.label}
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </Link>
+            )
+          })}
+        </div>
       )}
     </>
   )
 
   return (
-    <div className="flex min-h-24 items-start justify-between gap-3 rounded-md border border-gray-800 bg-gray-950 p-3">
+    <div className="flex min-h-24 flex-col gap-3 rounded-md border border-gray-800 bg-gray-950 p-3">
       {content}
     </div>
   )

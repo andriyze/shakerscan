@@ -6,12 +6,12 @@
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
 
 **2026-07-05 audit note:** the parallel substrate is no longer the main product gap. The latest
-roadmap is in [proposed-next-steps.md](proposed-next-steps.md): prioritize Action Center remediation
-CTAs, typed ASM schedule kinds, target campaign timeline, AI red-team campaign UX, and guided Model
-Intake trust UX before adding more fan-out knobs. The first ASM scheduler/dispatcher skip-reason
-contract is now live in ASM policy/gaps/improve/activity responses and persisted target metadata;
-the schedules UI has an ASM coverage-wave bridge, but the API/DB still encode it through
-`scan_options.kind='asm_improve'`.
+roadmap is in [proposed-next-steps.md](proposed-next-steps.md): prioritize typed ASM schedule kinds,
+target campaign timeline, AI red-team campaign UX, and guided Model Intake trust UX before adding
+more fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
+policy/gaps/improve/activity responses and persisted target metadata; Dashboard Action Center CTAs
+link to the safe next steps; the schedules UI has an ASM coverage-wave bridge, but the API/DB still
+encode it through `scan_options.kind='asm_improve'`.
 
 > **How to read this doc.** It is now scoped to one thing: parallel execution for one logical scan.
 > 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and
@@ -46,7 +46,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Operator-facing campaign/ASM UX | Partial; Dashboard Action Center, ASM scheduler-state activity surfacing, and ASM schedule UI bridge shipped | Add Action Center CTAs, make ASM waves a typed schedule kind, then show recurring waves, background dispatcher state, and active blockers in one target timeline. |
+| Operator-facing campaign/ASM UX | Partial; Dashboard Action Center CTAs, ASM scheduler-state activity surfacing, and ASM schedule UI bridge shipped | Make ASM waves a typed schedule kind, then show recurring waves, background dispatcher state, and active blockers in one target timeline. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |

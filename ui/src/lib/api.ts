@@ -70,6 +70,12 @@ export interface DashboardActionSample {
   href?: string | null
 }
 
+export interface DashboardActionLink {
+  label: string
+  href: string
+  variant?: 'primary' | 'secondary' | string
+}
+
 export interface DashboardActionItem {
   id: string
   priority: 'critical' | 'high' | 'medium' | 'low' | 'info' | string
@@ -78,6 +84,7 @@ export interface DashboardActionItem {
   detail: string
   href?: string | null
   action_label?: string | null
+  actions?: DashboardActionLink[]
   count?: number | null
   samples?: DashboardActionSample[]
   metadata?: Record<string, unknown>

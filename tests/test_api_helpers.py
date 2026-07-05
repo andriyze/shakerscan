@@ -424,6 +424,7 @@ class _ActionCenterConn:
                 "no_inventory_targets": 1,
                 "targets_with_gaps": 2,
                 "endpoints_needing_work": 25,
+                "sample_target_id": "11111111-1111-4111-8111-111111111111",
             }
         if "FROM schedules" in query:
             return {
@@ -469,11 +470,18 @@ def test_dashboard_action_center_prioritizes_server_derived_items():
 
     assert items[0]["id"] == "deploy-gate-blockers"
     assert by_id["deploy-gate-blockers"]["priority"] == "critical"
+    assert by_id["deploy-gate-blockers"]["actions"][0]["href"] == "/findings?status=active&severity=critical"
     assert by_id["worker-build-freshness"]["count"] == 2
+    assert by_id["worker-build-freshness"]["actions"][0]["label"] == "Adjust workers"
     assert by_id["policy-exception-hygiene"]["count"] == 6
-    assert by_id["asm-coverage-gaps"]["metadata"] == {}
+    assert by_id["policy-exception-hygiene"]["href"] == "/settings/exceptions"
+    assert by_id["policy-exception-hygiene"]["actions"][0]["href"] == "/settings/exceptions?queue_filter=expired"
+    assert by_id["asm-coverage-gaps"]["href"] == "/asm?target_id=11111111-1111-4111-8111-111111111111"
+    assert by_id["asm-coverage-gaps"]["actions"][0]["label"] == "Improve coverage"
     assert by_id["next-asm-schedule"]["priority"] == "info"
+    assert by_id["recent-failed-scans"]["actions"][1]["label"] == "Latest failed scan"
     assert by_id["model-intake-untrusted-signatures"]["samples"][0]["detail"] == "signature status: untrusted_root"
+    assert by_id["model-intake-untrusted-signatures"]["actions"][1]["label"] == "Latest scan"
 
 
 def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
@@ -494,6 +502,7 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
 
     assert ai_item["count"] == 1
     assert ai_item["href"] == "/settings/ai-gate"
+    assert ai_item["actions"][1]["href"] == "/findings?source_type=ai&status=active"
     assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 

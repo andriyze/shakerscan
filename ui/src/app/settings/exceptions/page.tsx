@@ -33,6 +33,10 @@ const QUEUE_FILTERS: Array<{ value: QueueFilter; label: string; description: str
   { value: 'target_scoped', label: 'Target scoped', description: 'Limited to one target.' },
 ]
 
+function parseQueueFilter(value: string | null): QueueFilter {
+  return QUEUE_FILTERS.some((filter) => filter.value === value) ? (value as QueueFilter) : ''
+}
+
 const STATUS_STYLES: Record<string, string> = {
   active: 'bg-blue-500/15 text-blue-300',
   approved: 'bg-emerald-500/15 text-emerald-300',
@@ -80,6 +84,10 @@ export default function ExceptionsQueuePage() {
   const [error, setError] = useState(false)
   const [revoking, setRevoking] = useState<FindingException | null>(null)
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setQueueFilter(parseQueueFilter(new URLSearchParams(window.location.search).get('queue_filter')))
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
