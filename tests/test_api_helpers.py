@@ -968,6 +968,43 @@ def test_ai_campaign_history_reports_decision_change():
     assert history["previous_run"]["decision"] == "block"
 
 
+def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs():
+    latest_rag = _ai_history_row("scan-4", decision="allow", executed=4, findings_count=0)
+    previous_rag = _ai_history_row("scan-3", decision="block", executed=2, skipped=1, findings_count=2)
+    latest_agent = _ai_history_row(
+        "scan-2",
+        pack="shaker-agent-abuse",
+        profile="deep",
+        environment="production",
+        decision="block",
+        errors=1,
+        findings_count=3,
+    )
+
+    history = api_module._build_ai_target_campaign_history(
+        "target-ai",
+        [latest_rag, previous_rag, latest_agent],
+        limit=12,
+    )
+
+    assert history["ai_target_id"] == "target-ai"
+    assert history["summary"] == {
+        "total_runs": 3,
+        "contexts": 2,
+        "blocked_runs": 2,
+        "errored_runs": 1,
+        "budget_stopped_runs": 0,
+    }
+    assert [run["id"] for run in history["runs"]] == ["scan-4", "scan-3", "scan-2"]
+    rag_context = next(ctx for ctx in history["contexts"] if ctx["probe_pack"] == "shaker-rag-lite")
+    assert rag_context["runs_count"] == 2
+    assert rag_context["latest_run"]["id"] == "scan-4"
+    assert rag_context["previous_run"]["id"] == "scan-3"
+    assert rag_context["deltas"]["findings_count"] == -2
+    assert rag_context["deltas"]["executed"] == 2
+    assert rag_context["deltas"]["decision_changed"] is True
+
+
 def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata():
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",

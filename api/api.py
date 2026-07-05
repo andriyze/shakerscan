@@ -5344,6 +5344,69 @@ def _build_ai_campaign_history(current_scan: Any, scan_rows: list[Any], *, limit
     }
 
 
+def _build_ai_target_campaign_history(target_id: str, scan_rows: list[Any], *, limit: int = 12) -> dict[str, Any]:
+    """Build target-level AI Gate campaign history grouped by probe/profile/environment."""
+    entries = [_ai_campaign_history_entry(row) for row in scan_rows]
+    entries = entries[:limit]
+    contexts: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for entry in entries:
+        key = (
+            str(entry.get("probe_pack") or ""),
+            str(entry.get("scan_profile") or ""),
+            str(entry.get("environment") or ""),
+        )
+        bucket = contexts.setdefault(
+            key,
+            {
+                "probe_pack": entry.get("probe_pack"),
+                "scan_profile": entry.get("scan_profile"),
+                "environment": entry.get("environment"),
+                "runs": [],
+            },
+        )
+        bucket["runs"].append(entry)
+
+    context_summaries: list[dict[str, Any]] = []
+    for bucket in contexts.values():
+        runs = bucket["runs"]
+        latest = runs[0] if runs else None
+        previous = runs[1] if len(runs) > 1 else None
+        deltas = None
+        if latest and previous:
+            deltas = {
+                "findings_count": latest["findings_count"] - previous["findings_count"],
+                "executed": latest["executed"] - previous["executed"],
+                "skipped": latest["skipped"] - previous["skipped"],
+                "errors": latest["errors"] - previous["errors"],
+                "coverage_pct": latest["coverage_pct"] - previous["coverage_pct"],
+                "decision_changed": latest.get("decision") != previous.get("decision"),
+            }
+        context_summaries.append({
+            "probe_pack": bucket["probe_pack"],
+            "scan_profile": bucket["scan_profile"],
+            "environment": bucket["environment"],
+            "runs_count": len(runs),
+            "latest_run": latest,
+            "previous_run": previous,
+            "deltas": deltas,
+        })
+
+    latest_run = entries[0] if entries else None
+    return {
+        "ai_target_id": str(target_id),
+        "runs": entries,
+        "contexts": context_summaries,
+        "latest_run": latest_run,
+        "summary": {
+            "total_runs": len(entries),
+            "contexts": len(context_summaries),
+            "blocked_runs": sum(1 for entry in entries if entry.get("decision") == "block"),
+            "errored_runs": sum(1 for entry in entries if entry.get("errors", 0) > 0),
+            "budget_stopped_runs": sum(1 for entry in entries if entry.get("stopped_by_request_budget")),
+        },
+    }
+
+
 def _mask_ai_headers_for_preview(headers: dict[str, str]) -> dict[str, str]:
     masked: dict[str, str] = {}
     for key, value in headers.items():
@@ -7132,6 +7195,36 @@ async def list_ai_targets(
         "limit": limit,
         "offset": offset,
     }
+
+
+@app.get("/ai/targets/{target_id}/campaign-history")
+async def get_ai_target_campaign_history(target_id: str, limit: int = Query(12, ge=1, le=50)):
+    """Return longitudinal AI Gate campaign history for one saved target."""
+    try:
+        target_uuid = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid AI target id")
+
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id FROM ai_targets WHERE id = $1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="AI Gate target not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, ai_target_id, target_url, options, result, run_kind, status,
+                   score, grade, findings_count, created_at, completed_at
+            FROM scans
+            WHERE ai_target_id = $1
+              AND status = 'completed'
+              AND run_kind LIKE 'ai_%'
+              AND result IS NOT NULL
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+            LIMIT $2
+            """,
+            target_uuid,
+            limit,
+        )
+    return _build_ai_target_campaign_history(str(target_uuid), list(rows), limit=limit)
 
 
 @app.post("/ai/targets")

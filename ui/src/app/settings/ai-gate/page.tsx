@@ -20,6 +20,7 @@ import {
   getAISettings,
   getAITestScenarios,
   getAITargets,
+  getAiTargetCampaignHistory,
   runAIDemo,
   scanAITarget,
   testAITargetConnectivity,
@@ -33,6 +34,7 @@ import {
   type AITestReadinessControl,
   type AITestScenario,
   type AITestTargetTemplate,
+  type AiTargetCampaignHistory,
   type AIAuthKind,
   type AIEnvironment,
   type AIProbePack,
@@ -276,6 +278,31 @@ function summarizeRequestTemplate(template: Record<string, unknown> | null | und
   return keys.length ? keys.slice(0, 3).join(', ') : 'custom JSON'
 }
 
+function formatCampaignLabel(value: string | null | undefined): string {
+  if (!value) return 'unknown'
+  return value.replace(/^shaker-/, '').replace(/[-_]/g, ' ')
+}
+
+function formatShortDate(value: string | null | undefined): string {
+  if (!value) return 'unknown'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function formatDelta(value: number | null | undefined, suffix = ''): string {
+  const n = Number(value || 0)
+  if (n === 0) return `0${suffix}`
+  return `${n > 0 ? '+' : ''}${n}${suffix}`
+}
+
+function decisionPillClass(decision: string | null | undefined): string {
+  if (decision === 'block') return 'bg-red-500/10 text-red-300'
+  if (decision === 'needs_approval') return 'bg-yellow-500/10 text-yellow-200'
+  if (decision === 'allow') return 'bg-emerald-500/10 text-emerald-300'
+  return 'bg-gray-800 text-gray-300'
+}
+
 export default function AIGateSettingsPage() {
   const router = useRouter()
   const toast = useToast()
@@ -289,6 +316,9 @@ export default function AIGateSettingsPage() {
   const [testingMCP, setTestingMCP] = useState<string | null>(null)
   const [connectivityResults, setConnectivityResults] = useState<Record<string, AITargetConnectivityResult>>({})
   const [mcpReadinessResults, setMCPReadinessResults] = useState<Record<string, AIMCPLiveReadinessResult>>({})
+  const [campaignHistories, setCampaignHistories] = useState<Record<string, AiTargetCampaignHistory>>({})
+  const [campaignHistoryErrors, setCampaignHistoryErrors] = useState<Record<string, string>>({})
+  const [loadingCampaignHistory, setLoadingCampaignHistory] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<TargetFormErrors>({})
   const [confirmDisableTarget, setConfirmDisableTarget] = useState<AITarget | null>(null)
@@ -357,6 +387,24 @@ export default function AIGateSettingsPage() {
     } catch (err) {
       setInventory(null)
       setInventoryError(err instanceof Error ? err.message : 'Failed to load AI inventory')
+    }
+  }, [])
+
+  const loadTargetCampaignHistory = useCallback(async (targetId: string) => {
+    setLoadingCampaignHistory(targetId)
+    try {
+      const history = await getAiTargetCampaignHistory(targetId, 12)
+      setCampaignHistories((prev) => ({ ...prev, [targetId]: history }))
+      setCampaignHistoryErrors((prev) => {
+        const next = { ...prev }
+        delete next[targetId]
+        return next
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load AI Gate campaign history'
+      setCampaignHistoryErrors((prev) => ({ ...prev, [targetId]: msg }))
+    } finally {
+      setLoadingCampaignHistory(null)
     }
   }, [])
 
@@ -1112,6 +1160,9 @@ export default function AIGateSettingsPage() {
                 ? controlSummary(target.target_type, target.metadata_json || {}, scenario.readiness_controls || [])
                 : null
               const isDemoTarget = isCalibrationLikeTarget(target, true)
+              const campaignHistory = campaignHistories[target.id]
+              const campaignHistoryError = campaignHistoryErrors[target.id]
+              const campaignHistoryLoading = loadingCampaignHistory === target.id
               return (
                 <Card key={target.id} className="p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1261,6 +1312,122 @@ export default function AIGateSettingsPage() {
                       </div>
                     </div>
                   )}
+                  <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-gray-200">Campaign history</div>
+                        <p className="mt-1 text-xs text-gray-500">Recent AI Gate runs for this target across probe packs, profiles, and environments.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => loadTargetCampaignHistory(target.id)}
+                        disabled={campaignHistoryLoading}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${campaignHistoryLoading ? 'animate-spin' : ''}`} />
+                        {campaignHistory ? 'Refresh history' : 'Load history'}
+                      </button>
+                    </div>
+                    {campaignHistoryError && (
+                      <p role="alert" className="mt-2 break-words text-xs text-amber-300">{campaignHistoryError}</p>
+                    )}
+                    {campaignHistory && (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="text-gray-500">Runs</div>
+                            <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.total_runs}</div>
+                          </div>
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="text-gray-500">Contexts</div>
+                            <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.contexts}</div>
+                          </div>
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="text-gray-500">Blocked</div>
+                            <div className="mt-1 text-lg font-semibold text-red-300">{campaignHistory.summary.blocked_runs}</div>
+                          </div>
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="text-gray-500">Errored</div>
+                            <div className="mt-1 text-lg font-semibold text-yellow-200">{campaignHistory.summary.errored_runs}</div>
+                          </div>
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="text-gray-500">Budget stopped</div>
+                            <div className="mt-1 text-lg font-semibold text-blue-200">{campaignHistory.summary.budget_stopped_runs}</div>
+                          </div>
+                        </div>
+
+                        {campaignHistory.contexts.length > 0 && (
+                          <div className="grid gap-2 lg:grid-cols-2">
+                            {campaignHistory.contexts.slice(0, 4).map((context) => (
+                              <div
+                                key={`${context.probe_pack || 'pack'}-${context.scan_profile || 'profile'}-${context.environment || 'env'}`}
+                                className="rounded border border-gray-800 bg-gray-950 p-2 text-xs"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="font-medium text-gray-200">
+                                    {formatCampaignLabel(context.probe_pack)} · {formatCampaignLabel(context.scan_profile)} · {formatCampaignLabel(context.environment)}
+                                  </span>
+                                  <span className="rounded bg-gray-800 px-2 py-0.5 text-gray-300">{context.runs_count} run{context.runs_count === 1 ? '' : 's'}</span>
+                                </div>
+                                {context.latest_run && (
+                                  <div className="mt-2 flex flex-wrap gap-2 text-gray-400">
+                                    <span className={`rounded px-2 py-0.5 ${decisionPillClass(context.latest_run.decision)}`}>{formatCampaignLabel(context.latest_run.decision)}</span>
+                                    <span>{context.latest_run.findings_count} finding{context.latest_run.findings_count === 1 ? '' : 's'}</span>
+                                    <span>{context.latest_run.coverage_pct}% coverage</span>
+                                    {context.deltas && (
+                                      <>
+                                        <span>findings {formatDelta(context.deltas.findings_count)}</span>
+                                        <span>errors {formatDelta(context.deltas.errors)}</span>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {campaignHistory.runs.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full text-left text-xs">
+                              <thead className="text-gray-500">
+                                <tr>
+                                  <th className="py-1 pr-3 font-medium">Completed</th>
+                                  <th className="py-1 pr-3 font-medium">Campaign</th>
+                                  <th className="py-1 pr-3 font-medium">Decision</th>
+                                  <th className="py-1 pr-3 font-medium">Findings</th>
+                                  <th className="py-1 pr-3 font-medium">Coverage</th>
+                                  <th className="py-1 pr-3 font-medium">Evidence</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-800">
+                                {campaignHistory.runs.slice(0, 8).map((run) => (
+                                  <tr key={run.id}>
+                                    <td className="py-1 pr-3 text-gray-400">{formatShortDate(run.completed_at || run.created_at)}</td>
+                                    <td className="py-1 pr-3 text-gray-300">
+                                      {formatCampaignLabel(run.probe_pack)} · {formatCampaignLabel(run.scan_profile)} · {formatCampaignLabel(run.environment)}
+                                    </td>
+                                    <td className="py-1 pr-3">
+                                      <span className={`rounded px-2 py-0.5 ${decisionPillClass(run.decision)}`}>{formatCampaignLabel(run.decision)}</span>
+                                    </td>
+                                    <td className="py-1 pr-3 text-gray-300">{run.findings_count}</td>
+                                    <td className="py-1 pr-3 text-gray-300">{run.coverage_pct}%</td>
+                                    <td className="py-1 pr-3">
+                                      <Link className="text-blue-400 hover:text-blue-300" href={run.ui_url || `/scans/${run.id}`}>
+                                        Open scan
+                                      </Link>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-gray-500">No completed AI Gate campaigns have been recorded for this target yet.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </Card>
               )
             })

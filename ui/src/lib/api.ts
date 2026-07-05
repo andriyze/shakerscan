@@ -2054,6 +2054,38 @@ export async function getAiScanCampaignHistory(id: string, limit: number = 6): P
   return res.json()
 }
 
+export interface AiTargetCampaignHistoryContext {
+  probe_pack?: string | null
+  scan_profile?: string | null
+  environment?: string | null
+  runs_count: number
+  latest_run?: AiScanCampaignHistoryRun | null
+  previous_run?: AiScanCampaignHistoryRun | null
+  deltas?: AiScanCampaignHistory['deltas'] | null
+}
+
+export interface AiTargetCampaignHistory {
+  ai_target_id: string
+  runs: AiScanCampaignHistoryRun[]
+  contexts: AiTargetCampaignHistoryContext[]
+  latest_run?: AiScanCampaignHistoryRun | null
+  summary: {
+    total_runs: number
+    contexts: number
+    blocked_runs: number
+    errored_runs: number
+    budget_stopped_runs: number
+  }
+}
+
+export async function getAiTargetCampaignHistory(id: string, limit: number = 12): Promise<AiTargetCampaignHistory> {
+  const res = await fetch(`${API_URL}/ai/targets/${id}/campaign-history?limit=${limit}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate target campaign history'))
+  }
+  return res.json()
+}
+
 export async function getFindingRetests(id: string, limit: number = 20): Promise<{
   finding_id: string
   retests: RetestRecord[]

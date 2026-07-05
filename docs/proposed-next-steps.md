@@ -192,12 +192,14 @@ ordering and more exact implementation boundaries:
   scheduler decision object. Dashboard Action Center items now expose structured safe CTAs; the next
   dashboard gap is richer product counts/quick links, not the base action contract.
 - Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
-  saved trust-anchor selection/creation. The next slice is tighter policy-profile binding and
-  exception UX, not more low-level signature fields.
+  saved trust-anchor selection/creation. Strict policy profiles can now require saved anchors and
+  matching Model Intake scans inherit them; the next slice is exception/expiry UX, not more low-level
+  signature fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
-  per-transcript replay actions, and same-context run comparison on scan detail. Remaining AI Gate
-  gaps are richer campaign history outside a single scan and longitudinal reporting.
+  per-transcript replay actions, same-context run comparison on scan detail, and target-level
+  longitudinal campaign history on the AI Gate target surface. Remaining AI Gate gaps are deeper
+  readiness trends and report export from the target-level history view.
 
 ### Immediate implementation sequence
 
@@ -206,10 +208,10 @@ These are the next commit-sized slices, in order:
 1. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
-2. **Model Intake policy binding/exception UX:** bind strict saved policy profiles to required saved
-   anchors and make trust exceptions/expiry explicit in deployment decisions.
-3. **Richer AI campaign history:** expand same-context scan-detail comparison into target-level
-   longitudinal reporting after the saved-anchor and detector-recall slices.
+2. **Model Intake exception/deployment UX:** make trust exceptions, expiry, owner/approver hygiene,
+   and policy-required anchor failures explicit in deployment decisions.
+3. **AI campaign history polish:** add target-level history export/readiness trends after the current
+   target-level run/context summary has soaked.
 
 ### Positioning-adjusted priority order
 
@@ -227,10 +229,11 @@ Use this order when choosing between otherwise-valid work:
 - **P1: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
   transcript/report links, finding-level replay entry points, scan-level rerun actions, and deploy
   decisions are phase 1 done. Selected transcript replay and same-context scan comparison are also
-  phase 1 done. Remaining work is target-level longitudinal history/reporting.
+  phase 1 done. Target-level longitudinal run/context history is now phase 1 done on the AI Gate
+  target page. Remaining work is export/readiness trend polish from that history.
 - **P2: Model Intake trust UX.** Guided trust modes and pre-submit trust preview are phase 1 done;
-  saved trust anchors and scan selection are also phase 1 done. Remaining work is policy-profile
-  anchor binding and clearer exception flows.
+  saved trust anchors, scan selection, and strict policy-profile anchor binding are also phase 1
+  done. Remaining work is clearer exception flows.
 - **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
   retention/sweeper, redaction consistency, and audit/export manifests.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
@@ -299,7 +302,8 @@ now renders a campaign review card backed by `ai_gate.coverage_matrix`, `executi
 `evidence_manifest`, and `POST /ai/scans/{scan_id}/replay` queues focused reruns for skipped
 probes, errored families, selected families, selected transcript probes, or all probes.
 `GET /ai/scans/{scan_id}/campaign-history` returns same-context run comparison for the campaign
-panel. It still needs target-level longitudinal campaign history outside a single scan detail page.
+panel, and `GET /ai/targets/{target_id}/campaign-history` plus `/settings/ai-gate` now expose
+target-level longitudinal run/context history outside a single scan detail page.
 
 **Implement:**
 1. DONE: add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
@@ -310,14 +314,14 @@ panel. It still needs target-level longitudinal campaign history outside a singl
    already preserves production confirmation. Scan-level "rerun failed/skipped probes" now exists
    for skipped/errors/family/all modes and also preserves production confirmation. Selected
    transcript replay now exists through `mode=transcript` and uses the same production gate.
-   Same-context campaign history/comparison now exists on scan detail. Still add target-level
-   longitudinal reporting.
+   Same-context campaign history/comparison now exists on scan detail. Target-level longitudinal
+   run/context reporting now exists on the AI Gate target page.
 4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
    AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
-campaign artifact instead of a loose scan report. Phase 1 satisfies this on scan detail; broader
-target-level history remains a later polish item.
+campaign artifact instead of a loose scan report. Phase 1 now satisfies this on scan detail and on
+the AI Gate target page; export/readiness trend polish remains later work.
 
 ### 4. Model Intake trust UX
 **Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:
