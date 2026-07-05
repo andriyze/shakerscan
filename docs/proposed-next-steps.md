@@ -148,6 +148,12 @@ called at real sites — verify before re-proposing any of it:
   receipts bound to an existing `scope_receipt`, requires `confirm_authorized` for approvals, rejects
   approval of blocked scopes, and preserves `execution_enabled=false`. `/settings/arsenal` can record
   an approval/denial for the previewed scope without queueing work.
+- **Approval receipt validation phase 1** — `/scans`, `/targets/{id}/asm/test`,
+  `/targets/{id}/asm/recon`, and `/targets/{id}/asm/improve` now accept optional
+  `approval_receipt_id`, validate that it is approved, unexpired, confirm-authorized, linked to a
+  non-blocked scope, and compatible with the requested target host/id, then stamp
+  `approval_receipt_id` / `scope_receipt_id` into queued scan options. Legacy submissions without a
+  receipt still work; mandatory enforcement is the remaining rollout step.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -260,7 +266,8 @@ raw shell execution or LLM-produced verified findings.
    `wired`, `installed`, `runnable`, `gated`, `waived`, and `disabled`.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
    `ActionScopeGuard`, persisted `ScopeReceipt` previews, and durable `ApprovalReceipt` records.
-   Remaining work is enforcing receipts on scan submission, ASM improve/test, focused family
+   DONE phase 1 for optional receipt validation on `/scans` and Continuous ASM recon/test/improve.
+   Remaining work is making receipts mandatory by policy and extending enforcement to focused family
    campaigns, AI Gate scans/replay, Model Intake artifact fetches, retests, and future command/MCP
    adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
@@ -395,8 +402,9 @@ and audit traces.
    trailing-dot hosts, loopback/private ranges outside lab policy, broad CIDRs, hosts outside the
    provided allowed scope, and supplied redirect destinations that leave scope. DONE phase 1 for
    durable `ApprovalReceipt` recording: approvals require `confirm_authorized`, needs-approval scopes
-   require `confirm_scope_reviewed`, and blocked scopes cannot be approved. Remaining work is requiring
-   receipts on the existing state-changing routes.
+   require `confirm_scope_reviewed`, and blocked scopes cannot be approved. DONE phase 1 for optional
+   route validation on scan submission and Continuous ASM actions. Remaining work is policy-based
+   mandatory enforcement across all existing state-changing routes.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.

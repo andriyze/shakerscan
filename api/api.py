@@ -2866,6 +2866,10 @@ class ScanOptions(BaseModel):
         le=20,
         description="Advanced API/AI override for max active shard jobs per parent scan.",
     )
+    approval_receipt_id: Optional[str] = Field(
+        default=None,
+        description="Optional durable approval receipt to validate and stamp on state-changing scan submissions.",
+    )
 
     @field_validator("check_family", "asm_check_family")
     @classmethod
@@ -10159,6 +10163,15 @@ async def submit_scan(request: ScanRequest):
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.options.approval_receipt_id,
+            target_url=normalized_target,
+            target_id=target_id,
+        )
+        if approval_context:
+            options_payload.update(approval_context)
+
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
 
@@ -10199,6 +10212,9 @@ async def submit_scan(request: ScanRequest):
         if options_payload.get("auto_sharded"):
             response['auto_sharded'] = True
             response['auto_sharding_reason'] = options_payload.get("auto_sharding_reason")
+    if options_payload.get("approval_receipt_id"):
+        response["approval_receipt_id"] = options_payload.get("approval_receipt_id")
+        response["scope_receipt_id"] = options_payload.get("scope_receipt_id")
     # Surface warning if path/query was stripped
     if target_note:
         response['warning'] = target_note
@@ -11613,6 +11629,96 @@ def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _canonical_receipt_host(value: Any) -> str:
+    host = str(value or "").strip().strip("[]").lower()
+    if host.endswith("."):
+        host = host[:-1]
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
+def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:
+    candidate = _canonical_receipt_host(host)
+    normalized = _decode_json_value(scope.get("normalized_scope")) or {}
+    allowed_hosts = _decode_json_value(scope.get("allowed_hosts")) or []
+    allowed_roots = _decode_json_value(scope.get("allowed_root_domains")) or []
+    normalized_host = _canonical_receipt_host(normalized.get("host") if isinstance(normalized, dict) else "")
+    if normalized_host and candidate == normalized_host:
+        return True
+    for allowed in allowed_hosts if isinstance(allowed_hosts, list) else []:
+        if candidate == _canonical_receipt_host(allowed):
+            return True
+    for root in allowed_roots if isinstance(allowed_roots, list) else []:
+        root_host = _canonical_receipt_host(root)
+        if candidate == root_host or candidate.endswith(f".{root_host}"):
+            return True
+    return False
+
+
+async def _validate_approval_receipt_for_action(
+    conn,
+    approval_receipt_id: str | None,
+    *,
+    target_url: str | None = None,
+    target_id: str | uuid.UUID | None = None,
+) -> dict[str, Any] | None:
+    if not approval_receipt_id:
+        return None
+    try:
+        approval_uuid = uuid.UUID(str(approval_receipt_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="approval_receipt_id must be a UUID")
+
+    approval_row = await conn.fetchrow("SELECT * FROM approval_receipts WHERE id=$1", approval_uuid)
+    if not approval_row:
+        raise HTTPException(status_code=404, detail="Approval receipt not found")
+    approval = _public_approval_receipt_row(approval_row)
+    if not approval.get("approved_by") or approval.get("denial_reason"):
+        raise HTTPException(status_code=400, detail="Approval receipt is not an approval")
+    confirmations = approval.get("confirmations") if isinstance(approval.get("confirmations"), list) else []
+    if "confirm_authorized" not in confirmations:
+        raise HTTPException(status_code=400, detail="Approval receipt is missing confirm_authorized")
+    expires_at = approval_row["expires_at"]
+    if expires_at:
+        now = datetime.now(timezone.utc)
+        if expires_at.tzinfo is None:
+            now = utc_now()
+        if expires_at <= now:
+            raise HTTPException(status_code=400, detail="Approval receipt is expired")
+
+    scope_id = approval.get("scope_receipt_id")
+    if not scope_id:
+        raise HTTPException(status_code=400, detail="Approval receipt is not linked to a scope receipt")
+    scope_row = await conn.fetchrow("SELECT * FROM scope_receipts WHERE id=$1", str(scope_id))
+    if not scope_row:
+        raise HTTPException(status_code=404, detail="Linked scope receipt not found")
+    scope = _public_scope_receipt_row(scope_row)
+    if scope.get("verdict") == "blocked":
+        raise HTTPException(status_code=400, detail="Linked scope receipt is blocked")
+    if scope.get("verdict") == "needs_approval" and "confirm_scope_reviewed" not in confirmations:
+        raise HTTPException(status_code=400, detail="Approval receipt is missing confirm_scope_reviewed")
+
+    requested_target_id = str(target_id) if target_id else None
+    scope_target_id = str(scope.get("target_id") or "")
+    if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
+        raise HTTPException(status_code=400, detail="Approval receipt scope target does not match requested target")
+
+    if target_url:
+        parsed = urllib.parse.urlparse(target_url if "://" in target_url else f"https://{target_url}")
+        host = parsed.hostname or ""
+        if host and not _host_matches_receipt_scope(host, scope):
+            raise HTTPException(status_code=400, detail="Approval receipt scope host does not match requested target")
+
+    return {
+        "approval_receipt_id": approval["id"],
+        "scope_receipt_id": scope["id"],
+        "approved_by": approval.get("approved_by"),
+        "risk_tier": approval.get("risk_tier"),
+    }
+
+
 @app.post("/arsenal/scope/preview")
 async def arsenal_scope_preview(req: ScopePreviewRequest):
     """Validate and persist a scope receipt preview without queueing or executing work."""
@@ -11724,6 +11830,7 @@ class AsmTestRequest(BaseModel):
     exploit_depth: bool = False
     check_family: Optional[str] = None
     endpoint_filter: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
 
     @field_validator("check_family")
     @classmethod
@@ -11738,6 +11845,7 @@ class AsmTestRequest(BaseModel):
 
 class AsmReconRequest(BaseModel):
     budget_profile: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
 
 
 class AsmImproveRequest(BaseModel):
@@ -11746,6 +11854,7 @@ class AsmImproveRequest(BaseModel):
     exploit_depth: Optional[bool] = None
     check_family: Optional[str] = None
     endpoint_filter: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
 
     @field_validator("check_family")
     @classmethod
@@ -12605,6 +12714,14 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
         base_opts = _decode_target_scan_options(target["scan_options"])
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target["url"],
+            target_id=target_id,
+        )
+        if approval_context:
+            base_opts.update(approval_context)
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
@@ -12618,6 +12735,8 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         "check_family": _normalize_asm_check_family(request.check_family) or "all",
         "endpoint_filter": _validate_asm_endpoint_filter_value(request.endpoint_filter),
         "inventory_total": coverage["total"], "untested": coverage["untested"],
+        "approval_receipt_id": base_opts.get("approval_receipt_id"),
+        "scope_receipt_id": base_opts.get("scope_receipt_id"),
     }
 
 
@@ -12643,6 +12762,14 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
                 ),
             )
         base_opts = _decode_target_scan_options(target["scan_options"])
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target["url"],
+            target_id=target_id,
+        )
+        if approval_context:
+            base_opts.update(approval_context)
         if request.budget_profile:
             base_opts["budget_profile"] = request.budget_profile
         enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="api")
@@ -12654,6 +12781,8 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         "campaign_id": enq["campaign_id"],
         "status": "queued",
         "reason": "Queued discovery refresh for the persistent ASM inventory",
+        "approval_receipt_id": base_opts.get("approval_receipt_id"),
+        "scope_receipt_id": base_opts.get("scope_receipt_id"),
     }
 
 
@@ -12760,6 +12889,14 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             }
 
         base_opts = _decode_target_scan_options(target["scan_options"])
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target["url"],
+            target_id=target_id,
+        )
+        if approval_context:
+            base_opts.update(approval_context)
         if rec["next_action"] == "recon":
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
@@ -12772,6 +12909,8 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "reason": rec["reason"],
                 "recommendation": rec,
                 "scheduler_state": scheduler_state,
+                "approval_receipt_id": base_opts.get("approval_receipt_id"),
+                "scope_receipt_id": base_opts.get("scope_receipt_id"),
             }
 
         batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
@@ -12798,6 +12937,8 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "reason": rec["reason"],
         "recommendation": rec,
         "scheduler_state": scheduler_state,
+        "approval_receipt_id": base_opts.get("approval_receipt_id"),
+        "scope_receipt_id": base_opts.get("scope_receipt_id"),
     }
 
 

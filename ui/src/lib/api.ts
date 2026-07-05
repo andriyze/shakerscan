@@ -675,6 +675,8 @@ export interface AsmActionResponse {
   reason?: string
   recommendation?: AsmRecommendation
   scheduler_state?: AsmSchedulerState
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }
 
 export interface AsmCheckFamily {
@@ -1643,7 +1645,7 @@ export async function getAsmCheckFamilies(): Promise<AsmCheckFamiliesResponse> {
 
 export async function testAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string; approval_receipt_id?: string }
 ): Promise<{
   scan_id: string
   job_id: string
@@ -1653,6 +1655,8 @@ export async function testAsmTarget(
   endpoint_filter?: string | null
   inventory_total: number
   untested: number
+  approval_receipt_id?: string | null
+  scope_receipt_id?: string | null
 }> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/test`, {
     method: 'POST',
@@ -1668,7 +1672,7 @@ export async function testAsmTarget(
 
 export async function reconAsmTarget(
   targetId: string,
-  opts?: { budget_profile?: string }
+  opts?: { budget_profile?: string; approval_receipt_id?: string }
 ): Promise<AsmActionResponse> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/recon`, {
     method: 'POST',
@@ -1684,7 +1688,7 @@ export async function reconAsmTarget(
 
 export async function improveAsmTarget(
   targetId: string,
-  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string }
+  opts?: { batch_size?: number; stale_days?: number; exploit_depth?: boolean; check_family?: string; endpoint_filter?: string; approval_receipt_id?: string }
 ): Promise<AsmActionResponse> {
   const res = await fetch(`${API_URL}/targets/${targetId}/asm/improve`, {
     method: 'POST',

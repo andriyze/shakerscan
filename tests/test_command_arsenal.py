@@ -83,6 +83,14 @@ def test_approval_record_is_gated_not_execution():
     assert "approval_receipt" in cmd["evidence_contract"]
 
 
+def test_gated_commands_advertise_approval_receipts():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    for name in ("asm.improve", "scan.focused_family"):
+        assert "approval_receipt_id" in commands[name]["parameters_schema"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 
