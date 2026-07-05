@@ -3,30 +3,30 @@
   "artifact_status": "failed_benchmark_scorecard",
   "artifact_note": "Tracked benchmark scorecard. A tracked file is not a success claim: passed=true means every configured gate passed; passed=false means at least one configured gate failed.",
   "fleet": {
-    "count": 5,
-    "current": 5,
+    "count": 16,
+    "current": 16,
     "stale": 0,
     "pending": 0,
     "fingerprints": [
-      "8bf1a59989d90ad9"
+      "a0a3b2ad273479b0"
     ]
   },
   "fleet_uniform": true,
   "rescore_after_retest": true,
   "targets": [
     {
-      "total_findings": 29,
-      "verified_high_critical": 3,
-      "suspected_high_critical": 0,
-      "false_positive_risk": 0.0,
-      "coverage_percent": 0.426,
-      "endpoints_discovered": 1492,
-      "endpoints_tested": 635,
+      "total_findings": 28,
+      "verified_high_critical": 1,
+      "suspected_high_critical": 8,
+      "false_positive_risk": 0.89,
+      "coverage_percent": 0.365,
+      "endpoints_discovered": 1494,
+      "endpoints_tested": 545,
       "budget_exhausted": false,
       "budget_exhausted_reason": null,
       "auth_blocked": false,
       "auth_states_tested": [
-        "anonymous"
+        "user1"
       ],
       "timeout": false,
       "error": null,
@@ -43,7 +43,7 @@
           "family": "sensitive_exposure",
           "route": "/ftp",
           "proof": "deterministic",
-          "evidence": "Sensitive file exposed via allowlist bypass: encrypt.pyc"
+          "evidence": "Sensitive file exposed: premium.key"
         },
         {
           "id": "exposed-confidential",
@@ -107,7 +107,7 @@
       "grade_reliable": true,
       "report_degraded": false,
       "report_invariant_violations": [],
-      "scan_id": "087cd6f5-81a9-4735-aa51-f533e97164da",
+      "scan_id": "56e1cacf-6f30-4749-95eb-06883bed231c",
       "target": "juice_shop",
       "gates": [
         {
@@ -138,12 +138,12 @@
         {
           "gate": "min_verified_high_critical",
           "pass": false,
-          "detail": "3 >= 6"
+          "detail": "1 >= 6"
         },
         {
           "gate": "max_unverified_high_ratio",
-          "pass": true,
-          "detail": "0.0 <= 0.35"
+          "pass": false,
+          "detail": "0.89 <= 0.35"
         },
         {
           "gate": "require_verified_sqli",
@@ -159,18 +159,18 @@
       "passed": false,
       "scorecards": {
         "scan_finish": {
-          "total_findings": 29,
-          "verified_high_critical": 3,
-          "suspected_high_critical": 0,
-          "false_positive_risk": 0.0,
-          "coverage_percent": 0.426,
-          "endpoints_discovered": 1492,
-          "endpoints_tested": 635,
+          "total_findings": 28,
+          "verified_high_critical": 1,
+          "suspected_high_critical": 8,
+          "false_positive_risk": 0.89,
+          "coverage_percent": 0.365,
+          "endpoints_discovered": 1494,
+          "endpoints_tested": 545,
           "budget_exhausted": false,
           "budget_exhausted_reason": null,
           "auth_blocked": false,
           "auth_states_tested": [
-            "anonymous"
+            "user1"
           ],
           "timeout": false,
           "error": null,
@@ -252,18 +252,18 @@
           "two_user": false
         },
         "post_retest": {
-          "total_findings": 29,
-          "verified_high_critical": 3,
-          "suspected_high_critical": 0,
-          "false_positive_risk": 0.0,
-          "coverage_percent": 0.426,
-          "endpoints_discovered": 1492,
-          "endpoints_tested": 635,
+          "total_findings": 28,
+          "verified_high_critical": 1,
+          "suspected_high_critical": 8,
+          "false_positive_risk": 0.89,
+          "coverage_percent": 0.365,
+          "endpoints_discovered": 1494,
+          "endpoints_tested": 545,
           "budget_exhausted": false,
           "budget_exhausted_reason": null,
           "auth_blocked": false,
           "auth_states_tested": [
-            "anonymous"
+            "user1"
           ],
           "timeout": false,
           "error": null,
@@ -280,7 +280,7 @@
               "family": "sensitive_exposure",
               "route": "/ftp",
               "proof": "deterministic",
-              "evidence": "Sensitive file exposed via allowlist bypass: encrypt.pyc"
+              "evidence": "Sensitive file exposed: premium.key"
             },
             {
               "id": "exposed-confidential",
