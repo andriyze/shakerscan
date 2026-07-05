@@ -32,6 +32,7 @@ def test_command_catalog_contains_required_initial_commands():
         "finding.get",
         "ai_target.list",
         "model_intake.trust_preview",
+        "operation_plan.list",
         "evidence.get",
         "deployment.decision",
         "tool.status",
@@ -70,6 +71,17 @@ def test_scope_preview_is_dry_run_not_execution():
     assert cmd["risk_tier"] == "read_only"
     assert cmd["path"] == "/arsenal/scope/preview"
     assert "scope_receipt" in cmd["evidence_contract"]
+
+
+def test_operation_plan_preview_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["operation_plan.preview"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/arsenal/plans"
+    assert "operation_plan" in cmd["evidence_contract"]
 
 
 def test_approval_record_is_gated_not_execution():

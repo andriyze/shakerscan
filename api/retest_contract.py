@@ -1210,6 +1210,42 @@ async def run_schema_migrations(pool) -> None:
                 ON approval_receipts(scope_receipt_id)
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS operation_plans (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    objective TEXT NOT NULL,
+                    planner JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    context_hash TEXT NOT NULL,
+                    target_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    risk_tier TEXT NOT NULL,
+                    actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    confirmations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    missing_inputs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    stop_conditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    success_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    validation_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    approval_receipt_id UUID REFERENCES approval_receipts(id) ON DELETE SET NULL,
+                    plan_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT operation_plans_risk_check
+                        CHECK (risk_tier IN ('read_only','passive','active','intrusive','credential','dangerous')),
+                    CONSTRAINT operation_plans_status_check
+                        CHECK (status IN ('planned','blocked','approved','rejected','stale'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operation_plans_created_at
+                ON operation_plans(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operation_plans_scope
+                ON operation_plans(scope_receipt_id, created_at DESC) WHERE scope_receipt_id IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     name TEXT NOT NULL UNIQUE,

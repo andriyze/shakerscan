@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
 import {
+  createOperationPlan,
   createApprovalReceipt,
   getArsenalCommands,
   getArsenalContracts,
+  getOperationPlans,
   getArsenalTools,
   previewScopeReceipt,
   type ApprovalReceipt,
@@ -13,6 +15,8 @@ import {
   type ArsenalCommandsResponse,
   type ArsenalContractDefinition,
   type ArsenalContractsResponse,
+  type OperationPlan,
+  type OperationPlanResponse,
   type ArsenalTool,
   type ArsenalToolsResponse,
   type ScopeReceiptPreview,
@@ -218,6 +222,14 @@ export default function ArsenalSettingsPage() {
   const [approvalReceipt, setApprovalReceipt] = useState<ApprovalReceipt | null>(null)
   const [approvalLoading, setApprovalLoading] = useState(false)
   const [approvalError, setApprovalError] = useState<string | null>(null)
+  const [planObjective, setPlanObjective] = useState('Review target coverage and record the next safe action')
+  const [planCommand, setPlanCommand] = useState('asm.gaps')
+  const [planRiskTier, setPlanRiskTier] = useState('read_only')
+  const [planContextHash, setPlanContextHash] = useState('0'.repeat(64))
+  const [planResult, setPlanResult] = useState<OperationPlanResponse | null>(null)
+  const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
+  const [planLoading, setPlanLoading] = useState(false)
+  const [planError, setPlanError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -227,14 +239,16 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, contractData, toolData] = await Promise.all([
+      const [commandData, contractData, toolData, planData] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
         getArsenalTools({ probeVersions }),
+        getOperationPlans(5),
       ])
       setCommands(commandData)
       setContracts(contractData)
       setTools(toolData)
+      setRecentPlans(planData.operation_plans)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
     } finally {
@@ -261,6 +275,10 @@ export default function ArsenalSettingsPage() {
     [contracts]
   )
   const visibleTools = tools?.tools || []
+  const selectedPlanCommand = useMemo(
+    () => (commands?.commands || []).find((command) => command.name === planCommand),
+    [commands, planCommand]
+  )
 
   function splitLines(value: string): string[] {
     return value
@@ -309,6 +327,48 @@ export default function ArsenalSettingsPage() {
       setApprovalError(err instanceof Error ? err.message : 'Failed to create approval receipt')
     } finally {
       setApprovalLoading(false)
+    }
+  }
+
+  async function createPlan() {
+    setPlanLoading(true)
+    setPlanError(null)
+    try {
+      const command = selectedPlanCommand
+      const gated = command?.status === 'gated'
+      const confirmations = gated ? ['confirm_authorized'] : []
+      const response = await createOperationPlan({
+        objective: planObjective,
+        planner: { kind: 'ui', name: 'settings-arsenal', version: commands?.schema_version || 'unknown' },
+        context_hash: planContextHash,
+        target_scope: {
+          url: scopeUrl,
+          allowed_hosts: splitLines(scopeHosts),
+          allowed_root_domains: splitLines(scopeRoots),
+          environment: scopeEnvironment,
+        },
+        risk_tier: planRiskTier,
+        confirmations,
+        actions: [{
+          command: planCommand,
+          risk_tier: command?.risk_tier || planRiskTier,
+          parameters: {},
+          scope_receipt_id: scopePreview?.receipt_id,
+          approval_receipt_id: approvalReceipt?.approved_by ? approvalReceipt.id : undefined,
+          reason: 'operator dry-run preview',
+        }],
+        stop_conditions: ['scope_blocked', 'budget_exhausted', 'operator_cancelled'],
+        success_criteria: ['plan_validated', 'no_execution_performed'],
+        scope_receipt_id: scopePreview?.receipt_id,
+        approval_receipt_id: approvalReceipt?.approved_by ? approvalReceipt.id : undefined,
+        created_by: approvalActor.trim() || 'operator',
+      })
+      setPlanResult(response)
+      setRecentPlans((plans) => [response.operation_plan, ...plans].slice(0, 5))
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : 'Failed to validate operation plan')
+    } finally {
+      setPlanLoading(false)
     }
   }
 
@@ -377,6 +437,107 @@ export default function ArsenalSettingsPage() {
           <div className="grid gap-3 xl:grid-cols-2">
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Operation Plan Preview</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">dry-run only</Badge>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <label className="block">
+            <span className="text-xs text-gray-400">Objective</span>
+            <input
+              value={planObjective}
+              onChange={(event) => setPlanObjective(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Command</span>
+            <select
+              value={planCommand}
+              onChange={(event) => setPlanCommand(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              {(commands?.commands || []).map((command) => (
+                <option key={command.name} value={command.name}>
+                  {command.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Risk tier</span>
+            <select
+              value={planRiskTier}
+              onChange={(event) => setPlanRiskTier(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="read_only">read_only</option>
+              <option value="passive">passive</option>
+              <option value="active">active</option>
+              <option value="intrusive">intrusive</option>
+              <option value="credential">credential</option>
+              <option value="dangerous">dangerous</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Context hash</span>
+            <input
+              value={planContextHash}
+              onChange={(event) => setPlanContextHash(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button type="button" variant="secondary" onClick={() => void createPlan()} disabled={planLoading || !commands?.commands.length}>
+            {planLoading ? 'Validating...' : 'Persist dry-run plan'}
+          </Button>
+          {selectedPlanCommand && (
+            <span className="text-xs text-gray-500">
+              {selectedPlanCommand.status} / {selectedPlanCommand.risk_tier}
+              {selectedPlanCommand.status === 'gated' && !approvalReceipt?.approved_by ? ' / approval receipt required' : ''}
+            </span>
+          )}
+          {planError && <span role="alert" className="text-sm text-red-300">{planError}</span>}
+        </div>
+        {planResult && (
+          <div className="mt-4 rounded-md border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className={planResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
+                {planResult.operation_plan.status}
+              </Badge>
+              <span className="font-mono text-xs text-gray-400">{planResult.operation_plan.id}</span>
+              <span className="text-xs text-gray-500">execution disabled</span>
+            </div>
+            <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+              <div>errors: <span className="text-gray-300">{planResult.operation_plan.validation_errors.length ? planResult.operation_plan.validation_errors.join(', ') : 'none'}</span></div>
+              <div>warnings: <span className="text-gray-300">{planResult.operation_plan.validation_warnings.length ? planResult.operation_plan.validation_warnings.join(', ') : 'none'}</span></div>
+              <div>scope receipt: <span className="font-mono text-gray-300">{planResult.operation_plan.scope_receipt_id || 'none'}</span></div>
+              <div>approval receipt: <span className="font-mono text-gray-300">{planResult.operation_plan.approval_receipt_id || 'none'}</span></div>
+            </div>
+          </div>
+        )}
+        {recentPlans.length > 0 && (
+          <div className="mt-4 grid gap-2">
+            {recentPlans.slice(0, 5).map((plan) => (
+              <div key={plan.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-sm text-gray-200">{plan.objective}</span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge className={plan.status === 'blocked' ? statusClass('out_of_scope') : statusClass('read_only')}>{plan.status}</Badge>
+                    <span className="font-mono text-xs text-gray-500">{plan.id}</span>
+                  </div>
+                </div>
+              </div>
             ))}
           </div>
         )}

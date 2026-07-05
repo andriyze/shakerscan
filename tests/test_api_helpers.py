@@ -1259,6 +1259,35 @@ def test_state_changing_request_models_accept_approval_receipt_id():
     ).approval_receipt_id == receipt_id
 
 
+def test_operation_plan_canonicalization_redacts_parameters_and_normalizes_lists():
+    plan = api_module.OperationPlanRequest(
+        objective=" Review target ",
+        planner={"kind": "ui", "api_key": "secret-value"},
+        context_hash="A" * 64,
+        target_scope={"allowed_hosts": ["app.example.com"], "authorization": "Bearer secret"},
+        risk_tier="active",
+        confirmations=["confirm_authorized", ""],
+        actions=[{
+            "command": "asm.improve",
+            "parameters": {"auth_header": "Bearer secret-token", "batch_size": 10},
+            "risk_tier": "active",
+        }],
+        stop_conditions=["budget_exhausted", ""],
+        success_criteria=["plan_validated"],
+    )
+
+    canonical = api_module._canonical_operation_plan(plan)
+
+    assert canonical["objective"] == "Review target"
+    assert canonical["context_hash"] == "a" * 64
+    assert canonical["confirmations"] == ["confirm_authorized"]
+    assert canonical["stop_conditions"] == ["budget_exhausted"]
+    assert canonical["actions"][0]["command"] == "asm.improve"
+    assert canonical["actions"][0]["parameters"]["auth_header"] != "Bearer secret-token"
+    assert canonical["planner"]["api_key"] != "secret-value"
+    assert canonical["target_scope"]["authorization"] != "Bearer secret"
+
+
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
     req = api_module.PolicyProfileRequest(
         name="strict",

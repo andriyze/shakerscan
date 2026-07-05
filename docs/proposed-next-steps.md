@@ -53,6 +53,41 @@ Market positioning guidance:
   first on operational trust decisions: checksum/signature/trusted anchor/model-card/governance
   evidence, clear claim-vs-trust semantics, exceptions, and gates.
 
+## T3MP3ST adoption reconciliation (2026-07-05)
+
+`docs/t3mp3st-adoption-implementation-plan-updated.md` is now folded into this roadmap as an
+operating-model input. The useful adoption target is not T3MP3ST's broad offensive-tool surface or
+raw local-agent execution. The useful target is its harness discipline:
+
+- objective-driven missions instead of disconnected scan buttons;
+- schema-described commands instead of raw shell access;
+- scope, approval, environment, rate, and evidence gates before execution;
+- local coding agents as optional dry-run planners, never privileged executors;
+- a shared lead/hypothesis board before anything becomes a finding;
+- durable tool receipts and parser status before tool output can affect proof;
+- refuter workflows and integrity ledgers that record benchmark/planner mistakes instead of hiding
+  them.
+
+The merged roadmap rule is: **agentic planning may propose work, but deterministic ShakerScan
+contracts decide execution, proof, evidence, findings, and gates.** This means the next increments
+should make mission contracts, context packs, decision traces, Command Arsenal status labels, scope
+receipts, approval receipts, hypotheses, tool receipts, and integrity ledgers real before any local
+agent or MCP path can execute state-changing actions.
+
+Every agent-facing or operator-facing capability should carry an explicit maturity label until it is
+fully implemented:
+
+| Label | Meaning |
+| --- | --- |
+| `contract` | Schema or documentation only; no runtime behavior. |
+| `read_only` | Can inspect stored ShakerScan state only. |
+| `dry_run` | Can produce plans/previews but cannot queue work or mutate target state. |
+| `gated` | Can execute only through scope receipt, approval/policy checks, and existing API handlers. |
+| `proof_backed` | Can affect findings/gates because a deterministic evidence contract exists. |
+| `experimental` | Available behind feature flag; not for production claims. |
+| `catalog_only` | Known future adapter or command; not wired or runnable. |
+| `out_of_scope` | Intentionally excluded from the current roadmap. |
+
 ## Done (do not re-list as TODO)
 
 The product-invariant / contract-first layer that the last cycle targeted is implemented and
@@ -138,6 +173,12 @@ called at real sites — verify before re-proposing any of it:
   `ToolReceipt`, `CampaignAction`, `Hypothesis`, and `EvidenceInstance`, including secret-handling
   policy and safety invariants. `/settings/arsenal` renders these contracts without adding planning,
   approval, or execution power.
+- **OperationPlan persistence phase 1** — `POST /arsenal/plans` now validates and persists dry-run
+  `OperationPlan` records without executing actions. Plans validate context-hash format, known
+  Command Arsenal command names, risk-tier escalation, gated-action confirmations, scope receipts,
+  approval receipts, and receipt/scope consistency; `GET /arsenal/plans` returns recent plans with
+  validation errors/warnings and `execution_enabled=false`. `/settings/arsenal` can create and review
+  these dry-run plan records from the same scope/approval receipt workflow.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -260,8 +301,10 @@ raw shell execution or LLM-produced verified findings.
 1. **Mission/command contracts:** DONE phase 1 for read-only schema discovery:
    `OperationPlan`, `AgentContextPack`, `AgentDecisionTrace`, Command Arsenal schemas, command result
    schema, risk tiers, scope receipt, approval receipt, tool receipt, campaign action, hypothesis, and
-   `EvidenceInstance` schemas. Remaining work is persistence plus validators around those contracts;
-   it still must add no new execution power until receipts/gates are durable.
+   `EvidenceInstance` schemas. DONE phase 1 for persisted dry-run `OperationPlan` validation records.
+   Remaining work is AgentContextPack/DecisionTrace persistence, maturity labels on every
+   agent-facing surface, and validators around those contracts; it still must add no new execution
+   power until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -290,11 +333,15 @@ raw shell execution or LLM-produced verified findings.
    existing tools before adding any new offensive tooling.
 9. **Registry-driven execution:** migrate scanner family execution and report rollups to proof
    contracts after the evidence/proof shape is stable.
-10. **Planner evals and local-agent planning, dry-run only:** add planner fixtures, integrity ledgers,
+10. **Refuter and integrity layer:** add refuter workflows for weak High/Criticals, AI Gate semantic
+    hits, Model Intake metadata claims, benchmark wins, and deployment-gating findings. Add benchmark
+    and planner integrity ledgers for contamination, retractions, stale-fleet runs, phantom tool
+    assumptions, and methodology corrections.
+11. **Planner evals and local-agent planning, dry-run only:** add planner fixtures, integrity ledgers,
     and dry-run local-agent planning only after command contracts, scope receipts, and read-only command
     status are reliable. Local agents may propose plans; they must not execute shell commands, broaden
     scope, bypass confirmations, or mark findings verified.
-11. **AI Gate and Model Intake polish:** add AI Gate target-history export/readiness trends and Model
+12. **AI Gate and Model Intake polish:** add AI Gate target-history export/readiness trends and Model
     Intake exception remediation workflow depth after the cross-product operator surface can link to
     them cleanly.
 
@@ -318,6 +365,10 @@ Use this order when choosing between otherwise-valid work:
 - **P1: campaign + hypothesis layer.** Graph/source/AI/tool signals become deduped, claimable,
   refutable hypotheses before they become findings. Graph-driven authz work should flow through this
   layer rather than creating direct findings from durable graph facts.
+- **P1: refuter and integrity discipline.** High-impact or weakly supported claims should be
+  challenged by deterministic replay, parser/protocol evidence, cryptographic verification, or
+  human-approved review policy before they influence gates. Benchmark and planner mistakes should be
+  logged as durable integrity records.
 - **P1: close benchmark proof gaps.** Browser-first/stored XSS, POST-body SQLi, NoSQL JSON/body
   routing, workflow/write-BOLA, mass assignment, JWT/session weakness, and deterministic retest loops
   per verified family.
@@ -335,7 +386,8 @@ Use this order when choosing between otherwise-valid work:
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
   telemetry schemas, safety gates, and family-specific run contracts.
 - **P2/P3: planner evals and local-agent planning.** Only after read-only Command Arsenal and safety
-  receipts are stable, add planner fixture scorecards and optional dry-run local-agent planning.
+  receipts are stable, add planner fixture scorecards, bounded/redacted context packs, durable
+  decision traces, local-agent capability detection, and optional dry-run local-agent planning.
 - **P3: MCP, new tools, multi-node, and internet-scale ASM.** MCP must be a thin adapter over REST
   Command Arsenal; new tools stay `catalog_only` until receipts/proof contracts exist. Multi-node and
   internet-scale ASM wait until queue leases, object evidence, worker freshness, campaign semantics,
@@ -379,12 +431,13 @@ T3MP3ST adoption plan correctly identifies the missing operating model: ShakerSc
 safe/productized primitives, but no persisted mission contract yet shared by UI, REST, scheduler,
 AI Ops Router, local-agent planners, and future MCP. The near-term goal is not broad agent execution.
 It is schema-first planning, read-only command discovery, durable scope receipts, approval receipts,
-and audit traces.
+bounded context packs, decision traces, and audit receipts.
 
 **Implement:**
 1. DONE phase 1: define read-only `OperationPlan` schema with objective, planner metadata, context
    hash, target scope, allowed hosts, environment, allowed/disallowed families, budget/rate/window
    constraints, missing inputs, confirmations, actions, stop conditions, and success criteria.
+   DONE phase 1 persistence: `/arsenal/plans` stores validated dry-run plans and never queues actions.
 2. DONE phase 1: define read-only `AgentContextPack` schema as a bounded redacted summary: target
    summary, current surface, ASM/family gaps, hypothesis summary, active findings with proof
    state/evidence IDs, allowed/disallowed commands, known preconditions, worker freshness, and
@@ -415,13 +468,21 @@ and audit traces.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.
-8. Add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
+8. Add local-agent capability records before any planner connector is usable. Each record must expose
+   binary presence, version, auth-detected status without reading auth artifact contents, headless/JSON
+   mode support, timeout support, workdir isolation support, network-disable support if any, max prompt
+   and output bytes, and adapter risk notes.
+9. Strip provider API-key environment variables when spawning local planners. Send bounded context
+   packs and command schemas; do not send secrets, cookies, bearer tokens, private keys, raw
+   transcripts, or raw request/response bodies by default.
+10. Add benchmark/planner integrity ledgers for stale workers, benchmark fitting, hidden contamination,
    AI prose counted as evidence, phantom tool assumptions, auth context not actually used, planner
    scope/risk broadening, and unrunnable planned families being presented as runnable.
 
 **Done when:** a mission can be planned, previewed, blocked, approved, queued, executed, and audited
 through one schema without exposing raw shell, bypassing policy gates, or allowing AI/local-agent prose
-to create verified findings.
+to create verified findings. A local agent can only produce a validated dry-run `OperationPlan` from
+a bounded `AgentContextPack`; it cannot execute a command directly.
 
 ### 3. ASM scheduling and campaign semantics
 **Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
@@ -534,7 +595,8 @@ Object-ID and cross-user primitives also exist per scan (`access_control_checks`
 extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_exploit` /
 `verification_engine`). The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
 do not read the durable graph as their source of hypotheses, and ShakerScan has no first-class lead
-board between weak signals and canonical findings.
+board between weak signals and canonical findings. This should borrow T3MP3ST's PackBoard idea, but
+adapt it into ShakerScan's proof model: leads are coordinated work items, not findings.
 
 **Implement:**
 1. Add a `campaigns` / `campaign_actions` layer over ASM waves, scans, focused family work, AI Gate
@@ -555,7 +617,10 @@ board between weak signals and canonical findings.
 5. Add append-only endorsements and refutations. Refuter signals can weaken/support/question a claim,
    but only deterministic replay, cryptographic evidence, parser/protocol evidence, or human-approved
    review policy can change finding status.
-6. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
+6. Add bounded situation reports for agents/operators: hottest unclaimed hypotheses, claims owned by
+   the requester, refuted/dead hypotheses to avoid resurfacing, live blockers, and missing
+   preconditions. Do not expose the entire board by default.
+7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
    graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
@@ -603,6 +668,33 @@ finding with enumerable concrete proof instances; evidence survives worker churn
 produce receipts for both successful and failed/skipped runs; missing binaries show as skipped/waived,
 not phantom success.
 
+### 9a. Refuter workflow and integrity ledgers
+**Status: CONTRACT ONLY.** T3MP3ST's strongest process lesson is not a detector; it is the habit of
+trying to disprove weak wins. ShakerScan needs a durable refuter path for claims that can affect
+operator trust, benchmark claims, or deployment gates.
+
+**Implement:**
+1. Trigger refuter work for Critical/High findings with suspected or weak proof, AI Gate semantic-only
+   hits, Model Intake metadata claims without operator trust anchors, new benchmark wins, unusually
+   large finding deltas, deployment-gating findings, and parser output that would promote severity or
+   proof state.
+2. Refuter behavior should rerun the minimal reproducer, test benign explanations, verify auth
+   context/principal/tenant/object ownership, check request freshness, and attach counterevidence when
+   a claim weakens.
+3. Separate `refuter_signal` from `refuter_verdict`. Signals can weaken/support/question a claim.
+   Verdicts can change status only when backed by deterministic replay, cryptographic evidence,
+   parser/protocol evidence, or explicitly labeled human-approved review policy.
+4. Add integrity ledgers for benchmark and planner methodology: stale/non-uniform worker runs,
+   benchmark fitting, hidden contamination, hardcoded target facts, phantom tool assumptions, source
+   hints counted as runtime proof, AI prose counted as evidence, and planner safety failures.
+5. Store integrity records close to the artifacts they correct, for example
+   `results/benchmark-runs/INTEGRITY_LEDGER.md` and `results/planner-evals/INTEGRITY_LEDGER.md`, then
+   add API/UI summaries only after the file-backed discipline is stable.
+
+**Done when:** a benchmark win, semantic AI hit, metadata trust claim, or weak High/Critical can be
+challenged and corrected without deleting history, and corrections are visible in the same evidence
+and deployment-gate story as the original claim.
+
 ### 10. Check-registry execution migration + proof contracts per family
 **Status: PARTIAL.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and carries `requires_auth_states` / `requires_credentials` /
@@ -637,6 +729,12 @@ local-agent pattern is useful as a planner harness, not as raw execution power.
 5. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
    arbitrary shell commands, broaden scope, increase risk tier, bypass confirmations, or mark findings
    verified.
+6. Add dry-run APIs only after eval fixtures exist: `GET /agents/local` for capability matrix,
+   `POST /agents/local/test` for bounded harmless ping, and `POST /ai/ops/plan` for a validated
+   `OperationPlan`. `/ai/ops/route` remains the only execution gateway.
+7. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
+   closed on unknown commands, missing risk tiers, widened scope, hidden state-changing action
+   requests, missing confirmations, or unbounded parameters.
 
 **Done when:** a local or hosted planner can produce a validated dry-run `OperationPlan` from a
 bounded context pack, fail the unsafe fixtures, and route every proposed state-changing action through
@@ -697,8 +795,11 @@ Every implementation increment above must include its own test slice:
   redirects, Unicode/punycode, userinfo tricks, malformed schemes, and Model Intake artifact redirects.
 - Tool status/receipt tests proving missing binaries are skipped/waived and parser failures do not
   create verified findings.
+- Refuter/integrity tests proving weak claims can be challenged without deleting original evidence,
+  and benchmark/planner correction records remain linked to the corrected artifact.
 - Planner eval scorecards proving no raw shell, no scope broadening, no risk-tier escalation, no
-  AI-verified findings, and correct missing-input/confirmation handling.
+  AI-verified findings, no ambiguous JSON fallback acceptance, no secret leakage in context packs,
+  and correct missing-input/confirmation handling.
 - At least one live or fixture-backed scorecard for detector/ASM changes.
 - Browser QA across desktop/mobile before claiming UI completion.
 - A worker-freshness preflight (`GET /workers` build-current) before any DAST-quality benchmark.

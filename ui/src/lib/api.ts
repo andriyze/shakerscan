@@ -204,6 +204,65 @@ export interface ApprovalReceiptResponse {
   execution_enabled: boolean
 }
 
+export interface OperationPlanAction {
+  command: string
+  parameters?: Record<string, unknown>
+  risk_tier?: string
+  scope_receipt_id?: string
+  approval_receipt_id?: string
+  reason?: string
+}
+
+export interface OperationPlanRequest {
+  objective: string
+  planner?: Record<string, unknown>
+  context_hash: string
+  target_scope?: Record<string, unknown>
+  risk_tier: string
+  allowed_families?: string[]
+  disallowed_families?: string[]
+  budget?: Record<string, unknown>
+  constraints?: Record<string, unknown>
+  missing_inputs?: string[]
+  confirmations?: string[]
+  actions?: OperationPlanAction[]
+  stop_conditions?: string[]
+  success_criteria?: string[]
+  scope_receipt_id?: string
+  approval_receipt_id?: string
+  created_by?: string
+}
+
+export interface OperationPlan {
+  id: string
+  objective: string
+  planner: Record<string, unknown>
+  context_hash: string
+  target_scope: Record<string, unknown>
+  risk_tier: string
+  actions: OperationPlanAction[]
+  confirmations: string[]
+  missing_inputs: string[]
+  stop_conditions: string[]
+  success_criteria: string[]
+  status: string
+  validation_errors: string[]
+  validation_warnings: string[]
+  scope_receipt_id?: string | null
+  approval_receipt_id?: string | null
+  plan_json: Record<string, unknown>
+  created_by?: string | null
+  created_at?: string
+  updated_at?: string
+  execution_enabled: boolean
+}
+
+export interface OperationPlanResponse {
+  operation_plan: OperationPlan
+  execution_enabled: boolean
+  validated: boolean
+}
+
 export interface ArsenalTool {
   tool_name: string
   family: string
@@ -1319,6 +1378,22 @@ export async function createApprovalReceipt(payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create approval receipt'))
+  return res.json()
+}
+
+export async function createOperationPlan(payload: OperationPlanRequest): Promise<OperationPlanResponse> {
+  const res = await fetch(`${API_URL}/arsenal/plans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to validate operation plan'))
+  return res.json()
+}
+
+export async function getOperationPlans(limit: number = 20): Promise<{ operation_plans: OperationPlan[]; execution_enabled: boolean; count: number }> {
+  const res = await fetch(`${API_URL}/arsenal/plans?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load operation plans'))
   return res.json()
 }
 

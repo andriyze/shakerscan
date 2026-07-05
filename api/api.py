@@ -3145,6 +3145,38 @@ class ApprovalReceiptRequest(BaseModel):
     expires_at: Optional[datetime] = None
 
 
+class OperationPlanAction(BaseModel):
+    command: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    risk_tier: Optional[str] = Field(
+        default=None,
+        pattern="^(read_only|passive|active|intrusive|credential|dangerous)$",
+    )
+    scope_receipt_id: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class OperationPlanRequest(BaseModel):
+    objective: str
+    planner: dict[str, Any] = Field(default_factory=dict)
+    context_hash: str
+    target_scope: dict[str, Any] = Field(default_factory=dict)
+    risk_tier: str = Field(pattern="^(read_only|passive|active|intrusive|credential|dangerous)$")
+    allowed_families: list[str] = Field(default_factory=list)
+    disallowed_families: list[str] = Field(default_factory=list)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    missing_inputs: list[str] = Field(default_factory=list)
+    confirmations: list[str] = Field(default_factory=list)
+    actions: list[OperationPlanAction] = Field(default_factory=list)
+    stop_conditions: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    scope_receipt_id: Optional[str] = None
+    approval_receipt_id: Optional[str] = None
+    created_by: Optional[str] = None
+
+
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
@@ -11678,6 +11710,169 @@ def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_operation_plan_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "planner",
+        "target_scope",
+        "actions",
+        "confirmations",
+        "missing_inputs",
+        "stop_conditions",
+        "success_criteria",
+        "validation_errors",
+        "validation_warnings",
+        "plan_json",
+    ):
+        payload[key] = _decode_json_value(payload.get(key))
+    payload["execution_enabled"] = False
+    return payload
+
+
+RISK_TIER_ORDER = {
+    "read_only": 0,
+    "passive": 1,
+    "active": 2,
+    "intrusive": 3,
+    "credential": 4,
+    "dangerous": 5,
+}
+
+
+def _operation_plan_allowed_commands() -> dict[str, dict[str, Any]]:
+    try:
+        catalog = describe_arsenal_commands()
+    except Exception:
+        return {}
+    return {
+        str(item.get("name")): item
+        for item in catalog.get("commands", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+
+
+def _canonical_operation_plan(req: OperationPlanRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    payload["objective"] = str(payload.get("objective") or "").strip()
+    payload["context_hash"] = str(payload.get("context_hash") or "").strip().lower()
+    payload["confirmations"] = [
+        str(item).strip() for item in payload.get("confirmations", []) if str(item).strip()
+    ]
+    payload["missing_inputs"] = [
+        str(item).strip() for item in payload.get("missing_inputs", []) if str(item).strip()
+    ]
+    payload["stop_conditions"] = [
+        str(item).strip() for item in payload.get("stop_conditions", []) if str(item).strip()
+    ]
+    payload["success_criteria"] = [
+        str(item).strip() for item in payload.get("success_criteria", []) if str(item).strip()
+    ]
+    payload["actions"] = [
+        {
+            **action,
+            "command": str(action.get("command") or "").strip(),
+            "parameters": redact_sensitive(action.get("parameters") or {}, redact_strings=True, scrub_text=True),
+        }
+        for action in payload.get("actions", [])
+        if str(action.get("command") or "").strip()
+    ]
+    payload["planner"] = redact_sensitive(payload.get("planner") or {}, redact_strings=True, scrub_text=True)
+    payload["target_scope"] = redact_sensitive(payload.get("target_scope") or {}, redact_strings=True, scrub_text=True)
+    payload["budget"] = redact_sensitive(payload.get("budget") or {}, redact_strings=True, scrub_text=True)
+    payload["constraints"] = redact_sensitive(payload.get("constraints") or {}, redact_strings=True, scrub_text=True)
+    return payload
+
+
+async def _validate_operation_plan(conn, req: OperationPlanRequest) -> tuple[dict[str, Any], list[str], list[str], str]:
+    payload = _canonical_operation_plan(req)
+    errors: list[str] = []
+    warnings: list[str] = []
+    objective = str(payload.get("objective") or "").strip()
+    if not objective:
+        errors.append("objective_required")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("context_hash") or "")):
+        errors.append("context_hash_must_be_sha256_hex")
+    if not payload.get("target_scope"):
+        warnings.append("target_scope_empty")
+    if not payload.get("actions"):
+        errors.append("actions_required")
+    if not payload.get("stop_conditions"):
+        warnings.append("stop_conditions_empty")
+    if not payload.get("success_criteria"):
+        warnings.append("success_criteria_empty")
+
+    commands = _operation_plan_allowed_commands()
+    plan_risk = str(payload.get("risk_tier") or "read_only")
+    plan_risk_rank = RISK_TIER_ORDER.get(plan_risk, 999)
+    confirmations = set(payload.get("confirmations") or [])
+    needs_approval = False
+
+    for index, action in enumerate(payload.get("actions") or []):
+        command_name = str(action.get("command") or "")
+        command = commands.get(command_name)
+        if not command:
+            errors.append(f"action_{index}_unknown_command:{command_name}")
+            continue
+        command_risk = str(action.get("risk_tier") or command.get("risk_tier") or "read_only")
+        if RISK_TIER_ORDER.get(command_risk, 999) > plan_risk_rank:
+            errors.append(f"action_{index}_risk_exceeds_plan:{command_name}")
+        for required in command.get("required_confirmations") or []:
+            if str(required).startswith("confirm_") and required not in confirmations:
+                if required == "confirm_production_when_applicable":
+                    warnings.append(f"action_{index}_may_need_production_confirmation:{command_name}")
+                else:
+                    errors.append(f"action_{index}_missing_confirmation:{required}")
+        if command.get("status") == "gated":
+            needs_approval = True
+            if not (action.get("approval_receipt_id") or payload.get("approval_receipt_id")):
+                errors.append(f"action_{index}_missing_approval_receipt:{command_name}")
+
+    scope_id = str(payload.get("scope_receipt_id") or "").strip()
+    approval_id = str(payload.get("approval_receipt_id") or "").strip()
+    if scope_id:
+        scope_row = await conn.fetchrow("SELECT * FROM scope_receipts WHERE id=$1", scope_id)
+        if not scope_row:
+            errors.append("scope_receipt_not_found")
+        else:
+            scope = _public_scope_receipt_row(scope_row)
+            if scope.get("verdict") == "blocked":
+                errors.append("scope_receipt_blocked")
+            if scope.get("verdict") == "needs_approval":
+                needs_approval = True
+    elif needs_approval:
+        errors.append("scope_receipt_required_for_gated_actions")
+
+    if approval_id:
+        try:
+            approval_uuid = uuid.UUID(approval_id)
+        except ValueError:
+            errors.append("approval_receipt_id_must_be_uuid")
+        else:
+            approval_row = await conn.fetchrow("SELECT * FROM approval_receipts WHERE id=$1", approval_uuid)
+            if not approval_row:
+                errors.append("approval_receipt_not_found")
+            else:
+                approval = _public_approval_receipt_row(approval_row)
+                if not approval.get("approved_by") or approval.get("denial_reason"):
+                    errors.append("approval_receipt_not_approved")
+                if scope_id and str(approval.get("scope_receipt_id") or "") != scope_id:
+                    errors.append("approval_receipt_scope_mismatch")
+                if "confirm_authorized" not in set(approval.get("confirmations") or []):
+                    errors.append("approval_receipt_missing_confirm_authorized")
+                expires_at = approval_row["expires_at"]
+                if expires_at:
+                    now = datetime.now(timezone.utc)
+                    if expires_at.tzinfo is None:
+                        now = utc_now()
+                    if expires_at <= now:
+                        errors.append("approval_receipt_expired")
+    elif needs_approval:
+        errors.append("approval_receipt_required_for_gated_actions")
+
+    status = "blocked" if errors else ("approved" if approval_id else "planned")
+    return payload, errors, warnings, status
+
+
 def _canonical_receipt_host(value: Any) -> str:
     host = str(value or "").strip().strip("[]").lower()
     if host.endswith("."):
@@ -11862,6 +12057,71 @@ async def arsenal_create_approval(req: ApprovalReceiptRequest):
         "approval_receipt": _public_approval_receipt_row(row),
         "scope_receipt": scope,
         "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/plans")
+async def arsenal_create_operation_plan(req: OperationPlanRequest):
+    """Validate and persist a dry-run OperationPlan without executing any action."""
+    async with db_pool.acquire() as conn:
+        payload, errors, warnings, status = await _validate_operation_plan(conn, req)
+        scope_id = str(payload.get("scope_receipt_id") or "").strip() or None
+        approval_id = str(payload.get("approval_receipt_id") or "").strip() or None
+        row = await conn.fetchrow(
+            """
+            INSERT INTO operation_plans (
+                objective, planner, context_hash, target_scope, risk_tier, actions,
+                confirmations, missing_inputs, stop_conditions, success_criteria,
+                status, validation_errors, validation_warnings, scope_receipt_id,
+                approval_receipt_id, plan_json, created_by
+            ) VALUES (
+                $1,$2::jsonb,$3,$4::jsonb,$5,$6::jsonb,
+                $7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,
+                $11,$12::jsonb,$13::jsonb,$14,$15,$16::jsonb,$17
+            )
+            RETURNING *
+            """,
+            payload["objective"],
+            json.dumps(payload.get("planner") or {}),
+            payload["context_hash"],
+            json.dumps(payload.get("target_scope") or {}),
+            payload["risk_tier"],
+            json.dumps(payload.get("actions") or []),
+            json.dumps(payload.get("confirmations") or []),
+            json.dumps(payload.get("missing_inputs") or []),
+            json.dumps(payload.get("stop_conditions") or []),
+            json.dumps(payload.get("success_criteria") or []),
+            status,
+            json.dumps(errors),
+            json.dumps(warnings),
+            scope_id,
+            uuid.UUID(approval_id) if approval_id else None,
+            json.dumps(payload),
+            str(payload.get("created_by") or "").strip() or None,
+        )
+    return {
+        "operation_plan": _public_operation_plan_row(row),
+        "execution_enabled": False,
+        "validated": not errors,
+    }
+
+
+@app.get("/arsenal/plans")
+async def arsenal_operation_plans(limit: int = Query(20, ge=1, le=100)):
+    """Read recent dry-run OperationPlan records."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM operation_plans
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return {
+        "operation_plans": [_public_operation_plan_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
     }
 
 
