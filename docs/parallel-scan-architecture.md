@@ -13,13 +13,14 @@ registry-driven proof contracts before adding more fan-out knobs. The first ASM 
 policy/gaps/improve/activity responses and persisted target metadata; Dashboard Action Center CTAs
 link to the safe next steps; ASM waves are now a typed schedule kind with legacy
 `scan_options.kind='asm_improve'` compatibility; `/targets/{id}/asm/activity.timeline` now derives a
-single target campaign timeline from scheduler, schedule, active-scan, and activity facts. AI Gate
-scan detail can now rerun skipped/error/family/all campaign slices and selected transcript probes;
-scan detail also compares recent same-context runs, and the AI Gate target page now exposes
-target-level longitudinal campaign history. Model Intake strict trust mode now supports saved
-operator trust anchors by ID, strict policy profiles can require saved anchors, and deployment
-decisions explain policy-required anchor gaps plus exception expiry/hygiene; remaining trust UX work
-is remediation flow polish.
+single target campaign timeline from scheduler, schedule, active-scan, and activity facts. The next
+operator gap is product-level blocker counts, quick links, and safe remediation flows, not more
+parallel-scan knobs. AI Gate scan detail can now rerun skipped/error/family/all campaign slices and
+selected transcript probes; scan detail also compares recent same-context runs, and the AI Gate
+target page now exposes target-level longitudinal campaign history. Model Intake strict trust mode
+now supports saved operator trust anchors by ID, strict policy profiles can require saved anchors,
+and deployment decisions explain policy-required anchor gaps plus exception expiry/hygiene;
+remaining trust UX work is remediation flow polish.
 
 > **How to read this doc.** It is now scoped to one thing: parallel execution for one logical scan.
 > 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and
@@ -54,7 +55,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Operator-facing campaign/ASM UX | Partial; Dashboard Action Center CTAs, ASM scheduler-state activity surfacing, and ASM schedule UI bridge shipped | Make ASM waves a typed schedule kind, then show recurring waves, background dispatcher state, and active blockers in one target timeline. |
+| Operator-facing campaign/ASM UX | Phase 1 shipped; Dashboard Action Center CTAs, ASM scheduler-state activity surfacing, typed ASM waves, and target timeline shipped | Add product-level blocker counts/quick links, remediation entry points, and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -153,7 +154,8 @@ settings directly: batch size, stale-days, endpoint filter, focused family, and 
 Scheduled execution applies those settings both when counting claimable endpoints and when queueing
 the ASM batch. The ASM activity API/UI now collapse these into one target campaign timeline showing
 "what runs next" and "why nothing ran" instead of exposing them as independent knobs. Remaining UX
-work is action depth: fix blockers and safely rerun focused families from that timeline.
+work is product-level action depth: dashboard blocker counts, safe remediation entry points, and
+family-aware quality agreement across scan detail, `/asm/gaps`, and the target timeline.
 
 Strategic caution: parallelism is a means to run proof campaigns faster, not the differentiator on
 its own. Prefer worker-aware waves, family-specific proof contracts, and evidence completeness over

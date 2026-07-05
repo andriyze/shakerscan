@@ -30,9 +30,11 @@ dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decisi
 now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy
 `scan_options.kind='asm_improve'` compatibility. ASM activity now also returns a derived target
 campaign `timeline` that merges scheduler state, next ASM schedule, active scans, and recent
-campaign activity. Model Intake now has guided trust modes, a pass/fail/advisory pre-submit
-preview, saved operator trust anchors, strict policy-profile required anchors, and deployment
-decisions that explain policy-required anchor gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
+campaign activity. The next ASM product work is not another schedule bridge; it is family-aware
+campaign quality, graph-driven hypotheses, and dashboard/action-center decision flow. Model Intake
+now has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors,
+strict policy-profile required anchors, and deployment decisions that explain policy-required anchor
+gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
 campaign review panel from the stored coverage matrix/evidence manifest and can queue scan-level
 reruns for skipped probes, errored families, selected families, selected transcript probes, or all
 probes. Scan detail now also compares recent same-context AI Gate runs, and the AI Gate target page
@@ -59,7 +61,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| ASM scheduling/operator UX | Partial; next-action/skip-reason contract, ASM activity surfacing, Action Center CTAs, and schedule UI bridge shipped | Make ASM waves a first-class schedule kind and unify background policy, recurring waves, manual actions, and scan rows into one target timeline. |
+| ASM scheduling/operator UX | Phase 1 shipped; next-action/skip-reason contract, ASM activity surfacing, Action Center CTAs, typed ASM waves, and target timeline shipped | Add product-level blocker counts/quick links, remediation entry points, and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -145,9 +147,11 @@ Shipped pieces:
   `targets.metadata_json.asm_last_decision`.
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
   inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, target
-  campaign timeline, policy presets, local-time window helper, and new-surface feed.
-- `/schedules` gives users a first typed UI/API path for recurring ASM waves through
-  `schedule_kind='asm_improve'`. Legacy `scan_options.kind='asm_improve'` rows are still decoded for
+  campaign timeline, policy presets, local-time window helper, new-surface feed, and typed recurring
+  ASM wave visibility.
+- `/schedules` gives users a typed UI/API path for recurring ASM waves through
+  `schedule_kind='asm_improve'`, including batch size, stale-days, endpoint filter, focused family,
+  and Lab/deep gating. Legacy `scan_options.kind='asm_improve'` rows are still decoded for
   compatibility.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 - `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and

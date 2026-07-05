@@ -27,18 +27,26 @@ trust controls, AI Gate hardening/report export/transcripts, evidence-object pha
 application-graph phase 1. Treat those as foundations, not open P0 items.
 
 The report remains correct on the larger gaps: the graph is not yet a campaign consumer, evidence is
-not yet externalized into proof instances, scanner execution is not yet fully registry-driven, Model
-Intake trust is too low-level, AI Gate review is scan-centric instead of campaign-centric, and ASM
-schedule/campaign semantics are still encoded through legacy scan concepts.
+not yet externalized into proof instances, scanner execution is not yet fully registry-driven,
+detector recall still misses important benchmark families/workflows, Model Intake remediation is
+still more explanation than workflow, and AI Gate target history needs readiness/export polish. The
+part of the report that is now stale is the P0 operator foundation: structured Action Center CTAs,
+typed ASM schedule kinds, ASM scheduler-state surfacing, and the target campaign timeline have
+shipped. The remaining operator gap is **productized decision flow**: one dashboard/action surface
+that summarizes DAST, ASM, AI Gate, Model Intake, exceptions, worker freshness, and deployment gates
+with counts, blockers, next actions, and safe remediation entry points.
 
 Market positioning guidance:
 
 - External ASM vendors are strong at discovering and mapping internet-facing assets. Do not compete
   first on internet-scale corpus. Compete on owned-surface testing quality: authenticated, replayable,
-  proof-grade campaigns with honest coverage and attempt ledgers.
+  proof-grade campaigns with honest coverage, blocked/skipped reasons, and attempt ledgers.
 - DAST/API scanners are strong at crawl, audit, CI, and template execution. ShakerScan's wedge is
   continuous endpoint inventory plus graph-driven authenticated proof campaigns and canonical
   evidence across web, API, and AI surfaces.
+- Template/exposure scanners are strong at broad checks and ecosystem velocity. ShakerScan should
+  use templates where useful, but make stateful workflows, auth context, proof contracts, and
+  evidence instances the differentiator.
 - AI red-team tools prove demand for automated AI probing. ShakerScan should differentiate on
   campaign evidence, replay, control inventory, deterministic findings, and deployment gates.
 - Dedicated model-security vendors may go deeper on malware/backdoor analysis. ShakerScan should win
@@ -204,24 +212,40 @@ ordering and more exact implementation boundaries:
 
 ### Immediate implementation sequence
 
-These are the next commit-sized slices, in order:
+These are the next commit-sized slices, in order. The intent is to productize shipped foundations
+before opening more scanner surface area, then attack the proof-quality gaps with benchmarks.
 
-1. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
-   NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
-   graph-driven authz hypotheses.
-2. **Model Intake exception/deployment UX:** DONE for decision explanation: trust exceptions, expiry,
-   owner/approver hygiene, and policy-required anchor failures are explicit in deployment decisions.
-   Remaining work is remediation workflow depth from those decision cards.
-3. **AI campaign history polish:** add target-level history export/readiness trends after the current
-   target-level run/context summary has soaked.
+1. **Dashboard product status / Action Center 2:** add API-backed product cards for DAST, ASM,
+   AI Gate, Model Intake, policy exceptions, deployment gates, and worker freshness. Each card should
+   show blocker counts, stale/blocked/running state, primary destination, and a safe next action.
+2. **Action Center remediation flows:** from the product cards and existing action items, add tested
+   confirmation flows for non-destructive remediation: rerun failed scan, open target ASM timeline,
+   enable/adjust ASM wave, jump to exception hygiene filter, open Model Intake trust remediation, and
+   open AI Gate missing-control/readiness view.
+3. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
+   and the target campaign timeline agree on family-aware state: attempted, proved, partial,
+   blocked by auth, blocked by second user, blocked by schedule/rate cap, and stale.
+4. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+   NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, mass
+   assignment/JWT, and graph-driven authz hypotheses.
+5. **Application graph consumer:** schedule BOLA/BFLA/BOPLA/tenant/workflow hypotheses from durable
+   producer->object->consumer graph facts instead of only per-scan transient discoveries.
+6. **Evidence store phase 2:** split canonical findings from concrete `EvidenceInstance` rows and
+   externalize large artifacts before broadening more high-noise families.
+7. **Registry-driven execution:** migrate scanner family execution and report rollups to proof
+   contracts after the evidence/proof shape is stable.
+8. **AI Gate and Model Intake polish:** add AI Gate target-history export/readiness trends and Model
+   Intake exception remediation workflow depth after the cross-product operator surface can link to
+   them cleanly.
 
 ### Positioning-adjusted priority order
 
 Use this order when choosing between otherwise-valid work:
 
-- **P0: productize shipped foundations.** Richer Action Center product counts/links and deeper
-  schedule workflow controls. The base Action Center/CTAs, Exceptions Queue, first-class ASM schedule
-  kinds, and target campaign timeline phase 1 are already done.
+- **P0: productize shipped foundations.** Richer Dashboard/Action Center product counts, blocker
+  summaries, quick links, safe remediation entry points, and deployment-gate/worker-health visibility.
+  The base Action Center/CTAs, Exceptions Queue, first-class ASM schedule kinds, and target campaign
+  timeline phase 1 are already done.
 - **P1: make Continuous ASM the flagship.** Family-aware coverage quality, proof-quality gaps,
   worker-aware waves, CT/new-surface inheritance, and Improve Coverage explanations that always say
   what ran or why it waited.
@@ -245,15 +269,15 @@ Use this order when choosing between otherwise-valid work:
   worker freshness, campaign semantics, and proof/evidence invariants stay green.
 
 ### 1. Product-operability layer: one place that explains "what needs action"
-**Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
+**Status: PHASE 1 DONE, PRODUCTIZED DECISION FLOW OPEN.** `/dashboard` now includes a server-backed
 `action_center` feed built from worker freshness, deployment blockers, failed scans, exception
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
 expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted as
 `metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
-Exceptions Queue. Dashboard items now expose structured safe CTAs. Remaining work is deeper
-product-level actionability: richer product counts/quick links and state-changing remediation only
-after each flow has a tested confirmation boundary.
+Exceptions Queue. Dashboard items now expose structured safe CTAs. Remaining work is product-level
+decision flow: summarize each product area, show blocker/stale/running counts, explain why work is
+blocked, and provide safe remediation links without making users infer state from scan JSON.
 
 **Implement:**
 1. DONE: extend Action Center items with safe CTAs for workers, failed scans, target-preselected ASM
@@ -264,6 +288,12 @@ after each flow has a tested confirmation boundary.
    missing owner/approver, no compensating controls, policy-scoped, and target-scoped.
 4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product
    counts/quick links in Action Center and dashboards, not to expose the filter itself.
+5. NEXT: add `/dashboard.product_status` or equivalent API-backed cards for DAST, ASM, AI Gate,
+   Model Intake, policy exceptions, deployment gates, and worker freshness. Do not compute these
+   counts only in the browser.
+6. NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
+   open missing-auth/second-user blockers, open exception hygiene filters, open Model Intake trust
+   remediation, open AI Gate readiness/control gaps, and open worker rebuild/scale controls.
 
 **Done when:** a junior operator can answer, from one screen, "what is risky, what is blocked, what
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.

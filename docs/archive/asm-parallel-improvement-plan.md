@@ -10,11 +10,11 @@ evidence/root-cause detail only. Current implementation direction lives in
 **2026-07-05 audit note:** do not implement directly from this archive. The remaining A4/P6 and
 worker-rebuild/handshake follow-ups have been migrated into
 `docs/proposed-next-steps.md` under "Operational / inventory-hygiene follow-ups". The newer priority
-work is product operability: Action Center remediation CTAs, first-class ASM schedule kinds, visible
-scheduler/dispatcher skip reasons in ASM activity and the target campaign timeline, AI red-team
-campaign UX, and guided Model Intake trust UX. The schedules UI already exposes ASM coverage waves
-through `scan_options.kind='asm_improve'`; the unfinished work is the durable typed contract and
-timeline, not another archive-driven scanner fix.
+work is proof-first Continuous Exposure Management productization: dashboard product status and
+blocker counts, safe Action Center remediation flows, family-aware ASM quality, graph-driven authz
+hypotheses, evidence instances, registry-driven proof contracts, AI red-team campaign polish, and
+Model Intake remediation UX. First-class ASM schedule kinds, scheduler/dispatcher skip reasons, and
+the target campaign timeline have shipped; do not use this archive to re-open those as roadmap items.
 
 Each item lists the **evidence** observed, the **root cause**, and the **fix**.
 P1 (worker scaling), A1 (phantom-endpoint pollution), P2 (re-classified as a P1 skew symptom, not a
