@@ -33,6 +33,12 @@ import {
   type ModelIntakeScanRequest,
   type PolicyProfile as SavedPolicyProfile,
 } from '@/lib/api'
+import {
+  buildModelIntakeTrustPreview,
+  inferModelIntakeTrustMode,
+  type ModelIntakeTrustMode,
+  type ModelIntakeTrustPreviewStatus,
+} from '@/lib/modelIntakeTrust'
 
 const inputClass =
   'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
@@ -137,6 +143,24 @@ const POLICY_PROFILES: Array<{ value: BuiltinPolicyProfile; label: string; helpe
   { value: 'production', label: 'Production', helper: 'Require approval, evidence, and deployment controls' },
   { value: 'strict', label: 'Strict', helper: 'Production plus verified signature evidence' },
 ]
+
+const TRUST_MODE_OPTIONS: Array<{
+  value: ModelIntakeTrustMode
+  label: string
+  helper: string
+}> = [
+  { value: 'checksum_only', label: 'Checksum only', helper: 'Digest pin or registry hash; no signature trust.' },
+  { value: 'signature_url_key_url', label: 'Signature URL + key URL', helper: 'Detached signature and verifier key fetched by URL.' },
+  { value: 'inline_signature_key', label: 'Inline signature + key', helper: 'Paste detached signature and public key PEM.' },
+  { value: 'trusted_key_fingerprint', label: 'Trusted key fingerprint', helper: 'Require signature plus operator trust anchor.' },
+  { value: 'metadata_evidence', label: 'Metadata evidence', helper: 'Publisher claims only; not a trust root.' },
+]
+
+const TRUST_PREVIEW_BADGE: Record<ModelIntakeTrustPreviewStatus, string> = {
+  pass: 'bg-green-900/50 text-green-200',
+  fail: 'bg-red-900/50 text-red-200',
+  advisory: 'bg-yellow-900/50 text-yellow-200',
+}
 
 function parseOptionalJsonObject(raw: string): Record<string, unknown> | undefined {
   const trimmed = raw.trim()
@@ -269,6 +293,7 @@ export default function ModelIntakeSettingsPage() {
   const [metadataUrl, setMetadataUrl] = useState('')
   const [metadataJson, setMetadataJson] = useState('')
   const [expectedSha256, setExpectedSha256] = useState('')
+  const [trustMode, setTrustMode] = useState<ModelIntakeTrustMode>('checksum_only')
   const [signatureUrl, setSignatureUrl] = useState('')
   const [signaturePublicKeyUrl, setSignaturePublicKeyUrl] = useState('')
   const [signaturePublicKey, setSignaturePublicKey] = useState('')
@@ -374,6 +399,35 @@ export default function ModelIntakeSettingsPage() {
     setMaxDownloadBytes(String(payload.max_download_bytes || 10000000))
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
+    setTrustMode(inferModelIntakeTrustMode({
+      expectedSha256: payload.expected_sha256,
+      signatureUrl: payload.signature_url,
+      signaturePublicKeyUrl: payload.signature_public_key_url,
+      signaturePublicKey: payload.signature_public_key,
+      signatureValue: payload.signature_value,
+      signatureTrustedKeys: listFieldText(payload.signature_trusted_keys),
+      signatureTrustedKeySha256: listFieldText(payload.signature_trusted_key_sha256),
+      metadata: payload.metadata_json,
+    }))
+  }
+
+  function applyTrustMode(mode: ModelIntakeTrustMode) {
+    setTrustMode(mode)
+    if (mode === 'checksum_only') {
+      setRequireHash(true)
+      setRequireSignature(false)
+      setRequireSignatureVerification(false)
+      return
+    }
+    if (mode === 'metadata_evidence') {
+      setRequireSignature(true)
+      setRequireSignatureVerification(false)
+      return
+    }
+    setRequireSignature(true)
+    if (mode === 'trusted_key_fingerprint') {
+      setRequireSignatureVerification(true)
+    }
   }
 
   function validateField(field: keyof IntakeFormErrors) {
@@ -397,12 +451,13 @@ export default function ModelIntakeSettingsPage() {
   }
 
   function validateIntakeForm(): boolean {
+    const needsUrlKeyFields = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
     const errors: IntakeFormErrors = {
       artifactUrl: validateArtifactUrlField(artifactUrl),
       metadataUrl: validateHttpUrlField(metadataUrl),
-      signatureUrl: validateHttpUrlField(signatureUrl),
-      signaturePublicKeyUrl: validateHttpUrlField(signaturePublicKeyUrl),
-      signatureTrustedKeySha256: validateSha256ListField(signatureTrustedKeySha256),
+      signatureUrl: needsUrlKeyFields ? validateHttpUrlField(signatureUrl) : undefined,
+      signaturePublicKeyUrl: needsUrlKeyFields ? validateHttpUrlField(signaturePublicKeyUrl) : undefined,
+      signatureTrustedKeySha256: trustMode === 'trusted_key_fingerprint' ? validateSha256ListField(signatureTrustedKeySha256) : undefined,
       modelCardUrl: validateHttpUrlField(modelCardUrl),
       expectedSha256: validateSha256Field(expectedSha256),
     }
@@ -413,6 +468,10 @@ export default function ModelIntakeSettingsPage() {
   function buildPayload(): ModelIntakeScanRequest {
     const maxBytes = Number(maxDownloadBytes || 10000000)
     const timeout = Number(timeoutSeconds || 20)
+    const includeUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
+    const includeInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
+    const includeTrustAnchor = trustMode === 'trusted_key_fingerprint'
+    const includeSignatureOptions = trustMode !== 'checksum_only'
     if (!Number.isFinite(maxBytes) || maxBytes < 1024) throw new Error('Download limit must be at least 1024 bytes')
     if (!Number.isFinite(timeout) || timeout < 1) throw new Error('Timeout must be at least 1 second')
     const payload: ModelIntakeScanRequest = {
@@ -421,15 +480,15 @@ export default function ModelIntakeSettingsPage() {
       metadata_url: optionalText(metadataUrl),
       metadata_json: parseOptionalJsonObject(metadataJson),
       expected_sha256: optionalText(expectedSha256),
-      signature_url: optionalText(signatureUrl),
-      signature_public_key: optionalText(signaturePublicKey),
-      signature_public_key_url: optionalText(signaturePublicKeyUrl),
-      signature_value: optionalText(signatureValue),
-      signature_rsa_padding: optionalText(signatureRsaPadding),
-      signature_hash: optionalText(signatureHash),
-      signature_payload: optionalText(signaturePayload),
-      signature_trusted_keys: optionalText(signatureTrustedKeys),
-      signature_trusted_key_sha256: optionalList(signatureTrustedKeySha256),
+      signature_url: includeUrlSignature ? optionalText(signatureUrl) : undefined,
+      signature_public_key: includeInlineSignature ? optionalText(signaturePublicKey) : undefined,
+      signature_public_key_url: includeUrlSignature ? optionalText(signaturePublicKeyUrl) : undefined,
+      signature_value: includeInlineSignature ? optionalText(signatureValue) : undefined,
+      signature_rsa_padding: includeSignatureOptions ? optionalText(signatureRsaPadding) : undefined,
+      signature_hash: includeSignatureOptions ? optionalText(signatureHash) : undefined,
+      signature_payload: includeSignatureOptions ? optionalText(signaturePayload) : undefined,
+      signature_trusted_keys: includeTrustAnchor ? optionalText(signatureTrustedKeys) : undefined,
+      signature_trusted_key_sha256: includeTrustAnchor ? optionalList(signatureTrustedKeySha256) : undefined,
       model_card_url: optionalText(modelCardUrl),
       deployment_approved: deploymentApproved,
       require_deployment_approval: requireDeploymentApproval,
@@ -499,6 +558,7 @@ export default function ModelIntakeSettingsPage() {
       setRequireHash(false)
       setRequireModelGovernance(false)
       setMaxDownloadBytes('10000000')
+      if (trustMode === 'trusted_key_fingerprint') setTrustMode('signature_url_key_url')
       return
     }
     setRequireHash(true)
@@ -507,6 +567,9 @@ export default function ModelIntakeSettingsPage() {
     setRequireDeploymentApproval(profile === 'production' || profile === 'strict')
     setRequireSignatureVerification(profile === 'strict')
     setMaxDownloadBytes(profile === 'strict' ? '50000000' : '10000000')
+    if (profile === 'strict' && trustMode !== 'trusted_key_fingerprint') {
+      setTrustMode('trusted_key_fingerprint')
+    }
   }
 
   function updateMetadataField(key: string, value: string) {
@@ -583,6 +646,10 @@ export default function ModelIntakeSettingsPage() {
       setError('Fix the highlighted fields before queueing.')
       return
     }
+    if (trustPreview.blockingFailures.length > 0) {
+      setError('Fix the failed trust preview checks before queueing.')
+      return
+    }
     setSubmitting(true)
     setError(null)
     try {
@@ -636,6 +703,29 @@ export default function ModelIntakeSettingsPage() {
   const evidenceBadgeText = !hasIntakeInput ? 'Not started' : `${presentControls}/${readinessControls.length}`
   const scanBlockedByResolver = Boolean(resolverResult && !resolverResult.scan_payload && !artifactUrl.trim())
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
+  const previewIncludesUrlSignature = trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint'
+  const previewIncludesInlineSignature = trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint'
+  const previewIncludesTrustAnchor = trustMode === 'trusted_key_fingerprint'
+  const trustPreview = buildModelIntakeTrustPreview({
+    mode: trustMode,
+    policyProfile,
+    requireHash,
+    requireSignature,
+    requireSignatureVerification,
+    requireDeploymentApproval,
+    requireModelGovernance,
+    deploymentApproved,
+    expectedSha256,
+    signatureUrl: previewIncludesUrlSignature ? signatureUrl : '',
+    signaturePublicKeyUrl: previewIncludesUrlSignature ? signaturePublicKeyUrl : '',
+    signaturePublicKey: previewIncludesInlineSignature ? signaturePublicKey : '',
+    signatureValue: previewIncludesInlineSignature ? signatureValue : '',
+    signatureTrustedKeys: previewIncludesTrustAnchor ? signatureTrustedKeys : '',
+    signatureTrustedKeySha256: previewIncludesTrustAnchor ? signatureTrustedKeySha256 : '',
+    metadata: parsedMetadata,
+    modelCardUrl,
+  })
+  const hasTrustFailures = trustPreview.blockingFailures.length > 0
 
   return (
     <div className="min-w-0 max-w-full space-y-6">
@@ -890,19 +980,7 @@ export default function ModelIntakeSettingsPage() {
           </label>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <label className={fieldClass}>
-            Signature URL
-            <input
-              value={signatureUrl}
-              onChange={(e) => setSignatureUrl(e.target.value)}
-              onBlur={() => validateField('signatureUrl')}
-              aria-invalid={fieldErrors.signatureUrl ? true : undefined}
-              className={fieldErrors.signatureUrl ? invalidFieldClass(inputClass) : inputClass}
-              placeholder="https://.../model.sig"
-            />
-            {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
-          </label>
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)]">
           <label className={fieldClass}>
             Model Card URL
             <input
@@ -918,92 +996,159 @@ export default function ModelIntakeSettingsPage() {
         </div>
 
         <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-            <ShieldCheck className="h-4 w-4 text-cyan-300" />
-            Signature verification
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
+              <ShieldCheck className="h-4 w-4 text-cyan-300" />
+              Trust mode
+            </div>
+            <span className={`rounded px-2 py-1 text-xs ${TRUST_PREVIEW_BADGE[trustPreview.headlineStatus]}`}>
+              {trustPreview.headline}
+            </span>
           </div>
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <label className={fieldClass}>
-              Public key URL
-              <input
-                value={signaturePublicKeyUrl}
-                onChange={(e) => setSignaturePublicKeyUrl(e.target.value)}
-                onBlur={() => validateField('signaturePublicKeyUrl')}
-                aria-invalid={fieldErrors.signaturePublicKeyUrl ? true : undefined}
-                className={fieldErrors.signaturePublicKeyUrl ? invalidFieldClass(inputClass) : inputClass}
-                placeholder="https://.../signing-key.pem"
-              />
-              {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
-            </label>
-            <label className={fieldClass}>
-              Trusted key SHA-256
-              <input
-                value={signatureTrustedKeySha256}
-                onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
-                onBlur={() => validateField('signatureTrustedKeySha256')}
-                aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
-                className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
-                placeholder="one or more fingerprints"
-              />
-              {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
-            </label>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            {TRUST_MODE_OPTIONS.map((mode) => (
+              <button
+                key={mode.value}
+                type="button"
+                onClick={() => applyTrustMode(mode.value)}
+                className={`min-w-0 rounded-lg border p-3 text-left ${
+                  trustMode === mode.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                }`}
+              >
+                <div className="break-words text-sm font-medium text-white">{mode.label}</div>
+                <div className="mt-1 break-words text-xs text-gray-500">{mode.helper}</div>
+              </button>
+            ))}
           </div>
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <label className={fieldClass}>
-              Public key PEM
-              <textarea
-                value={signaturePublicKey}
-                onChange={(e) => setSignaturePublicKey(e.target.value)}
-                className={textareaClass}
-                rows={5}
-                placeholder="-----BEGIN PUBLIC KEY-----"
-              />
-            </label>
-            <label className={fieldClass}>
-              Signature value
-              <textarea
-                value={signatureValue}
-                onChange={(e) => setSignatureValue(e.target.value)}
-                className={textareaClass}
-                rows={5}
-                placeholder="base64 detached signature"
-              />
-            </label>
-          </div>
-          <label className={fieldClass}>
-            Trusted key PEM
-            <textarea
-              value={signatureTrustedKeys}
-              onChange={(e) => setSignatureTrustedKeys(e.target.value)}
-              className={textareaClass}
-              rows={4}
-              placeholder="Optional operator trust anchor PEM"
-            />
-          </label>
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
-            <label className={fieldClass}>
-              Payload
-              <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
-                <option value="artifact">Artifact bytes</option>
-                <option value="digest_hex">SHA-256 hex digest</option>
-                <option value="digest_raw">SHA-256 raw digest</option>
-              </select>
-            </label>
-            <label className={fieldClass}>
-              Hash
-              <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
-                <option value="sha256">SHA-256</option>
-                <option value="sha384">SHA-384</option>
-                <option value="sha512">SHA-512</option>
-              </select>
-            </label>
-            <label className={fieldClass}>
-              RSA padding
-              <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
-                <option value="pss">PSS</option>
-                <option value="pkcs1v15">PKCS#1 v1.5</option>
-              </select>
-            </label>
+
+          {(trustMode === 'signature_url_key_url' || trustMode === 'trusted_key_fingerprint') && (
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
+                Signature URL
+                <input
+                  value={signatureUrl}
+                  onChange={(e) => setSignatureUrl(e.target.value)}
+                  onBlur={() => validateField('signatureUrl')}
+                  aria-invalid={fieldErrors.signatureUrl ? true : undefined}
+                  className={fieldErrors.signatureUrl ? invalidFieldClass(inputClass) : inputClass}
+                  placeholder="https://.../model.sig"
+                />
+                {fieldErrors.signatureUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureUrl}</span>}
+              </label>
+              <label className={fieldClass}>
+                Public key URL
+                <input
+                  value={signaturePublicKeyUrl}
+                  onChange={(e) => setSignaturePublicKeyUrl(e.target.value)}
+                  onBlur={() => validateField('signaturePublicKeyUrl')}
+                  aria-invalid={fieldErrors.signaturePublicKeyUrl ? true : undefined}
+                  className={fieldErrors.signaturePublicKeyUrl ? invalidFieldClass(inputClass) : inputClass}
+                  placeholder="https://.../signing-key.pem"
+                />
+                {fieldErrors.signaturePublicKeyUrl && <span role="alert" className="text-sm text-red-400">{fieldErrors.signaturePublicKeyUrl}</span>}
+              </label>
+            </div>
+          )}
+
+          {(trustMode === 'inline_signature_key' || trustMode === 'trusted_key_fingerprint') && (
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
+                Public key PEM
+                <textarea
+                  value={signaturePublicKey}
+                  onChange={(e) => setSignaturePublicKey(e.target.value)}
+                  className={textareaClass}
+                  rows={5}
+                  placeholder="-----BEGIN PUBLIC KEY-----"
+                />
+              </label>
+              <label className={fieldClass}>
+                Signature value
+                <textarea
+                  value={signatureValue}
+                  onChange={(e) => setSignatureValue(e.target.value)}
+                  className={textareaClass}
+                  rows={5}
+                  placeholder="base64 detached signature"
+                />
+              </label>
+            </div>
+          )}
+
+          {trustMode === 'trusted_key_fingerprint' && (
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
+                Trusted key SHA-256
+                <input
+                  value={signatureTrustedKeySha256}
+                  onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
+                  onBlur={() => validateField('signatureTrustedKeySha256')}
+                  aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
+                  className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
+                  placeholder="one or more fingerprints"
+                />
+                {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
+              </label>
+              <label className={fieldClass}>
+                Trusted key PEM
+                <textarea
+                  value={signatureTrustedKeys}
+                  onChange={(e) => setSignatureTrustedKeys(e.target.value)}
+                  className={textareaClass}
+                  rows={4}
+                  placeholder="Optional operator trust anchor PEM"
+                />
+              </label>
+            </div>
+          )}
+
+          {trustMode === 'metadata_evidence' && (
+            <div className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-3 text-sm text-yellow-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>Metadata-supplied signing data is treated as evidence of a publisher claim. It cannot establish a trusted signature unless an operator supplies the verifier key and trust anchor.</span>
+            </div>
+          )}
+
+          {trustMode !== 'checksum_only' && (
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+              <label className={fieldClass}>
+                Payload
+                <select value={signaturePayload} onChange={(e) => setSignaturePayload(e.target.value)} className={inputClass}>
+                  <option value="artifact">Artifact bytes</option>
+                  <option value="digest_hex">SHA-256 hex digest</option>
+                  <option value="digest_raw">SHA-256 raw digest</option>
+                </select>
+              </label>
+              <label className={fieldClass}>
+                Hash
+                <select value={signatureHash} onChange={(e) => setSignatureHash(e.target.value)} className={inputClass}>
+                  <option value="sha256">SHA-256</option>
+                  <option value="sha384">SHA-384</option>
+                  <option value="sha512">SHA-512</option>
+                </select>
+              </label>
+              <label className={fieldClass}>
+                RSA padding
+                <select value={signatureRsaPadding} onChange={(e) => setSignatureRsaPadding(e.target.value)} className={inputClass}>
+                  <option value="pss">PSS</option>
+                  <option value="pkcs1v15">PKCS#1 v1.5</option>
+                </select>
+              </label>
+            </div>
+          )}
+
+          <div className="grid gap-2 lg:grid-cols-5">
+            {trustPreview.items.map((previewItem) => (
+              <div key={previewItem.id} className="min-w-0 rounded border border-gray-800 bg-gray-900 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="break-words text-xs font-medium text-gray-200">{previewItem.label}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${TRUST_PREVIEW_BADGE[previewItem.status]}`}>
+                    {previewItem.status}
+                  </span>
+                </div>
+                <div className="mt-1 break-words text-xs text-gray-500">{previewItem.detail}</div>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -1112,7 +1257,7 @@ export default function ModelIntakeSettingsPage() {
         </div>
 
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+          <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
             {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
             {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
           </button>
@@ -1123,6 +1268,9 @@ export default function ModelIntakeSettingsPage() {
         </div>
         {hasFieldErrors && (
           <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>
+        )}
+        {hasTrustFailures && (
+          <p role="alert" className="text-sm text-red-400">Fix the failed trust preview checks before queueing this scan.</p>
         )}
       </form>
 
