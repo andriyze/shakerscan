@@ -1,7 +1,7 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
 import ScanExecutionSettingsPanel from '@/components/ScanExecutionSettingsPanel'
 import Link from 'next/link'
-import { Bot, PackageCheck, ShieldCheck } from 'lucide-react'
+import { Bot, PackageCheck, ShieldAlert, ShieldCheck } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -31,6 +31,22 @@ export default function SettingsPage() {
           </div>
         </div>
         <span className="text-sm text-indigo-300">Open</span>
+      </Link>
+
+      <Link
+        href="/settings/exceptions"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-600/20 text-amber-300">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">Exceptions Queue</h2>
+            <p className="mt-1 text-sm text-gray-400">Review expired, expiring, weak, policy-scoped, and target-scoped exceptions</p>
+          </div>
+        </div>
+        <span className="text-sm text-amber-300">Open</span>
       </Link>
 
       <Link

@@ -9347,7 +9347,13 @@ async def delete_policy_profile(profile_id: str):
 
 
 @app.get("/finding-exceptions")
-async def list_finding_exceptions(target_id: Optional[str] = None, status: Optional[str] = None):
+async def list_finding_exceptions(
+    target_id: Optional[str] = None,
+    status: Optional[str] = None,
+    queue_filter: Optional[str] = None,
+    expiring_within_days: int = Query(7, ge=1, le=365),
+    limit: int = Query(200, ge=1, le=500),
+):
     clauses, params = [], []
     if target_id:
         params.append(uuid.UUID(target_id))
@@ -9355,9 +9361,41 @@ async def list_finding_exceptions(target_id: Optional[str] = None, status: Optio
     if status:
         params.append(status)
         clauses.append(f"status = ${len(params)}")
+    qf = str(queue_filter or "").strip().lower()
+    if qf in {"expired", "expired_or_status"}:
+        clauses.append("status <> 'revoked'")
+        clauses.append("(status = 'expired' OR (expires_at IS NOT NULL AND expires_at < NOW()))")
+    elif qf in {"expiring", "expiring_soon"}:
+        params.append(int(expiring_within_days))
+        clauses.append(
+            f"expires_at IS NOT NULL AND expires_at >= NOW() "
+            f"AND expires_at <= NOW() + (${len(params)}::int * INTERVAL '1 day')"
+        )
+        clauses.append("status IN ('active', 'approved', 'accepted_risk')")
+    elif qf in {"missing_owner", "missing_approver", "missing_controls", "policy_scoped", "target_scoped"}:
+        clauses.append("status IN ('active', 'approved', 'accepted_risk')")
+        if qf == "missing_owner":
+            clauses.append("(owner IS NULL OR btrim(owner) = '')")
+        elif qf == "missing_approver":
+            clauses.append("(approver IS NULL OR btrim(approver) = '')")
+        elif qf == "missing_controls":
+            clauses.append("(compensating_controls IS NULL OR btrim(compensating_controls) = '')")
+        elif qf == "policy_scoped":
+            clauses.append("policy_id IS NOT NULL")
+        elif qf == "target_scoped":
+            clauses.append("target_id IS NOT NULL")
+    elif qf:
+        raise HTTPException(
+            status_code=422,
+            detail="queue_filter must be one of expired, expiring, missing_owner, missing_approver, missing_controls, policy_scoped, target_scoped",
+        )
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(f"SELECT * FROM finding_exceptions{where} ORDER BY created_at DESC", *params)
+        params.append(limit)
+        rows = await conn.fetch(
+            f"SELECT * FROM finding_exceptions{where} ORDER BY created_at DESC LIMIT ${len(params)}",
+            *params,
+        )
     return {"finding_exceptions": [row_to_dict(r) for r in rows]}
 
 

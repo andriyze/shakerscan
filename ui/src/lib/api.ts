@@ -1769,10 +1769,16 @@ export interface FindingExceptionPayload {
 export async function getFindingExceptions(params?: {
   target_id?: string
   status?: string
+  queue_filter?: 'expired' | 'expiring' | 'missing_owner' | 'missing_approver' | 'missing_controls' | 'policy_scoped' | 'target_scoped'
+  expiring_within_days?: number
+  limit?: number
 }): Promise<{ finding_exceptions: FindingException[] }> {
   const searchParams = new URLSearchParams()
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.status) searchParams.set('status', params.status)
+  if (params?.queue_filter) searchParams.set('queue_filter', params.queue_filter)
+  if (params?.expiring_within_days) searchParams.set('expiring_within_days', params.expiring_within_days.toString())
+  if (params?.limit) searchParams.set('limit', params.limit.toString())
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/finding-exceptions${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch finding exceptions'))
@@ -1786,6 +1792,16 @@ export async function createFindingException(data: FindingExceptionPayload): Pro
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create finding exception'))
+  return res.json()
+}
+
+export async function updateFindingException(id: string, data: FindingExceptionPayload): Promise<FindingException> {
+  const res = await fetch(`${API_URL}/finding-exceptions/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update finding exception'))
   return res.json()
 }
 

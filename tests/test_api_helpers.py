@@ -605,6 +605,35 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert len(redis_client.hset_calls) == 1
 
 
+# ----- finding exception queue filters -------------------------------------
+
+class _ExceptionQueueConn:
+    def __init__(self):
+        self.fetch_calls = []
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        return []
+
+
+def test_list_finding_exceptions_adds_hygiene_filters(monkeypatch):
+    conn = _ExceptionQueueConn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+
+    asyncio.run(api_module.list_finding_exceptions(queue_filter="missing_controls", limit=25))
+    query, args = conn.fetch_calls[-1]
+    assert "compensating_controls IS NULL" in query
+    assert "LIMIT $1" in query
+    assert args == (25,)
+
+    asyncio.run(api_module.list_finding_exceptions(queue_filter="expiring", expiring_within_days=14, limit=50))
+    query, args = conn.fetch_calls[-1]
+    assert "expires_at >= NOW()" in query
+    assert "expires_at <= NOW()" in query
+    assert "status IN ('active', 'approved', 'accepted_risk')" in query
+    assert args == (14, 50)
+
+
 # --- Auto-sharding policy: explicit `parallel` intent must survive (P4) ---
 #
 # P4 ("parallel:true dropped -> standalone") turned out to be a stale-API skew

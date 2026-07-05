@@ -53,6 +53,10 @@ called at real sites — verify before re-proposing any of it:
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
+- **Exceptions Queue phase 1** — `/finding-exceptions` supports hygiene queue filters for expired,
+  expiring, missing owner, missing approver, missing compensating controls, policy-scoped, and
+  target-scoped records. `/settings/exceptions` renders those queues, summaries, finding links, and
+  non-destructive revoke actions that preserve the audit row.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -88,9 +92,9 @@ ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence 
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve now expose live
 `scheduler_state`, and dispatcher/scheduler decisions are persisted as
-`metadata_json.asm_last_decision`. Remaining work is deeper actionability: wiring those facts into
-Dashboard CTAs, a dedicated Exceptions Queue page, and inline one-click remediation for each blocker
-class.
+`metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
+Exceptions Queue. Remaining work is deeper actionability: wiring those facts into Dashboard CTAs and
+inline one-click remediation for each blocker class.
 
 **Implement:**
 1. Extend Action Center items with direct remediation where safe: restart/rescale worker CTA,
@@ -99,8 +103,8 @@ class.
    `/asm/activity` and Dashboard Action Center CTAs. The first contract is live, including
    `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and active scan
    links; activity rows still need to show the decision alongside scan history.
-3. Add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired, missing
-   owner/approver, no compensating controls, policy-scoped, and target-scoped.
+3. DONE: add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired,
+   missing owner/approver, no compensating controls, policy-scoped, and target-scoped.
 4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product
    counts/quick links in Action Center and dashboards, not to expose the filter itself.
 

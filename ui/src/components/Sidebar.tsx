@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, Crosshair, Menu, Network, PackageCheck, ShieldCheck, X } from 'lucide-react'
+import { Bot, Crosshair, Menu, Network, PackageCheck, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import { buttonClasses } from '@/components/ui'
 
 const navItems = [
@@ -76,6 +76,11 @@ const navItems = [
     href: '/settings/policy-profiles',
     label: 'Policy',
     icon: <ShieldCheck className="w-5 h-5" />,
+  },
+  {
+    href: '/settings/exceptions',
+    label: 'Exceptions',
+    icon: <ShieldAlert className="w-5 h-5" />,
   },
 ]
 
