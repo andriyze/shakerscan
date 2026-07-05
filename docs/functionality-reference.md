@@ -641,6 +641,8 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
 
+**Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/tools`
+
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report`

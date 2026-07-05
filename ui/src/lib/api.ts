@@ -112,6 +112,61 @@ export interface DashboardResponse {
   product_status?: DashboardProductStatusItem[]
 }
 
+export interface ArsenalCommand {
+  name: string
+  family: string
+  description: string
+  status: string
+  risk_tier: string
+  method: string
+  path: string
+  scope_fields: string[]
+  parameters_schema?: Record<string, unknown>
+  required_confirmations: string[]
+  required_capabilities: string[]
+  evidence_contract: string[]
+  redaction_contract: string[]
+  timeout_seconds: number
+}
+
+export interface ArsenalCommandsResponse {
+  schema_version: string
+  maturity: string
+  execution_enabled: boolean
+  status_labels: string[]
+  risk_tiers: string[]
+  commands: ArsenalCommand[]
+  result_schema: Record<string, unknown>
+}
+
+export interface ArsenalTool {
+  tool_name: string
+  family: string
+  description: string
+  risk_tier: string
+  status: string
+  expected_status: string
+  binary_path?: string | null
+  detection?: string | null
+  version?: string | null
+  version_probe_error?: string | null
+  version_command: string[]
+  evidence_parser?: string | null
+  proof_contract?: string | null
+  retest_contract?: string | null
+  redaction_rules: string[]
+  timeout_seconds: number
+}
+
+export interface ArsenalToolsResponse {
+  schema_version: string
+  maturity: string
+  probe_versions: boolean
+  status_labels: string[]
+  tools: ArsenalTool[]
+  summary: Record<string, number>
+}
+
 export interface Scan {
   id: string
   target_url: string
@@ -1148,6 +1203,21 @@ export interface ExposureGraph {
 export async function getDashboard(): Promise<DashboardResponse> {
   const res = await fetch(`${API_URL}/dashboard`)
   if (!res.ok) throw new Error('Failed to fetch dashboard')
+  return res.json()
+}
+
+export async function getArsenalCommands(): Promise<ArsenalCommandsResponse> {
+  const res = await fetch(`${API_URL}/arsenal/commands`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch Command Arsenal schema'))
+  return res.json()
+}
+
+export async function getArsenalTools(params?: { probeVersions?: boolean }): Promise<ArsenalToolsResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.probeVersions) searchParams.set('probe_versions', 'true')
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/arsenal/tools${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch tool status'))
   return res.json()
 }
 

@@ -1,7 +1,7 @@
 import AISettingsPanel from '@/components/AISettingsPanel'
 import ScanExecutionSettingsPanel from '@/components/ScanExecutionSettingsPanel'
 import Link from 'next/link'
-import { Bot, PackageCheck, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { Bot, Boxes, PackageCheck, ShieldAlert, ShieldCheck } from 'lucide-react'
 
 export default function SettingsPage() {
   return (
@@ -63,6 +63,22 @@ export default function SettingsPage() {
           </div>
         </div>
         <span className="text-sm text-blue-400">Open</span>
+      </Link>
+
+      <Link
+        href="/settings/arsenal"
+        className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900 p-4 hover:bg-gray-800/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-teal-600/20 text-teal-300">
+            <Boxes className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-white">Command Arsenal</h2>
+            <p className="mt-1 text-sm text-gray-400">Read-only command schemas and integrated tool status</p>
+          </div>
+        </div>
+        <span className="text-sm text-teal-300">Open</span>
       </Link>
 
       <Link

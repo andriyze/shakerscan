@@ -128,6 +128,11 @@ called at real sites — verify before re-proposing any of it:
   `evidence_manifest`: target/profile context, deploy decision, OWASP/RAG/agent/MCP-style family
   coverage, skipped reasons, transcript/report links, evidence hashes, semantic-judge status, and
   finding-level replay entry points.
+- **Read-only Command Arsenal and integrated tool status phase 1** — `/arsenal/commands` now exposes
+  schema-versioned product command contracts, risk tiers, required confirmations, scope fields,
+  redaction rules, and evidence contracts. `/arsenal/tools` exposes integrated scanner/tool adapter
+  status with optional read-only version probes. `/settings/arsenal` renders both surfaces without
+  adding a state-changing execution path.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -338,11 +343,12 @@ blocked, and provide safe remediation links without making users infer state fro
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
 
 ### 2. Mission contract, Command Arsenal, and scope/approval receipts
-**Status: CONTRACT NEEDED.** The T3MP3ST adoption plan correctly identifies the missing operating
-model: ShakerScan has many safe/productized primitives, but no single mission contract that can be
-shared by UI, REST, scheduler, AI Ops Router, local-agent planners, and future MCP. The near-term goal
-is not broad agent execution. It is schema-first planning, read-only command discovery, durable scope
-receipts, approval receipts, and audit traces.
+**Status: READ-ONLY ARSENAL PHASE 1 DONE; MISSION/RECEIPT CONTRACTS STILL NEEDED.** The T3MP3ST
+adoption plan correctly identifies the missing operating model: ShakerScan has many safe/productized
+primitives, but no single mission contract that can be shared by UI, REST, scheduler, AI Ops Router,
+local-agent planners, and future MCP. The near-term goal is not broad agent execution. It is
+schema-first planning, read-only command discovery, durable scope receipts, approval receipts, and
+audit traces.
 
 **Implement:**
 1. Define `OperationPlan` with objective, planner metadata, context hash, target scope, allowed hosts,
@@ -355,10 +361,10 @@ receipts, approval receipts, and audit traces.
 3. Define `AgentDecisionTrace` for durable operational trace: planner kind/version, context hash,
    command schema version, proposed/rejected actions, missing inputs, approvals/denials, result
    summaries, evidence refs, and final rationale. Do not store hidden chain-of-thought or raw secrets.
-4. Add a read-only Command Arsenal schema for product actions, not shell commands. Initial commands:
-   `target.list`, `target.get`, `asm.gaps`, `asm.activity`, `scan.result`, `finding.list`,
-   `finding.get`, `ai_target.list`, `model_intake.trust_preview`, `evidence.get`,
-   `deployment.decision`, and `tool.status`.
+4. DONE phase 1: add a read-only Command Arsenal schema for product actions, not shell commands.
+   `/arsenal/commands` currently includes the initial read-only commands plus gated placeholders for
+   state-changing actions such as ASM improve, focused family scans, finding retest, AI probe replay,
+   and Model Intake scans.
 5. Add risk tiers: `read_only`, `passive`, `active`, `intrusive`, `credential`, and `dangerous`.
    Every command must declare status (`contract`, `read_only`, `dry_run`, `gated`, `proof_backed`,
    `experimental`, `catalog_only`, `out_of_scope`), required confirmations, scope fields, redaction

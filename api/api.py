@@ -127,6 +127,15 @@ from target_dedupe import (
 )
 import check_registry
 
+try:
+    from command_arsenal import describe_commands as describe_arsenal_commands
+    from command_arsenal import describe_tools as describe_arsenal_tools
+except ModuleNotFoundError as exc:
+    if exc.name != "command_arsenal":
+        raise
+    from api.command_arsenal import describe_commands as describe_arsenal_commands
+    from api.command_arsenal import describe_tools as describe_arsenal_tools
+
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
 
@@ -11546,6 +11555,20 @@ async def asm_check_families():
         "asm_focus_allowed": list(check_registry.asm_focus_family_names()),
         "default": "all",
     }
+
+
+@app.get("/arsenal/commands")
+async def arsenal_commands():
+    """Read-only Command Arsenal schema for UI, REST clients, AI Ops, and future MCP."""
+    return describe_arsenal_commands()
+
+
+@app.get("/arsenal/tools")
+async def arsenal_tools(
+    probe_versions: bool = Query(False, description="Run short read-only version probes for installed tools."),
+):
+    """Read-only status catalog for already-integrated tool adapters."""
+    return describe_arsenal_tools(probe_versions=bool(probe_versions))
 
 
 class AsmTestRequest(BaseModel):
