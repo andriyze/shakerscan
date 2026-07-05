@@ -267,21 +267,25 @@ will run next, and which button fixes the next blocker" without reading scan JSO
 background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
 live/persisted scheduler decisions. `/schedules` has a visible ASM coverage-wave option and the
 API/DB now expose first-class schedule kinds (`normal_scan`, `asm_improve`) with legacy
-`scan_options.kind` compatibility. `/targets/{id}/asm/activity` now exposes and the ASM UI renders a
-derived campaign timeline that combines scheduler decisions, next eligible time, next recurring ASM
-wave, active scans, last scheduler decision, and recent activity. Remaining work is deeper workflow
-editing and remediation actions, not the base timeline contract.
+`scan_options.kind` compatibility. `/schedules` can now create and edit ASM waves with batch size,
+stale-days, endpoint filter, focused family, and Lab/deep gating; due-run execution honors those
+per-schedule settings when counting claimable work and enqueueing batches. `/targets/{id}/asm/activity`
+now exposes and the ASM UI renders a derived campaign timeline that combines scheduler decisions,
+next eligible time, next recurring ASM wave, active scans, last scheduler decision, and recent
+activity. Remaining work is remediation actions from the timeline, not schedule payload depth.
 
 **Implement:**
 1. DONE: introduce a typed schedule kind (`normal_scan`, `asm_improve`) in API/DB/UI with
    migration/backfill and legacy `scan_options.kind` decode.
 2. DONE: show one unified target timeline: background dispatcher decision, recurring schedule next run,
    current active scan/ASM batch, last activity, and last skip reason.
-3. Let `/schedules` create/edit ASM waves without pretending they have a DAST `scan_type`; expose
-   batch size, stale days, endpoint filter, family, and Lab/deep gating only when relevant. The
-   existing typed UI selector is the starting point, not the final workflow.
-4. Add tests for schedule-kind validation, legacy decode, due-run dispatch, target active-scan skip,
-   and UI payload shape.
+3. DONE: `/schedules` creates/edits ASM waves without pretending they have a DAST `scan_type`; it
+   exposes batch size, stale days, endpoint filter, focused family, and Lab/deep gating only when
+   relevant.
+4. DONE/PARTIAL: schedule-kind validation, legacy decode, due-run dispatch, scoped ASM option
+   execution, and target active-scan skip have backend tests. UI payload shape is covered by
+   TypeScript/production build and browser QA; add component-level tests when the UI test harness
+   expands beyond helper scripts.
 
 **Done when:** "Keep this target covered" is a first-class scheduled/campaign action, not an
 encoded scan option, and users can see why a target did or did not receive ASM work.

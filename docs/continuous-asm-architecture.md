@@ -761,13 +761,16 @@ New quality gaps to track:
 
 Remaining product work from the 2026-07-05 audit:
 
-- Expand ASM schedule editing beyond the typed schedule kind: advanced batch fields, endpoint
-  filter, focused family selection, and Lab/deep BOLA gating where relevant.
+- ASM schedule editing now covers advanced batch fields, endpoint filter, focused family selection,
+  and Lab/deep BOLA gating, and scheduled execution applies those settings during claimable-work
+  selection and batch enqueue. Remaining schedule work is direct remediation/action wiring from the
+  campaign timeline.
 - Enrich the target campaign timeline with direct remediation/edit actions once each action has a
   tested confirmation boundary. Phase 1 derives timeline facts from scheduler state, schedules,
   active scans, and implementation scan/activity rows.
-- Add UI tests for ASM schedule creation/editing, advanced batch fields, endpoint filter, focused
-  family selection, Lab/deep BOLA gating, and skip-reason display.
+- Add component-level UI tests for ASM schedule creation/editing and skip-reason display once the UI
+  test harness grows beyond helper-script coverage; current verification is TypeScript build plus
+  browser QA.
 
 ### Phase E — Multi-Node Readiness
 

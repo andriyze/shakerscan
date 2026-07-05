@@ -2209,15 +2209,26 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 try:
                     cfg_row = await conn.fetchrow(
                         "SELECT asm_config FROM targets WHERE id = $1", target_id)
-                    cfg = asm_inventory.merge_asm_config(
-                        _decode_asm_config(cfg_row["asm_config"]) if cfg_row else {})
+                    cfg = asm_inventory.merge_asm_config({
+                        **(_decode_asm_config(cfg_row["asm_config"]) if cfg_row else {}),
+                        **{k: v for k, v in asm_opts.items() if k in {"batch_size", "stale_days", "exploit_depth"}},
+                    })
+                    check_family = _validate_asm_check_family_value(asm_opts.get("check_family"))
+                    endpoint_filter = _validate_asm_endpoint_filter_value(asm_opts.get("endpoint_filter"))
                     claimable = await asm_inventory.claimable_count(
-                        conn, str(target_id), stale_days=cfg["stale_days"])
+                        conn,
+                        str(target_id),
+                        stale_days=cfg["stale_days"],
+                        check_family=check_family,
+                        endpoint_filter=endpoint_filter,
+                    )
                     if claimable > 0:
                         enq = await _enqueue_asm_exploit_batch(
                             conn, r, str(target_id), target_url, asm_opts,
                             batch_size=min(cfg["batch_size"], claimable),
                             stale_days=cfg["stale_days"], exploit_depth=cfg["exploit_depth"],
+                            check_family=check_family,
+                            endpoint_filter=endpoint_filter,
                             triggered_by="schedule")
                         await conn.execute(
                             "UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", target_id)

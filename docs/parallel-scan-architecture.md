@@ -148,10 +148,12 @@ setting off.
 Product caution from the 2026-07-05 audit: users now see three related controls - one-shot
 parallel scans, Continuous ASM background policy, and recurring schedules that can queue ASM waves.
 The schedules UI/API now expose ASM waves as `schedule_kind='asm_improve'`, with legacy
-`scan_options.kind='asm_improve'` decode for old rows/clients. The ASM activity API/UI now collapse
-these into one target campaign timeline showing "what runs next" and "why nothing ran" instead of
-exposing them as independent knobs. Remaining UX work is action depth: edit schedule wave settings,
-fix blockers, and safely rerun focused families from that timeline.
+`scan_options.kind='asm_improve'` decode for old rows/clients. Operators can create and edit wave
+settings directly: batch size, stale-days, endpoint filter, focused family, and Lab/deep gating.
+Scheduled execution applies those settings both when counting claimable endpoints and when queueing
+the ASM batch. The ASM activity API/UI now collapse these into one target campaign timeline showing
+"what runs next" and "why nothing ran" instead of exposing them as independent knobs. Remaining UX
+work is action depth: fix blockers and safely rerun focused families from that timeline.
 
 Strategic caution: parallelism is a means to run proof campaigns faster, not the differentiator on
 its own. Prefer worker-aware waves, family-specific proof contracts, and evidence completeness over

@@ -637,23 +637,50 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
     schedule = _due_schedule()
     schedule["schedule_kind"] = "asm_improve"
-    schedule["scan_options"] = {"batch_size": 25}
+    schedule["scan_options"] = {
+        "batch_size": 25,
+        "stale_days": 7,
+        "check_family": "sqli",
+        "endpoint_filter": "api",
+        "exploit_depth": True,
+    }
     conn = _FakeConn([schedule])
     redis_client = _RecordingRedis()
     queued = {}
 
-    async def fake_claimable_count(*_args, **_kwargs):
-        return 0
+    async def fake_claimable_count(_conn, target_id, **kwargs):
+        queued["claimable_target_id"] = target_id
+        queued["claimable_kwargs"] = kwargs
+        return 3
 
-    async def fake_enqueue_asm_recon(_conn, _redis, target_id, target_url, asm_opts, *, triggered_by):
+    async def fake_enqueue_asm_exploit_batch(
+        _conn, _redis, target_id, target_url, asm_opts, *,
+        batch_size, stale_days, exploit_depth, check_family=None,
+        endpoint_filter=None, triggered_by,
+    ):
         queued["target_id"] = target_id
         queued["target_url"] = target_url
         queued["asm_opts"] = asm_opts
+        queued["batch_size"] = batch_size
+        queued["stale_days"] = stale_days
+        queued["exploit_depth"] = exploit_depth
+        queued["check_family"] = check_family
+        queued["endpoint_filter"] = endpoint_filter
         queued["triggered_by"] = triggered_by
+        return {"scan_id": "11111111-1111-4111-8111-111111111111"}
+
+    async def fake_enqueue_asm_recon(_conn, _redis, target_id, target_url, asm_opts, *, triggered_by):
+        queued["unexpected_recon"] = {
+            "target_id": target_id,
+            "target_url": target_url,
+            "asm_opts": asm_opts,
+            "triggered_by": triggered_by,
+        }
         return {"scan_id": "11111111-1111-4111-8111-111111111111"}
 
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable_count)
+    monkeypatch.setattr(api_module, "_enqueue_asm_exploit_batch", fake_enqueue_asm_exploit_batch)
     monkeypatch.setattr(api_module, "_enqueue_asm_recon", fake_enqueue_asm_recon)
 
     asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
@@ -662,7 +689,24 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
     assert "INSERT INTO scans" not in executed_sql
     assert "UPDATE schedules SET last_run_at" in executed_sql
     assert queued["triggered_by"] == "schedule"
-    assert queued["asm_opts"] == {"batch_size": 25}
+    assert queued["claimable_kwargs"] == {
+        "stale_days": 7,
+        "check_family": "sqli",
+        "endpoint_filter": "api",
+    }
+    assert queued["asm_opts"] == {
+        "batch_size": 25,
+        "stale_days": 7,
+        "check_family": "sqli",
+        "endpoint_filter": "api",
+        "exploit_depth": True,
+    }
+    assert queued["batch_size"] == 3
+    assert queued["stale_days"] == 7
+    assert queued["exploit_depth"] is True
+    assert queued["check_family"] == "sqli"
+    assert queued["endpoint_filter"] == "api"
+    assert "unexpected_recon" not in queued
 
 
 def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
