@@ -5757,10 +5757,47 @@ def _load_custom_payloads(category: str, include_packs: bool = False) -> list[st
     return out
 
 
+# Techniques that EXTRACT data (heavy, column-count-specific) vs. techniques that
+# DETECT injection (quote/paren closure, boolean, comment, error). When the DBMS
+# is unknown we front-load the detection tier so an early budget cutoff still
+# tries the high-signal closure payloads.
+_SQLI_EXTRACTION_TECHNIQUE_MARKERS = ("union", "schema", "version", "extract", "dump", "col")
+
+
 def _select_sqli_payloads(dbms_key: str | None) -> list[tuple[str, str, str]]:
-    selected_key = dbms_key or "generic"
-    payloads = list(DBMS_SQLI_PAYLOADS.get(selected_key, DBMS_SQLI_PAYLOADS["generic"]))
-    seen = {(payload, technique) for payload, technique, _ in payloads}
+    known_dbms = bool(dbms_key) and dbms_key != "generic" and dbms_key in DBMS_SQLI_PAYLOADS
+    if known_dbms:
+        # Fingerprint succeeded: stay focused on that engine's payloads.
+        payloads = list(DBMS_SQLI_PAYLOADS[dbms_key])
+    else:
+        # DBMS unknown/inconclusive (fingerprint returned nothing — common when a
+        # single-process target degrades under scan load). Do NOT fall back to
+        # generic-only: that set has no paren-closure payloads, so a param wrapped
+        # in ``'))``/``')`` (e.g. Juice Shop's search) is never broken and the SQLi
+        # is missed even though it is trivially present. Cast a wide net across ALL
+        # engine families instead — detection is DBMS-agnostic (_check_sqli_response
+        # scans every error signature), so the only thing that mattered was sending
+        # the right closure payload. On a hit the caller re-fingerprints from the
+        # vulnerable body and self-corrects `dbms`.
+        detection: list[tuple[str, str, str]] = []
+        extraction: list[tuple[str, str, str]] = []
+        families = ["generic"] + [k for k in DBMS_SQLI_PAYLOADS if k != "generic"]
+        for fam in families:
+            for payload, technique, description in DBMS_SQLI_PAYLOADS.get(fam, []):
+                tl = technique.lower()
+                bucket = extraction if any(m in tl for m in _SQLI_EXTRACTION_TECHNIQUE_MARKERS) else detection
+                bucket.append((payload, technique, description))
+        payloads = detection + extraction
+
+    # De-dup (payload, technique) — same payload can recur across families.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[str, str, str]] = []
+    for payload, technique, description in payloads:
+        if (payload, technique) not in seen:
+            seen.add((payload, technique))
+            deduped.append((payload, technique, description))
+    payloads = deduped
+
     for payload, technique, description in SQLI_CROSS_DBMS_FALLBACK_PAYLOADS:
         if (payload, technique) not in seen:
             payloads.append((payload, technique, description))

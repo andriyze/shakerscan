@@ -25,7 +25,65 @@ from scanner_tools.active_checks import (
     _parse_fragment_params,
     _build_fragment_url,
     _is_hash_route,
+    _select_sqli_payloads,
+    _check_sqli_response,
 )
+
+
+# ---------------------------------------------------------------------------
+# SQLi payload selection must NOT be gated behind DBMS fingerprinting: when the
+# DBMS is unknown (fingerprint failed — common when a target degrades under load)
+# the paren-closure payloads that break wrapped WHERE clauses (Juice Shop's
+# ')) search) must still be sent, instead of a generic-only fallback.
+# ---------------------------------------------------------------------------
+
+def _techniques(payloads):
+    return [t for _p, t, _d in payloads]
+
+
+def test_unknown_dbms_includes_paren_closure_payloads():
+    for key in (None, "generic"):
+        techs = _techniques(_select_sqli_payloads(key))
+        # sqlite double-paren closure/boolean that Juice Shop's search needs
+        assert "comment_bypass" in techs, f"{key}: missing ')) --' comment_bypass"
+        assert "boolean_always_true" in techs, f"{key}: missing ')) OR 1=1--'"
+        # and still the generic single-quote boolean
+        assert "boolean" in techs, f"{key}: lost generic boolean"
+        # an actual ')) payload string is present
+        assert any(")) " in p or "))" in p for p, _t, _d in _select_sqli_payloads(key))
+
+
+def test_unknown_dbms_orders_detection_before_extraction():
+    payloads = _select_sqli_payloads(None)
+    first_boolean = next((i for i, (_p, t, _d) in enumerate(payloads) if "boolean" in t.lower()), None)
+    first_union = next((i for i, (_p, t, _d) in enumerate(payloads) if "union" in t.lower()), None)
+    assert first_boolean is not None
+    if first_union is not None:
+        assert first_boolean < first_union, "cheap boolean payloads must precede heavy UNION extraction"
+
+
+def test_known_dbms_stays_focused():
+    # A fingerprinted engine keeps its own family (+fallback+custom) and is NOT
+    # bloated with every other engine's payloads.
+    unknown = _select_sqli_payloads(None)
+    mysql = _select_sqli_payloads("mysql")
+    assert len(mysql) < len(unknown)
+    # mysql-focused must not pull in sqlite-only comment_bypass
+    assert "comment_bypass" not in _techniques(mysql)
+
+
+def test_check_sqli_response_catches_sqlite_error_without_fingerprint():
+    # Detection is DBMS-agnostic: a SQLITE_ERROR in the response (absent from the
+    # baseline) is proof even when dbms_detected is None.
+    body = "<html><title>Error: SQLITE_ERROR: incomplete input</title></html>"
+    baseline = '{"status":"success","data":[]}'
+    is_vuln, evidence = _check_sqli_response(
+        body, len(baseline), 0.1, "comment_bypass", None,
+        status_code=500, baseline_status=200, baseline_elapsed=0.1,
+        baseline_body=baseline, payload="test')--",
+    )
+    assert is_vuln is True
+    assert any("SQL error detected" in e for e in evidence)
 
 
 def test_reachability_gate_drops_only_clear_not_found():
