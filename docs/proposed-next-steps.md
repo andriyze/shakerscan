@@ -342,15 +342,16 @@ low-level signature field, and the UI explains why "signature present" is not th
 ### 5. Detection recall: benchmark misses still matter
 **Status: PARTIAL.** Reflected XSS on id-like path segments shipped
 (`active_checks._injectable_path_segment`). Still historically weak or missed on benchmark apps:
-POST-body SQLi/login coverage, NoSQL operator probes routed to the right JSON/body params, stored
-XSS store-then-render proof, and workflow/write-side BOLA. Body-param SQLi/NoSQL primitives exist
-(`nosql_injection_test_json_body` and body-param sites in `active_checks`), so the near-term gap is
-endpoint/body capture, auth context, and proof routing.
+POST-body SQLi/login coverage, stored XSS store-then-render proof, and workflow/write-side BOLA.
+Body-param SQLi/NoSQL primitives exist (`nosql_injection_test_json_body` and body-param sites in
+`active_checks`), and NoSQL JSON-body checks now emit endpoint-attempt telemetry so ASM/family
+coverage can distinguish completed, partial, and skipped JSON-body probes. The near-term gap is
+still better endpoint/body capture, auth context, and proof routing on benchmark workflows.
 
 **Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
-review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; route NoSQL operators to JSON
-body params; add browser-first reflected/stored XSS proof; add safe Lab/deep workflow/write-BOLA
-checks after graph/principal preconditions exist.
+review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; keep NoSQL operator probes
+attached to JSON-body coverage telemetry; add browser-first reflected/stored XSS proof; add safe
+Lab/deep workflow/write-BOLA checks after graph/principal preconditions exist.
 
 **Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
 finding, not merely an attempted endpoint.

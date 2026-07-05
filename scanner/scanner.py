@@ -10096,6 +10096,10 @@ async def build_report(target: str,
                                     body_template=ep.get("body_template"),
                                     body_param_defaults=ep.get("body_param_defaults") or {},
                                 )
+                                _append_endpoint_attempt_telemetry(
+                                    active_block,
+                                    nosql_result.get("endpoint_attempts"),
+                                )
                                 if nosql_result.get("vulnerable"):
                                     active_block["nosql_injection"].append(nosql_result)
                                     for finding in nosql_result.get("findings", []):

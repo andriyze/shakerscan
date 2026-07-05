@@ -107,8 +107,9 @@ Live Juice Shop and crAPI validation changed the interpretation of "parallel sca
   `scripts/benchmark_targets.py` + `tests/fixtures/benchmarks/*.yaml` (verified vs suspected, coverage,
   per-target gates) so regressions are visible.
 - **What is not working yet:** stored XSS (store-then-render proof) and reflected XSS beyond the hash
-  route are still partial; NoSQLi on discovered GET endpoints is limited; broad all-family runs can
-  over-shard badly; and BOLA depth is still mostly read-side, not workflow/write-side. Note: **parallel
+  route are still partial; NoSQLi still needs better benchmark workflow capture, but JSON-body probes
+  now emit family endpoint-attempt telemetry; broad all-family runs can over-shard badly; and BOLA
+  depth is still mostly read-side, not workflow/write-side. Note: **parallel
   `coverage` mode detects FEWER crit/high than a single Smart scan** on apps like Juice Shop because
   coverage children run zero-rediscovery (no browser/DOM-XSS) and fragment the global posture checks.
 - **Bad pattern observed:** a broad `coverage_family` Juice Shop run planned 140 shards while only

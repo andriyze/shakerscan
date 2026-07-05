@@ -2355,10 +2355,56 @@ async def nosql_injection_test_json_body(
         "params_tested": 0,
         "url": url,
         "method": method,
+        "endpoint_attempts": [],
     }
 
+    params = _coerce_param_names(params)
     if not params:
         return results
+
+    attempt_endpoint: dict[str, Any] = {
+        "url": url,
+        "method": method,
+        "content_type": "application/json",
+        "body_params": list(params),
+    }
+    if isinstance(body_template, dict):
+        attempt_endpoint["body_template"] = body_template
+    attempt = _new_endpoint_attempt(
+        attempt_endpoint,
+        "nosqli",
+        url_override=url,
+        method_override=method,
+        body_params=list(params),
+    )
+
+    def _finalize_attempt(*, skipped_reason: str | None = None) -> None:
+        if results["endpoint_attempts"]:
+            return
+        finished = _finish_endpoint_attempt(attempt, skipped_reason=skipped_reason)
+        if finished:
+            results["endpoint_attempts"].append(finished)
+
+    attempted_param_names: set[str] = set()
+    completed_param_names: set[str] = set()
+
+    def _mark_attempted(names: list[str]) -> None:
+        if attempt is None:
+            return
+        for name in names:
+            if name in attempted_param_names:
+                continue
+            attempted_param_names.add(name)
+            attempt["attempted_params_count"] += 1
+
+    def _mark_completed(names: list[str]) -> None:
+        if attempt is None:
+            return
+        for name in names:
+            if name in completed_param_names:
+                continue
+            completed_param_names.add(name)
+            attempt["completed_params_count"] += 1
 
     meta_pattern = re.compile(r"__SHAKERSCAN_NOSQL__(\d{3})__SHAKERSCAN_NOSQL__$")
 
@@ -2481,6 +2527,7 @@ async def nosql_injection_test_json_body(
     if identity_params and secret_params:
         identity_param = identity_params[0]
         secret_param = secret_params[0]
+        _mark_attempted([identity_param, secret_param])
         baseline_payload = copy.deepcopy(base_body)
         _set_nested_value(baseline_payload, identity_param, _fallback_value_for_param(identity_param), overwrite=True)
         _set_nested_value(baseline_payload, secret_param, "shakerscan_invalid_password_12345", overwrite=True)
@@ -2493,10 +2540,13 @@ async def nosql_injection_test_json_body(
         ] + auth_args + [url]
         baseline_raw, _, baseline_rc = await run(baseline_cmd, timeout=15)
         baseline_out, baseline_code = _parse_meta(baseline_raw or "")
+        if baseline_rc == 0:
+            _mark_completed([identity_param, secret_param])
         if baseline_rc == 0 and baseline_code in (405, 415, 501):
             results["skipped"] = True
             results["reason"] = "method_or_content_type_not_supported"
             results["baseline_status"] = baseline_code
+            _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
             return results
 
         if baseline_rc == 0 and _is_auth_failure(baseline_code, baseline_out):
@@ -2539,10 +2589,12 @@ async def nosql_injection_test_json_body(
                         "payload_length": len(test_out or ""),
                         "response_snippet": test_out[:500] if test_out else "",
                     })
+                    _finalize_attempt()
                     return results
 
     for param in params[:5]:  # Limit to first 5 params
         results["params_tested"] += 1
+        _mark_attempted([param])
 
         # Baseline: send normal request with safe value
         baseline_payload = copy.deepcopy(base_body)
@@ -2564,10 +2616,12 @@ async def nosql_injection_test_json_body(
 
         if baseline_rc != 0:
             continue
+        _mark_completed([param])
         if baseline_code in (405, 415, 501):
             results["skipped"] = True
             results["reason"] = "method_or_content_type_not_supported"
             results["baseline_status"] = baseline_code
+            _finalize_attempt(skipped_reason="method_or_content_type_not_supported")
             return results
 
         # Test each NoSQLi payload
@@ -2697,6 +2751,7 @@ async def nosql_injection_test_json_body(
                 })
                 break  # Found vuln for this param, move to next
 
+    _finalize_attempt()
     return results
 
 

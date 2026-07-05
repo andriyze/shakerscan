@@ -27,6 +27,19 @@ def test_nosql_json_body_stops_on_method_not_allowed(monkeypatch, capsys):
     assert result["reason"] == "method_or_content_type_not_supported"
     assert result["baseline_status"] == 405
     assert result["params_tested"] == 1
+    assert result["endpoint_attempts"] == [
+        {
+            "custom_endpoint": 'POST /api/features json:{"email":"test@example.com","token":"test_token_abc123"}',
+            "family": "nosqli",
+            "method": "POST",
+            "url": "https://example.test/api/features",
+            "param_count": 2,
+            "attempted_params_count": 1,
+            "completed_params_count": 1,
+            "status": "skipped",
+            "skip_reason": "method_or_content_type_not_supported",
+        }
+    ]
     assert len(calls) == 1
     assert capsys.readouterr().err == ""
 
@@ -91,6 +104,18 @@ def test_nosql_json_body_detects_paired_credential_operator_bypass(monkeypatch):
     assert result["findings"][0]["baseline_status"] == 401
     assert result["findings"][0]["payload_status"] == 200
     assert set(result["findings"][0]["success_signals"]) == {"auth_token_or_session", "user_identity_data"}
+    assert result["endpoint_attempts"] == [
+        {
+            "custom_endpoint": 'POST /rest/user/login json:{"email":"test@example.com","password":"wrong"}',
+            "family": "nosqli",
+            "method": "POST",
+            "url": "https://example.test/rest/user/login",
+            "param_count": 2,
+            "attempted_params_count": 2,
+            "completed_params_count": 2,
+            "status": "completed",
+        }
+    ]
     assert len(calls) == 2
 
 
