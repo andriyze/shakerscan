@@ -193,8 +193,9 @@ ordering and more exact implementation boundaries:
   dashboard gap is richer product counts/quick links, not the base action contract.
 - Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
   saved trust-anchor selection/creation. Strict policy profiles can now require saved anchors and
-  matching Model Intake scans inherit them; the next slice is exception/expiry UX, not more low-level
-  signature fields.
+  matching Model Intake scans inherit them. Deployment decisions now expose strict policy-required
+  anchor gaps plus exception hygiene/expiry summaries, so the next slice is exception remediation
+  workflow depth, not more low-level signature fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
@@ -208,8 +209,9 @@ These are the next commit-sized slices, in order:
 1. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
-2. **Model Intake exception/deployment UX:** make trust exceptions, expiry, owner/approver hygiene,
-   and policy-required anchor failures explicit in deployment decisions.
+2. **Model Intake exception/deployment UX:** DONE for decision explanation: trust exceptions, expiry,
+   owner/approver hygiene, and policy-required anchor failures are explicit in deployment decisions.
+   Remaining work is remediation workflow depth from those decision cards.
 3. **AI campaign history polish:** add target-level history export/readiness trends after the current
    target-level run/context summary has soaked.
 
@@ -233,7 +235,8 @@ Use this order when choosing between otherwise-valid work:
   target page. Remaining work is export/readiness trend polish from that history.
 - **P2: Model Intake trust UX.** Guided trust modes and pre-submit trust preview are phase 1 done;
   saved trust anchors, scan selection, and strict policy-profile anchor binding are also phase 1
-  done. Remaining work is clearer exception flows.
+  done. Deployment decisions now explain policy-required anchor gaps and exception hygiene. Remaining
+  work is exception remediation flow polish.
 - **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
   retention/sweeper, redaction consistency, and audit/export manifests.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
@@ -332,7 +335,7 @@ trusted-root, governance, or approval evidence will block or remain advisory bef
 Saved trust-anchor selection/creation/deactivation is now implemented for strict trust mode.
 Policy profiles can now bind required saved trust anchors, and matching strict Model Intake scans
 inherit those anchors before cryptographic trust evaluation. Remaining ergonomics work is clearer
-exception handling and expiry display in deployment decisions.
+exception remediation after deployment decisions surface anchor gaps and exception expiry/hygiene.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
@@ -342,9 +345,10 @@ exception handling and expiry display in deployment decisions.
 3. DONE: clear warnings explain when metadata-supplied keys are evidence but not an operator trust
    root, and strict mode now has a saved trust-anchor selector/manager.
 4. DONE/PARTIAL: helper tests cover each preview mode's core trust semantics, saved-anchor expansion,
-   and policy-profile required-anchor binding. Keep the existing API/e2e signature tests proving
-   trusted verification is reachable only with operator-supplied trust material; add deeper
-   exception-expiry coverage with the remaining deployment-decision UX work.
+   policy-profile required-anchor binding, deployment-decision anchor gaps, and exception hygiene.
+   Keep the existing API/e2e signature tests proving trusted verification is reachable only with
+   operator-supplied trust material; add deeper remediation-action coverage with the remaining
+   exception workflow work.
 
 **Done when:** a developer can submit a model with a valid trust configuration without knowing every
 low-level signature field, and the UI explains why "signature present" is not the same as "trusted."

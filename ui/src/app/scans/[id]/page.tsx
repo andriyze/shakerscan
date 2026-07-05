@@ -197,7 +197,14 @@ function DeploymentDecisionCard({
   const blockingFindings = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings : []
   const blockingCount = blockingFindings.length
   const targetActiveCount = blockingFindings.filter((f) => f?.from_target_active).length
-  const exceptionCount = Array.isArray(decision?.exceptions_applied) ? decision.exceptions_applied.length : 0
+  const appliedExceptions = Array.isArray(decision?.applied_exceptions)
+    ? decision.applied_exceptions
+    : Array.isArray(decision?.exceptions_applied)
+      ? decision.exceptions_applied
+      : []
+  const exceptionCount = appliedExceptions.length
+  const exceptionSummary = decision?.exception_summary
+  const requiredEvidenceMissing = Array.isArray(decision?.required_evidence_missing) ? decision.required_evidence_missing : []
   const verdictClass =
     verdict === 'block'
       ? 'bg-red-900/50 text-red-200'
@@ -231,8 +238,61 @@ function DeploymentDecisionCard({
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
         <span>{blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}</span>
         <span>{exceptionCount} exception{exceptionCount === 1 ? '' : 's'} applied</span>
+        {exceptionSummary?.total !== undefined && <span>{Number(exceptionSummary.total || 0)} exception record{Number(exceptionSummary.total || 0) === 1 ? '' : 's'} evaluated</span>}
         {decision?.expires_at && <span>expires {formatDate(String(decision.expires_at))}</span>}
       </div>
+      {requiredEvidenceMissing.length > 0 && (
+        <div className="mt-3 rounded border border-amber-500/20 bg-amber-500/10 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-amber-200">Required evidence missing</div>
+          <div className="mt-2 grid gap-2 md:grid-cols-2">
+            {requiredEvidenceMissing.slice(0, 6).map((item, index) => (
+              <div key={`${item.id || 'evidence'}-${index}`} className="rounded border border-amber-500/20 bg-gray-950/40 p-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-amber-100">{String(item.label || item.id || 'Evidence')}</span>
+                  {item.status && <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-amber-200">{String(item.status).replace(/_/g, ' ')}</span>}
+                </div>
+                {item.id === 'policy_required_trust_anchors' && (
+                  <div className="mt-1 space-y-1 text-gray-400">
+                    {item.policy_profile && <div>profile: {String(item.policy_profile)}</div>}
+                    {item.signature_verification_status && <div>signature: {String(item.signature_verification_status).replace(/_/g, ' ')}</div>}
+                    {Array.isArray(item.required_trust_anchor_ids) && item.required_trust_anchor_ids.length > 0 && (
+                      <div className="break-all">required anchors: {item.required_trust_anchor_ids.map((id) => id.slice(0, 8)).join(', ')}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {requiredEvidenceMissing.length > 6 && (
+            <p className="mt-2 text-xs text-amber-200">+{requiredEvidenceMissing.length - 6} more evidence requirement{requiredEvidenceMissing.length - 6 === 1 ? '' : 's'}</p>
+          )}
+        </div>
+      )}
+      {exceptionSummary && (
+        <div className="mt-3 rounded border border-gray-800 bg-gray-950/40 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Exception hygiene</div>
+            {exceptionSummary.profile_disables_exceptions && (
+              <span className="rounded bg-red-900/40 px-2 py-0.5 text-xs text-red-200">disabled by profile</span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{Number(exceptionSummary.applied_count || 0)} applied</span>
+            {Number(exceptionSummary.expired || 0) > 0 && <span className="rounded bg-red-900/40 px-2 py-1 text-red-200">{exceptionSummary.expired} expired</span>}
+            {Number(exceptionSummary.expiring_soon || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.expiring_soon} expiring soon</span>}
+            {Number(exceptionSummary.missing_owner || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_owner} missing owner</span>}
+            {Number(exceptionSummary.missing_approver || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_approver} missing approver</span>}
+            {Number(exceptionSummary.missing_compensating_controls || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_compensating_controls} missing controls</span>}
+            {Number(exceptionSummary.missing_expiry || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_expiry} missing expiry</span>}
+            {Number(exceptionSummary.inactive_or_revoked || 0) > 0 && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{exceptionSummary.inactive_or_revoked} inactive/revoked</span>}
+          </div>
+          {Number(exceptionSummary.review_required || 0) > 0 && (
+            <p className="mt-2 text-xs text-amber-200">
+              {exceptionSummary.review_required} exception record{Number(exceptionSummary.review_required) === 1 ? '' : 's'} need review before relying on this gate decision.
+            </p>
+          )}
+        </div>
+      )}
       {blockingCount > 0 && (
         <div className="mt-3 border-t border-gray-800 pt-3">
           {targetActiveCount > 0 && (

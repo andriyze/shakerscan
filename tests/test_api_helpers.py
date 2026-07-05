@@ -1005,6 +1005,81 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
     assert rag_context["deltas"]["decision_changed"] is True
 
 
+def test_deployment_decision_exception_hygiene_summary():
+    decision = api_module.build_deployment_decision(
+        {
+            "id": "scan-exception-summary",
+            "status": "completed",
+            "scan_type": "smart",
+            "run_kind": "web_dast",
+            "result": {"findings": [{"id": "f-high", "severity": "high", "title": "x"}]},
+        },
+        db_exceptions=[
+            {
+                "finding_id": "f-high",
+                "status": "active",
+                "approver": "sec",
+                "owner": "appsec",
+                "compensating_controls": "WAF rule",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            },
+            {"finding_id": "f-high", "status": "active", "expires_at": "2000-01-01T00:00:00+00:00"},
+            {"finding_id": "f-high", "status": "revoked", "approver": "sec", "expires_at": "2999-01-01T00:00:00+00:00"},
+            {"finding_id": "f-high", "status": "active", "owner": "appsec"},
+        ],
+    )
+
+    assert decision["exception_summary"]["total"] == 4
+    assert decision["exception_summary"]["applied_count"] == 1
+    assert decision["exception_summary"]["expired"] == 1
+    assert decision["exception_summary"]["inactive_or_revoked"] == 1
+    assert decision["exception_summary"]["missing_expiry"] == 1
+    assert decision["exception_summary"]["missing_approver"] == 2
+    assert decision["exception_summary"]["missing_owner"] == 2
+    assert decision["exception_summary"]["missing_compensating_controls"] == 3
+    assert decision["exception_summary"]["review_required"] == 3
+
+
+def test_deployment_decision_model_intake_policy_anchor_gap():
+    decision = api_module.build_deployment_decision(
+        {
+            "id": "scan-policy-anchor-gap",
+            "status": "completed",
+            "scan_type": "model_intake",
+            "run_kind": "model_intake",
+            "options": {"environment": "production"},
+            "result": {
+                "model_intake": {
+                    "checks": {"signature_verification": True},
+                    "summary": {
+                        "signature_verified": True,
+                        "signature_trusted_root": False,
+                        "signature_verification_status": "verified_untrusted_root",
+                    },
+                },
+                "result": {"decision": "allow"},
+            },
+        },
+        db_policy_profiles={
+            "production": {
+                "name": "strict-prod",
+                "environment": "production",
+                "minimum_block_severity": "high",
+                "expires_days": 30,
+                "strict_model_intake": True,
+                "id": "production",
+                "required_trust_anchor_ids": ["11111111-1111-4111-8111-111111111111"],
+            }
+        },
+    )
+
+    assert decision["decision"] == "needs_review"
+    gap = next(item for item in decision["required_evidence_missing"] if item["id"] == "policy_required_trust_anchors")
+    assert gap["status"] == "untrusted"
+    assert gap["required_trust_anchor_ids"] == ["11111111-1111-4111-8111-111111111111"]
+    assert gap["signature_trusted_root"] is False
+
+
 def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata():
     request = api_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",

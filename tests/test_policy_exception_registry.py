@@ -139,6 +139,50 @@ def test_policy_scoped_exception_only_applies_under_its_policy():
     assert applied(None) == 1       # unscoped -> applies anywhere
 
 
+def test_deployment_decision_summarizes_exception_hygiene():
+    scan = _scan_with_high_finding()
+    decision = api_module.build_deployment_decision(
+        scan,
+        db_exceptions=[
+            {
+                "finding_id": "f-high",
+                "status": "active",
+                "approver": "sec",
+                "owner": "appsec",
+                "compensating_controls": "WAF rule",
+                "expires_at": FUTURE,
+            },
+            {
+                "finding_id": "f-high",
+                "status": "active",
+                "expires_at": PAST,
+            },
+            {
+                "finding_id": "f-high",
+                "status": "revoked",
+                "approver": "sec",
+                "expires_at": FUTURE,
+            },
+            {
+                "finding_id": "f-high",
+                "status": "active",
+                "owner": "appsec",
+            },
+        ],
+    )
+
+    summary = decision["exception_summary"]
+    assert summary["total"] == 4
+    assert summary["applied_count"] == 1
+    assert summary["expired"] == 1
+    assert summary["inactive_or_revoked"] == 1
+    assert summary["missing_expiry"] == 1
+    assert summary["missing_approver"] == 2
+    assert summary["missing_owner"] == 2
+    assert summary["missing_compensating_controls"] == 3
+    assert summary["review_required"] == 3
+
+
 def test_strict_model_intake_promotes_indeterminate_checks_to_blocking():
     scan = {
         "id": "m1", "status": "completed", "scan_type": "model_intake", "run_kind": "model_intake",
@@ -156,3 +200,38 @@ def test_strict_model_intake_promotes_indeterminate_checks_to_blocking():
     d_lax = api_module.build_deployment_decision(scan, db_policy_profiles=lax)
     assert d_lax["decision"] == "allow"
     assert not d_lax["required_evidence_missing"]
+
+
+def test_strict_model_intake_reports_policy_required_anchor_gap():
+    scan = {
+        "id": "m2", "status": "completed", "scan_type": "model_intake", "run_kind": "model_intake",
+        "options": json.dumps({"environment": "production"}),
+        "result": {
+            "model_intake": {
+                "checks": {"signature_verification": True},
+                "summary": {
+                    "signature_verified": True,
+                    "signature_trusted_root": False,
+                    "signature_verification_status": "verified_untrusted_root",
+                },
+            },
+            "result": {"decision": "allow"},
+        },
+    }
+    strict = {"production": {
+        "name": "strict-prod",
+        "environment": "production",
+        "minimum_block_severity": "high",
+        "expires_days": 30,
+        "strict_model_intake": True,
+        "id": "production",
+        "required_trust_anchor_ids": ["11111111-1111-4111-8111-111111111111"],
+    }}
+
+    decision = api_module.build_deployment_decision(scan, db_policy_profiles=strict)
+
+    assert decision["decision"] == "needs_review"
+    anchor_gap = next(item for item in decision["required_evidence_missing"] if item["id"] == "policy_required_trust_anchors")
+    assert anchor_gap["status"] == "untrusted"
+    assert anchor_gap["required_trust_anchor_ids"] == ["11111111-1111-4111-8111-111111111111"]
+    assert anchor_gap["signature_trusted_root"] is False

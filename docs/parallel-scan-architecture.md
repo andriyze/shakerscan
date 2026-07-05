@@ -8,7 +8,7 @@
 **2026-07-05 audit note:** the parallel substrate is no longer the main product gap. The latest
 roadmap is in [proposed-next-steps.md](proposed-next-steps.md): ShakerScan's north star is
 proof-first Continuous Exposure Management for owned web, API, and AI systems. Prioritize detector
-recall campaigns, graph consumers, externalized evidence, deployment/exception UX, and
+recall campaigns, graph consumers, externalized evidence, exception remediation workflow depth, and
 registry-driven proof contracts before adding more fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
 policy/gaps/improve/activity responses and persisted target metadata; Dashboard Action Center CTAs
 link to the safe next steps; ASM waves are now a typed schedule kind with legacy
@@ -17,8 +17,9 @@ single target campaign timeline from scheduler, schedule, active-scan, and activ
 scan detail can now rerun skipped/error/family/all campaign slices and selected transcript probes;
 scan detail also compares recent same-context runs, and the AI Gate target page now exposes
 target-level longitudinal campaign history. Model Intake strict trust mode now supports saved
-operator trust anchors by ID and strict policy profiles can require saved anchors; remaining trust UX
-work is exception flows.
+operator trust anchors by ID, strict policy profiles can require saved anchors, and deployment
+decisions explain policy-required anchor gaps plus exception expiry/hygiene; remaining trust UX work
+is remediation flow polish.
 
 > **How to read this doc.** It is now scoped to one thing: parallel execution for one logical scan.
 > 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and

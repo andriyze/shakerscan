@@ -3753,6 +3753,79 @@ def _deployment_gate_required_evidence_missing(
     return missing
 
 
+def _model_intake_policy_anchor_missing(result: dict[str, Any], policy_profile: dict[str, Any]) -> list[dict[str, Any]]:
+    if not bool(policy_profile.get("strict_model_intake")):
+        return []
+    required_ids = _str_list(_decode_json_value(policy_profile.get("required_trust_anchor_ids")))
+    if not required_ids:
+        return []
+    model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+    summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
+    if summary.get("signature_trusted_root") is True:
+        return []
+    verified = summary.get("signature_verified") or summary.get("signature_cryptographically_verified")
+    return [{
+        "id": "policy_required_trust_anchors",
+        "label": "Policy-required trust anchors",
+        "status": "untrusted" if verified else "missing",
+        "required_trust_anchor_ids": required_ids,
+        "policy_profile": policy_profile.get("name") or policy_profile.get("id"),
+        "signature_trusted_root": summary.get("signature_trusted_root"),
+        "signature_verification_status": summary.get("signature_verification_status"),
+    }]
+
+
+def _exception_hygiene_summary(
+    exceptions: list[dict[str, Any]],
+    applied_exceptions: list[dict[str, Any]],
+    *,
+    exceptions_disabled: bool = False,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    expiring_cutoff = now + timedelta(days=7)
+    summary = {
+        "total": len(exceptions),
+        "applied_count": len(applied_exceptions),
+        "profile_disables_exceptions": bool(exceptions_disabled),
+        "expired": 0,
+        "expiring_soon": 0,
+        "missing_owner": 0,
+        "missing_approver": 0,
+        "missing_compensating_controls": 0,
+        "missing_expiry": 0,
+        "inactive_or_revoked": 0,
+        "review_required": 0,
+    }
+    for item in exceptions:
+        status = str(item.get("status") or item.get("decision") or "active").strip().lower()
+        expires_at = _parse_iso_datetime(item.get("expires_at") or item.get("expiry"))
+        weak = False
+        if status not in {"active", "approved", "accepted_risk"}:
+            summary["inactive_or_revoked"] += 1
+            weak = True
+        if expires_at is None:
+            summary["missing_expiry"] += 1
+            weak = True
+        elif expires_at <= now or status == "expired":
+            summary["expired"] += 1
+            weak = True
+        elif expires_at <= expiring_cutoff:
+            summary["expiring_soon"] += 1
+            weak = True
+        if not item.get("owner"):
+            summary["missing_owner"] += 1
+            weak = True
+        if not item.get("approved_by") and not item.get("approver"):
+            summary["missing_approver"] += 1
+            weak = True
+        if not item.get("compensating_controls"):
+            summary["missing_compensating_controls"] += 1
+            weak = True
+        if weak:
+            summary["review_required"] += 1
+    return summary
+
+
 POLICY_PROFILES: dict[str, dict[str, Any]] = {
     "development": {
         "name": "development-ai-v1",
@@ -3969,6 +4042,8 @@ def build_deployment_decision(
         product,
         strict_model_intake=bool(policy_profile.get("strict_model_intake")),
     )
+    if product == "model_intake" and isinstance(result, dict):
+        missing.extend(_model_intake_policy_anchor_missing(result, policy_profile))
     if raw_decision == "allow" and missing:
         raw_decision = "needs_review"
         rationale = "Required deployment evidence is missing or incomplete."
@@ -4015,6 +4090,11 @@ def build_deployment_decision(
         applied_exceptions: list[dict[str, Any]] = []
     else:
         blocking_findings, applied_exceptions = _apply_policy_exceptions(blocking_findings, exceptions)
+    exception_summary = _exception_hygiene_summary(
+        exceptions,
+        applied_exceptions,
+        exceptions_disabled=exceptions_disabled,
+    )
     if blocking_findings and raw_decision == "allow":
         raw_decision = "block"
         rationale = f"{len(blocking_findings)} finding(s) meet the {policy_profile['id']} block threshold."
@@ -4033,6 +4113,7 @@ def build_deployment_decision(
         "blocking_findings": blocking_findings,
         "applied_exceptions": applied_exceptions,
         "exceptions_disabled_by_profile": exceptions_disabled,
+        "exception_summary": exception_summary,
         "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
         "required_evidence_missing": missing,
         "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),

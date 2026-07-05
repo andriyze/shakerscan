@@ -24,14 +24,15 @@ modern apps, APIs, and AI systems. External ASM vendors are strong at discoverin
 internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
 authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
 evidence. The backend foundations are ahead of the operator workflow: graph-driven campaign
-consumers, detector recall campaigns, and deployment/exception UX are the next product priorities.
+consumers, detector recall campaigns, and exception remediation workflow depth are the next product priorities.
 First-pass next-action / skip-reason state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
 dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. ASM waves are
 now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy
 `scan_options.kind='asm_improve'` compatibility. ASM activity now also returns a derived target
 campaign `timeline` that merges scheduler state, next ASM schedule, active scans, and recent
-campaign activity. Model Intake now has guided trust modes and a pass/fail/advisory pre-submit
-preview, saved operator trust anchors, and strict policy-profile required anchors. AI Gate scan detail now surfaces a
+campaign activity. Model Intake now has guided trust modes, a pass/fail/advisory pre-submit
+preview, saved operator trust anchors, strict policy-profile required anchors, and deployment
+decisions that explain policy-required anchor gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
 campaign review panel from the stored coverage matrix/evidence manifest and can queue scan-level
 reruns for skipped probes, errored families, selected families, selected transcript probes, or all
 probes. Scan detail now also compares recent same-context AI Gate runs, and the AI Gate target page

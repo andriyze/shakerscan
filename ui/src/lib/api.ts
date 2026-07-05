@@ -1747,7 +1747,30 @@ export interface DeploymentDecision {
   rationale?: string
   reason?: string
   blocking_findings?: DeploymentBlockingFinding[]
+  applied_exceptions?: unknown[]
   exceptions_applied?: unknown[]
+  exception_summary?: {
+    total?: number
+    applied_count?: number
+    profile_disables_exceptions?: boolean
+    expired?: number
+    expiring_soon?: number
+    missing_owner?: number
+    missing_approver?: number
+    missing_compensating_controls?: number
+    missing_expiry?: number
+    inactive_or_revoked?: number
+    review_required?: number
+  }
+  required_evidence_missing?: Array<{
+    id?: string
+    label?: string
+    status?: string
+    required_trust_anchor_ids?: string[]
+    policy_profile?: string
+    signature_trusted_root?: boolean | null
+    signature_verification_status?: string | null
+  }>
   expires_at?: string
   [key: string]: unknown
 }
