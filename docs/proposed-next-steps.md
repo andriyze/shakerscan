@@ -208,8 +208,10 @@ ordering and more exact implementation boundaries:
 - Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
   saved trust-anchor selection/creation. Strict policy profiles can now require saved anchors and
   matching Model Intake scans inherit them. Deployment decisions now expose strict policy-required
-  anchor gaps plus exception hygiene/expiry summaries, so the next slice is exception remediation
-  workflow depth, not more low-level signature fields.
+  anchor gaps plus exception hygiene/expiry summaries, and dashboard Model Intake trust blockers now
+  open `/settings/model-intake?remediate=trust`, which selects the strict trusted-anchor path and
+  focuses the trust remediation panel. Remaining work is broader exception remediation workflow depth,
+  not more low-level signature fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
@@ -298,8 +300,10 @@ blocked, and provide safe remediation links without making users infer state fro
    Model Intake, policy exceptions, deployment gates, and worker freshness. Do not compute these
    counts only in the browser.
 6. PARTIAL/NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
-   open missing-auth/second-user blockers, open exception hygiene filters, open Model Intake trust
-   remediation, open AI Gate readiness/control gaps, and open worker rebuild/scale controls.
+   open missing-auth/second-user blockers, open exception hygiene filters, open AI Gate
+   readiness/control gaps, and open worker rebuild/scale controls. DONE for Model Intake trust
+   blockers: `/settings/model-intake?remediate=trust` selects strict trusted-anchor mode, highlights
+   the trust controls, and links exception hygiene.
 
 **Done when:** a junior operator can answer, from one screen, "what is risky, what is blocked, what
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
@@ -370,8 +374,9 @@ trust modes plus a pre-submit pass/fail/advisory preview, so users can see why c
 trusted-root, governance, or approval evidence will block or remain advisory before queueing.
 Saved trust-anchor selection/creation/deactivation is now implemented for strict trust mode.
 Policy profiles can now bind required saved trust anchors, and matching strict Model Intake scans
-inherit those anchors before cryptographic trust evaluation. Remaining ergonomics work is clearer
-exception remediation after deployment decisions surface anchor gaps and exception expiry/hygiene.
+inherit those anchors before cryptographic trust evaluation. Dashboard Model Intake blockers now open
+the trust-remediation route state. Remaining ergonomics work is clearer exception remediation after
+deployment decisions surface anchor gaps and exception expiry/hygiene.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline

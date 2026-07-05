@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardSkeleton, ErrorState, useToast } from '@/components/ui'
 import {
@@ -284,8 +284,29 @@ function metadataString(metadata: Record<string, unknown> | undefined, key: stri
 }
 
 export default function ModelIntakeSettingsPage() {
+  return (
+    <Suspense fallback={<ModelIntakePageFallback />}>
+      <ModelIntakeSettingsContent />
+    </Suspense>
+  )
+}
+
+function ModelIntakePageFallback() {
+  return (
+    <div className="min-w-0 max-w-full space-y-6">
+      <CardSkeleton />
+      <CardSkeleton />
+      <CardSkeleton />
+    </div>
+  )
+}
+
+function ModelIntakeSettingsContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const toast = useToast()
+  const trustSectionRef = useRef<HTMLDivElement | null>(null)
+  const [trustRemediationApplied, setTrustRemediationApplied] = useState(false)
   const [platform, setPlatform] = useState<ModelIntakePlatform>('auto')
   const [sourceRef, setSourceRef] = useState('')
   const [revision, setRevision] = useState('')
@@ -385,6 +406,28 @@ export default function ModelIntakeSettingsPage() {
     loadTrustAnchors()
   }, [loadScenario, loadPolicyProfiles, loadTrustAnchors])
 
+  const remediationMode = searchParams.get('remediate')
+  const trustRemediationMode = remediationMode === 'trust'
+
+  useEffect(() => {
+    if (!trustRemediationMode || trustRemediationApplied) return
+    setPolicyProfile('strict')
+    setRequireHash(true)
+    setRequireSignature(true)
+    setRequireSignatureVerification(true)
+    setRequireModelGovernance(true)
+    setRequireDeploymentApproval(true)
+    setTrustMode('trusted_key_fingerprint')
+    setMaxDownloadBytes((current) => {
+      const parsed = Number(current)
+      return Number.isFinite(parsed) && parsed >= 50_000_000 ? current : '50000000'
+    })
+    setTrustRemediationApplied(true)
+    window.requestAnimationFrame(() => {
+      trustSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }, [trustRemediationApplied, trustRemediationMode])
+
   const selectedPlatform = platform === 'auto'
     ? AUTO_PLATFORM_OPTION
     : PLATFORM_OPTIONS.find((item) => item.value === platform) || PLATFORM_OPTIONS[0]
@@ -400,6 +443,16 @@ export default function ModelIntakeSettingsPage() {
     () => savedPolicyProfiles.filter((profile) => profile.is_active),
     [savedPolicyProfiles]
   )
+
+  useEffect(() => {
+    if (!trustRemediationMode) return
+    const strictProfile = activeSavedPolicyProfiles.find((profile) =>
+      profile.strict_model_intake && profile.environment === 'strict'
+    )
+    const requiredAnchorIds = strictProfile?.required_trust_anchor_ids || []
+    if (!requiredAnchorIds.length) return
+    setSelectedTrustAnchorIds((prev) => Array.from(new Set([...prev, ...requiredAnchorIds])))
+  }, [activeSavedPolicyProfiles, trustRemediationMode])
   const selectedTrustAnchors = useMemo(
     () => savedTrustAnchors.filter((anchor) => selectedTrustAnchorIds.includes(anchor.id)),
     [savedTrustAnchors, selectedTrustAnchorIds]
@@ -837,6 +890,31 @@ export default function ModelIntakeSettingsPage() {
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
+      {trustRemediationMode && (
+        <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/30 p-4 text-sm text-cyan-100">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 font-medium text-white">
+                <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                Model trust remediation
+              </div>
+              <p className="mt-1 text-cyan-100/80">
+                Strict signing checks are selected. Add or select an operator trust anchor, provide
+                signature evidence, and confirm the preview before queueing the replacement intake scan.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a href="#model-intake-trust-remediation" className="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
+                Trust controls
+              </a>
+              <Link href="/settings/exceptions?queue_filter=expired" className="rounded border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-800">
+                Exception hygiene
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Card className="min-w-0 p-4">
         <div className="flex items-center gap-2 text-white">
           <Wand2 className="h-4 w-4 text-cyan-300" />
@@ -1093,7 +1171,13 @@ export default function ModelIntakeSettingsPage() {
           </label>
         </div>
 
-        <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+        <div
+          id="model-intake-trust-remediation"
+          ref={trustSectionRef}
+          className={`min-w-0 scroll-mt-24 space-y-3 rounded-lg border bg-gray-950 p-3 ${
+            trustRemediationMode ? 'border-cyan-500/60 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]' : 'border-gray-800'
+          }`}
+        >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
               <ShieldCheck className="h-4 w-4 text-cyan-300" />

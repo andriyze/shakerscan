@@ -483,6 +483,7 @@ def test_dashboard_action_center_prioritizes_server_derived_items():
     assert by_id["next-asm-schedule"]["priority"] == "info"
     assert by_id["recent-failed-scans"]["actions"][1]["label"] == "Latest failed scan"
     assert by_id["model-intake-untrusted-signatures"]["samples"][0]["detail"] == "signature status: untrusted_root"
+    assert by_id["model-intake-untrusted-signatures"]["actions"][0]["href"] == "/settings/model-intake?remediate=trust"
     assert by_id["model-intake-untrusted-signatures"]["actions"][1]["label"] == "Latest scan"
 
 
@@ -580,6 +581,8 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     assert by_id["ai_gate"]["status"] == "warning"
     assert by_id["ai_gate"]["secondary_label"] == "control gaps"
     assert by_id["model_intake"]["status"] == "critical"
+    assert by_id["model_intake"]["href"] == "/settings/model-intake?remediate=trust"
+    assert by_id["model_intake"]["actions"][0]["label"] == "Fix trust"
     assert by_id["model_intake"]["actions"][1]["href"] == "/findings?source_type=model_intake&status=active"
     assert by_id["exceptions"]["href"] == "/settings/exceptions?queue_filter=expired"
     assert by_id["deployment"]["primary_count"] == 1

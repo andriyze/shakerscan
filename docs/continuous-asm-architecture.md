@@ -35,8 +35,9 @@ and quick links across DAST, ASM, AI Gate, Model Intake, exceptions, deployment 
 The next ASM product work is not another schedule bridge or dashboard-count strip; it is
 family-aware campaign quality, graph-driven hypotheses, and safe remediation flow. Model Intake now
 has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors, strict
-policy-profile required anchors, and deployment decisions that explain policy-required anchor gaps
-plus exception expiry/hygiene. AI Gate scan detail now surfaces a
+policy-profile required anchors, a dashboard trust-remediation route
+(`/settings/model-intake?remediate=trust`), and deployment decisions that explain policy-required
+anchor gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
 campaign review panel from the stored coverage matrix/evidence manifest and can queue scan-level
 reruns for skipped probes, errored families, selected families, selected transcript probes, or all
 probes. Scan detail now also compares recent same-context AI Gate runs, and the AI Gate target page

@@ -8212,13 +8212,13 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="Model Intake",
             status=status,
             summary=summary,
-            href="/settings/model-intake",
+            href="/settings/model-intake?remediate=trust" if active_findings or untrusted else "/settings/model-intake",
             primary_count=active_findings,
             primary_label="findings",
             secondary_count=untrusted,
             secondary_label="untrusted",
             actions=[
-                {"label": "Model Intake", "href": "/settings/model-intake", "variant": "primary"},
+                {"label": "Fix trust", "href": "/settings/model-intake?remediate=trust", "variant": "primary"},
                 {"label": "Model findings", "href": "/findings?source_type=model_intake&status=active", "variant": "secondary"},
             ],
         ))
@@ -8668,7 +8668,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 href="/settings/model-intake",
                 action_label="Review intake",
                 actions=[
-                    {"label": "Model Intake", "href": "/settings/model-intake", "variant": "primary"},
+                    {"label": "Fix model trust", "href": "/settings/model-intake?remediate=trust", "variant": "primary"},
                     {"label": "Latest scan", "href": samples[0]["href"] if samples else "/settings/model-intake", "variant": "secondary"},
                 ],
                 count=len(model_rows),
