@@ -3,10 +3,11 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, formatDuration, formatDate, type DeploymentDecision } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
+import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -287,6 +288,154 @@ function deploySeverityClass(severity?: string): string {
     default:
       return 'bg-gray-700 text-gray-300'
   }
+}
+
+function formatAiGateLabel(value: string | null | undefined): string {
+  return String(value || 'unknown').replace(/_/g, ' ')
+}
+
+function AiGateCampaignReviewCard({ scan }: { scan: any }) {
+  const review: AiGateCampaignReview = buildAiGateCampaignReview(scan?.result)
+  if (!review.available) return null
+
+  const coveragePct = review.planned > 0 ? Math.round((review.executed / review.planned) * 100) : 0
+  const transcriptUrl = `${API_URL}/ai/scans/${scan.id}/transcript`
+  const reportUrl = `${API_URL}/scans/${scan.id}/ai-redteam-report`
+  const decisionClass =
+    review.decision === 'block'
+      ? 'bg-red-900/50 text-red-200'
+      : review.decision === 'allow'
+        ? 'bg-green-900/50 text-green-200'
+        : 'bg-amber-900/50 text-amber-200'
+
+  return (
+    <Card className="p-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-300">AI Red-Team Campaign</h2>
+          <p className="mt-0.5 text-xs text-gray-500">
+            {review.target_name || 'AI target'} · {formatAiGateLabel(review.target_type)} · {formatAiGateLabel(review.probe_pack)} · {formatAiGateLabel(review.scan_profile)}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {review.decision && (
+            <span className={`rounded px-2 py-1 text-xs ${decisionClass}`}>{formatAiGateLabel(review.decision)}</span>
+          )}
+          {review.environment && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{formatAiGateLabel(review.environment)}</span>}
+          {review.judging_gate_status && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">judge {formatAiGateLabel(review.judging_gate_status)}</span>}
+        </div>
+      </div>
+
+      {review.rationale && <p className="mt-3 text-sm text-gray-300">{review.rationale}</p>}
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <CoverageMetric label="Planned probes" value={review.planned} />
+        <CoverageMetric label="Executed" value={`${review.executed} (${coveragePct}%)`} accent={review.executed ? 'text-green-300' : 'text-gray-300'} />
+        <CoverageMetric label="Skipped" value={review.skipped} accent={review.skipped ? 'text-yellow-300' : 'text-gray-300'} />
+        <CoverageMetric label="Transcripts" value={review.with_transcripts} accent={review.with_transcripts ? 'text-blue-300' : 'text-gray-300'} />
+        <CoverageMetric label="Finding probes" value={review.with_findings} accent={review.with_findings ? 'text-red-300' : 'text-gray-300'} />
+        <CoverageMetric label="Errors" value={review.errors} accent={review.errors ? 'text-red-300' : 'text-gray-300'} />
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+        <div className="min-w-0 rounded border border-gray-800 bg-gray-950/50 p-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Coverage Matrix</div>
+          {review.families.length ? (
+            <div className="space-y-2">
+              {review.families.slice(0, 8).map((family) => (
+                <div key={family.family} className="rounded border border-gray-800 bg-gray-900/60 p-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="font-medium text-gray-200">{formatAiGateLabel(family.family)}</span>
+                    <span className="text-gray-500">{family.executed}/{family.planned} executed</span>
+                  </div>
+                  <div className="mt-2 h-1.5 rounded bg-gray-800">
+                    <div
+                      className="h-1.5 rounded bg-purple-500"
+                      style={{ width: `${family.planned ? Math.min(100, Math.round((family.executed / family.planned) * 100)) : 0}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-500">
+                    <span>{family.with_transcript} transcript{family.with_transcript === 1 ? '' : 's'}</span>
+                    <span>{family.with_findings} finding probe{family.with_findings === 1 ? '' : 's'}</span>
+                    {family.skipped > 0 && <span>{family.skipped} skipped</span>}
+                    {family.errors > 0 && <span className="text-red-300">{family.errors} errors</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No family coverage matrix was stored for this run.</p>
+          )}
+        </div>
+
+        <div className="min-w-0 space-y-3">
+          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Skipped / Blocked</div>
+            {review.skipped_reasons.length ? (
+              <div className="space-y-2">
+                {review.skipped_reasons.slice(0, 6).map((reason) => (
+                  <div key={reason.reason} className="rounded bg-gray-900/70 p-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-gray-200">{formatAiGateLabel(reason.reason)}</span>
+                      <span className="text-yellow-300">{reason.count}</span>
+                    </div>
+                    <div className="mt-1 break-words text-gray-500">{reason.families.map(formatAiGateLabel).join(', ')}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No skipped probes were recorded.</p>
+            )}
+          </div>
+
+          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Evidence Pack</div>
+            <div className="space-y-1 text-xs text-gray-500">
+              {review.planned_hash && <div className="truncate">planned: <span className="font-mono text-gray-300">{review.planned_hash}</span></div>}
+              {review.executed_hash && <div className="truncate">executed: <span className="font-mono text-gray-300">{review.executed_hash}</span></div>}
+              {review.transcripts_hash && <div className="truncate">transcripts: <span className="font-mono text-gray-300">{review.transcripts_hash}</span></div>}
+              {review.execution_plan_hash && <div className="truncate">plan: <span className="font-mono text-gray-300">{review.execution_plan_hash}</span></div>}
+              {review.evidence_manifest_hash && <div className="truncate">manifest: <span className="font-mono text-gray-300">{review.evidence_manifest_hash}</span></div>}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <a href={transcriptUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                Transcripts
+              </a>
+              <a href={reportUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                Export report
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {review.findings.length > 0 && (
+        <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Replay / Rerun Findings</div>
+          <div className="grid gap-2 lg:grid-cols-2">
+            {review.findings.map((finding) => (
+              <div key={finding.id || `${finding.title}-${finding.probe_id}`} className="rounded border border-gray-800 bg-gray-900/60 p-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${deploySeverityClass(finding.severity)}`}>
+                    {finding.severity}
+                  </span>
+                  <span className="min-w-0 flex-1 break-words text-xs text-gray-200">{finding.title}</span>
+                </div>
+                <div className="mt-1 text-[11px] text-gray-500">
+                  {finding.probe_id || 'probe unknown'}{finding.probe_family ? ` · ${formatAiGateLabel(finding.probe_family)}` : ''}
+                </div>
+                {finding.id && (
+                  <Link href={`/findings/${finding.id}`} className="mt-2 inline-block rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                    Review / replay
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  )
 }
 
 function ParentCoverageRollup({ scan }: { scan: any }) {
@@ -808,6 +957,7 @@ function ScanDetailContent() {
           <FailedScanPanel scan={scan} hasPartialResults={true} />
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
+          <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
             loading={deploymentDecisionLoading}
@@ -854,6 +1004,7 @@ function ScanDetailContent() {
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
+      <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
         loading={deploymentDecisionLoading}

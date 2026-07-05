@@ -111,6 +111,11 @@ called at real sites — verify before re-proposing any of it:
   signature, trusted-root, governance, and approval readiness as pass/fail/advisory before queueing.
   Metadata-supplied signing data is explicitly shown as publisher evidence, not an operator trust
   root.
+- **AI red-team campaign review phase 1** — completed AI Gate scan detail pages now render an
+  AI Red-Team Campaign panel from the stored `ai_gate.coverage_matrix`, `execution_plan`, and
+  `evidence_manifest`: target/profile context, deploy decision, OWASP/RAG/agent/MCP-style family
+  coverage, skipped reasons, transcript/report links, evidence hashes, semantic-judge status, and
+  finding-level replay entry points.
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
@@ -170,15 +175,17 @@ ordering and more exact implementation boundaries:
 - Model Intake has the low-level trust fields in API/UI and now has guided trust modes plus a
   pre-submit preview. The next slice is saved trust-anchor management and policy-profile integration,
   not more low-level signature fields.
-- AI Gate has transcripts, reports, adaptive probes, MCP readiness, and control evidence, but lacks a
-  campaign review/replay surface that explains planned/executed/skipped probes by risk family.
+- AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, and now a
+  first campaign review surface on scan detail. Remaining gaps are scan-level rerun/replay actions,
+  run comparison, and deeper campaign history outside a single scan.
 
 ### Immediate implementation sequence
 
 These are the next commit-sized slices, in order:
 
-1. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
-   matrix, skipped-probe reasons, transcript/report export, and gated rerun/replay actions.
+1. **AI red-team scan-level replay/history:** build on the scan-detail campaign panel with gated
+   rerun of skipped/failed probe families, replay of selected transcripts, and cross-run campaign
+   comparison.
 2. **Model Intake saved trust anchors:** add saved trust-anchor management/selection and connect
    strict policy profiles to explicit operator anchors.
 3. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
@@ -198,9 +205,9 @@ Use this order when choosing between otherwise-valid work:
 - **P1: close benchmark proof gaps.** Browser-first/stored XSS, POST-body SQLi, NoSQL JSON/body
   routing, workflow/write-BOLA, mass assignment, JWT/session weakness, and deterministic retest
   loops per verified family.
-- **P1: AI red-team campaign UX.** Campaign review, OWASP LLM/RAG/agent/MCP coverage matrix,
-  skipped/blocked probe reasons, replay/rerun, transcript evidence, control inventory, and deploy
-  decisions.
+- **P1: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
+  transcript/report links, finding-level replay entry points, and deploy decisions are phase 1 done.
+  Remaining work is scan-level rerun/replay, transcript-level replay, and cross-run comparison.
 - **P2: Model Intake trust UX.** Guided trust modes and pre-submit trust preview are phase 1 done;
   remaining work is saved trust anchors, policy-profile anchor binding, and clearer exception flows.
 - **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
@@ -259,20 +266,23 @@ editing and remediation actions, not the base timeline contract.
 encoded scan option, and users can see why a target did or did not receive ASM work.
 
 ### 3. AI red-team campaign UX and replay loop
-**Status: PARTIAL.** AI Gate has targets, scenario presets, deterministic/semantic judging,
+**Status: PARTIAL, PHASE 1 REVIEW DONE.** AI Gate has targets, scenario presets, deterministic/semantic judging,
 redacted transcripts (`GET /ai/scans/{id}/transcript`), transcript purge, MCP readiness, control
 inventory (`api.ai_assurance`), adaptive logic (`api/ai_gate/adaptive.py`), and red-team report
-export (`GET /scans/{id}/ai-redteam-report` / `api.get_ai_redteam_report`). It still feels
-target/scan-centric, not campaign-centric.
+export (`GET /scans/{id}/ai-redteam-report` / `api.get_ai_redteam_report`). Completed scan detail
+now renders a campaign review card backed by `ai_gate.coverage_matrix`, `execution_plan`, and
+`evidence_manifest`. It still needs scan-level replay/rerun and cross-run campaign history.
 
 **Implement:**
-1. Add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
+1. DONE: add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
    control inventory, skipped probes, transcripts, findings, semantic judge output, and report export.
-2. Add an OWASP LLM / RAG / agent / MCP coverage matrix: planned, executed, skipped, blocked by
+2. DONE: add an OWASP LLM / RAG / agent / MCP coverage matrix: planned, executed, skipped, blocked by
    safety profile, finding count, and evidence hash per family.
-3. Add "rerun failed/skipped probes" and "replay this transcript/finding" actions that preserve
-   production confirmation and rate/budget controls.
-4. Promote MCP readiness and missing-control findings into the Action Center from §1.
+3. PARTIAL: finding-level replay entry points link to finding detail, where focused AI Gate replay
+   already preserves production confirmation. Still add scan-level "rerun failed/skipped probes" and
+   transcript-level replay actions with explicit budget/production gates.
+4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
+   AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared, and defended as a campaign
 artifact instead of a loose scan report.
