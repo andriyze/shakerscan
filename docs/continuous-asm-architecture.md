@@ -23,12 +23,13 @@ that ASM should expose as family/proof/workflow gaps.
 modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
 internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
 authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
-evidence. The backend foundations are ahead of the operator workflow: first-class ASM schedule kinds,
-one target campaign timeline, AI red-team campaign UX, and guided Model Intake trust UX are the next
-product priorities. First-pass next-action / skip-reason state is now live:
-ASM policy/gaps/improve/activity return `scheduler_state`, and dispatcher/scheduler decisions
-persist to `targets.metadata_json.asm_last_decision`. The schedules UI has an ASM coverage-wave
-selector, but the API/DB contract still encodes it as `scan_options.kind='asm_improve'`.
+evidence. The backend foundations are ahead of the operator workflow: one target campaign timeline,
+AI red-team campaign UX, and guided Model Intake trust UX are the next product priorities. First-pass
+next-action / skip-reason state is now live: ASM policy/gaps/improve/activity return
+`scheduler_state`, and dispatcher/scheduler decisions persist to
+`targets.metadata_json.asm_last_decision`. ASM waves are now a first-class schedule kind
+(`schedules.schedule_kind='asm_improve'`) with legacy `scan_options.kind='asm_improve'`
+compatibility.
 
 ---
 
@@ -138,9 +139,9 @@ Shipped pieces:
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
   inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, ASM
   activity, policy presets, local-time window helper, and new-surface feed.
-- `/schedules` gives users a first UI bridge for recurring ASM waves, but it still submits
-  `scan_options.kind='asm_improve'` through the normal schedule API. Treat that as compatibility
-  behavior until a typed schedule-kind contract exists.
+- `/schedules` gives users a first typed UI/API path for recurring ASM waves through
+  `schedule_kind='asm_improve'`. Legacy `scan_options.kind='asm_improve'` rows are still decoded for
+  compatibility.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 - `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and
   `include_internal=true` expose them for debugging.

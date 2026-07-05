@@ -60,7 +60,7 @@ For a full map of product capabilities and pointers to the architecture/policy d
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings.
 - **New Scan (`/scan/new`)**: scan type grid (6 types with duration/description), coverage budget selector (`fast`, `balanced`, `thorough`, `exhaustive`), advanced option toggles (Active Testing, Nuclei Templates, Subdomain Discovery, Enhanced DNS, JS Dependency Scanning, JS Secret Scanning), and optional custom budget overrides. Warning for active testing types.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly scans. Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), scan type. Auto-opens from targets page with pre-populated target.
+- **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly actions. Supports normal scan schedules and typed ASM coverage-wave schedules (`schedule_kind: asm_improve`). Create modal with target dropdown, name, frequency, day-of-week selector, time (UTC), schedule type, and scan type when relevant. Auto-opens from targets page with pre-populated target.
 - **Findings (`/findings`)**: filter by type (DAST vs AI), severity/status/last-seen (7/30/60/90 days)/domain/search, sort by severity/first-seen/last-seen/CVSS. Pagination (50/page). **Bulk cleanup**: dry-run preview before deletion, filter by age (30-180+ days)/status/domain.
 - **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, DAST/AI type badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs.
 - **AI Gate (`/settings/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints.
@@ -656,9 +656,20 @@ curl -X POST http://localhost:8080/schedules \
   -H "Content-Type: application/json" \
   -d '{
     "target_id": "target-uuid",
+    "schedule_kind": "normal_scan",
     "frequency": "daily",
     "time_of_day": "02:00",
     "scan_type": "standard"
+  }'
+
+# Create a recurring Continuous ASM coverage wave
+curl -X POST http://localhost:8080/schedules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_id": "target-uuid",
+    "schedule_kind": "asm_improve",
+    "frequency": "daily",
+    "time_of_day": "02:00"
   }'
 
 # Update/toggle schedule

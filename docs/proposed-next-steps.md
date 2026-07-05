@@ -96,10 +96,10 @@ called at real sites — verify before re-proposing any of it:
   `scheduler_state` contract as policy/gaps/improve, and the ASM Activity card renders the live
   decision, skip reason, last recorded decision, budget/claimable counters, and active scan link
   alongside recent ASM scan/campaign rows.
-- **Schedules UI phase 1 for ASM waves** — `/schedules` exposes a "Keep this target covered
-  (ASM coverage wave)" option and submits `scan_options.kind='asm_improve'`. This is a UI bridge,
-  not a finished API contract; `ScheduleCreate.scan_type` is still required and the schedule kind is
-  still encoded inside `scan_options`.
+- **First-class schedule kind for ASM waves** — `schedules.schedule_kind`, `ScheduleCreate` /
+  `ScheduleUpdate`, `run_due_schedules`, and `/schedules` now treat `normal_scan` and
+  `asm_improve` as typed schedule actions. Legacy `scan_options.kind='asm_improve'` is backfilled
+  and still decoded for old clients, but new UI/API payloads use `schedule_kind`.
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
@@ -149,10 +149,9 @@ ordering and more exact implementation boundaries:
 - `docs/continuous-asm-architecture.md` correctly identifies the target architecture, but the live
   product still exposes overlapping concepts: background ASM policy, recurring schedules, manual
   Improve Coverage, and hidden implementation scans.
-- The schedules UI already exposes ASM waves (`ui/src/app/schedules/page.tsx`), but the API/DB still
-  model them as normal schedules with `scan_options.kind='asm_improve'`
-  (`api/api.py::ScheduleCreate`, `/schedules`). The next change is therefore contract cleanup and
-  timeline visibility, not adding another schedule button.
+- ASM waves are now a first-class schedule kind (`normal_scan`, `asm_improve`) with legacy
+  `scan_options.kind` compatibility. The next change is target campaign timeline visibility, not
+  another schedule button or contract bridge.
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
   scheduler decision object. Dashboard Action Center items now expose structured safe CTAs; the next
   dashboard gap is richer product counts/quick links, not the base action contract.
@@ -165,18 +164,14 @@ ordering and more exact implementation boundaries:
 
 These are the next commit-sized slices, in order:
 
-1. **First-class schedule kind:** add `schedule_kind` (or equivalent typed field) for
-   `normal_scan` and `asm_improve`, backfill/decode legacy `scan_options.kind`, keep legacy API
-   compatibility, and make `/schedules` create/edit ASM waves without pretending a DAST `scan_type`
-   is the primary action.
-2. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
+1. **Target campaign timeline:** combine background dispatcher state, recurring ASM wave next run,
    manual Improve Coverage, active implementation scan, last activity, last skip reason, and next
    eligible time in one target-scoped view.
-3. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
+2. **Guided Model Intake trust modes:** add trust-mode selection and pre-submit pass/fail/advisory
    preview before broadening artifact/provider support.
-4. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
+3. **AI red-team campaign review/replay:** add campaign grouping, OWASP LLM/RAG/agent/MCP coverage
    matrix, skipped-probe reasons, transcript/report export, and gated rerun/replay actions.
-5. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+4. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
 
@@ -184,9 +179,9 @@ These are the next commit-sized slices, in order:
 
 Use this order when choosing between otherwise-valid work:
 
-- **P0: productize shipped foundations.** First-class schedule kinds, target campaign timeline, and
-  richer Action Center product counts/links. The base Action Center/CTAs and Exceptions Queue are
-  already done; the remaining P0 is to make schedule/campaign state understandable and typed.
+- **P0: productize shipped foundations.** Target campaign timeline and richer Action Center product
+  counts/links. The base Action Center/CTAs, Exceptions Queue, and first-class ASM schedule kinds are
+  already done; the remaining P0 is to make schedule/campaign state understandable in one place.
 - **P1: make Continuous ASM the flagship.** Family-aware coverage quality, proof-quality gaps,
   worker-aware waves, CT/new-surface inheritance, and Improve Coverage explanations that always say
   what ran or why it waited.
@@ -232,21 +227,20 @@ will run next, and which button fixes the next blocker" without reading scan JSO
 ### 2. ASM scheduling and campaign semantics
 **Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
 background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
-live/persisted scheduler decisions. `/schedules` now has a visible ASM coverage-wave option, but the
-contract is still legacy-shaped: schedules encode ASM as `scan_options.kind='asm_improve'` while
-`ScheduleCreate.scan_type` remains required. The remaining product problem is therefore not a missing
-button; it is that recurring schedules, continuous policy, manual Improve Coverage, and internal scan
-rows are still separate mental models.
+live/persisted scheduler decisions. `/schedules` has a visible ASM coverage-wave option and the
+API/DB now expose first-class schedule kinds (`normal_scan`, `asm_improve`) with legacy
+`scan_options.kind` compatibility. The remaining product problem is therefore not a missing button or
+contract field; it is that recurring schedules, continuous policy, manual Improve Coverage, and
+internal scan rows are still separate mental models.
 
 **Implement:**
-1. Introduce a typed schedule kind (`normal_scan`, `asm_improve`, later `focused_family` /
-   `finding_retest`) in the API and DB migration/backfill. Keep backward compatibility by decoding
-   legacy `scan_options.kind` and accepting old clients that still send only `scan_type`.
+1. DONE: introduce a typed schedule kind (`normal_scan`, `asm_improve`) in API/DB/UI with
+   migration/backfill and legacy `scan_options.kind` decode.
 2. Show one unified target timeline: background dispatcher decision, recurring schedule next run,
    current active scan/ASM batch, last activity, and last skip reason.
 3. Let `/schedules` create/edit ASM waves without pretending they have a DAST `scan_type`; expose
    batch size, stale days, endpoint filter, family, and Lab/deep gating only when relevant. The
-   existing UI selector is the starting point, not the final contract.
+   existing typed UI selector is the starting point, not the final workflow.
 4. Add tests for schedule-kind validation, legacy decode, due-run dispatch, target active-scan skip,
    and UI payload shape.
 

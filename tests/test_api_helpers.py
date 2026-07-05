@@ -10,6 +10,8 @@ import sys
 import types
 import uuid
 
+import pytest
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 # api/api.py imports asyncpg/redis/fastapi at module load; stub the ones
@@ -540,6 +542,11 @@ class _FakeConn:
     async def fetchval(self, query, *args):
         return 0
 
+    async def fetchrow(self, query, *args):
+        if "SELECT asm_config FROM targets" in query:
+            return {"asm_config": {}}
+        return {}
+
     async def execute(self, query, *args):
         self.executes.append((query, args))
         return "OK"
@@ -574,6 +581,7 @@ def _due_schedule():
         "id": uuid.uuid4(),
         "target_id": uuid.uuid4(),
         "target_url": "https://example.test",
+        "schedule_kind": "normal_scan",
         "scan_type": "smart",
         "scan_options": {"budget_profile": "fast"},
         "frequency": "daily",
@@ -582,6 +590,18 @@ def _due_schedule():
         "timezone": "UTC",
         "jitter_minutes": 0,
     }
+
+
+def test_schedule_kind_normalizer_supports_typed_and_legacy_contracts():
+    assert api_module._normalize_schedule_kind("normal_scan", {}) == "normal_scan"
+    assert api_module._normalize_schedule_kind("asm_improve", {}) == "asm_improve"
+    assert api_module._normalize_schedule_kind(None, {"kind": "asm_improve"}) == "asm_improve"
+
+    with pytest.raises(ValueError):
+        api_module._normalize_schedule_kind("normal_scan", {"kind": "asm_improve"})
+
+    with pytest.raises(ValueError):
+        api_module._normalize_schedule_kind("bad_kind", {})
 
 
 def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatch):
@@ -612,6 +632,37 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
+
+
+def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
+    schedule = _due_schedule()
+    schedule["schedule_kind"] = "asm_improve"
+    schedule["scan_options"] = {"batch_size": 25}
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+    queued = {}
+
+    async def fake_claimable_count(*_args, **_kwargs):
+        return 0
+
+    async def fake_enqueue_asm_recon(_conn, _redis, target_id, target_url, asm_opts, *, triggered_by):
+        queued["target_id"] = target_id
+        queued["target_url"] = target_url
+        queued["asm_opts"] = asm_opts
+        queued["triggered_by"] = triggered_by
+        return {"scan_id": "11111111-1111-4111-8111-111111111111"}
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable_count)
+    monkeypatch.setattr(api_module, "_enqueue_asm_recon", fake_enqueue_asm_recon)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    executed_sql = "\n".join(query for query, _args in conn.executes)
+    assert "INSERT INTO scans" not in executed_sql
+    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert queued["triggered_by"] == "schedule"
+    assert queued["asm_opts"] == {"batch_size": 25}
 
 
 # ----- finding exception queue filters -------------------------------------

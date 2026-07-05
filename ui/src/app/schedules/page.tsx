@@ -46,6 +46,12 @@ function formatRelativeTime(dateStr: string): string {
   }
 }
 
+function getScheduleKind(schedule: Schedule): 'normal_scan' | 'asm_improve' {
+  if (schedule.schedule_kind === 'asm_improve') return 'asm_improve'
+  if ((schedule.scan_options as { kind?: string } | undefined)?.kind === 'asm_improve') return 'asm_improve'
+  return 'normal_scan'
+}
+
 function SchedulesContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -143,8 +149,8 @@ function SchedulesContent() {
         frequency: formFrequency,
         day_of_week: formFrequency === 'weekly' ? formDayOfWeek : undefined,
         time_of_day: formTime,
+        schedule_kind: formKind,
         scan_type: formScanType,
-        scan_options: formKind === 'asm_improve' ? { kind: 'asm_improve' } : undefined,
       })
       setShowCreateModal(false)
       resetForm()
@@ -246,6 +252,7 @@ function SchedulesContent() {
             const localTime = (schedule.timezone || 'UTC') === 'UTC'
               ? utcTimeToLocalLabel(schedule.time_of_day.slice(0, 5))
               : null
+            const scheduleKind = getScheduleKind(schedule)
             return (
             <div
               key={schedule.id}
@@ -284,7 +291,7 @@ function SchedulesContent() {
                     )}
                   </div>
                   <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
-                    {(schedule.scan_options as { kind?: string } | undefined)?.kind === 'asm_improve' ? (
+                    {scheduleKind === 'asm_improve' ? (
                       <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
                         ASM coverage wave
                       </span>

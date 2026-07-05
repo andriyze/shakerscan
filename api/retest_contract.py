@@ -768,6 +768,29 @@ async def run_schema_migrations(pool) -> None:
                 ON targets(asm_enabled) WHERE asm_enabled = true
             """)
 
+            # Recurring schedules now have a first-class kind. Existing
+            # installs may still encode ASM waves as scan_options.kind.
+            await conn.execute("""
+                ALTER TABLE schedules
+                ADD COLUMN IF NOT EXISTS schedule_kind TEXT DEFAULT 'normal_scan'
+            """)
+            await conn.execute("""
+                UPDATE schedules
+                SET schedule_kind = 'asm_improve'
+                WHERE COALESCE(scan_options->>'kind', '') = 'asm_improve'
+                  AND COALESCE(schedule_kind, 'normal_scan') <> 'asm_improve'
+            """)
+            await conn.execute("""
+                UPDATE schedules
+                SET schedule_kind = 'normal_scan'
+                WHERE schedule_kind IS NULL
+                   OR schedule_kind NOT IN ('normal_scan', 'asm_improve')
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_schedules_kind_next_run
+                ON schedules(schedule_kind, next_run_at) WHERE is_active = true
+            """)
+
             # Parallel scan orchestration (parent/shard/merge fan-out).
             await conn.execute("""
                 ALTER TABLE scans

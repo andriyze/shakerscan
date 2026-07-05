@@ -71,6 +71,7 @@ except ModuleNotFoundError:
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve"}
 
 
 def utc_now() -> datetime:
@@ -497,6 +498,48 @@ def _decode_json_value(value: Any) -> Any:
             except json.JSONDecodeError:
                 return value
     return value
+
+
+def _schedule_options_dict(value: Any) -> dict[str, Any]:
+    decoded = _decode_json_value(value) or {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _normalize_schedule_kind(
+    schedule_kind: Any = None,
+    scan_options: Any = None,
+    *,
+    allow_legacy: bool = True,
+) -> str:
+    requested = str(schedule_kind or "").strip().lower()
+    options = _schedule_options_dict(scan_options)
+    legacy = str(options.get("kind") or "").strip().lower()
+
+    if requested in ("", "scan", "normal"):
+        requested = "normal_scan"
+    if legacy in ("scan", "normal"):
+        legacy = "normal_scan"
+
+    if requested not in VALID_SCHEDULE_KINDS:
+        raise ValueError(f"schedule_kind must be one of: {', '.join(sorted(VALID_SCHEDULE_KINDS))}")
+
+    if allow_legacy and legacy:
+        if legacy not in VALID_SCHEDULE_KINDS:
+            raise ValueError(f"scan_options.kind must be one of: {', '.join(sorted(VALID_SCHEDULE_KINDS))}")
+        if schedule_kind is not None and legacy != requested:
+            raise ValueError("schedule_kind conflicts with scan_options.kind")
+        return legacy
+
+    return requested
+
+
+def _schedule_kind_from_row(row: Any) -> str:
+    data = _record_map(row)
+    return _normalize_schedule_kind(
+        data.get("schedule_kind"),
+        data.get("scan_options"),
+        allow_legacy=True,
+    )
 
 
 # Sensitive-key matching + value masking live in the shared scanner.redaction
@@ -2103,6 +2146,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
         target_id = schedule['target_id']
         target_url = schedule['target_url']
         scan_type = schedule['scan_type'] or 'standard'
+        try:
+            schedule_kind = _schedule_kind_from_row(schedule)
+        except ValueError as exc:
+            print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+            continue
 
         async with pool.acquire() as conn:
             # Check if target already has a running/pending scan
@@ -2113,8 +2161,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
 
             if existing > 0:
                 print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: target already has active scan", flush=True)
-                blocked_options = _decode_json_value(schedule['scan_options']) or {}
-                if isinstance(blocked_options, dict) and str(blocked_options.get('kind') or '').lower() == 'asm_improve':
+                if schedule_kind == 'asm_improve':
                     await _persist_asm_decision(
                         conn,
                         target_id,
@@ -2150,16 +2197,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # Use the shared helper so JSONB shapes (raw string vs decoded
             # dict, depending on asyncpg version / column type) are handled
             # consistently with the rest of the codebase.
-            decoded_options = _decode_json_value(schedule['scan_options']) or {}
-            if not isinstance(decoded_options, dict):
-                decoded_options = {}
-            scan_options = dict(decoded_options)
+            scan_options = dict(_schedule_options_dict(schedule['scan_options']))
 
-            # §9: ASM-aware schedule. kind='asm_improve' queues a bounded coverage
+            # §9: ASM-aware schedule. schedule_kind='asm_improve' queues a bounded coverage
             # wave (test if claimable, else recon) instead of a full scan — the
-            # "keep this target covered" cadence, spread across the schedule. Stored
-            # in scan_options so no schema migration is needed.
-            if str(scan_options.get('kind') or '').lower() == 'asm_improve':
+            # "keep this target covered" cadence, spread across the schedule. Legacy
+            # rows that still carry scan_options.kind are normalized before this point.
+            if schedule_kind == 'asm_improve':
                 asm_opts = {k: v for k, v in scan_options.items() if k != 'kind'}
                 _asm_ok = False
                 try:
@@ -3059,6 +3103,7 @@ class ScheduleCreate(BaseModel):
     day_of_week: Optional[int] = None  # 0-6 (Monday-Sunday)
     time_of_day: str = '02:00'  # HH:MM
     timezone: str = 'UTC'
+    schedule_kind: str = 'normal_scan'
     scan_type: str = 'standard'
     scan_options: Optional[dict] = None
     jitter_minutes: int = 30
@@ -3070,6 +3115,7 @@ class ScheduleUpdate(BaseModel):
     day_of_week: Optional[int] = None
     time_of_day: Optional[str] = None
     timezone: Optional[str] = None
+    schedule_kind: Optional[str] = None
     scan_type: Optional[str] = None
     scan_options: Optional[dict] = None
     jitter_minutes: Optional[int] = None
@@ -7458,7 +7504,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
             FROM schedules s
             JOIN targets t ON t.id = s.target_id
             WHERE s.is_active = true
-              AND COALESCE(s.scan_options->>'kind', '') = 'asm_improve'
+              AND (
+                COALESCE(s.schedule_kind, 'normal_scan') = 'asm_improve'
+                OR COALESCE(s.scan_options->>'kind', '') = 'asm_improve'
+              )
             ORDER BY s.next_run_at NULLS LAST, s.created_at DESC
             LIMIT 1
         """)
@@ -14815,6 +14864,14 @@ async def list_schedules(
 @app.post("/schedules")
 async def create_schedule(request: ScheduleCreate):
     """Create a new scan schedule."""
+    try:
+        kind_input = request.schedule_kind if "schedule_kind" in request.model_fields_set else None
+        schedule_kind = _normalize_schedule_kind(kind_input, request.scan_options, allow_legacy=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    scan_options = _schedule_options_dict(request.scan_options)
+    scan_options.pop("kind", None)
+
     # Validate frequency
     if request.frequency not in ('daily', 'weekly'):
         raise HTTPException(status_code=400, detail="Frequency must be 'daily' or 'weekly'")
@@ -14863,9 +14920,9 @@ async def create_schedule(request: ScheduleCreate):
         schedule_id = await conn.fetchval("""
             INSERT INTO schedules (
                 target_id, name, frequency, day_of_week, time_of_day,
-                timezone, jitter_minutes, scan_type, scan_options,
+                timezone, jitter_minutes, schedule_kind, scan_type, scan_options,
                 is_active, next_run_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11)
             RETURNING id
         """,
             uuid.UUID(request.target_id),
@@ -14875,8 +14932,9 @@ async def create_schedule(request: ScheduleCreate):
             request.time_of_day,
             request.timezone,
             request.jitter_minutes,
+            schedule_kind,
             request.scan_type,
-            json.dumps(request.scan_options) if request.scan_options else '{}',
+            json.dumps(scan_options),
             next_run
         )
 
@@ -14963,6 +15021,26 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             param_idx += 1
             timing_changed = True
 
+        explicit_kind_update = request.schedule_kind is not None
+        legacy_kind_update = (
+            request.scan_options is not None
+            and isinstance(request.scan_options, dict)
+            and "kind" in request.scan_options
+        )
+        normalized_schedule_kind: str | None = None
+        if explicit_kind_update or legacy_kind_update:
+            try:
+                normalized_schedule_kind = _normalize_schedule_kind(
+                    request.schedule_kind if explicit_kind_update else None,
+                    request.scan_options if request.scan_options is not None else {},
+                    allow_legacy=True,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            updates.append(f"schedule_kind = ${param_idx}")
+            params.append(normalized_schedule_kind)
+            param_idx += 1
+
         if request.scan_type is not None:
             valid_scan_types = ['quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
             if request.scan_type not in valid_scan_types:
@@ -14972,9 +15050,18 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             param_idx += 1
 
         if request.scan_options is not None:
+            scan_options = _schedule_options_dict(request.scan_options)
+            scan_options.pop("kind", None)
             updates.append(f"scan_options = ${param_idx}")
-            params.append(json.dumps(request.scan_options))
+            params.append(json.dumps(scan_options))
             param_idx += 1
+        elif explicit_kind_update:
+            existing_options = _schedule_options_dict(existing["scan_options"])
+            if "kind" in existing_options:
+                existing_options.pop("kind", None)
+                updates.append(f"scan_options = ${param_idx}")
+                params.append(json.dumps(existing_options))
+                param_idx += 1
 
         if request.jitter_minutes is not None:
             updates.append(f"jitter_minutes = ${param_idx}")

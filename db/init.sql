@@ -390,6 +390,7 @@ CREATE TABLE schedules (
     jitter_minutes INTEGER DEFAULT 30,
 
     -- Scan configuration
+    schedule_kind TEXT DEFAULT 'normal_scan',  -- normal_scan, asm_improve
     scan_type TEXT DEFAULT 'standard',
     scan_options JSONB DEFAULT '{}',
 
