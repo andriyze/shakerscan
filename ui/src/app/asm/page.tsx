@@ -752,6 +752,10 @@ function CoverageAdvisorCard({
   const selectedFamilyOption = checkFamilyOptions.find((option) => option.value === checkFamily && !option.disabled)
   const selectedRiskLabel = formatRiskLevel(selectedFamilyOption?.riskLevel)
   const plannedFamilyOptions = checkFamilyOptions.filter((option) => option.disabled)
+  const scheduler = gaps?.scheduler_state
+  const decision = scheduler?.decision
+  const lastDecision = scheduler?.last_decision
+  const activeScanId = decision?.active_scan_id || scheduler?.active_scan_ids?.[0] || lastDecision?.active_scan_id
 
   return (
     <Card className="p-4 space-y-4">
@@ -802,6 +806,45 @@ function CoverageAdvisorCard({
                   {status.replace(/_/g, ' ')}: {count}
                 </Badge>
               ))}
+            </div>
+          )}
+          {decision && (
+            <div className="grid gap-2 rounded border border-gray-800 bg-gray-950/50 p-2 text-xs sm:grid-cols-2">
+              <div>
+                <div className="text-[11px] uppercase text-gray-500">Scheduler decision</div>
+                <div className="mt-1 text-gray-300">
+                  {decision.action || 'none'}{decision.blocked_by ? ` · blocked by ${decision.blocked_by.replace(/_/g, ' ')}` : ''}
+                </div>
+                <div className="mt-0.5 text-gray-500">{decision.reason || 'No scheduler reason available.'}</div>
+                {decision.next_eligible_at && (
+                  <div className="mt-0.5 text-gray-500">Next eligible: {formatDate(decision.next_eligible_at)}</div>
+                )}
+                {activeScanId && (
+                  <Link href={`/scans/${activeScanId}`} className="mt-1 inline-flex text-blue-400 underline hover:text-blue-300">
+                    View active ASM scan
+                  </Link>
+                )}
+              </div>
+              <div>
+                <div className="text-[11px] uppercase text-gray-500">Budget remaining</div>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  <Badge className="bg-gray-800 text-gray-300">
+                    daily: {decision.daily_cap_remaining ?? 'unlimited'}
+                  </Badge>
+                  <Badge className="bg-gray-800 text-gray-300">
+                    domain/hour: {decision.rate_cap_remaining ?? 'unlimited'}
+                  </Badge>
+                  <Badge className="bg-gray-800 text-gray-300">
+                    tested today: {decision.tested_today ?? 0}
+                  </Badge>
+                </div>
+                {lastDecision && (
+                  <div className="mt-1 text-gray-500">
+                    Last recorded {lastDecision.source || 'decision'}: {lastDecision.action || 'none'}
+                    {lastDecision.recorded_at ? ` at ${formatDate(lastDecision.recorded_at)}` : ''}
+                  </div>
+                )}
+              </div>
             </div>
           )}
           {gaps?.family_coverage && Object.keys(gaps.family_coverage).length > 0 && (

@@ -410,6 +410,34 @@ export interface AsmRecommendation {
   blockers: Array<{ kind: string; count: number; message: string; scan_id?: string; scan_ids?: string[] }>
 }
 
+export interface AsmSchedulerDecision {
+  action?: 'recon' | 'test' | 'none' | string
+  reason?: string
+  blocked_by?: string | null
+  next_eligible_at?: string | null
+  daily_cap_remaining?: number | null
+  rate_cap_remaining?: number | null
+  claimable?: number | null
+  tested_today?: number | null
+  source?: string
+  recorded_at?: string
+  active_scan_id?: string
+  active_scan_ids?: string[]
+}
+
+export interface AsmSchedulerState {
+  decision?: AsmSchedulerDecision | null
+  last_decision?: AsmSchedulerDecision | null
+  active_scan_ids?: string[]
+  claimable?: number
+  tested_today?: number
+  daily_cap_remaining?: number | null
+  rate_cap_remaining?: number | null
+  domain_rate_cap?: number
+  domain_rate_used?: number
+  domain_rate_reserved?: number
+}
+
 export interface AsmFamilyCoverage { completed: number; attempts: number }
 export interface AsmRecommendedCampaign {
   campaign: string
@@ -422,6 +450,7 @@ export interface AsmGaps {
   claimable: number
   active_scans: number
   recommendation: AsmRecommendation
+  scheduler_state?: AsmSchedulerState
   recommended_campaigns?: AsmRecommendedCampaign[]
   by_auth_state: Record<string, Record<string, number>>
   by_param_location: Record<string, number>
@@ -455,12 +484,14 @@ export interface AsmActionResponse {
   action: 'recon' | 'test' | 'wait'
   scan_id?: string
   job_id?: string
+  campaign_id?: string
   status: string
   batch_size?: number
   check_family?: string
   endpoint_filter?: string | null
   reason?: string
   recommendation?: AsmRecommendation
+  scheduler_state?: AsmSchedulerState
 }
 
 export interface AsmCheckFamily {
@@ -1412,6 +1443,7 @@ export interface AsmPolicy {
   config: AsmConfig
   last_test_at: string | null
   last_recon_at: string | null
+  scheduler_state?: AsmSchedulerState
 }
 
 export async function getAsmPolicy(targetId: string): Promise<AsmPolicy> {

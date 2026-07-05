@@ -20,8 +20,10 @@ that ASM should expose as family/proof/workflow gaps.
 
 **2026-07-05 audit note:** the backend foundations are ahead of the operator workflow. The current
 implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): first-class ASM
-schedule kinds, visible next-action / skip-reason state, one target campaign timeline, and Action
-Center surfacing are the next product priorities.
+schedule kinds, one target campaign timeline, Action Center remediation CTAs, and broader activity
+surfacing are the next product priorities. First-pass next-action / skip-reason state is now live:
+ASM policy/gaps/improve return `scheduler_state`, and dispatcher/scheduler decisions persist to
+`targets.metadata_json.asm_last_decision`.
 
 ---
 
@@ -44,7 +46,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| ASM scheduling/operator UX | Partial | Unify background policy and recurring ASM waves; expose next eligible action, skip reasons, caps, blockers, and active scan links. |
+| ASM scheduling/operator UX | Partial; next-action/skip-reason contract shipped | Unify background policy and recurring ASM waves; surface the decision contract in activity rows, dashboard CTAs, and one target timeline. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -118,9 +120,14 @@ Shipped pieces:
   `custom_endpoints`, saves findings, and stamps inventory.
 - `run_asm_dispatch` periodically decides recon vs. test using target policy: batch size, stale TTL,
   min interval, daily cap, recon cadence, UTC windows, weekday windows, and per-root-domain caps.
+- `asm_inventory.decide_asm_action` returns operator-facing decision facts: `blocked_by`,
+  `next_eligible_at`, `daily_cap_remaining`, `rate_cap_remaining`, `claimable`, and `tested_today`.
+  `/targets/{id}/asm/policy`, `/asm/gaps`, and `/asm/improve` expose those facts as
+  `scheduler_state`; dispatcher/scheduler runs persist the latest decision under
+  `targets.metadata_json.asm_last_decision`.
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
-  inventory, coverage gaps, ASM activity, policy presets, local-time window helper, and
-  new-surface feed.
+  inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, ASM
+  activity, policy presets, local-time window helper, and new-surface feed.
 - Gungnir can inherit ASM policy for newly discovered subdomains under an ASM-enabled root.
 - `/scans` hides shard and ASM implementation rows by default; `include_shards=true` and
   `include_internal=true` expose them for debugging.

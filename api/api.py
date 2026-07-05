@@ -2113,6 +2113,23 @@ async def run_due_schedules(pool: asyncpg.Pool):
 
             if existing > 0:
                 print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: target already has active scan", flush=True)
+                blocked_options = _decode_json_value(schedule['scan_options']) or {}
+                if isinstance(blocked_options, dict) and str(blocked_options.get('kind') or '').lower() == 'asm_improve':
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {
+                            "action": "none",
+                            "reason": "target already has an active scan",
+                            "blocked_by": "active_scan",
+                            "next_eligible_at": None,
+                            "daily_cap_remaining": None,
+                            "rate_cap_remaining": None,
+                            "claimable": None,
+                            "tested_today": None,
+                        },
+                        source="schedule",
+                    )
                 # Recalculate next_run_at anyway so we don't keep retrying every 60s
                 next_run = calculate_next_run(
                     schedule['frequency'],
@@ -2170,8 +2187,39 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     _asm_ok = True
                     print(f"[scheduler] ASM improve ({_asm_kind}) queued for schedule "
                           f"{str(schedule_id)[:8]} -> {str(enq.get('scan_id', ''))[:8]}", flush=True)
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {
+                            "action": _asm_kind,
+                            "reason": f"scheduled ASM {_asm_kind} queued",
+                            "blocked_by": None,
+                            "next_eligible_at": None,
+                            "daily_cap_remaining": None,
+                            "rate_cap_remaining": None,
+                            "claimable": claimable,
+                            "tested_today": None,
+                        },
+                        source="schedule",
+                        active_scan_ids=[str(enq.get("scan_id"))] if enq.get("scan_id") else None,
+                    )
                 except Exception as exc:
                     print(f"[scheduler] ASM improve failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {
+                            "action": "none",
+                            "reason": f"scheduled ASM improve failed: {exc}",
+                            "blocked_by": "enqueue_failed",
+                            "next_eligible_at": None,
+                            "daily_cap_remaining": None,
+                            "rate_cap_remaining": None,
+                            "claimable": None,
+                            "tested_today": None,
+                        },
+                        source="schedule",
+                    )
                 if _asm_ok:
                     # Wave queued: advance to the normal cadence and stamp last_run_at.
                     next_run = calculate_next_run(
@@ -2343,10 +2391,19 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     claimable=claimable,
                     tested_today=tested_today,
                     domain_rate_exceeded=domain_rate_exceeded,
+                    domain_rate_remaining=max(0, cap - used - reserved) if cap > 0 and root_domain else None,
                     config=raw_config,
                 )
                 action = decision['action']
                 if action == 'none':
+                    active_ids = await _asm_active_scan_ids(conn, target_id) if decision.get("blocked_by") == "active_scan" else None
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        decision,
+                        source="dispatcher",
+                        active_scan_ids=active_ids,
+                    )
                     continue
 
                 base_opts = _decode_json_value(t['scan_options']) or {}
@@ -2356,6 +2413,13 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {**decision, "active_scan_id": enq["scan_id"], "active_scan_ids": [enq["scan_id"]]},
+                        source="dispatcher",
+                        active_scan_ids=[enq["scan_id"]],
+                    )
                     print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
                 elif action == 'test':
                     dispatch_batch_size = min(cfg['batch_size'], claimable)
@@ -2370,6 +2434,12 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             dispatch_batch_size,
                         )
                     if dispatch_batch_size <= 0:
+                        await _persist_asm_decision(
+                            conn,
+                            target_id,
+                            {**decision, "action": "none", "reason": "no dispatch budget remaining", "blocked_by": "rate_or_daily_cap"},
+                            source="dispatcher",
+                        )
                         continue
                     enq = await _enqueue_asm_exploit_batch(
                         conn, r, target_id, target_url, base_opts,
@@ -2378,6 +2448,13 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                         domain_rate_reserved=dispatch_batch_size,
                     )
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {**decision, "active_scan_id": enq["scan_id"], "active_scan_ids": [enq["scan_id"]]},
+                        source="dispatcher",
+                        active_scan_ids=[enq["scan_id"]],
+                    )
                     print(f"[asm] test batch queued for {target_url} "
                           f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
@@ -10505,6 +10582,122 @@ async def _asm_active_scan_ids(conn, target_id: str) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
+def _public_asm_decision(decision: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(decision, dict):
+        return None
+    return {
+        "action": decision.get("action"),
+        "reason": decision.get("reason"),
+        "blocked_by": decision.get("blocked_by"),
+        "next_eligible_at": decision.get("next_eligible_at"),
+        "daily_cap_remaining": decision.get("daily_cap_remaining"),
+        "rate_cap_remaining": decision.get("rate_cap_remaining"),
+        "claimable": decision.get("claimable"),
+        "tested_today": decision.get("tested_today"),
+    }
+
+
+async def _persist_asm_decision(
+    conn,
+    target_id: str | uuid.UUID,
+    decision: dict[str, Any],
+    *,
+    source: str,
+    active_scan_ids: list[str] | None = None,
+) -> None:
+    public = _public_asm_decision(decision) or {}
+    public["source"] = source
+    public["recorded_at"] = utc_now_iso()
+    if active_scan_ids:
+        public["active_scan_id"] = active_scan_ids[0]
+        public["active_scan_ids"] = active_scan_ids
+    await conn.execute(
+        """
+        UPDATE targets
+        SET metadata_json = jsonb_set(
+                COALESCE(metadata_json, '{}'::jsonb),
+                '{asm_last_decision}',
+                $1::jsonb,
+                true
+            ),
+            updated_at = NOW()
+        WHERE id = $2
+        """,
+        json.dumps(public),
+        uuid.UUID(str(target_id)),
+    )
+
+
+async def _asm_scheduler_state(
+    conn,
+    r,
+    target_id: str,
+    *,
+    endpoint_filter: str | None = None,
+    stale_days: int | None = None,
+) -> dict[str, Any]:
+    target = await conn.fetchrow(
+        """
+        SELECT id, url, root_domain, asm_config, asm_last_test_at, asm_last_recon_at,
+               metadata_json
+        FROM targets
+        WHERE id = $1
+        """,
+        uuid.UUID(target_id),
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
+    effective_stale_days = stale_days if stale_days is not None else cfg["stale_days"]
+    active_scan_ids = await _asm_active_scan_ids(conn, target_id)
+    claimable = await asm_inventory.claimable_count(
+        conn,
+        target_id,
+        stale_days=effective_stale_days,
+        endpoint_filter=endpoint_filter,
+    )
+    tested_today = await asm_inventory.tested_recently_count(conn, target_id, hours=24)
+    root_domain = target["root_domain"]
+    domain_rate_cap = int(cfg["max_requests_per_hour_per_domain"] or 0)
+    domain_rate_used = 0
+    domain_rate_reserved = 0
+    domain_rate_remaining: int | None = None
+    if domain_rate_cap > 0 and root_domain:
+        domain_rate_used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
+        domain_rate_reserved = _asm_reserved_count(r, root_domain)
+        domain_rate_remaining = max(0, domain_rate_cap - domain_rate_used - domain_rate_reserved)
+    decision = asm_inventory.decide_asm_action(
+        now=utc_now(),
+        last_test_at=target["asm_last_test_at"],
+        last_recon_at=target["asm_last_recon_at"],
+        has_active_scan=bool(active_scan_ids),
+        claimable=claimable,
+        tested_today=tested_today,
+        domain_rate_exceeded=domain_rate_remaining == 0 if domain_rate_remaining is not None else False,
+        domain_rate_remaining=domain_rate_remaining,
+        config=cfg,
+    )
+    public_decision = _public_asm_decision(decision) or {}
+    if active_scan_ids:
+        public_decision["active_scan_id"] = active_scan_ids[0]
+        public_decision["active_scan_ids"] = active_scan_ids
+    metadata = _decode_json_value(target["metadata_json"]) or {}
+    persisted = metadata.get("asm_last_decision") if isinstance(metadata, dict) else None
+    return {
+        "decision": public_decision,
+        "last_decision": persisted if isinstance(persisted, dict) else None,
+        "active_scan_ids": active_scan_ids,
+        "claimable": claimable,
+        "tested_today": tested_today,
+        "daily_cap_remaining": public_decision.get("daily_cap_remaining"),
+        "rate_cap_remaining": public_decision.get("rate_cap_remaining"),
+        "domain_rate_cap": domain_rate_cap,
+        "domain_rate_used": domain_rate_used,
+        "domain_rate_reserved": domain_rate_reserved,
+    }
+
+
 def _asm_recommended_campaigns(
     *,
     coverage: dict[str, Any],
@@ -10943,12 +11136,14 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(target["asm_config"]))
         stale_days = request.stale_days if request.stale_days is not None else cfg["stale_days"]
         endpoint_filter = _validate_asm_endpoint_filter_value(request.endpoint_filter)
-        claimable = await asm_inventory.claimable_count(
+        scheduler_state = await _asm_scheduler_state(
             conn,
+            r,
             target_id,
-            stale_days=stale_days,
             endpoint_filter=endpoint_filter,
+            stale_days=stale_days,
         )
+        claimable = int(scheduler_state.get("claimable") or 0)
         attempts = await conn.fetch(
             """
             SELECT COALESCE(last_attempt_status, 'none') AS status, COUNT(*) AS count
@@ -10960,7 +11155,13 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         attempt_counts = {str(rw["status"]): int(rw["count"] or 0) for rw in attempts}
         rec = _asm_recommendation(coverage, claimable=claimable, active_scans=active, active_scan_ids=active_scan_ids, last_attempt_counts=attempt_counts)
         if rec["next_action"] == "wait":
-            return {"action": "wait", "status": "busy", "endpoint_filter": endpoint_filter, **rec}
+            return {
+                "action": "wait",
+                "status": "busy",
+                "endpoint_filter": endpoint_filter,
+                "scheduler_state": scheduler_state,
+                **rec,
+            }
 
         if endpoint_filter and rec["next_action"] == "test" and claimable <= 0:
             filtered_rec = {
@@ -10975,6 +11176,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "endpoint_filter": endpoint_filter,
                 "reason": filtered_rec["reason"],
                 "recommendation": filtered_rec,
+                "scheduler_state": scheduler_state,
             }
 
         base_opts = _decode_target_scan_options(target["scan_options"])
@@ -10989,6 +11191,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "status": "queued",
                 "reason": rec["reason"],
                 "recommendation": rec,
+                "scheduler_state": scheduler_state,
             }
 
         batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
@@ -11014,6 +11217,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         "endpoint_filter": endpoint_filter,
         "reason": rec["reason"],
         "recommendation": rec,
+        "scheduler_state": scheduler_state,
     }
 
 
@@ -11025,6 +11229,7 @@ def _decode_asm_config(raw) -> dict:
 @app.get("/targets/{target_id}/asm/policy")
 async def asm_get_policy(target_id: str):
     """Return the effective Continuous ASM policy for a target."""
+    r = get_redis()
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT asm_enabled, asm_config, asm_last_test_at, asm_last_recon_at FROM targets WHERE id = $1",
@@ -11032,11 +11237,13 @@ async def asm_get_policy(target_id: str):
         )
         if not row:
             raise HTTPException(status_code=404, detail="Target not found")
+        scheduler_state = await _asm_scheduler_state(conn, r, target_id)
     return {
         "enabled": bool(row["asm_enabled"]),
         "config": asm_inventory.merge_asm_config(_decode_asm_config(row["asm_config"])),
         "last_test_at": row["asm_last_test_at"].isoformat() if row["asm_last_test_at"] else None,
         "last_recon_at": row["asm_last_recon_at"].isoformat() if row["asm_last_recon_at"] else None,
+        "scheduler_state": scheduler_state,
     }
 
 
@@ -11044,6 +11251,7 @@ async def asm_get_policy(target_id: str):
 async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
     """Enable/disable continuous ASM and update the per-target policy (validated
     + clamped to safe bounds)."""
+    r = get_redis()
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
         if not row:
@@ -11062,11 +11270,13 @@ async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
             "SELECT asm_enabled, asm_last_test_at, asm_last_recon_at FROM targets WHERE id = $1",
             uuid.UUID(target_id),
         )
+        scheduler_state = await _asm_scheduler_state(conn, r, target_id)
     return {
         "enabled": bool(out["asm_enabled"]),
         "config": new_config,
         "last_test_at": out["asm_last_test_at"].isoformat() if out["asm_last_test_at"] else None,
         "last_recon_at": out["asm_last_recon_at"].isoformat() if out["asm_last_recon_at"] else None,
+        "scheduler_state": scheduler_state,
     }
 
 
@@ -11086,6 +11296,7 @@ async def asm_diff(
 @app.get("/targets/{target_id}/asm/gaps")
 async def asm_gaps(target_id: str):
     """Explain remaining ASM coverage gaps for UI and AI agents."""
+    r = get_redis()
     async with db_pool.acquire() as conn:
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
             raise HTTPException(status_code=404, detail="Target not found")
@@ -11093,6 +11304,7 @@ async def asm_gaps(target_id: str):
         cfg_row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
         cfg = asm_inventory.merge_asm_config(_decode_asm_config(cfg_row["asm_config"] if cfg_row else {}))
         claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg["stale_days"])
+        scheduler_state = await _asm_scheduler_state(conn, r, target_id, stale_days=cfg["stale_days"])
         active_scan_ids = await _asm_active_scan_ids(conn, target_id)
         active = len(active_scan_ids)
         by_auth_rows = await conn.fetch(
@@ -11243,6 +11455,7 @@ async def asm_gaps(target_id: str):
         "claimable": claimable,
         "active_scans": active,
         "recommendation": recommendation,
+        "scheduler_state": scheduler_state,
         "recommended_campaigns": recommended_campaigns,
         "by_auth_state": by_auth,
         "by_param_location": {str(r["param_location"]): int(r["count"] or 0) for r in by_location_rows},

@@ -7,8 +7,9 @@
 
 **2026-07-05 audit note:** the parallel substrate is no longer the main product gap. The latest
 roadmap is in [proposed-next-steps.md](proposed-next-steps.md): prioritize operator-visible
-campaign state, ASM schedule kinds, scheduler/dispatcher skip reasons, AI red-team campaign UX, and
-guided Model Intake trust UX before adding more fan-out knobs.
+campaign state, ASM schedule kinds, AI red-team campaign UX, and guided Model Intake trust UX before
+adding more fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in
+ASM policy/gaps/improve responses and persisted target metadata.
 
 > **How to read this doc.** It is now scoped to one thing: parallel execution for one logical scan.
 > 1. **§1–§14 — Parallel scan core (SHIPPED & verified).** The parent→plan→shard→merge design and
@@ -43,7 +44,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| Operator-facing campaign/ASM UX | Partial; Dashboard Action Center phase 1 shipped | Show next action, skip/block reasons, recurring ASM waves, background dispatcher state, and active blockers in one target timeline. |
+| Operator-facing campaign/ASM UX | Partial; Dashboard Action Center and ASM scheduler-state phase 1 shipped | Show recurring ASM waves, background dispatcher state, and active blockers in one target timeline with remediation CTAs. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |

@@ -1273,6 +1273,9 @@ def test_decide_action_recon_when_due():
         config={"recon_interval_hours": 168},
     )
     assert d["action"] == "recon"
+    assert d["blocked_by"] is None
+    assert d["claimable"] == 100
+    assert d["daily_cap_remaining"] is not None
 
 
 def test_decide_action_test_when_recon_not_due():
@@ -1280,9 +1283,11 @@ def test_decide_action_test_when_recon_not_due():
         now=_utc(), last_test_at=None,
         last_recon_at=_utc() - timedelta(hours=1),  # recent recon
         has_active_scan=False, claimable=100, tested_today=0,
+        domain_rate_remaining=15,
         config={"recon_interval_hours": 168},
     )
     assert d["action"] == "test"
+    assert d["rate_cap_remaining"] == 15
 
 
 def test_decide_action_skips():
@@ -1290,20 +1295,36 @@ def test_decide_action_skips():
                 has_active_scan=False, claimable=100, tested_today=0,
                 config={"recon_interval_hours": 0})  # recon off -> consider test
     # active scan blocks everything
-    assert a.decide_asm_action(**{**base, "has_active_scan": True})["action"] == "none"
+    active = a.decide_asm_action(**{**base, "has_active_scan": True})
+    assert active["action"] == "none"
+    assert active["blocked_by"] == "active_scan"
     # nothing claimable
-    assert a.decide_asm_action(**{**base, "claimable": 0})["action"] == "none"
+    no_work = a.decide_asm_action(**{**base, "claimable": 0})
+    assert no_work["action"] == "none"
+    assert no_work["blocked_by"] == "no_claimable_endpoints"
     # within min interval
-    assert a.decide_asm_action(**{**base, "last_test_at": _utc() - timedelta(minutes=5),
-                                  "config": {"recon_interval_hours": 0, "min_interval_minutes": 60}})["action"] == "none"
+    interval = a.decide_asm_action(**{**base, "last_test_at": _utc() - timedelta(minutes=5),
+                                      "config": {"recon_interval_hours": 0, "min_interval_minutes": 60}})
+    assert interval["action"] == "none"
+    assert interval["blocked_by"] == "min_interval"
+    assert interval["next_eligible_at"]
     # daily cap reached
-    assert a.decide_asm_action(**{**base, "tested_today": 5000,
-                                  "config": {"recon_interval_hours": 0, "daily_endpoint_cap": 2000}})["action"] == "none"
+    daily = a.decide_asm_action(**{**base, "tested_today": 5000,
+                                   "config": {"recon_interval_hours": 0, "daily_endpoint_cap": 2000}})
+    assert daily["action"] == "none"
+    assert daily["blocked_by"] == "daily_endpoint_cap"
+    assert daily["daily_cap_remaining"] == 0
     # per-domain rate limit
-    assert a.decide_asm_action(**{**base, "domain_rate_exceeded": True})["action"] == "none"
+    rate = a.decide_asm_action(**{**base, "domain_rate_exceeded": True, "domain_rate_remaining": 0})
+    assert rate["action"] == "none"
+    assert rate["blocked_by"] == "domain_rate_cap"
+    assert rate["rate_cap_remaining"] == 0
     # outside time window
-    assert a.decide_asm_action(**{**base, "config": {"recon_interval_hours": 0,
-                                  "window_start_hour": 2, "window_end_hour": 6}})["action"] == "none"
+    window = a.decide_asm_action(**{**base, "config": {"recon_interval_hours": 0,
+                                      "window_start_hour": 2, "window_end_hour": 6}})
+    assert window["action"] == "none"
+    assert window["blocked_by"] == "outside_window"
+    assert window["next_eligible_at"]
 
 
 # §7.5: GC of long-retired ('gone') endpoint rows -----------------------------

@@ -1973,6 +1973,26 @@ def within_window(now: datetime, config: Any) -> bool:
     return hour >= start or hour < end  # window wraps midnight
 
 
+def next_window_start(now: datetime, config: Any) -> datetime | None:
+    """Best-effort next UTC time that satisfies the ASM window.
+
+    Windows are hour/day based, so an hourly scan over the next week is enough
+    to explain "why skipped" without adding a scheduler dependency here.
+    """
+    now = _as_utc(now)
+    cfg = merge_asm_config(config)
+    if within_window(now, cfg):
+        return now
+    probe = now.replace(minute=0, second=0, microsecond=0)
+    if probe <= now:
+        probe += timedelta(hours=1)
+    for _ in range(24 * 8):
+        if within_window(probe, cfg):
+            return probe
+        probe += timedelta(hours=1)
+    return None
+
+
 def decide_asm_action(
     *,
     now: datetime,
@@ -1982,6 +2002,7 @@ def decide_asm_action(
     claimable: int,
     tested_today: int,
     domain_rate_exceeded: bool = False,
+    domain_rate_remaining: int | None = None,
     config: Any = None,
 ) -> dict[str, Any]:
     """Pure per-target dispatch decision. Returns {action, reason, config}
@@ -1993,28 +2014,71 @@ def decide_asm_action(
     last_test_at = _as_utc(last_test_at)
     last_recon_at = _as_utc(last_recon_at)
     cfg = merge_asm_config(config)
+    daily_cap = int(cfg["daily_endpoint_cap"])
+    daily_remaining = None if daily_cap <= 0 else max(0, daily_cap - int(tested_today or 0))
+    rate_remaining = None if domain_rate_remaining is None else max(0, int(domain_rate_remaining or 0))
 
-    def result(action: str, reason: str) -> dict[str, Any]:
-        return {"action": action, "reason": reason, "config": cfg}
+    def _iso(dt: datetime | None) -> str | None:
+        return dt.isoformat() if dt else None
+
+    def result(
+        action: str,
+        reason: str,
+        *,
+        blocked_by: str | None = None,
+        next_eligible_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "action": action,
+            "reason": reason,
+            "blocked_by": blocked_by,
+            "next_eligible_at": _iso(next_eligible_at),
+            "daily_cap_remaining": daily_remaining,
+            "rate_cap_remaining": rate_remaining,
+            "claimable": max(0, int(claimable or 0)),
+            "tested_today": max(0, int(tested_today or 0)),
+            "config": cfg,
+        }
 
     if not within_window(now, cfg):
-        return result("none", "outside allowed time window")
+        return result(
+            "none",
+            "outside allowed time window",
+            blocked_by="outside_window",
+            next_eligible_at=next_window_start(now, cfg),
+        )
     if has_active_scan:
-        return result("none", "target already has an active scan")
+        return result("none", "target already has an active scan", blocked_by="active_scan")
     if domain_rate_exceeded:
-        return result("none", "per-root-domain rate limit reached")
+        return result("none", "per-root-domain rate limit reached", blocked_by="domain_rate_cap")
 
     rih = cfg["recon_interval_hours"]
     if rih > 0 and (last_recon_at is None or (now - last_recon_at) >= timedelta(hours=rih)):
         return result("recon", "recon interval elapsed")
 
     if claimable <= 0:
-        return result("none", "no claimable endpoints")
+        next_recon_at = last_recon_at + timedelta(hours=rih) if rih > 0 and last_recon_at else None
+        return result(
+            "none",
+            "no claimable endpoints",
+            blocked_by="no_claimable_endpoints",
+            next_eligible_at=next_recon_at,
+        )
     if last_test_at is not None and (now - last_test_at) < timedelta(minutes=cfg["min_interval_minutes"]):
-        return result("none", "within minimum test interval")
+        return result(
+            "none",
+            "within minimum test interval",
+            blocked_by="min_interval",
+            next_eligible_at=last_test_at + timedelta(minutes=cfg["min_interval_minutes"]),
+        )
     cap = cfg["daily_endpoint_cap"]
     if cap > 0 and tested_today >= cap:
-        return result("none", "daily endpoint cap reached")
+        return result(
+            "none",
+            "daily endpoint cap reached",
+            blocked_by="daily_endpoint_cap",
+            next_eligible_at=now + timedelta(hours=24),
+        )
     return result("test", "claimable endpoints available")
 
 

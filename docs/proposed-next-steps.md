@@ -44,6 +44,12 @@ called at real sites — verify before re-proposing any of it:
   freshness, deployment blockers, failed scans, policy-exception hygiene, ASM gaps/schedules,
   Model Intake trust gaps, and AI control-baseline gaps; the dashboard renders them as a
   prioritized operator feed.
+- **ASM next-action / skip-reason contract phase 1** — `asm_inventory.decide_asm_action` now returns
+  `blocked_by`, `next_eligible_at`, `daily_cap_remaining`, `rate_cap_remaining`, `claimable`, and
+  `tested_today`; `/targets/{id}/asm/policy`, `/asm/gaps`, and `/asm/improve` expose
+  `scheduler_state`, while the dispatcher/scheduler persist the latest decision under
+  `targets.metadata_json.asm_last_decision`. The ASM page renders the live and last recorded
+  scheduler decision plus remaining daily/domain budget.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -77,17 +83,19 @@ ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence 
 **Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
 `action_center` feed built from worker freshness, deployment blockers, failed scans, exception
 hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI control-baseline gaps.
-The dashboard renders this as a prioritized Action Center. Remaining work is deeper actionability:
-persisted ASM scheduler/dispatcher skip reasons, a dedicated Exceptions Queue page, and inline
-one-click remediation for each blocker class.
+The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve now expose live
+`scheduler_state`, and dispatcher/scheduler decisions are persisted as
+`metadata_json.asm_last_decision`. Remaining work is deeper actionability: wiring those facts into
+Dashboard CTAs, a dedicated Exceptions Queue page, and inline one-click remediation for each blocker
+class.
 
 **Implement:**
 1. Extend Action Center items with direct remediation where safe: restart/rescale worker CTA,
    Improve Coverage CTA with target preselection, exception-renew/revoke CTA, and retry failed scan.
-2. Add first-class "next action" and "why skipped" facts to ASM policy/activity responses. The
-   scheduler (`api.run_due_schedules`) and dispatcher (`api.run_asm_dispatch`) should persist/return
-   `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and
-   `active_scan_id` when they choose `wait`.
+2. Extend first-class "next action" and "why skipped" facts from ASM policy/gaps/improve into
+   `/asm/activity` and Dashboard Action Center CTAs. The first contract is live, including
+   `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and active scan
+   links; activity rows still need to show the decision alongside scan history.
 3. Add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired, missing
    owner/approver, no compensating controls, policy-scoped, and target-scoped.
 4. Make finding filters use product taxonomy consistently: `dast`, `ai_gate`, `model_intake`,
@@ -99,11 +107,11 @@ will run next, and which button fixes the next blocker" without reading scan JSO
 
 ### 2. ASM scheduling and campaign semantics
 **Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
-background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy. The problem is
-that the product has two overlapping automation models: recurring schedules and continuous policy.
-Schedules encode ASM as `scan_options.kind='asm_improve'` while `ScheduleCreate.scan_type` remains
-required, so ASM waves are a hidden variant of a DAST scan schedule rather than a first-class schedule
-kind.
+background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
+live/persisted scheduler decisions. The remaining product problem is that the product still has two
+overlapping automation models: recurring schedules and continuous policy. Schedules encode ASM as
+`scan_options.kind='asm_improve'` while `ScheduleCreate.scan_type` remains required, so ASM waves are
+a hidden variant of a DAST scan schedule rather than a first-class schedule kind.
 
 **Implement:**
 1. Introduce a typed schedule kind (`normal_scan`, `asm_improve`, later `focused_family` /
