@@ -4,11 +4,20 @@ import os
 import signal
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
+
+try:  # sibling module; tolerate flat (/app) execution
+    from .adaptive_throttle import get_throttle as _get_active_throttle
+except ImportError:  # pragma: no cover - flat-module fallback
+    try:
+        from adaptive_throttle import get_throttle as _get_active_throttle
+    except ImportError:
+        _get_active_throttle = None
 
 # Disable SSL verification for testing
 _ssl_context = ssl.create_default_context()
@@ -103,11 +112,21 @@ async def run(
 
     Uses a semaphore to limit concurrent subprocess executions and prevent resource exhaustion.
     """
+    # The adaptive throttle only engages for HTTP (curl) requests during an active
+    # scan; it paces the shared request stream so a single-process target under
+    # load stops returning degraded responses that make detectors flake. No-op
+    # unless explicitly enabled (non-active scans are unaffected).
+    is_http_request = bool(cmd) and cmd[0] == "curl"
+    _throttle = _get_active_throttle() if (is_http_request and _get_active_throttle) else None
+
     async with _get_semaphore():
         for attempt in range(retry + 1):
             proc = None
             use_process_group = kill_process_group and os.name == "posix"
             tool_name = cmd[0] if cmd else "subprocess"
+            if _throttle is not None:
+                await _throttle.before()
+            _req_started = time.monotonic()
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -143,12 +162,17 @@ async def run(
                     else:
                         proc.kill()
                     await proc.wait()  # Reap zombie process
+                    if _throttle is not None:
+                        # A timeout is the strongest degradation signal.
+                        _throttle.record(rc=124, elapsed=timeout)
                     if attempt < retry:
                         await asyncio.sleep(2 ** attempt)
                         continue
                     return "", f"timeout after {timeout}s", 124
                 out = out_b.decode(errors="ignore")
                 err = err_b.decode(errors="ignore")
+                if _throttle is not None:
+                    _throttle.record(rc=proc.returncode, elapsed=time.monotonic() - _req_started)
                 return out.strip(), err.strip(), proc.returncode
             except asyncio.CancelledError:
                 if proc is not None:

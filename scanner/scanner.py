@@ -65,6 +65,7 @@ from scanner_tools.focused_scope import (
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
 from scanner_tools.exposure_markers import exposure_severity
+from scanner_tools.adaptive_throttle import configure_throttle, get_throttle
 from scanner_tools.har_discovery import (
     extract_discovery_from_har,
     get_testable_endpoints,
@@ -8060,6 +8061,15 @@ async def build_report(target: str,
             active_block["synthetic_targets_sample"] = list(cand_synthetic)[:10]
         post_active_budget_exhausted = False
 
+        # Enable the adaptive request throttle for the active phase: it stays a
+        # no-op while the target responds cleanly (zero delay) and only paces the
+        # shared curl stream once degradation signals (timeouts / slow responses)
+        # appear, so a single-process target under load stops returning degraded
+        # responses that make SQLi/DBMS-fingerprint/content detectors flake.
+        # Disable with SHAKERSCAN_DISABLE_ADAPTIVE_THROTTLE=1.
+        if (run_sqli or run_xss or active_checks) and not os.environ.get("SHAKERSCAN_DISABLE_ADAPTIVE_THROTTLE"):
+            configure_throttle(enabled=True)
+
         # Smart mode: Use DBMS-aware and context-aware active tests
         if smart_mode:
             try:
@@ -9017,6 +9027,7 @@ async def build_report(target: str,
                     active_block["smart_xss_budget_exhausted_reason"] = xss_budget_reason
                 if primary_active_budget_exhausted:
                     active_block["primary_active_budget_exhausted"] = True
+                active_block["adaptive_throttle"] = get_throttle().telemetry()
                 post_active_budget_exhausted = (
                     active_checks
                     and active_remaining_after_smart is not None
