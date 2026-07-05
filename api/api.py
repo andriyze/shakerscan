@@ -6340,6 +6340,56 @@ def _merge_model_intake_trust_anchor_material(
     })
 
 
+def _apply_model_intake_policy_profile_requirements(
+    request: ModelIntakeScanRequest,
+    profile: dict[str, Any] | None,
+) -> ModelIntakeScanRequest:
+    if not profile:
+        return request
+    if str(profile.get("product_area") or "").strip().lower() != "model_intake":
+        return request
+    if not bool(profile.get("strict_model_intake")):
+        return request
+    required_ids = _str_list(_decode_json_value(profile.get("required_trust_anchor_ids")))
+    if not required_ids:
+        return request
+    selected_ids = _str_list(request.trust_anchor_ids)
+    merged_ids = list(dict.fromkeys(selected_ids + required_ids))
+    metadata = dict(request.metadata_json or {})
+    metadata["policy_required_trust_anchor_ids"] = required_ids
+    metadata["policy_required_trust_anchor_profile"] = str(
+        profile.get("name") or profile.get("environment") or request.policy_profile or ""
+    )
+    return request.model_copy(update={
+        "trust_anchor_ids": merged_ids,
+        "metadata_json": metadata,
+    })
+
+
+async def _expand_model_intake_policy_profile_requirements(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
+    profile_key = str(request.policy_profile or "").strip().lower()
+    if not profile_key:
+        return request
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM policy_profiles
+            WHERE is_active = true
+              AND product_area = 'model_intake'
+              AND (active_from IS NULL OR active_from <= NOW())
+              AND (active_until IS NULL OR active_until > NOW())
+              AND (lower(environment) = $1 OR lower(name) = $1)
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            profile_key,
+        )
+    return _apply_model_intake_policy_profile_requirements(
+        request,
+        row_to_dict(row) if row else None,
+    )
+
+
 async def _expand_model_intake_saved_trust_anchors(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
     anchor_ids = [uuid.UUID(item) for item in _str_list(request.trust_anchor_ids)]
     if not anchor_ids:
@@ -6776,6 +6826,7 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
     request = await _enrich_model_intake_scan_request(request)
+    request = await _expand_model_intake_policy_profile_requirements(request)
     request = await _expand_model_intake_saved_trust_anchors(request)
     artifact_ref = (request.artifact_url or "").strip()
     if not artifact_ref:
@@ -9739,6 +9790,7 @@ async def get_scan_deployment_decision(scan_id: str):
             "expires_days": r["expires_days"],
             "strict_model_intake": r["strict_model_intake"],
             "allow_active_exceptions": r["allow_active_exceptions"],
+            "required_trust_anchor_ids": _str_list(_decode_json_value(r["required_trust_anchor_ids"])),
             "owner": r["owner"],
             "version": r["version"],
             "id": env,
@@ -9776,6 +9828,7 @@ class PolicyProfileRequest(BaseModel):
     expires_days: int = 30
     strict_model_intake: bool = False
     allow_active_exceptions: bool = True
+    required_trust_anchor_ids: list[str] = Field(default_factory=list)
     owner: Optional[str] = None
     version: Optional[str] = None
     is_active: bool = True
@@ -9795,6 +9848,29 @@ class FindingExceptionRequest(BaseModel):
     expires_at: Optional[str] = None
 
 
+async def _validate_policy_profile_required_anchor_ids(conn, req: PolicyProfileRequest) -> list[str]:
+    try:
+        required_anchor_ids = [str(uuid.UUID(item)) for item in _str_list(req.required_trust_anchor_ids)]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="required_trust_anchor_ids must contain valid UUIDs")
+    required_anchor_ids = list(dict.fromkeys(required_anchor_ids))
+    if not required_anchor_ids:
+        return []
+    if req.product_area != "model_intake" or not req.strict_model_intake:
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT id FROM model_intake_trust_anchors
+        WHERE id = ANY($1::uuid[]) AND is_active = true
+        """,
+        [uuid.UUID(item) for item in required_anchor_ids],
+    )
+    found = {str(row["id"]) for row in rows}
+    if found != set(required_anchor_ids):
+        raise HTTPException(status_code=422, detail="required_trust_anchor_ids must reference active Model Intake trust anchors")
+    return required_anchor_ids
+
+
 @app.get("/policy-profiles")
 async def list_policy_profiles():
     async with db_pool.acquire() as conn:
@@ -9805,18 +9881,21 @@ async def list_policy_profiles():
 @app.post("/policy-profiles")
 async def create_policy_profile(req: PolicyProfileRequest):
     async with db_pool.acquire() as conn:
+        required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         try:
             row = await conn.fetchrow(
                 """
                 INSERT INTO policy_profiles
                     (name, product_area, environment, minimum_block_severity, expires_days,
-                     strict_model_intake, allow_active_exceptions, owner, version, is_active)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     strict_model_intake, allow_active_exceptions, required_trust_anchor_ids,
+                     owner, version, is_active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                 RETURNING *
                 """,
                 req.name, req.product_area, req.environment.strip().lower(),
                 req.minimum_block_severity, req.expires_days, req.strict_model_intake,
-                req.allow_active_exceptions, req.owner, req.version, req.is_active,
+                req.allow_active_exceptions, json.dumps(required_anchor_ids),
+                req.owner, req.version, req.is_active,
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Policy profile name already exists")
@@ -9826,17 +9905,19 @@ async def create_policy_profile(req: PolicyProfileRequest):
 @app.patch("/policy-profiles/{profile_id}")
 async def update_policy_profile(profile_id: str, req: PolicyProfileRequest):
     async with db_pool.acquire() as conn:
+        required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         row = await conn.fetchrow(
             """
             UPDATE policy_profiles SET
                 name=$2, product_area=$3, environment=$4, minimum_block_severity=$5,
                 expires_days=$6, strict_model_intake=$7, allow_active_exceptions=$8,
-                owner=$9, version=$10, is_active=$11, updated_at=NOW()
+                required_trust_anchor_ids=$9, owner=$10, version=$11, is_active=$12, updated_at=NOW()
             WHERE id=$1 RETURNING *
             """,
             uuid.UUID(profile_id), req.name, req.product_area, req.environment.strip().lower(),
             req.minimum_block_severity, req.expires_days, req.strict_model_intake,
-            req.allow_active_exceptions, req.owner, req.version, req.is_active,
+            req.allow_active_exceptions, json.dumps(required_anchor_ids),
+            req.owner, req.version, req.is_active,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Policy profile not found")

@@ -6,8 +6,10 @@ import { Edit3, Plus, RefreshCw, Save, ShieldCheck, Trash2, X } from 'lucide-rea
 import {
   createPolicyProfile,
   deletePolicyProfile,
+  getModelIntakeTrustAnchors,
   getPolicyProfiles,
   updatePolicyProfile,
+  type ModelIntakeTrustAnchor,
   type PolicyProfile,
   type PolicyProfilePayload,
 } from '@/lib/api'
@@ -29,6 +31,7 @@ interface ProfileFormState {
   expires_days: string
   strict_model_intake: boolean
   allow_active_exceptions: boolean
+  required_trust_anchor_ids: string[]
   owner: string
   version: string
   is_active: boolean
@@ -42,6 +45,7 @@ const EMPTY_FORM: ProfileFormState = {
   expires_days: '30',
   strict_model_intake: false,
   allow_active_exceptions: true,
+  required_trust_anchor_ids: [],
   owner: '',
   version: '',
   is_active: true,
@@ -57,6 +61,7 @@ function profileToForm(profile: PolicyProfile): ProfileFormState {
     expires_days: String(profile.expires_days ?? 30),
     strict_model_intake: Boolean(profile.strict_model_intake),
     allow_active_exceptions: Boolean(profile.allow_active_exceptions),
+    required_trust_anchor_ids: profile.required_trust_anchor_ids || [],
     owner: profile.owner || '',
     version: profile.version || '',
     is_active: Boolean(profile.is_active),
@@ -76,6 +81,9 @@ function formToPayload(form: ProfileFormState): PolicyProfilePayload {
     expires_days: Math.round(expiresDays),
     strict_model_intake: form.strict_model_intake,
     allow_active_exceptions: form.allow_active_exceptions,
+    required_trust_anchor_ids: form.product_area === 'model_intake' && form.strict_model_intake
+      ? form.required_trust_anchor_ids
+      : [],
     owner: form.owner.trim() || null,
     version: form.version.trim() || null,
     is_active: form.is_active,
@@ -90,6 +98,8 @@ export default function PolicyProfilesPage() {
   const toast = useToast()
   const [profiles, setProfiles] = useState<PolicyProfile[]>([])
   const [loading, setLoading] = useState(true)
+  const [trustAnchors, setTrustAnchors] = useState<ModelIntakeTrustAnchor[]>([])
+  const [trustAnchorsError, setTrustAnchorsError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState<ProfileFormState>(EMPTY_FORM)
@@ -112,6 +122,21 @@ export default function PolicyProfilesPage() {
     loadProfiles()
   }, [loadProfiles])
 
+  const loadTrustAnchors = useCallback(async () => {
+    try {
+      const result = await getModelIntakeTrustAnchors(true)
+      setTrustAnchors(result.trust_anchors || [])
+      setTrustAnchorsError(null)
+    } catch (err) {
+      setTrustAnchors([])
+      setTrustAnchorsError(err instanceof Error ? err.message : 'Failed to load Model Intake trust anchors')
+    }
+  }, [])
+
+  useEffect(() => {
+    loadTrustAnchors()
+  }, [loadTrustAnchors])
+
   const activeCount = useMemo(() => profiles.filter((profile) => profile.is_active).length, [profiles])
   const modelIntakeCount = useMemo(
     () => profiles.filter((profile) => profile.product_area === 'model_intake').length,
@@ -120,6 +145,22 @@ export default function PolicyProfilesPage() {
 
   function updateForm<K extends keyof ProfileFormState>(key: K, value: ProfileFormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function toggleRequiredAnchor(anchorId: string, checked: boolean) {
+    setForm((prev) => ({
+      ...prev,
+      required_trust_anchor_ids: checked
+        ? Array.from(new Set([...prev.required_trust_anchor_ids, anchorId]))
+        : prev.required_trust_anchor_ids.filter((id) => id !== anchorId),
+    }))
+  }
+
+  function anchorLabel(anchorId: string) {
+    const anchor = trustAnchors.find((item) => item.id === anchorId)
+    if (!anchor) return anchorId.slice(0, 8)
+    const fp = anchor.public_key_sha256 ? ` · ${anchor.public_key_sha256.slice(0, 12)}...` : ' · PEM'
+    return `${anchor.name}${fp}`
   }
 
   async function saveProfile(event: React.FormEvent) {
@@ -274,6 +315,59 @@ export default function PolicyProfilesPage() {
           </label>
         </div>
 
+        {form.product_area === 'model_intake' && form.strict_model_intake && (
+          <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium text-gray-200">Required Model Intake trust anchors</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Strict scans using this profile automatically include these saved operator roots.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={loadTrustAnchors}
+                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+              >
+                Refresh anchors
+              </button>
+            </div>
+            {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
+            {trustAnchors.length === 0 ? (
+              <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+                No active saved trust anchors. Create anchors in Model Intake, then bind them here.
+              </div>
+            ) : (
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {trustAnchors.map((anchor) => {
+                  const selected = form.required_trust_anchor_ids.includes(anchor.id)
+                  return (
+                    <label
+                      key={anchor.id}
+                      className={`flex min-w-0 items-start gap-2 rounded border p-3 text-sm ${
+                        selected ? 'border-cyan-500 bg-cyan-950/30 text-cyan-100' : 'border-gray-800 bg-gray-900 text-gray-300'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) => toggleRequiredAnchor(anchor.id, e.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
+                      />
+                      <span className="min-w-0">
+                        <span className="block break-words font-medium">{anchor.name}</span>
+                        <span className="mt-1 block break-words text-xs text-gray-500">
+                          {anchor.policy_profile || 'any profile'}{anchor.owner ? ` · ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` · ${anchor.public_key_sha256.slice(0, 12)}...` : ' · PEM anchor'}
+                        </span>
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="mt-4 flex justify-end">
           <Button type="submit" disabled={saving}>
             <Save className="h-4 w-4" />
@@ -314,9 +408,24 @@ export default function PolicyProfilesPage() {
                       <div className="text-xs">block {profile.minimum_block_severity}+</div>
                       <div className="text-xs text-gray-500">{profile.expires_days}d exception expiry</div>
                       {profile.strict_model_intake && <div className="mt-1 text-xs text-cyan-300">strict intake</div>}
+                      {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
+                        <div className="mt-1 text-xs text-cyan-200">
+                          {(profile.required_trust_anchor_ids || []).length} required anchor{(profile.required_trust_anchor_ids || []).length === 1 ? '' : 's'}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-3">{fmt(profile.owner)}</td>
                     <td className="px-3 py-3">
+                      {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
+                        <div className="mb-2 max-w-xs space-y-1 text-xs text-gray-500">
+                          {(profile.required_trust_anchor_ids || []).slice(0, 2).map((anchorId) => (
+                            <div key={anchorId} className="truncate">{anchorLabel(anchorId)}</div>
+                          ))}
+                          {(profile.required_trust_anchor_ids || []).length > 2 && (
+                            <div>+{(profile.required_trust_anchor_ids || []).length - 2} more</div>
+                          )}
+                        </div>
+                      )}
                       <span className={`rounded px-2 py-1 text-xs ${profile.is_active ? 'bg-green-900/50 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
                         {profile.is_active ? 'active' : 'inactive'}
                       </span>

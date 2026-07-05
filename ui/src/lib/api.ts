@@ -1767,6 +1767,7 @@ export interface PolicyProfile {
   expires_days: number
   strict_model_intake: boolean
   allow_active_exceptions: boolean
+  required_trust_anchor_ids?: string[]
   owner?: string | null
   version?: string | null
   is_active: boolean
@@ -1782,6 +1783,7 @@ export interface PolicyProfilePayload {
   expires_days: number
   strict_model_intake: boolean
   allow_active_exceptions: boolean
+  required_trust_anchor_ids?: string[]
   owner?: string | null
   version?: string | null
   is_active: boolean

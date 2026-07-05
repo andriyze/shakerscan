@@ -636,6 +636,12 @@ export default function ModelIntakeSettingsPage() {
       setRequireDeploymentApproval(saved.product_area === 'model_intake' || saved.minimum_block_severity !== 'info')
       setRequireSignatureVerification(Boolean(saved.strict_model_intake))
       setMaxDownloadBytes(saved.strict_model_intake ? '50000000' : '10000000')
+      if (saved.strict_model_intake) {
+        setTrustMode('trusted_key_fingerprint')
+        if ((saved.required_trust_anchor_ids || []).length) {
+          setSelectedTrustAnchorIds((prev) => Array.from(new Set([...prev, ...(saved.required_trust_anchor_ids || [])])))
+        }
+      }
       return
     }
     if (profile === 'research') {
@@ -1002,6 +1008,11 @@ export default function ModelIntakeSettingsPage() {
               <div className="mt-1 break-words text-xs text-gray-500">
                 Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
               </div>
+              {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
+                <div className="mt-2 text-xs text-cyan-200">
+                  {(profile.required_trust_anchor_ids || []).length} policy-bound trust anchor{(profile.required_trust_anchor_ids || []).length === 1 ? '' : 's'}
+                </div>
+              )}
             </button>
           ))}
         </div>

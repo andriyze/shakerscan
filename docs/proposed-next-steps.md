@@ -326,7 +326,9 @@ key URL/PEM, signature value, trusted keys, hash, payload, and padding. The form
 trust modes plus a pre-submit pass/fail/advisory preview, so users can see why checksum, signature,
 trusted-root, governance, or approval evidence will block or remain advisory before queueing.
 Saved trust-anchor selection/creation/deactivation is now implemented for strict trust mode.
-Remaining ergonomics work is policy-profile anchor binding and clearer exception handling.
+Policy profiles can now bind required saved trust anchors, and matching strict Model Intake scans
+inherit those anchors before cryptographic trust evaluation. Remaining ergonomics work is clearer
+exception handling and expiry display in deployment decisions.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
@@ -335,10 +337,10 @@ Remaining ergonomics work is policy-profile anchor binding and clearer exception
    fail, or be advisory under the selected policy profile.
 3. DONE: clear warnings explain when metadata-supplied keys are evidence but not an operator trust
    root, and strict mode now has a saved trust-anchor selector/manager.
-4. PARTIAL: helper tests cover each preview mode's core trust semantics plus saved-anchor expansion.
-   Keep the existing API/e2e signature tests proving trusted verification is reachable only with
-   operator-supplied trust material, and add deeper end-to-end coverage around policy-profile anchor
-   binding when that feature lands.
+4. DONE/PARTIAL: helper tests cover each preview mode's core trust semantics, saved-anchor expansion,
+   and policy-profile required-anchor binding. Keep the existing API/e2e signature tests proving
+   trusted verification is reachable only with operator-supplied trust material; add deeper
+   exception-expiry coverage with the remaining deployment-decision UX work.
 
 **Done when:** a developer can submit a model with a valid trust configuration without knowing every
 low-level signature field, and the UI explains why "signature present" is not the same as "trusted."

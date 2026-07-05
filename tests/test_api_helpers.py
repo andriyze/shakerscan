@@ -995,6 +995,74 @@ def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata(
     }]
 
 
+def test_model_intake_policy_profile_requirements_add_required_anchor_ids():
+    explicit = "11111111-1111-4111-8111-111111111111"
+    required = "22222222-2222-4222-8222-222222222222"
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        policy_profile="production",
+        trust_anchor_ids=[explicit],
+        metadata_json={"license": "apache-2.0"},
+    )
+
+    updated = api_module._apply_model_intake_policy_profile_requirements(
+        request,
+        {
+            "name": "Production strict",
+            "product_area": "model_intake",
+            "environment": "production",
+            "strict_model_intake": True,
+            "required_trust_anchor_ids": [required],
+        },
+    )
+
+    assert updated.trust_anchor_ids == [explicit, required]
+    assert updated.metadata_json["license"] == "apache-2.0"
+    assert updated.metadata_json["policy_required_trust_anchor_ids"] == [required]
+    assert updated.metadata_json["policy_required_trust_anchor_profile"] == "Production strict"
+
+
+def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_products():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        policy_profile="production",
+    )
+    other_product = api_module._apply_model_intake_policy_profile_requirements(
+        request,
+        {
+            "product_area": "ai_gate",
+            "strict_model_intake": True,
+            "required_trust_anchor_ids": ["22222222-2222-4222-8222-222222222222"],
+        },
+    )
+    non_strict = api_module._apply_model_intake_policy_profile_requirements(
+        request,
+        {
+            "product_area": "model_intake",
+            "strict_model_intake": False,
+            "required_trust_anchor_ids": ["22222222-2222-4222-8222-222222222222"],
+        },
+    )
+
+    assert other_product.trust_anchor_ids is None
+    assert non_strict.trust_anchor_ids is None
+
+
+def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
+    req = api_module.PolicyProfileRequest(
+        name="strict",
+        product_area="model_intake",
+        strict_model_intake=True,
+        required_trust_anchor_ids=["not-a-uuid"],
+    )
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module._validate_policy_profile_required_anchor_ids(None, req))
+
+    assert exc.value.status_code == 422
+    assert "valid UUIDs" in exc.value.detail
+
+
 def test_model_intake_trust_anchor_request_requires_material():
     with pytest.raises(api_module.HTTPException) as exc:
         api_module._validate_model_intake_trust_anchor_request(

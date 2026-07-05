@@ -1108,6 +1108,7 @@ async def run_schema_migrations(pool) -> None:
                     expires_days INTEGER NOT NULL DEFAULT 30,
                     strict_model_intake BOOLEAN NOT NULL DEFAULT false,
                     allow_active_exceptions BOOLEAN NOT NULL DEFAULT true,
+                    required_trust_anchor_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     owner TEXT,
                     version TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT true,
@@ -1116,6 +1117,10 @@ async def run_schema_migrations(pool) -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+            """)
+            await conn.execute("""
+                ALTER TABLE policy_profiles
+                ADD COLUMN IF NOT EXISTS required_trust_anchor_ids JSONB NOT NULL DEFAULT '[]'::jsonb
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS finding_exceptions (
