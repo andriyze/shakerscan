@@ -18,6 +18,11 @@ that ASM should expose as family/proof/workflow gaps.
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 
+**2026-07-05 audit note:** the backend foundations are ahead of the operator workflow. The current
+implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): first-class ASM
+schedule kinds, visible next-action / skip-reason state, one target campaign timeline, and Action
+Center surfacing are the next product priorities.
+
 ---
 
 ## Shared capability status matrix (agent quick read)
@@ -39,6 +44,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
+| ASM scheduling/operator UX | Partial | Unify background policy and recurring ASM waves; expose next eligible action, skip reasons, caps, blockers, and active scan links. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -110,7 +116,7 @@ Shipped pieces:
   - `PUT /targets/{id}/asm/policy`
 - `exploit_batch` claims untested/stale rows with `FOR UPDATE SKIP LOCKED`, runs `run_scan()` with
   `custom_endpoints`, saves findings, and stamps inventory.
-- `asm_dispatcher` periodically decides recon vs. test using target policy: batch size, stale TTL,
+- `run_asm_dispatch` periodically decides recon vs. test using target policy: batch size, stale TTL,
   min interval, daily cap, recon cadence, UTC windows, weekday windows, and per-root-domain caps.
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
   inventory, coverage gaps, ASM activity, policy presets, local-time window helper, and
@@ -498,8 +504,18 @@ Recommended UI:
 
 - **Attack Surface (`/asm`):** one primary action, `Improve coverage`, that chooses recon vs. test
   batch based on current state. Keep manual `Run recon` and `Test next batch` secondary.
+- **Target campaign timeline:** show background dispatcher state, next recurring ASM-wave schedule,
+  current active scan/batch, last activity, last skip/block reason, and next eligible time in one
+  place. A user should not have to know whether work came from `run_asm_dispatch`,
+  `run_due_schedules`, or a manual Improve Coverage click.
+- **Skip/block reasons:** expose rate cap, daily cap, UTC window, weekday window, min interval,
+  active scan, missing auth, missing second user, stale worker, and no claimable endpoints as
+  user-facing states instead of silent "nothing happened" behavior.
 - **Continuous policy:** one enable switch plus presets: `Safe`, `Balanced`, `Aggressive lab`.
   Advanced fields stay expandable.
+- **Recurring ASM waves:** model them as first-class schedule kinds, not as a hidden
+  `scan_options.kind='asm_improve'` variant of a normal DAST scan schedule. Keep legacy decoding for
+  old rows.
 - **Automation defaults:** fresh installs should enable safe automation by default: auto-shard
   eligible active scans when enough workers exist, and enable passive ASM recon/new-surface tracking
   for new targets. Active ASM exploitation should use small safe batches by default and require an
@@ -705,6 +721,17 @@ New quality gaps to track:
   API for UI/API/AI callers; the Settings page shows a compact Automation Defaults card with
   auto-sharding, default Continuous ASM for new web targets, safe ASM presets, and read-only
   Lab/deep confirmation boundaries.
+
+Remaining product work from the 2026-07-05 audit:
+
+- Make ASM schedule kind first-class in the schedule API/DB while preserving legacy
+  `scan_options.kind='asm_improve'` rows.
+- Persist and expose dispatcher/scheduler decision facts: next eligible time, skip reason, active
+  blocker scan, rate/daily cap state, and missing auth/precondition state.
+- Add a target campaign timeline that unifies background ASM policy, recurring ASM waves, manual
+  Improve Coverage actions, and implementation scan/activity rows.
+- Add UI tests for ASM schedule creation/editing, advanced batch fields, endpoint filter, focused
+  family selection, Lab/deep BOLA gating, and skip-reason display.
 
 ### Phase E — Multi-Node Readiness
 

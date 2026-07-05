@@ -1,9 +1,11 @@
 # Proposed Next Steps — DAST & ASM Quality
 
-**Status:** rewritten 2026-06-23. The contract-first proof layer is now implemented and wired;
-this document lists only the *verified-remaining* work (gaps and unfinished layers) plus the
-architectural direction. Each remaining item cites the code symbol that proves its status, so it
-stays auditable. No item below is "already done."
+**Status:** updated 2026-07-05 after the latest-20-commit audit. The contract-first proof layer,
+first app-graph/evidence slices, target de-dupe, policy exceptions, Model Intake trust controls,
+AI Gate hardening, and ASM scheduling foundations are now implemented and wired. This document lists
+only the *verified-remaining* work (gaps and unfinished layers) plus the architectural direction.
+Each remaining item cites the code symbol or UI/API surface that proves its status, so it stays
+auditable. No item below is "already done."
 
 ## Done (do not re-list as TODO)
 
@@ -18,10 +20,26 @@ called at real sites — verify before re-proposing any of it:
   finding set (scanner + `worker.process_scan_merge_job`).
 - **One budget contract** — `constants.resolve_or_consume_budget` (consumed, not re-resolved).
 - **Worker/fleet truth** — `api.compute_fleet_summary` (current/stale/uniform) + `scanner.sh status`.
+- **Build-stale fail-closed jobs** — `api.worker._refuse_stale_job_if_needed` rejects jobs when
+  `require_current_workers` / submit-time fingerprint expectations say the worker is stale.
 - **Active-execution honesty** — `assess_scan_completeness` flags active-zero as `grade_reliable=false`.
 - **Finding-count collapse** — `findings.templated_finding_identity` (DB fingerprint + merge key + dedup).
+- **Canonical target de-dupe prevention** — `api.target_dedupe.canonical_target_key` +
+  self-healing migrations and target insert `ON CONFLICT` paths prevent duplicate-target gate bypasses.
 - **One proof taxonomy** — `ai_verdict_policy.has_deterministic_exploit_proof` + `proof_state`;
   **AI never promotes to `verified`** (enforced across grading/reporting/gating/API/UI).
+- **Policy profiles and exceptions** — `policy_profiles` / `finding_exceptions` are durable and
+  consumed by deployment gates.
+- **Evidence-object phase 1** — `evidence_objects` persists one object per finding for DAST,
+  AI Gate, and Model Intake evidence.
+- **Application-graph phase 1** — `application_graph_nodes` / `application_graph_edges` persist
+  route/object/auth-boundary graph facts and expose `GET /targets/{id}/graph`.
+- **Model Intake trust controls** — `/model-intake/scan` accepts detached signature, public key,
+  signature algorithm/hash/payload, and trusted-key anchors.
+- **AI Gate hardening** — transcript redaction/purge, MCP readiness, control inventory, trust-root
+  receipt verification, and red-team report export are implemented.
+- **ASM automation foundation** — per-target ASM policy, `/settings/automation`, background
+  dispatcher, and recurring ASM-wave schedules exist.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -46,103 +64,193 @@ inline evidence-object slice; the remaining platform gaps are **graph consumers*
 evidence storage**, and **registry-driven execution** that turn detectors into a durable,
 audit-grade platform.
 
-## Remaining work (impact-ordered, verified)
+## Remaining work / implementation plan (impact-ordered, verified)
 
-### 1. Detection recall — the misses are still missed (highest near-term value)
+The next work should be implemented as separate increments. Do not combine UI workflow cleanup,
+ASM scheduler semantics, AI red-team campaign UX, detector recall, and evidence storage in one PR.
+
+### 1. Product-operability layer: one place that explains "what needs action"
+**Status: PARTIAL.** The pieces exist but are scattered. Evidence: `/asm` policy and Improve
+Coverage live in `ui/src/app/asm/page.tsx`; recurring ASM waves live in
+`ui/src/app/schedules/page.tsx` via `scan_options.kind='asm_improve'`; automation defaults live in
+`ui/src/components/ScanExecutionSettingsPanel.tsx`; policy exceptions live on finding detail and in
+`api.list_finding_exceptions`; Model Intake trust controls live in
+`ui/src/app/settings/model-intake/page.tsx`; AI Gate red-team evidence is mostly visible through scan
+reports. Users still have to infer what is blocked, what will run next, and what they should fix.
+
+**Implement:**
+1. Add a Dashboard or `/asm` "Action Center" feed backed by API facts, not client inference:
+   stale ASM coverage, next scheduled ASM wave, dispatcher skip/block reason, failed partial scans,
+   stale/non-current workers, expiring exceptions, model artifacts without trusted signatures,
+   AI targets missing required controls, and deploy gates blocked by active findings.
+2. Add first-class "next action" and "why skipped" facts to ASM policy/activity responses. The
+   scheduler (`api.run_due_schedules`) and dispatcher (`api.run_asm_dispatch`) should persist/return
+   `blocked_by`, `next_eligible_at`, `rate_cap_remaining`, `daily_cap_remaining`, and
+   `active_scan_id` when they choose `wait`.
+3. Add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired, missing
+   owner/approver, no compensating controls, policy-scoped, and target-scoped.
+4. Make finding filters use product taxonomy consistently: `dast`, `ai_gate`, `model_intake`,
+   `asm`, and `manual` (the API already accepts these in `_finding_source_type_clause`; the UI must
+   make the distinction visible everywhere).
+
+**Done when:** a junior operator can answer, from one screen, "what is risky, what is blocked, what
+will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
+
+### 2. ASM scheduling and campaign semantics
+**Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
+background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy. The problem is
+that the product has two overlapping automation models: recurring schedules and continuous policy.
+Schedules encode ASM as `scan_options.kind='asm_improve'` while `ScheduleCreate.scan_type` remains
+required, so ASM waves are a hidden variant of a DAST scan schedule rather than a first-class schedule
+kind.
+
+**Implement:**
+1. Introduce a typed schedule kind (`normal_scan`, `asm_improve`, later `focused_family` /
+   `finding_retest`) in the API and DB migration/backfill. Keep backward compatibility by decoding
+   legacy `scan_options.kind`.
+2. Show one unified target timeline: background dispatcher decision, recurring schedule next run,
+   current active scan/ASM batch, last activity, and last skip reason.
+3. Let `/schedules` create/edit ASM waves without pretending they have a DAST `scan_type`; expose
+   batch size, stale days, endpoint filter, family, and Lab/deep gating only when relevant.
+4. Add tests for schedule-kind validation, legacy decode, due-run dispatch, target active-scan skip,
+   and UI payload shape.
+
+**Done when:** "Keep this target covered" is a first-class scheduled/campaign action, not an
+encoded scan option, and users can see why a target did or did not receive ASM work.
+
+### 3. AI red-team campaign UX and replay loop
+**Status: PARTIAL.** AI Gate has targets, scenario presets, deterministic/semantic judging,
+redacted transcripts (`GET /ai/scans/{id}/transcript`), transcript purge, MCP readiness, control
+inventory (`api.ai_assurance`), adaptive logic (`api/ai_gate/adaptive.py`), and red-team report
+export (`GET /scans/{id}/ai-redteam-report` / `api.get_ai_redteam_report`). It still feels
+target/scan-centric, not campaign-centric.
+
+**Implement:**
+1. Add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
+   control inventory, skipped probes, transcripts, findings, semantic judge output, and report export.
+2. Add an OWASP LLM / RAG / agent / MCP coverage matrix: planned, executed, skipped, blocked by
+   safety profile, finding count, and evidence hash per family.
+3. Add "rerun failed/skipped probes" and "replay this transcript/finding" actions that preserve
+   production confirmation and rate/budget controls.
+4. Promote MCP readiness and missing-control findings into the Action Center from §1.
+
+**Done when:** an AI red-team run can be reviewed, rerun, compared, and defended as a campaign
+artifact instead of a loose scan report.
+
+### 4. Model Intake trust UX
+**Status: PARTIAL.** The API and UI now carry real signature/trust-anchor fields:
+`ModelIntakeScanRequest.signature_*` and the Model Intake page fields around signature URL, public
+key URL/PEM, signature value, trusted keys, hash, payload, and padding. The issue is operator
+ergonomics: the form is dense and does not guide users to valid trust modes.
+
+**Implement:**
+1. Add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
+   signature + inline key`, `trusted key fingerprint`, and `metadata-supplied evidence`.
+2. Add a pre-submit validation/preview panel that states exactly which trust requirements will pass,
+   fail, or be advisory under the selected policy profile.
+3. Add a saved trust-anchor selector and clear warnings when metadata-supplied keys are evidence but
+   not an operator trust root.
+4. Add UI tests for each mode and API tests that prove trusted signature verification is reachable
+   only with operator-supplied trust material.
+
+**Done when:** a developer can submit a model with a valid trust configuration without knowing every
+low-level signature field, and the UI explains why "signature present" is not the same as "trusted."
+
+### 5. Detection recall: benchmark misses still matter
 **Status: PARTIAL.** Reflected XSS on id-like path segments shipped
-(`active_checks._injectable_path_segment`). Still missed on the Juice Shop benchmark:
-`sqli-login` (POST-body SQLi on `/rest/user/login`) and `nosqli-reviews`
-(`/rest/products/reviews`). The probes exist — body-param SQLi/NoSQL is implemented
-(`active_checks` has 34 `body_params` sites; `nosql_injection_test_json_body`) — so the gap is
-**reaching the endpoints with the right body/param under the right auth**: the login POST body
-must be captured/exercised, and the NoSQL operator probe routed to the reviews body.
-**Done when:** a two-user benchmark proves `sqli-login` and `nosqli-reviews` as deterministic
-findings (recall ≥ 7/9), not merely "tested."
+(`active_checks._injectable_path_segment`). Still historically weak or missed on benchmark apps:
+POST-body SQLi/login coverage, NoSQL operator probes routed to the right JSON/body params, stored
+XSS store-then-render proof, and workflow/write-side BOLA. Body-param SQLi/NoSQL primitives exist
+(`nosql_injection_test_json_body` and body-param sites in `active_checks`), so the near-term gap is
+endpoint/body capture, auth context, and proof routing.
 
-### 2. Application / resource graph (consumer integration is the big missing layer)
+**Implement:** keep the benchmark as the unit of progress. Add focused campaigns for login/search/
+review/order APIs; capture real POST bodies from browser/HAR/OpenAPI; route NoSQL operators to JSON
+body params; add browser-first reflected/stored XSS proof; add safe Lab/deep workflow/write-BOLA
+checks after graph/principal preconditions exist.
+
+**Done when:** recorded two-user benchmark scorecards show the targeted miss becoming a deterministic
+finding, not merely an attempted endpoint.
+
+### 6. Application / resource graph consumers
 **Status: PHASE 1 DONE, CONSUMERS MISSING.** `application_graph_nodes` /
 `application_graph_edges` now persist route/object nodes plus producer/consumer/auth-boundary edges
 from discovery + recursive BOLA `resource_map`; `GET /targets/{id}/graph` exposes the graph.
-Object-ID and cross-user primitives also exist *per scan* (`access_control_checks` object-id
+Object-ID and cross-user primitives also exist per scan (`access_control_checks` object-id
 extraction, `_path_has_object_id_segment`, cross-principal replay in `proof_of_exploit` /
 `verification_engine`). The remaining gap is that BOLA/BFLA/BOPLA/tenant/workflow campaigns still
-do not read the durable graph as their source of hypotheses, and the graph does not yet model roles,
-tenants, workflow state, parameters, or expected access policies. **Do:** make an `ApplicationGraph`
-consumer that drives BOLA/BFLA hypotheses from persisted producer→consumer→object-id facts, then
-add params/resources/roles/tenants/workflow nodes. **Done when:** the scanner can state
-"`GET /api/orders` produces `order.id` owned by user1; `GET /api/orders/{id}` consumes it →
-test user2 read/mutate" from a persisted graph and schedule the deterministic campaign from it.
+do not read the durable graph as their source of hypotheses.
 
-### 3. Auth / principal / role matrix
+**Implement:** make an `ApplicationGraph` consumer that drives BOLA/BFLA hypotheses from persisted
+producer->consumer->object-id facts, then add params/resources/roles/tenants/workflow nodes.
+
+**Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
+`GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule
+the deterministic campaign from it.
+
+### 7. Auth / principal / role matrix
 **Status: PARTIAL.** `target_endpoints.auth_state` exists but only `anonymous / user1 / user2`.
-Real access-control testing needs principals with **roles** and **credential profiles** (admin
-vs user vs tenant-B), so BFLA/tenant-isolation can be expressed. **Do:** model principals
-(role, credential profile, tenant) and an endpoint×principal expectation matrix; feed #2.
+Real access-control testing needs principals with roles and credential profiles (admin vs user vs
+tenant-B), so BFLA/tenant-isolation can be expressed.
+
+**Implement:** model principals (role, credential profile, tenant) and an endpoint x principal
+expectation matrix; feed §6 and the AI/ASM campaign planners.
+
 **Done when:** a campaign can assert "endpoint X requires role admin" and prove a lower-role
 principal's access is a finding.
 
-### 4. Evidence object store
+### 8. Evidence object store phase 2 and EvidenceInstance split
 **Status: PHASE 1 DONE (inline).** `evidence_objects` table ships (hash, redaction_profile,
-retention_class, storage_uri, scan/finding links); `save_findings` + `save_ai_findings` each
-write one object per finding; `GET /findings/{id}/evidence` + `GET /evidence/{id}` read them
-(see `docs/REVIEW_IMPLEMENTATION_PLAN.md` Phase B). **Phase 2 remaining:** externalize
-`storage_uri` from `inline:` to S3/MinIO (`file://`) for large blobs + central retrieval across
-worker churn, and a retention sweeper.
-**Do (Phase 2):** make evidence first-class — `EvidenceObject {evidence_id,
-campaign_id, scan_id, finding_id, source_type, object_type (http_exchange|screenshot|
-browser_trace|transcript|payload|callback|report_json), storage_uri, sha256, redaction_profile,
-sensitive, node_id, retention_class}` backed by S3/MinIO. This also unblocks production multi-node
-(the multi-node doc already says local evidence is PoC-only) and AI-transcript auditability.
-**Done when:** findings reference evidence objects by id/hash; evidence survives worker churn and
-is retrievable centrally.
+retention_class, storage_uri, scan/finding links); `save_findings` + `save_ai_findings` write one
+object per finding; `GET /findings/{id}/evidence` + `GET /evidence/{id}` read them. The canonical
+finding collapse works (`templated_finding_identity`, `all_urls`, `all_payloads`,
+`duplicate_count`), but individual proof instances are still folded into evidence JSON.
 
-### 5. Finding / EvidenceInstance object split
-**Status: PARTIAL.** The *collapse* works (templated fingerprint + dedup accumulates `all_urls` /
-`all_payloads` / `duplicate_count`), but evidence instances are merged into the evidence dict, not
-modeled as discrete objects. **Do:** make the canonical `Finding` carry the route template /
-parameter / family / auth boundary, and attach N `EvidenceInstance {concrete_url, object_id,
-payload_variant, request_response_refs, principal_pair, proof_observation}` (referencing #4).
-**Done when:** one templated BOLA route is one finding whose concrete ids/payloads are enumerable
-as evidence instances, not folded into a JSON blob.
+**Implement:** externalize `storage_uri` from `inline:` to S3/MinIO or local object storage for large
+objects; add a retention sweeper; split canonical `Finding` from
+`EvidenceInstance {concrete_url, object_id, payload_variant, request_response_refs,
+principal_pair, proof_observation}`.
 
-### 6. Check-registry → execution migration + proof contracts per family
+**Done when:** findings reference evidence objects by id/hash; one templated BOLA route is one
+finding with enumerable concrete proof instances; evidence survives worker churn.
+
+### 9. Check-registry execution migration + proof contracts per family
 **Status: PARTIAL.** `api/check_registry.py` (`CheckFamilySpec`) is the family contract for API
 validation and ASM scheduling and carries `requires_auth_states` / `requires_credentials` /
-`risk_level` / `runnable` / `telemetry_schema` — but `scanner.build_report` still executes checks
-via hardcoded module calls, the spec has **no `proof_contract` / `severity_rules`**, and
-`lfi`/`rce`/`ssrf` are `runnable=False` (planned, surfaced as "unavailable" in the UI). **Do:**
-migrate `build_report` module execution to registry iteration; add `proof_contract` +
-`severity_rules` per family; make `lfi`/`rce`/`ssrf` runnable ASM families. **Done when:** adding a
-check family is a registry entry (with its proof contract), not edits scattered through
-`build_report`.
+`risk_level` / `runnable` / `telemetry_schema`. Scanner `build_report()` still executes many checks
+through hardcoded module calls, specs need `proof_contract` / `severity_rules`, and planned families
+such as `lfi`/`rce`/`ssrf` are not runnable.
 
-### 7. AI planner over the graph + gaps
-**Status: PARTIAL.** An AI ops router (`/ai/ops/route`) and AI-Gate adaptive logic
-(`api/ai_gate/adaptive.py`) exist, but no planner reads the application graph (#2) + coverage gaps
-to propose and rank campaigns. **Do (after #2):** an AI planner that observes graph + gaps +
-prior findings, proposes campaigns/hypotheses, and explains missing prerequisites — while the
-deterministic engine runs them and the proof engine decides. **Done when:** the planner's output
-is policy-gated campaigns with proof contracts, never direct "verified" claims.
+**Implement:** migrate `build_report()` module execution to registry iteration; add
+`proof_contract`, `severity_rules`, telemetry schema, safety gate, and report rollup per family;
+then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contracts exist.
 
-### 8. Operational / inventory-hygiene follow-ups
-**Status: OPEN (migrated from the now-archived asm-parallel-improvement-plan).** Smaller than
-§1–§7, but verified still-open after the 2026-06-17 live-validation round (most of that round's
-items — A1/A3/A2 reachability + soft-404 + `gone`-retirement GC, P1/P2/P3/P4/P5 — landed; these three
-did not):
+**Done when:** adding a check family is a registry entry plus module integration, not edits scattered
+through `build_report`.
+
+### 10. Operational / inventory-hygiene follow-ups
+**Status: OPEN (migrated from the now-archived asm-parallel-improvement-plan).** Most of the
+2026-06-17 live-validation items landed (A1/A3/A2 reachability + soft-404 + `gone` retirement,
+P1/P2/P3/P4/P5). Still open:
+
 - **Cap synthetic endpoint permutation (was A4).** Version/resource permutation can dominate the
-  worklist before reachability filtering (Juice Shop: 4475 versioned + 1677 resource-permuted paths,
-  the bulk phantom). Gate synthetic generation behind the A3 reachability signal and/or cap
-  permutation breadth so generation can't out-run the filter. Today the soft-404 GC
-  (`asm_inventory.sweep_endpoint_reachability`) retires phantoms *after* they are created rather than
-  not creating them.
-- **Worker code-version handshake (was the P1 follow-up).** A version-skewed worker/API silently runs
-  old code (the root cause behind the earlier "dynamic executes static" and "parallel dropped"
-  mis-diagnoses). Make `./scanner.sh rebuild/restart` recreate API-scaled workers too, and have a
-  skewed worker refuse jobs instead of running stale code. `compute_fleet_summary` already reports
-  `build_current`/uniformity; this closes the loop by acting on it.
-- **All-worker log aggregation (was P6).** `docker compose logs worker` only captures the compose
-  replicas, not API-scaled `shakerscan-worker-*` containers, so fan-out/plan lines on scaled workers
-  are invisible. Add a `scanner.sh logs` mode that aggregates all worker containers.
+  worklist before reachability filtering. Gate synthetic generation behind reachability signal and
+  cap permutation breadth so soft-404 GC does not have to retire thousands of phantoms after creation.
+- **Worker restart/rebuild closure.** `_refuse_stale_job_if_needed` now fail-closes stale jobs, but
+  `./scanner.sh rebuild/restart` should also recreate API-scaled workers so users do not have to
+  manually scale down/up to replace them.
+- **All-worker log aggregation (was P6).** `docker compose logs worker` only captures compose
+  replicas, not API-scaled `shakerscan-worker-*` containers. Add `scanner.sh logs` aggregation.
+
+### 11. Verification requirements for the next cycle
+Every implementation increment above must include its own test slice:
+
+- API/unit tests for new data contracts and legacy compatibility.
+- UI tests for action-center cards, ASM schedule payloads, Model Intake trust modes, and AI red-team
+  campaign review/rerun.
+- At least one live or fixture-backed scorecard for detector/ASM changes.
+- Browser QA across desktop/mobile before claiming UI completion.
+- A worker-freshness preflight (`GET /workers` build-current) before any DAST-quality benchmark.
 
 ## Standing invariants (enforced — keep them enforced)
 - No finding becomes `verified`/grade-capping from AI classification alone — only deterministic proof.
