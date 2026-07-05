@@ -238,6 +238,12 @@ async def verify_high_severity_findings(
                 ("command injection", "command_injection"), ("rce", "command_injection"),
                 ("ssti", "ssti"), ("template injection", "ssti"),
                 ("broken object level", "bola"), ("bola", "bola"),
+                # Exposed-file harvest ("Sensitive file exposed: X") + forced
+                # browsing, so unproven exposures downgrade instead of lingering
+                # as unverified highs. Primary route is finding["type"], this is
+                # the title/tool fallback.
+                ("file exposed", "exposed_file"), ("exposed file", "exposed_file"),
+                ("exposed_file", "exposed_file"), ("forced_browsing", "exposed_file"),
             ]:
                 if probe in title or probe in tool:
                     finding_type = ft

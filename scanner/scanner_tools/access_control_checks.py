@@ -796,13 +796,19 @@ async def check_forced_browsing(
 
     # SPA DETECTION: Check if site uses catch-all routing (returns same page for all paths)
     # This causes massive false positives since every path returns HTTP 200
+    spa_content_only = False
     try:
         spa_result = await detect_spa_catch_all(url, timeout=timeout_per_request)
         if spa_result.get("is_spa_catch_all"):
             results["spa_detected"] = True
             results["spa_evidence"] = spa_result.get("evidence", {})
-            # Skip forced browsing checks - all paths would return same content
-            return results
+            # Do NOT skip entirely (that silently hid /metrics, /actuator/*, and
+            # other real exposures on every Angular/React app). A validated
+            # Prometheus/actuator/JSON body provably is NOT the SPA shell, so we
+            # restrict to the content-validated categories and let
+            # test_single_path's content validation + homepage-hash guard reject
+            # the shell. Genuinely-exposed endpoints still surface as verified.
+            spa_content_only = True
     except Exception:
         pass  # Continue with checks if SPA detection fails
 
@@ -814,16 +820,19 @@ async def check_forced_browsing(
     except Exception:
         pass  # Continue without homepage comparison if fetch fails
 
-    # Determine which paths to test
-    if categories:
-        paths_to_test = []
-        for cat in categories:
-            if cat in PRIVILEGED_PATHS:
-                paths_to_test.extend(PRIVILEGED_PATHS[cat])
-                results["categories_tested"].append(cat)
-    else:
-        paths_to_test = get_all_paths()
-        results["categories_tested"] = list(PRIVILEGED_PATHS.keys())
+    # Determine which categories to test.
+    selected_categories = list(categories) if categories else list(PRIVILEGED_PATHS.keys())
+    if spa_content_only:
+        # Under an SPA catch-all, only categories with a strict content validator
+        # can be told apart from the app shell — restrict to those so we don't
+        # re-introduce the 200-everywhere false-positive flood.
+        selected_categories = [c for c in selected_categories if c in CATEGORY_CONTENT_VALIDATORS]
+
+    paths_to_test = []
+    for cat in selected_categories:
+        if cat in PRIVILEGED_PATHS:
+            paths_to_test.extend(PRIVILEGED_PATHS[cat])
+            results["categories_tested"].append(cat)
 
     results["paths_tested"] = len(paths_to_test)
 
@@ -3538,5 +3547,154 @@ async def check_vertical_privilege_escalation(
                     "cwe": "CWE-269",
                     "owasp": "A01:2021 - Broken Access Control",
                 })
+
+    return results
+
+
+def _is_collection_endpoint(url: str) -> bool:
+    """True if the URL looks like a REST collection (``/api/Users``, ``/rest/products``)
+    and isn't an excluded docs/static/health path. Reuses the shared collection
+    patterns so this stays consistent with resource-id synthesis."""
+    import re
+    low = url.lower()
+    if any(excl in low for excl in COLLECTION_EXCLUSIONS):
+        return False
+    return any(re.match(p, url, re.IGNORECASE) for p in COLLECTION_ENDPOINT_PATTERNS)
+
+
+async def check_collection_authz(
+    base_url: str,
+    discovered_urls: list[str] | None = None,
+    auth_session: Any | None = None,
+    timeout: int = 10,
+    max_endpoints: int = 40,
+) -> dict[str, Any]:
+    """Broken function-level authorization (BFLA) on sensitive COLLECTION endpoints.
+
+    General technique, no app-specific paths: a collection like ``/api/Users``
+    that denies anonymous callers (401/403) but returns a bulk array of OTHER
+    principals' sensitive records to *any authenticated user* is broken
+    function-level authorization — authentication is enforced, authorization is
+    not. The anonymous-denied vs authenticated-bulk-data differential IS the
+    deterministic proof, so findings are emitted pre-verified.
+
+    Precision guards (avoid flagging an endpoint returning only the caller's own
+    record): require the authenticated response to (a) pass the ``rest_api_models``
+    sensitive-field content validation (email/role/token markers, HTML rejected)
+    and (b) expose cross-principal data — >=2 distinct identities OR a privileged
+    (role:admin) record.
+    """
+    import re
+
+    results: dict[str, Any] = {"vulnerable": False, "findings": [], "endpoints_tested": 0}
+    if not auth_session:
+        results["skipped_reason"] = "no_auth_session"
+        return results
+
+    from .proof_of_exploit import fetch_with_capture
+
+    auth_headers: dict[str, str] = {}
+    if hasattr(auth_session, "config"):
+        auth_headers.update(getattr(auth_session.config, "headers", {}) or {})
+        cookies = getattr(auth_session.config, "cookies", {}) or {}
+        if cookies:
+            auth_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if not auth_headers:
+        results["skipped_reason"] = "no_auth_headers"
+        return results
+
+    # Candidate collections: discovered URLs that match the collection pattern,
+    # plus the curated rest_api_models model list so an admin/model API not
+    # linked in the SPA is still probed.
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        if not raw:
+            return
+        u = str(raw)
+        full = u if u.startswith("http") else urljoin(base_url.rstrip("/") + "/", u.lstrip("/"))
+        path = urlsplit(full).path or "/"
+        if path in seen:
+            return
+        if not _is_collection_endpoint(full):
+            return
+        seen.add(path)
+        candidates.append(full)
+
+    for u in (discovered_urls or []):
+        _add(u)
+    for p in PRIVILEGED_PATHS.get("rest_api_models", []):
+        _add(urljoin(base_url.rstrip("/") + "/", p.lstrip("/")))
+    candidates = candidates[:max_endpoints]
+
+    def _content_type(resp: dict[str, Any]) -> str:
+        for k, v in (resp.get("headers") or {}).items():
+            if str(k).lower() == "content-type":
+                return str(v)
+        return ""
+
+    for url in candidates:
+        results["endpoints_tested"] += 1
+        try:
+            r_auth = await fetch_with_capture(url, headers=auth_headers, timeout=timeout)
+        except Exception:
+            continue
+        if int(r_auth.get("status_code") or 0) != 200:
+            continue
+        body_auth = r_auth.get("body") or ""
+        ok, _reason = _has_category_content(body_auth, _content_type(r_auth), "rest_api_models")
+        if not ok:
+            continue
+        # Cross-principal guard: bulk data belonging to more than just the caller.
+        emails = set(re.findall(r'"email"\s*:\s*"([^"]+)"', body_auth))
+        has_privileged = bool(re.search(r'"(?:role|isadmin|is_admin)"\s*:\s*"?(?:admin|true)"?', body_auth, re.I))
+        if len(emails) < 2 and not has_privileged:
+            continue
+
+        # Anonymous differential.
+        try:
+            r_anon = await fetch_with_capture(url, timeout=timeout)
+        except Exception:
+            continue
+        s_anon = int(r_anon.get("status_code") or 0)
+        anon_denied = s_anon in (401, 403)
+        anon_leaks = False
+        if s_anon == 200:
+            anon_leaks, _ = _has_category_content(r_anon.get("body") or "", _content_type(r_anon), "rest_api_models")
+
+        # BFLA when anonymous is denied but any authenticated user gets the bulk
+        # data. If anonymous ALSO leaks it, that is an even worse unauthenticated
+        # exposure — still report (forced browsing may also flag it separately).
+        if not (anon_denied or (s_anon == 200 and not anon_leaks)):
+            continue
+
+        results["vulnerable"] = True
+        path = urlsplit(url).path
+        principal = "any authenticated user" if anon_denied else "a lower-privileged principal"
+        results["findings"].append({
+            "tool": "bfla",
+            "title": f"Broken function-level authorization: {path} returns bulk user records to {principal}",
+            "severity": "high",
+            "verified": True,
+            "type": "bfla",
+            "url": url,
+            "evidence": {
+                "type": "bfla",
+                "url": url,
+                "anonymous_status": s_anon,
+                "authenticated_status": 200,
+                "distinct_identities": len(emails),
+                "privileged_record_present": has_privileged,
+                "differential": (
+                    f"anonymous -> HTTP {s_anon}; authenticated -> HTTP 200 with "
+                    f"{len(emails)} distinct user record(s)"
+                    + (" incl. a privileged (admin) record" if has_privileged else "")
+                ),
+                "authenticated_snippet": body_auth[:300],
+            },
+            "cwe": "CWE-285",
+            "owasp": "A01:2021 - Broken Access Control",
+        })
 
     return results

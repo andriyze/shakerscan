@@ -23,6 +23,7 @@ MITRE ATT&CK:
 """
 
 import asyncio
+import hashlib
 import http.client
 import re
 import socket
@@ -581,13 +582,13 @@ async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int =
         lname = name.lower()
         sensitive_ext = lname.endswith(_SENSITIVE_FILE_EXT)
         file_url = urllib.parse.urljoin(base, urllib.parse.quote(name))
-        status, body, _ = await _fetch_url(file_url, timeout=8)
+        status, body, resp_headers = await _fetch_url(file_url, timeout=8)
         bypass_used = None
         if (status != 200 or not body) and sensitive_ext and status in (401, 403, 404, 406):
             # Encoded-null-byte extension-allowlist bypass (CWE-158 / CWE-22).
             for ext in _NULLBYTE_ALLOWED_EXT:
                 bypass_url = urllib.parse.urljoin(base, urllib.parse.quote(name) + "%2500" + ext)
-                status, body, _ = await _fetch_url(bypass_url, timeout=8)
+                status, body, resp_headers = await _fetch_url(bypass_url, timeout=8)
                 if status == 200 and body:
                     file_url = bypass_url
                     bypass_used = "encoded_null_byte"
@@ -612,6 +613,15 @@ async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int =
         # the content reads as confidential/secret.
         if not (bypass_used or sensitive_ext or markers or sensitive_content):
             continue
+        content_type = ""
+        for hk, hv in (resp_headers or {}).items():
+            if str(hk).lower() == "content-type":
+                content_type = str(hv).split(";")[0].strip().lower()
+                break
+        # preview_hash16 hashes the FULL body (same shape the retest prover
+        # re-hashes) so a marker-less-but-genuinely-exposed file can still be
+        # re-confirmed byte-for-byte; content_type feeds the prover's shape match.
+        preview_hash16 = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()[:16]
         found.append({
             "file": name,
             "url": file_url,
@@ -620,7 +630,9 @@ async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int =
             "markers": markers,
             "content_length": len(body),
             "content_preview": body[:300],
-            "confidence": guess_confidence(name, body, None),
+            "content_type": content_type,
+            "preview_hash16": preview_hash16,
+            "confidence": guess_confidence(name, body, content_type or None),
         })
     return found
 

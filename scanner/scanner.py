@@ -64,6 +64,7 @@ from scanner_tools.focused_scope import (
 )
 from scanner_tools.coverage_tracker import CoverageTracker
 from scanner_tools.completion_status import build_scan_completion_status
+from scanner_tools.exposure_markers import exposure_severity
 from scanner_tools.har_discovery import (
     extract_discovery_from_har,
     get_testable_endpoints,
@@ -7320,14 +7321,18 @@ async def build_report(target: str,
     if directory_listing_results.get("vulnerable"):
         for directory in directory_listing_results.get("exposed_directories", []):
             _sensitive = directory.get("sensitive_files") or []
-            # A listing that actually exposes readable sensitive files (backups,
-            # keys, confidential docs) is a high-severity exposure, not a mere
-            # "listing enabled" misconfig.
+            # The listing itself is a CWE-548 misconfiguration (medium). The
+            # high-severity signal lives in the individual harvested files, which
+            # are reported separately below and — unlike this summary — carry an
+            # exposed_file prover ladder so they are confirmed-or-downgraded on
+            # retest. Keeping the summary HIGH would add a permanently-unverified
+            # high to the ratio; recall for the listing is preserved by those
+            # per-file exposed_file findings.
             report["findings"].append(normalize_finding(
                 "directory_listing",
                 (f"Directory listing exposes {len(_sensitive)} sensitive file(s): {directory.get('directory')}"
                  if _sensitive else f"Directory listing enabled: {directory.get('directory')}"),
-                "high" if _sensitive else "medium",
+                "medium",
                 {
                     "directory": directory.get("directory"),
                     "url": directory.get("url"),
@@ -7346,17 +7351,35 @@ async def build_report(target: str,
                     if via_bypass else
                     f"Sensitive file exposed: {sf.get('file')}"
                 )
+                # Confidence-gated severity (mirrors check_exposed_files at
+                # scanner.py ~6553): a bare 200 + single keyword/extension is no
+                # longer auto-HIGH — that flooded the unverified-high ratio. HIGH
+                # requires a content marker, high confidence, or a bypass; weaker
+                # hits are medium/low and get confirmed-or-downgraded on retest.
+                sf_severity = exposure_severity(
+                    sf.get("markers"),
+                    sf.get("confidence"),
+                    sensitive_ext=bool(sf.get("sensitive_ext")),
+                    via_bypass=via_bypass,
+                )
                 report["findings"].append(normalize_finding(
                     "exposed_file",
                     title,
-                    "high",
+                    sf_severity,
                     {
+                        # type routes the finding to the exposed_file prover ladder
+                        # in the scan-time verification phase and the async retest,
+                        # so these are confirmed-or-downgraded rather than left as
+                        # permanent unverified highs.
+                        "type": "exposed_file",
                         "url": sf.get("url"),
                         "file": sf.get("file"),
                         "bypass": sf.get("bypass"),
                         "markers": sf.get("markers"),
                         "content_length": sf.get("content_length"),
                         "content_preview": sf.get("content_preview"),
+                        "content_type": sf.get("content_type"),
+                        "preview_hash16": sf.get("preview_hash16"),
                         "confidence": sf.get("confidence"),
                         "discovery": "directory_listing_harvest",
                     },
@@ -10043,12 +10066,25 @@ async def build_report(target: str,
                     except Exception as e:
                         active_block.setdefault("sqlmap_errors", []).append({"error": str(e)})
 
-                # NoSQL Injection testing for JSON body endpoints
-                # NoSQL is an injection attack and should run when SQLi testing is enabled
+                # NoSQL Injection testing for JSON body endpoints.
+                # NoSQL is a core injection family (operator injection / auth
+                # bypass), not optional re-confirmation enrichment like SQLMap, so
+                # give it priority: run whenever SQLi runs and any meaningful active
+                # time remains, using a small dedicated floor (5s) instead of the
+                # generic 15s post-active threshold. This keeps body-based NoSQL
+                # from being the first thing dropped on smaller budget profiles —
+                # it is cheap (<=8 endpoints, a handful of requests each). Note the
+                # candidate endpoints must be reachable: auth-gated NoSQL sinks
+                # (e.g. Juice Shop PATCH /rest/products/reviews -> 401 anonymous)
+                # only surface when the scan carries the required auth context.
+                _nosql_remaining = active_block.get("active_remaining_after_smart")
+                nosql_budget_exhausted = (
+                    _nosql_remaining is not None and _nosql_remaining < 5.0
+                )
                 nosql_decision = (
                     should_run_active_enrichment(
                         "nosql_injection",
-                        post_active_budget_exhausted=post_active_budget_exhausted,
+                        post_active_budget_exhausted=nosql_budget_exhausted,
                         active_block=active_block,
                     )
                     if run_sqli
@@ -10522,6 +10558,48 @@ async def build_report(target: str,
                         print(f"[scanner] Smart BOLA: found {len(bola_results['findings'])} vulnerabilities", file=sys.stderr)
                     else:
                         print(f"[scanner] Smart BOLA: no vulnerabilities found (tested {bola_results.get('endpoints_analyzed', 0)} endpoints)", file=sys.stderr)
+
+                # Broken function-level authorization (BFLA) on sensitive
+                # collection endpoints: a collection that denies anonymous but
+                # returns bulk cross-principal records to any authenticated user
+                # (e.g. /api/Users -> the full user list incl. admin). Needs a
+                # primary auth context; no-op anonymously. The anon-vs-authed
+                # differential is deterministic proof, so findings arrive verified.
+                if auth_session:
+                    try:
+                        from scanner_tools.access_control_checks import check_collection_authz
+                        collection_authz = await check_collection_authz(
+                            base_url,
+                            discovered_urls=bola_urls,
+                            auth_session=auth_session,
+                            timeout=10,
+                            max_endpoints=smart_bola_max_endpoints,
+                        )
+                        active_block["collection_authz"] = {
+                            "endpoints_tested": collection_authz.get("endpoints_tested", 0),
+                            "vulnerable": collection_authz.get("vulnerable", False),
+                            "skipped_reason": collection_authz.get("skipped_reason"),
+                        }
+                        for f in collection_authz.get("findings", []):
+                            nf = normalize_finding(
+                                str(f.get("tool") or "bfla"),
+                                str(f.get("title")),
+                                str(f.get("severity") or "high"),
+                                f.get("evidence") or {},
+                                f.get("cwe") or "CWE-285",
+                            )
+                            # Deterministic anon-vs-authed differential: carry the
+                            # pre-verified state through so the verification phase
+                            # skips it (it would otherwise route to the cross-user
+                            # BOLA prover, which needs user2 and would downgrade).
+                            nf["verified"] = True
+                            nf["cvss_score"] = 7.5
+                            report["findings"].append(nf)
+                        if collection_authz.get("findings"):
+                            print(f"[scanner] BFLA: found {len(collection_authz['findings'])} broken-authorization collection(s)", file=sys.stderr)
+                    except Exception as e:
+                        active_block["collection_authz_error"] = str(e)
+                        print(f"[scanner] BFLA collection-authz error: {e}", file=sys.stderr)
             except Exception as e:
                 active_block["smart_bola_error"] = str(e)
                 print(f"[scanner] Smart BOLA error: {e}", file=sys.stderr)

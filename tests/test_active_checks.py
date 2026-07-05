@@ -73,6 +73,26 @@ def test_reachability_gate_only_targets_synthetic_sources():
         assert syn({"source": guessed}) is True
 
 
+def test_reachability_gate_exempts_non_get_and_body_endpoints():
+    # A GET-based reachability probe cannot judge a POST/body route: Juice Shop's
+    # POST /rest/user/login exists but GETs to 500 (identical to a 500 sibling),
+    # so GET-probing would drop it before body SQLi. It must be exempt.
+    elig = active_checks._reachability_eligible
+    # POST login from the synthetic "common" source -> NOT droppable
+    assert elig({"source": "common", "method": "POST",
+                 "body_params": ["email", "password"], "url": "/rest/user/login"}) is False
+    # any endpoint carrying body_params (even GET) -> NOT droppable (real surface)
+    assert elig({"source": "inferred", "method": "GET",
+                 "body_params": ["q"], "url": "/api/search"}) is False
+    # a plain GET, no body, synthetic permutation -> STILL droppable (the
+    # /api/v{n}/oauth2/authorize explosion the gate exists to kill)
+    assert elig({"source": "inferred", "method": "GET",
+                 "url": "/api/v9/oauth2/authorize"}) is True
+    assert elig({"source": "common", "method": "GET", "url": "/api/v1/login"}) is True
+    # observed sources are never eligible for the drop regardless of method
+    assert elig({"source": "browser", "method": "GET", "url": "/real"}) is False
+
+
 def test_active_checks_synthetic_body_reconstructs_arrays():
     template = active_checks._synthetic_json_template_from_params(
         ["items", "items.id", "items.price", "shipping.zip"]

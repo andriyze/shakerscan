@@ -286,6 +286,13 @@ RETEST_TOOL_TYPE_MAP: dict[str, str] = {
     "access_control": "bola",
     "forced_browsing": "exposed_file",
     "exposed_files": "exposed_file",
+    # Singular tool name emitted by the directory-listing harvest
+    # (scanner.py normalize_finding("exposed_file", ...)). Without this the
+    # harvested exposures fell back to title matching, which their
+    # "Sensitive file exposed: X" wording missed, leaving them permanently
+    # unverified. Evidence.type also carries this now; the tool map is the
+    # more reliable identifier so both routes agree.
+    "exposed_file": "exposed_file",
 }
 
 DEFAULT_REPLAY_PAYLOADS: dict[str, str] = {
@@ -397,7 +404,12 @@ def infer_type_from_title_tool(title: str | None, tool: str | None) -> str | Non
         return "bola"
     if "idor" in title or "insecure direct object" in title:
         return "idor"
-    if "exposed file" in title or (title.startswith("accessible ") and ":" in title):
+    if (
+        "exposed file" in title
+        or "file exposed" in title          # "Sensitive file exposed: X" harvest wording
+        or "sensitive file" in title
+        or (title.startswith("accessible ") and ":" in title)
+    ):
         return "exposed_file"
     return None
 

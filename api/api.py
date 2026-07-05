@@ -1023,6 +1023,16 @@ def _resolve_auto_parallel_strategy(
     endpoint_count = _custom_endpoint_count(options_payload)
     if endpoint_count >= 2:
         return "scope"
+    # Authenticated active scans: prefer the additive auth split so a primary
+    # credential ADDS an authenticated pass on top of the anonymous baseline
+    # instead of REPLACING it (which silently drops anonymous-only findings like
+    # unauthenticated SQLi). Each auth_split shard is a full smart scan — no
+    # family/scope fragmentation of the global+browser checks — and the authed
+    # shard keeps user1+user2 so cross-user BOLA still runs. Focused-family scans
+    # keep coverage_family (they need per-family endpoint slicing).
+    has_primary_auth = any(options_payload.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS)
+    if has_primary_auth and not focused and scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
+        return "auth_split"
     if scan_type in AUTO_SHARD_ACTIVE_SCAN_TYPES:
         return "coverage_family" if focused else "coverage"
     return "family"

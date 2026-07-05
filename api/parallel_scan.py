@@ -99,7 +99,7 @@ PARALLEL_OPTION_KEYS = (
 # only meaningful for these; for passive types it degrades to a single shard.
 ACTIVE_SCAN_TYPES = frozenset({"full", "aggressive", "smart"})
 
-VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage", "coverage_family"})
+VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage", "coverage_family", "auth_split"})
 
 # exploit-depth: drive confirmed findings to proof rather than capping early.
 EXPLOIT_DEPTH_BUDGET = {
@@ -1379,6 +1379,36 @@ def plan_shards(
     resolved = strategy
     if strategy == "auto":
         resolved = "scope" if len(endpoints) >= 2 else "family"
+
+    # Additive auth split: run ONE full smart scan per auth state (anonymous +
+    # full-context authed) so authenticating ADDS coverage instead of replacing
+    # the anonymous pass. Each shard is a COMPLETE scan (no family/scope
+    # fragmentation of the global+browser checks that detection depends on), and
+    # the full-context authed shard keeps user1+user2 together so cross-user BOLA
+    # still runs. Degrades to a single standalone scan with no primary creds.
+    #
+    # Self-contained TWO-way split (NOT the shared _expand_auth_states, which does
+    # an intentional per-identity cross-product for coverage's per-principal
+    # endpoint coverage). A cross-product would strip user2 from the user1 shard
+    # and leave no shard able to run BOLA.
+    if resolved == "auth_split":
+        base_opts = _base_child_options(parent_options)
+        if not any(parent_options.get(k) for k in _PRIMARY_AUTH_KEYS):
+            notes.append("auth_split requested but no primary credentials; running a single anonymous scan")
+            if parent_options.get("exploit_depth"):
+                _apply_exploit_depth(base_opts)
+            return ParallelPlan(strategy="auth_split",
+                                shards=[ShardSpec(0, "auth", base_opts)], notes=notes)
+        authed = dict(base_opts)
+        authed["auth_state"] = "user1"          # full-context: all creds intact
+        anon = _apply_auth_state(base_opts, "anonymous")  # baseline: creds stripped
+        shards = [ShardSpec(0, "auth:authed", authed), ShardSpec(1, "auth:anonymous", anon)]
+        if parent_options.get("exploit_depth"):
+            for s in shards:
+                _apply_exploit_depth(s.options)
+        notes.append("auth_split: anonymous baseline + full-context authed (BOLA preserved)")
+        return ParallelPlan(strategy="auth_split", shards=shards, notes=notes)
+
     if resolved == "coverage":
         # coverage needs a harvested worklist that only the plan handler can
         # produce (discover-once recon). plan_shards is pure, so degrade safely.

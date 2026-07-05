@@ -7710,6 +7710,122 @@ async def smart_xss_test(
         name_l = name.lower()
         return any(tok in name_l for tok in ("file", "upload", "attachment", "image", "avatar", "photo"))
 
+    _XSS_EXECUTABLE_CONTEXTS = ("in_html", "in_script", "in_attribute", "in_angular")
+
+    async def _test_path_segment_xss(endpoint_url: str, parsed_ep: Any, path_seg: tuple[str, int]) -> None:
+        """Reflected XSS where the injection point is an id-like PATH SEGMENT
+        (e.g. ``/track-order/{id}``), not a query param — the query-param loop
+        never covers these. Generic (id-shape segment, no route names).
+
+        Precision guard: a path segment echoed into a JSON/API response is NOT,
+        by itself, XSS, so a finding is emitted only when browser-proven OR the
+        payload reflects unescaped in an executable HTML context. This keeps the
+        engine from flagging every id-reflecting REST endpoint.
+        """
+        seg_value, seg_index = path_seg
+        canary = f"xss{random.randint(10000, 99999)}test"
+        canary_url = _build_path_segment_url(parsed_ep, seg_index, canary)
+        out, _err, rc = await run([
+            "curl", "-sS", "-L", "-k", "--max-time", "10",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        ] + auth_args + [canary_url], timeout=12)
+        if rc != 0 or not out or canary not in out:
+            return
+        results["reflections_found"] += 1
+        context = detect_reflection_context(out, canary)
+        if context == "not_reflected":
+            return
+        executable = context in _XSS_EXECUTABLE_CONTEXTS
+        payloads = _select_xss_payloads(context)
+        for payload, technique, description in payloads:
+            if _budget_exhausted():
+                break
+            payload_url = _build_path_segment_url(parsed_ep, seg_index, payload)
+            payload_out, _p_err, payload_rc = await run([
+                "curl", "-sS", "-L", "-k", "--max-time", "10",
+                "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+            ] + auth_args + [payload_url], timeout=12)
+            if payload_rc != 0 or not payload_out:
+                continue
+
+            unescaped = False
+            if payload in payload_out:
+                escaped_variants = [
+                    payload.replace("<", "&lt;"),
+                    payload.replace(">", "&gt;"),
+                    payload.replace("'", "&#39;"),
+                    payload.replace('"', "&quot;"),
+                    urllib.parse.quote(payload),
+                ]
+                unescaped = not any(ev in payload_out for ev in escaped_variants)
+
+            verified = False
+            proof_data = None
+            severity = None
+            confidence = 0.6
+            evidence: list[str] = []
+
+            # Browser proof is the real arbiter: navigate directly to the URL
+            # with the payload already in the path (prebuilt_url) so no spurious
+            # query param is appended.
+            if HAS_XSS_PROOF and prove_xss_headless:
+                try:
+                    proof = await prove_xss_headless(
+                        url=endpoint_url,
+                        param=f"path:{seg_value}",
+                        payload=payload,
+                        prebuilt_url=payload_url,
+                    )
+                    if proof and proof.proven:
+                        verified = True
+                        severity = "high"
+                        confidence = proof.confidence
+                        evidence.append(f"Browser proof: {proof.technique}")
+                        if proof.extracted_data:
+                            evidence.append(f"Proof data: {proof.extracted_data}")
+                        proof_data = proof.to_dict()
+                except Exception as e:
+                    evidence.append(f"Browser verification skipped: {e}")
+
+            if not verified:
+                # No execution proof — only report an unescaped reflection that
+                # landed in an executable HTML context. JSON/text echoes are not
+                # reported (would be a false positive on id-reflecting APIs).
+                if not (unescaped and executable):
+                    continue
+                severity = "high" if context in ("in_script", "in_angular") else "medium"
+                confidence = 0.65
+                evidence.append(f"Payload reflected unescaped in path segment ({context})")
+
+            finding = {
+                "type": "XSS",
+                "subtype": f"path_segment_{context}",
+                "url": endpoint_url,
+                "method": "GET",
+                "param": seg_value,
+                "injection_point": "path_segment",
+                "payload": payload,
+                "technique": technique,
+                "description": description,
+                "evidence": evidence,
+                "confidence": confidence,
+                "severity": severity,
+                "verified": verified,
+            }
+            if verified:
+                # Browser-proven: explicit High CVSS so the generic 6.1 reflected
+                # base score can't cap it to medium (xss-severity-cvss-cap).
+                finding["cvss_score"] = 7.4
+            if proof_data:
+                finding["browser_proof"] = proof_data
+            request_headers = _headers_from_curl_args(auth_args)
+            if request_headers:
+                finding["request_headers"] = request_headers
+
+            results["findings"].append(finding)
+            results["vulnerabilities_found"] += 1
+            break  # one confirmed XSS per path segment is enough
+
     # Separate GET and POST endpoints to ensure both get tested
     get_endpoints = [
         e for e in endpoints
@@ -7740,7 +7856,13 @@ async def smart_xss_test(
         params = _coerce_param_list(endpoint.get("params") or endpoint.get("query_params"))
         param_defaults = endpoint.get("param_defaults") or endpoint.get("query_param_defaults") or {}
 
-        if not params:
+        # An id-like path segment (e.g. /track-order/{id}) is its own injection
+        # point; don't skip an endpoint that has one just because it has no query
+        # params.
+        parsed_ep = urllib.parse.urlparse(endpoint_url)
+        path_seg = _injectable_path_segment(parsed_ep.path)
+
+        if not params and not path_seg:
             continue
 
         attempt = _new_endpoint_attempt(
@@ -7901,6 +8023,14 @@ async def smart_xss_test(
                     results["findings"].append(finding)
                     results["vulnerabilities_found"] += 1
                     break  # One confirmed XSS per param is enough
+
+        # Reflected XSS via an id-like PATH SEGMENT (query-param loop above never
+        # covers these). Runs whether or not the endpoint had query params.
+        if path_seg and not _budget_exhausted():
+            try:
+                await _test_path_segment_xss(endpoint_url, parsed_ep, path_seg)
+            except Exception as _seg_err:
+                print(f"[xss] path-segment test error for {endpoint_url}: {_seg_err}", file=sys.stderr)
 
         finished = _finish_endpoint_attempt(
             attempt,
@@ -8548,6 +8678,29 @@ def _is_synthetic_active_source(endpoint: dict[str, Any]) -> bool:
     return str(endpoint.get("source") or "").strip().lower() not in _ACTIVE_OBSERVED_SOURCES
 
 
+def _reachability_eligible(endpoint: dict[str, Any]) -> bool:
+    """Whether a GET-based reachability probe can validly judge this endpoint.
+
+    The reachability gate probes each candidate with GET and drops it if the
+    response matches a sibling-404 decoy. That question is only meaningful for
+    GET routes with no body: a POST/PUT/PATCH route returns 404/405/5xx to GET
+    even when it exists (e.g. Juice Shop ``POST /rest/user/login`` exists but
+    ``GET /rest/user/login`` → 500, identical to a 500 sibling), so GET-probing
+    it wrongly classifies the route as a phantom and drops it before body
+    injection ever runs. Endpoints carrying ``body_params`` also have a concrete
+    injection surface and must not be dropped on a mismatched GET probe. The
+    GET-permutation explosion the gate exists to kill (``/api/v{n}/oauth2/
+    authorize`` etc.) is unaffected — those remain GET, no-body, and gated.
+    """
+    if not _is_synthetic_active_source(endpoint):
+        return False
+    if str(endpoint.get("method") or "GET").upper() != "GET":
+        return False
+    if endpoint.get("body_params"):
+        return False
+    return True
+
+
 def _response_matches_not_found(
     status: int | None,
     body_len: int,
@@ -8598,7 +8751,7 @@ async def _filter_reachable_active_endpoints(
     404/SPA signatures a single root decoy would miss. Observed endpoints are never
     probed or dropped. Best-effort: on any error, returns ``endpoints`` unchanged.
     """
-    synthetic = [e for e in endpoints if isinstance(e, dict) and _is_synthetic_active_source(e)]
+    synthetic = [e for e in endpoints if isinstance(e, dict) and _reachability_eligible(e)]
     if len(synthetic) < 5:
         return endpoints
     try:
@@ -8680,7 +8833,10 @@ async def _filter_reachable_active_endpoints(
 
     kept, dropped = [], 0
     for ep in endpoints:
-        if isinstance(ep, dict) and _is_synthetic_active_source(ep):
+        # Gate the drop by the SAME eligibility used to build the probe set so a
+        # non-eligible endpoint (e.g. POST login) sharing a path with an eligible
+        # GET phantom is never collaterally dropped.
+        if isinstance(ep, dict) and _reachability_eligible(ep):
             path = urllib.parse.urlparse(_abs(ep.get("url") or ep.get("path"))).path or "/"
             if path in unreachable:
                 dropped += 1
