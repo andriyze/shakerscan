@@ -90,11 +90,26 @@ export interface DashboardActionItem {
   metadata?: Record<string, unknown>
 }
 
+export interface DashboardProductStatusItem {
+  id: string
+  label: string
+  status: 'critical' | 'warning' | 'ok' | 'info' | string
+  summary: string
+  href: string
+  primary_count?: number | null
+  primary_label?: string | null
+  secondary_count?: number | null
+  secondary_label?: string | null
+  actions?: DashboardActionLink[]
+  metadata?: Record<string, unknown>
+}
+
 export interface DashboardResponse {
   metrics: DashboardMetrics
   recent_scans: Scan[]
   recent_findings: Finding[]
   action_center?: DashboardActionItem[]
+  product_status?: DashboardProductStatusItem[]
 }
 
 export interface Scan {

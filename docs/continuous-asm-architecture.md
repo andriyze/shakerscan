@@ -30,11 +30,13 @@ dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decisi
 now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy
 `scan_options.kind='asm_improve'` compatibility. ASM activity now also returns a derived target
 campaign `timeline` that merges scheduler state, next ASM schedule, active scans, and recent
-campaign activity. The next ASM product work is not another schedule bridge; it is family-aware
-campaign quality, graph-driven hypotheses, and dashboard/action-center decision flow. Model Intake
-now has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors,
-strict policy-profile required anchors, and deployment decisions that explain policy-required anchor
-gaps plus exception expiry/hygiene. AI Gate scan detail now surfaces a
+campaign activity. Dashboard Product Status cards now expose API-backed blocker/running/stale counts
+and quick links across DAST, ASM, AI Gate, Model Intake, exceptions, deployment gates, and workers.
+The next ASM product work is not another schedule bridge or dashboard-count strip; it is
+family-aware campaign quality, graph-driven hypotheses, and safe remediation flow. Model Intake now
+has guided trust modes, a pass/fail/advisory pre-submit preview, saved operator trust anchors, strict
+policy-profile required anchors, and deployment decisions that explain policy-required anchor gaps
+plus exception expiry/hygiene. AI Gate scan detail now surfaces a
 campaign review panel from the stored coverage matrix/evidence manifest and can queue scan-level
 reruns for skipped probes, errored families, selected families, selected transcript probes, or all
 probes. Scan detail now also compares recent same-context AI Gate runs, and the AI Gate target page
@@ -61,7 +63,7 @@ editing.
 | Coverage x family dynamic allocation | Shipped for broad/SQLi/XSS; gated Auth/BOLA lanes when preconditions exist | Make shard count worker-aware; run shared recon once, then focused family lanes without diluting SQLi/XSS/BOLA budgets. |
 | Known-endpoint distributed rate limits | Shipped | Extend beyond known endpoint batches only when scanner telemetry can budget discovered requests accurately. |
 | First-class check registry | Foundation + scanner boundary shipped | Migrate scanner `build_report()` module execution to registry iteration and add more runnable families beyond SQLi/XSS/Auth/BOLA. |
-| ASM scheduling/operator UX | Phase 1 shipped; next-action/skip-reason contract, ASM activity surfacing, Action Center CTAs, typed ASM waves, and target timeline shipped | Add product-level blocker counts/quick links, remediation entry points, and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
+| ASM scheduling/operator UX | Phase 1 shipped; next-action/skip-reason contract, ASM activity surfacing, Action Center CTAs, Product Status cards, typed ASM waves, and target timeline shipped | Add safe remediation entry points and family-aware campaign-quality agreement across dashboard, `/asm`, gaps, and scan detail. |
 | DAST quality benchmark loop | Active workstream | Treat "no XSS on Juice Shop" and "no workflow/write-BOLA on crAPI" as benchmark failures, not acceptable coverage. |
 | Multi-node WireGuard POC | Proposed/RFC | Build a two-VPS proof only after local queue/worker invariants stay green. |
 | Production multi-node fleet | Proposed/RFC | Add node registry, reliable queue leases, object evidence, and routing. |
@@ -750,6 +752,9 @@ New quality gaps to track:
   **Implemented:** `/dashboard` returns `action_center`, and the dashboard renders worker freshness,
   deploy blockers, failed scans, exception hygiene, ASM coverage/schedule gaps, Model Intake trust
   gaps, and AI control-baseline gaps.
+- Add API-backed dashboard product status cards. **Implemented:** `/dashboard.product_status` covers
+  DAST, ASM, AI Gate, Model Intake, policy exceptions, deployment gates, and worker freshness with
+  blocker/running/stale counts plus safe quick links.
 - Update AGENTS/skills guidance so AI agents use presets instead of hand-crafted budgets.
   **Implemented.**
 - Add a deterministic AI operations router for safe DAST/ASM intent-to-API planning with dry-run

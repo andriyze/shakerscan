@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { AlertTriangle, ArrowRight, CalendarClock } from 'lucide-react'
-import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardResponse } from '@/lib/api'
+import { AlertTriangle, ArrowRight, Bot, CalendarClock, Cpu, Gauge, PackageCheck, Rocket, ShieldCheck, Workflow } from 'lucide-react'
+import { getDashboard, getQueueStats, getWorkers, scaleWorkers, getSystemResources, getGungnirStatus, startGungnir, stopGungnir, getGradeColor, formatDate, type QueueStats, type WorkerStats, type SystemResources, type GungnirStatus, type DashboardActionItem, type DashboardProductStatusItem, type DashboardResponse } from '@/lib/api'
 import {
   Badge,
   Card,
@@ -274,6 +274,8 @@ export default function Dashboard() {
         />
       </div>
 
+      <ProductStatusStrip items={data?.product_status || []} loading={dashboardLoading && !data} />
+
       <ActionCenter items={data?.action_center || []} loading={dashboardLoading && !data} />
 
       {/* Queue Status & Worker Control */}
@@ -520,6 +522,108 @@ export default function Dashboard() {
   )
 }
 
+function ProductStatusStrip({
+  items,
+  loading,
+}: {
+  items: DashboardProductStatusItem[]
+  loading: boolean
+}) {
+  const visibleItems = items.slice(0, 7)
+
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-medium text-white">Product Status</h2>
+          <p className="mt-1 text-sm text-gray-400">Blockers and quick links across DAST, ASM, AI, model trust, policy, and workers</p>
+        </div>
+        {visibleItems.length > 0 && (
+          <Badge className="bg-gray-800 text-gray-300">{visibleItems.length} areas</Badge>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+        </div>
+      ) : visibleItems.length ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {visibleItems.map((item) => (
+            <ProductStatusCard key={item.id} item={item} />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-gray-400">
+          Product status is not available yet.
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ProductStatusCard({ item }: { item: DashboardProductStatusItem }) {
+  const tone = productStatusTone(item.status)
+  const actions = item.actions?.length ? item.actions : [{ label: 'Open', href: item.href, variant: 'primary' }]
+  const Icon = productStatusIcon(item.id)
+
+  return (
+    <div className={`flex min-h-32 flex-col justify-between rounded-md border bg-gray-950 p-3 ${tone.border}`}>
+      <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`rounded-md p-1.5 ${tone.icon}`}>
+              <Icon className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <Link href={item.href} className={`block truncate text-sm font-medium text-white hover:text-blue-200 ${FOCUS_RING}`}>
+                {item.label}
+              </Link>
+              <Badge className={`mt-1 ${tone.badge}`}>{item.status}</Badge>
+            </div>
+          </div>
+          <div className="shrink-0 text-right">
+            {typeof item.primary_count === 'number' && (
+              <div className="text-lg font-semibold text-white">{item.primary_count}</div>
+            )}
+            {item.primary_label && (
+              <div className="max-w-20 truncate text-xs text-gray-500">{item.primary_label}</div>
+            )}
+          </div>
+        </div>
+        <p className="mt-3 line-clamp-2 text-sm text-gray-400">{item.summary}</p>
+        {typeof item.secondary_count === 'number' && item.secondary_label ? (
+          <p className="mt-2 text-xs text-gray-500">
+            <span className="text-gray-300">{item.secondary_count}</span> {item.secondary_label}
+          </p>
+        ) : null}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {actions.slice(0, 2).map((action, idx) => {
+          const primary = (action.variant || (idx === 0 ? 'primary' : 'secondary')) === 'primary'
+          return (
+            <Link
+              key={`${item.id}-status-action-${idx}`}
+              href={action.href}
+              className={`inline-flex min-h-8 items-center gap-1 rounded border px-2.5 py-1.5 text-xs font-medium transition-colors ${FOCUS_RING} ${
+                primary
+                  ? 'border-blue-500/40 bg-blue-500/15 text-blue-200 hover:border-blue-400/60 hover:bg-blue-500/25'
+                  : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-600 hover:text-gray-100'
+              }`}
+            >
+              {action.label}
+              {primary && <ArrowRight className="h-3 w-3" aria-hidden="true" />}
+            </Link>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function ActionCenter({
   items,
   loading,
@@ -559,6 +663,56 @@ function ActionCenter({
       )}
     </Card>
   )
+}
+
+function productStatusIcon(id: string) {
+  switch (id) {
+    case 'asm':
+      return Workflow
+    case 'ai_gate':
+      return Bot
+    case 'model_intake':
+      return PackageCheck
+    case 'exceptions':
+      return AlertTriangle
+    case 'deployment':
+      return Rocket
+    case 'workers':
+      return Cpu
+    case 'dast':
+      return ShieldCheck
+    default:
+      return Gauge
+  }
+}
+
+function productStatusTone(status: string) {
+  switch (status) {
+    case 'critical':
+      return {
+        border: 'border-red-800/60',
+        badge: 'bg-red-500/15 text-red-300',
+        icon: 'bg-red-500/15 text-red-300',
+      }
+    case 'warning':
+      return {
+        border: 'border-amber-800/60',
+        badge: 'bg-amber-500/15 text-amber-300',
+        icon: 'bg-amber-500/15 text-amber-300',
+      }
+    case 'ok':
+      return {
+        border: 'border-emerald-800/50',
+        badge: 'bg-emerald-500/15 text-emerald-300',
+        icon: 'bg-emerald-500/15 text-emerald-300',
+      }
+    default:
+      return {
+        border: 'border-gray-800',
+        badge: 'bg-blue-500/15 text-blue-300',
+        icon: 'bg-blue-500/15 text-blue-300',
+      }
+  }
 }
 
 function ActionCenterRow({ item }: { item: DashboardActionItem }) {

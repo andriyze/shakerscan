@@ -508,6 +508,85 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 
+class _ProductStatusConn:
+    async def fetchrow(self, query, *args):
+        if "COALESCE(source, 'scan')" in query:
+            return {"blockers": 3, "active_findings": 5}
+        if "COALESCE(run_kind, 'dast')" in query:
+            return {"active_scans": 2, "recent_failed": 1}
+        if "WITH per_target AS" in query:
+            return {
+                "enabled_targets": 4,
+                "no_inventory_targets": 1,
+                "targets_with_gaps": 2,
+                "endpoints_needing_work": 25,
+                "sample_target_id": "11111111-1111-4111-8111-111111111111",
+            }
+        if "source = 'ai_gate'" in query:
+            return {"active_findings": 0}
+        if "source = 'model_intake'" in query:
+            return {"active_findings": 1}
+        if "untrusted_latest" in query:
+            return {"untrusted_latest": 2}
+        if "FROM finding_exceptions" in query:
+            return {"expired": 1, "expiring": 2, "weak_records": 3}
+        if "severity = 'critical'" in query and "severity = 'high'" in query:
+            return {"critical": 1, "high": 4}
+        return {}
+
+    async def fetch(self, query, *args):
+        if "FROM ai_targets" in query:
+            return [{
+                "id": uuid.uuid4(),
+                "name": "Production RAG",
+                "target_type": "rag",
+                "endpoint_url": "https://ai.example.test/rag",
+                "production_mode": True,
+                "metadata_json": {"risk_tier": "high"},
+            }]
+        return []
+
+
+def test_dashboard_product_status_summarizes_cross_product_state():
+    snapshot = {
+        "available": True,
+        "running": 5,
+        "stale_count": 1,
+        "pending_count": 2,
+        "stale_names": ["worker-old"],
+        "pending_names": ["worker-booting-a", "worker-booting-b"],
+    }
+
+    items = asyncio.run(api_module._build_dashboard_product_status(
+        _ProductStatusConn(),
+        worker_snapshot=snapshot,
+    ))
+    by_id = {item["id"]: item for item in items}
+
+    assert [item["id"] for item in items] == [
+        "dast",
+        "asm",
+        "ai_gate",
+        "model_intake",
+        "exceptions",
+        "deployment",
+        "workers",
+    ]
+    assert by_id["dast"]["status"] == "critical"
+    assert by_id["dast"]["primary_count"] == 3
+    assert by_id["dast"]["actions"][0]["href"] == "/findings?status=active&source_type=dast"
+    assert by_id["asm"]["href"] == "/asm?target_id=11111111-1111-4111-8111-111111111111"
+    assert by_id["asm"]["secondary_count"] == 25
+    assert by_id["ai_gate"]["status"] == "warning"
+    assert by_id["ai_gate"]["secondary_label"] == "control gaps"
+    assert by_id["model_intake"]["status"] == "critical"
+    assert by_id["model_intake"]["actions"][1]["href"] == "/findings?source_type=model_intake&status=active"
+    assert by_id["exceptions"]["href"] == "/settings/exceptions?queue_filter=expired"
+    assert by_id["deployment"]["primary_count"] == 1
+    assert by_id["workers"]["status"] == "critical"
+    assert by_id["workers"]["metadata"]["total"] == 5
+
+
 # ----- run_due_schedules --------------------------------------------------
 
 class _FakeAcquire:

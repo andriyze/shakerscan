@@ -94,6 +94,10 @@ called at real sites — verify before re-proposing any of it:
   alongside legacy `href/action_label`, and the dashboard renders safe direct links for worker
   controls, deployment blockers, failed scans, exception queues, target-preselected ASM coverage,
   ASM schedules, Model Intake trust gaps, and AI Gate control gaps.
+- **Dashboard Product Status phase 1** — `/dashboard` now returns `product_status` cards for DAST,
+  Continuous ASM, AI Gate, Model Intake, policy exceptions, deployment gates, and worker freshness.
+  The dashboard renders blocker/running/stale counts and safe quick links from API facts rather than
+  client-side inference.
 - **ASM next-action / skip-reason contract phase 1** — `asm_inventory.decide_asm_action` now returns
   `blocked_by`, `next_eligible_at`, `daily_cap_remaining`, `rate_cap_remaining`, `claimable`, and
   `tested_today`; `/targets/{id}/asm/policy`, `/asm/gaps`, and `/asm/improve` expose
@@ -197,8 +201,10 @@ ordering and more exact implementation boundaries:
   target campaign timeline, so the next change is deeper schedule editing/workflow controls, not
   another schedule button or contract bridge.
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
-  scheduler decision object. Dashboard Action Center items now expose structured safe CTAs; the next
-  dashboard gap is richer product counts/quick links, not the base action contract.
+  scheduler decision object. Dashboard Action Center items now expose structured safe CTAs, and
+  `/dashboard.product_status` now provides API-backed product status cards for DAST, ASM, AI Gate,
+  Model Intake, exceptions, deployment gates, and worker freshness. The next dashboard gap is deeper
+  remediation flow, not counts/links or the base action contract.
 - Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
   saved trust-anchor selection/creation. Strict policy profiles can now require saved anchors and
   matching Model Intake scans inherit them. Deployment decisions now expose strict policy-required
@@ -242,10 +248,10 @@ before opening more scanner surface area, then attack the proof-quality gaps wit
 
 Use this order when choosing between otherwise-valid work:
 
-- **P0: productize shipped foundations.** Richer Dashboard/Action Center product counts, blocker
-  summaries, quick links, safe remediation entry points, and deployment-gate/worker-health visibility.
-  The base Action Center/CTAs, Exceptions Queue, first-class ASM schedule kinds, and target campaign
-  timeline phase 1 are already done.
+- **P0: productize shipped foundations.** The base Action Center/CTAs, Product Status cards,
+  Exceptions Queue, first-class ASM schedule kinds, and target campaign timeline phase 1 are already
+  done. Remaining P0 work is deeper safe remediation entry points and cross-page agreement on
+  blocker/blocked/running state.
 - **P1: make Continuous ASM the flagship.** Family-aware coverage quality, proof-quality gaps,
   worker-aware waves, CT/new-surface inheritance, and Improve Coverage explanations that always say
   what ran or why it waited.
@@ -286,12 +292,12 @@ blocked, and provide safe remediation links without making users infer state fro
    into Dashboard Action Center CTAs where target/action links are safe.
 3. DONE: add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired,
    missing owner/approver, no compensating controls, policy-scoped, and target-scoped.
-4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product
-   counts/quick links in Action Center and dashboards, not to expose the filter itself.
-5. NEXT: add `/dashboard.product_status` or equivalent API-backed cards for DAST, ASM, AI Gate,
+4. DONE: make finding filters use product taxonomy consistently. Dashboard product counts/quick
+   links are now backed by `/dashboard.product_status`, not browser inference.
+5. DONE: add `/dashboard.product_status` or equivalent API-backed cards for DAST, ASM, AI Gate,
    Model Intake, policy exceptions, deployment gates, and worker freshness. Do not compute these
    counts only in the browser.
-6. NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
+6. PARTIAL/NEXT: add safe remediation routes from those cards: open failed scans, open target ASM timeline,
    open missing-auth/second-user blockers, open exception hygiene filters, open Model Intake trust
    remediation, open AI Gate readiness/control gaps, and open worker rebuild/scale controls.
 

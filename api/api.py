@@ -7892,6 +7892,35 @@ def _action_center_item(
     }
 
 
+def _dashboard_product_status_item(
+    *,
+    item_id: str,
+    label: str,
+    status: str,
+    summary: str,
+    href: str,
+    primary_count: int | None = None,
+    primary_label: str | None = None,
+    secondary_count: int | None = None,
+    secondary_label: str | None = None,
+    actions: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "label": label,
+        "status": status if status in {"critical", "warning", "ok", "info"} else "info",
+        "summary": summary,
+        "href": href,
+        "primary_count": primary_count,
+        "primary_label": primary_label,
+        "secondary_count": secondary_count,
+        "secondary_label": secondary_label,
+        "actions": actions or [{"label": "Open", "href": href, "variant": "primary"}],
+        "metadata": metadata or {},
+    }
+
+
 def _record_map(row: Any) -> dict[str, Any]:
     if not row:
         return {}
@@ -7933,6 +7962,441 @@ def _missing_ai_control_labels(target: dict[str, Any]) -> list[str]:
         if not _metadata_has_any(metadata, tuple(str(k) for k in keys)):
             missing.append(str(requirement.get("label") or requirement.get("id") or "control"))
     return missing
+
+
+async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Compact cross-product status cards for dashboard navigation.
+
+    This intentionally complements the prioritized Action Center. The Action
+    Center says "what should I do first"; these cards keep each product area's
+    blocker/running/stale counts visible without requiring the browser to infer
+    state from several unrelated API responses.
+    """
+    items: list[dict[str, Any]] = []
+
+    try:
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE status = 'active'
+                      AND severity IN ('critical', 'high')
+                      AND COALESCE(source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake', 'asm', 'manual')
+                      AND ai_target_id IS NULL
+                      AND COALESCE(tool, '') <> 'model_intake'
+                ) AS blockers,
+                COUNT(*) FILTER (
+                    WHERE status = 'active'
+                      AND COALESCE(source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake', 'asm', 'manual')
+                      AND ai_target_id IS NULL
+                      AND COALESCE(tool, '') <> 'model_intake'
+                ) AS active_findings
+            FROM findings
+        """)
+        counts = _record_map(row)
+        scan_row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (WHERE status IN ('pending', 'queued', 'running')) AS active_scans,
+                COUNT(*) FILTER (WHERE status = 'failed' AND created_at >= NOW() - INTERVAL '7 days') AS recent_failed
+            FROM scans
+            WHERE (scan_role IS NULL OR scan_role <> 'shard')
+              AND COALESCE(run_kind, 'dast') NOT IN ('ai_api', 'ai_widget', 'ai_rag', 'ai_trace', 'ai_mcp', 'model_intake')
+        """)
+        scan_counts = _record_map(scan_row)
+        blockers = int(counts.get("blockers") or 0)
+        active_findings = int(counts.get("active_findings") or 0)
+        active_scans = int(scan_counts.get("active_scans") or 0)
+        recent_failed = int(scan_counts.get("recent_failed") or 0)
+        if blockers:
+            status = "critical"
+            summary = f"{blockers} critical/high active DAST finding(s) need triage."
+            href = "/findings?status=active&source_type=dast"
+        elif recent_failed:
+            status = "warning"
+            summary = f"{recent_failed} DAST scan(s) failed in the last 7 days."
+            href = "/scans?status=failed"
+        elif active_scans:
+            status = "info"
+            summary = f"{active_scans} DAST scan(s) are queued or running."
+            href = "/scans?status=running"
+        else:
+            status = "ok"
+            summary = "No active DAST blockers detected."
+            href = "/scans"
+        items.append(_dashboard_product_status_item(
+            item_id="dast",
+            label="DAST",
+            status=status,
+            summary=summary,
+            href=href,
+            primary_count=blockers,
+            primary_label="crit/high",
+            secondary_count=active_scans,
+            secondary_label="running",
+            actions=[
+                {"label": "Findings", "href": "/findings?status=active&source_type=dast", "variant": "primary"},
+                {"label": "Scans", "href": "/scans", "variant": "secondary"},
+            ],
+            metadata={"active_findings": active_findings, "recent_failed_scans": recent_failed},
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="dast",
+            label="DAST",
+            status="info",
+            summary="DAST status unavailable.",
+            href="/scans",
+        ))
+
+    try:
+        row = await conn.fetchrow("""
+            WITH per_target AS (
+                SELECT
+                    t.id,
+                    COUNT(te.id) FILTER (WHERE COALESCE(te.test_status, 'untested') <> 'gone') AS total,
+                    COUNT(te.id) FILTER (
+                        WHERE COALESCE(te.test_status, 'untested') IN ('untested', 'stale', 'partial')
+                           OR COALESCE(te.last_attempt_status, '') IN ('partial', 'partial_timeout', 'auth_missing')
+                    ) AS needs_work
+                FROM targets t
+                LEFT JOIN target_endpoints te ON te.target_id = t.id
+                WHERE t.is_active = true AND t.asm_enabled = true
+                GROUP BY t.id
+            )
+            SELECT
+                COUNT(*) AS enabled_targets,
+                COUNT(*) FILTER (WHERE total = 0) AS no_inventory_targets,
+                COUNT(*) FILTER (WHERE needs_work > 0) AS targets_with_gaps,
+                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work,
+                MIN(id::text) FILTER (WHERE total = 0 OR needs_work > 0) AS sample_target_id
+            FROM per_target
+        """)
+        counts = _record_map(row)
+        enabled = int(counts.get("enabled_targets") or 0)
+        targets_with_gaps = int(counts.get("targets_with_gaps") or 0)
+        no_inventory = int(counts.get("no_inventory_targets") or 0)
+        endpoints_needing_work = int(counts.get("endpoints_needing_work") or 0)
+        sample_target_id = str(counts.get("sample_target_id") or "")
+        href = f"/asm?target_id={sample_target_id}" if sample_target_id else "/asm"
+        if no_inventory or targets_with_gaps:
+            status = "warning"
+            summary = f"{no_inventory} target(s) need inventory; {targets_with_gaps} have stale/partial endpoint work."
+        elif enabled:
+            status = "ok"
+            summary = f"{enabled} target(s) under continuous ASM policy."
+        else:
+            status = "info"
+            summary = "No targets have Continuous ASM enabled."
+        items.append(_dashboard_product_status_item(
+            item_id="asm",
+            label="Continuous ASM",
+            status=status,
+            summary=summary,
+            href=href,
+            primary_count=targets_with_gaps + no_inventory,
+            primary_label="needs action",
+            secondary_count=endpoints_needing_work,
+            secondary_label="endpoints",
+            actions=[
+                {"label": "ASM", "href": href, "variant": "primary"},
+                {"label": "Schedules", "href": "/schedules", "variant": "secondary"},
+            ],
+            metadata={"enabled_targets": enabled},
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="asm",
+            label="Continuous ASM",
+            status="info",
+            summary="ASM status unavailable.",
+            href="/asm",
+        ))
+
+    try:
+        findings_row = await conn.fetchrow("""
+            SELECT COUNT(*) AS active_findings
+            FROM findings
+            WHERE status = 'active'
+              AND (source = 'ai_gate' OR ai_target_id IS NOT NULL)
+        """)
+        target_rows = await conn.fetch("""
+            SELECT id, name, target_type, endpoint_url, production_mode, metadata_json
+            FROM ai_targets
+            WHERE is_active = true
+            ORDER BY production_mode DESC, updated_at DESC
+            LIMIT 250
+        """)
+        active_findings = int(_record_map(findings_row).get("active_findings") or 0)
+        missing_controls = 0
+        for row in target_rows:
+            target = row_to_dict(row)
+            metadata = _decode_json_value(target.get("metadata_json")) or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            enforce = bool(metadata.get("enforce_ai_control_baseline"))
+            risk = str(metadata.get("risk_tier") or "").lower()
+            if target.get("production_mode") or enforce or risk in {"high", "critical"}:
+                if _missing_ai_control_labels(target):
+                    missing_controls += 1
+        active_targets = len(target_rows)
+        if active_findings:
+            status = "critical"
+            summary = f"{active_findings} active AI Gate finding(s) need triage."
+        elif missing_controls:
+            status = "warning"
+            summary = f"{missing_controls} high-risk AI target(s) are missing control evidence."
+        elif active_targets:
+            status = "ok"
+            summary = f"{active_targets} AI target(s) configured."
+        else:
+            status = "info"
+            summary = "No AI Gate targets configured."
+        items.append(_dashboard_product_status_item(
+            item_id="ai_gate",
+            label="AI Gate",
+            status=status,
+            summary=summary,
+            href="/settings/ai-gate",
+            primary_count=active_findings,
+            primary_label="findings",
+            secondary_count=missing_controls,
+            secondary_label="control gaps",
+            actions=[
+                {"label": "AI Gate", "href": "/settings/ai-gate", "variant": "primary"},
+                {"label": "AI findings", "href": "/findings?source_type=ai_gate&status=active", "variant": "secondary"},
+            ],
+            metadata={"active_targets": active_targets},
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="ai_gate",
+            label="AI Gate",
+            status="info",
+            summary="AI Gate status unavailable.",
+            href="/settings/ai-gate",
+        ))
+
+    try:
+        finding_row = await conn.fetchrow("""
+            SELECT COUNT(*) AS active_findings
+            FROM findings
+            WHERE status = 'active'
+              AND (source = 'model_intake' OR tool = 'model_intake')
+        """)
+        trust_row = await conn.fetchrow("""
+            WITH latest AS (
+                SELECT DISTINCT ON (COALESCE(target_id::text, target_url))
+                    id, target_url, completed_at,
+                    COALESCE(result #>> '{model_intake,summary,signature_verification_status}', '') AS signature_status,
+                    COALESCE(result #>> '{model_intake,summary,signature_verified}', 'false') AS signature_verified
+                FROM scans
+                WHERE run_kind = 'model_intake' AND status = 'completed'
+                ORDER BY COALESCE(target_id::text, target_url), completed_at DESC NULLS LAST, created_at DESC
+            )
+            SELECT COUNT(*) AS untrusted_latest
+            FROM latest
+            WHERE signature_status <> 'verified' OR signature_verified <> 'true'
+        """)
+        active_findings = int(_record_map(finding_row).get("active_findings") or 0)
+        untrusted = int(_record_map(trust_row).get("untrusted_latest") or 0)
+        if active_findings:
+            status = "critical"
+            summary = f"{active_findings} active Model Intake finding(s) need review."
+        elif untrusted:
+            status = "warning"
+            summary = f"{untrusted} latest model artifact scan(s) lack trusted signatures."
+        else:
+            status = "ok"
+            summary = "No active Model Intake blockers detected."
+        items.append(_dashboard_product_status_item(
+            item_id="model_intake",
+            label="Model Intake",
+            status=status,
+            summary=summary,
+            href="/settings/model-intake",
+            primary_count=active_findings,
+            primary_label="findings",
+            secondary_count=untrusted,
+            secondary_label="untrusted",
+            actions=[
+                {"label": "Model Intake", "href": "/settings/model-intake", "variant": "primary"},
+                {"label": "Model findings", "href": "/findings?source_type=model_intake&status=active", "variant": "secondary"},
+            ],
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="model_intake",
+            label="Model Intake",
+            status="info",
+            summary="Model Intake status unavailable.",
+            href="/settings/model-intake",
+        ))
+
+    try:
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE status = 'active'
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= NOW()
+                ) AS expired,
+                COUNT(*) FILTER (
+                    WHERE status = 'active'
+                      AND expires_at > NOW()
+                      AND expires_at <= NOW() + INTERVAL '7 days'
+                ) AS expiring,
+                COUNT(*) FILTER (
+                    WHERE status = 'active'
+                      AND (owner IS NULL OR owner = '' OR approver IS NULL OR approver = ''
+                           OR compensating_controls IS NULL OR compensating_controls = '')
+                ) AS weak_records
+            FROM finding_exceptions
+        """)
+        counts = _record_map(row)
+        expired = int(counts.get("expired") or 0)
+        expiring = int(counts.get("expiring") or 0)
+        weak = int(counts.get("weak_records") or 0)
+        if expired:
+            status = "critical"
+            summary = f"{expired} policy exception(s) are expired."
+            href = "/settings/exceptions?queue_filter=expired"
+        elif expiring or weak:
+            status = "warning"
+            summary = f"{expiring} expiring soon; {weak} missing owner, approver, or controls."
+            href = "/settings/exceptions"
+        else:
+            status = "ok"
+            summary = "No exception hygiene blockers detected."
+            href = "/settings/exceptions"
+        items.append(_dashboard_product_status_item(
+            item_id="exceptions",
+            label="Exceptions",
+            status=status,
+            summary=summary,
+            href=href,
+            primary_count=expired,
+            primary_label="expired",
+            secondary_count=expiring + weak,
+            secondary_label="hygiene",
+            actions=[
+                {"label": "Expired", "href": "/settings/exceptions?queue_filter=expired", "variant": "primary"},
+                {"label": "All exceptions", "href": "/settings/exceptions", "variant": "secondary"},
+            ],
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="exceptions",
+            label="Exceptions",
+            status="info",
+            summary="Exception status unavailable.",
+            href="/settings/exceptions",
+        ))
+
+    try:
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS critical,
+                COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS high
+            FROM findings
+        """)
+        counts = _record_map(row)
+        critical = int(counts.get("critical") or 0)
+        high = int(counts.get("high") or 0)
+        blockers = critical + high
+        if critical:
+            status = "critical"
+            href = "/findings?status=active&severity=critical"
+            summary = f"{critical} critical active finding(s) can block deployment."
+        elif high:
+            status = "warning"
+            href = "/findings?status=active&severity=high"
+            summary = f"{high} high active finding(s) may block deployment."
+        else:
+            status = "ok"
+            href = "/settings/policy-profiles"
+            summary = "No active high/critical deployment blockers detected."
+        items.append(_dashboard_product_status_item(
+            item_id="deployment",
+            label="Deployment Gates",
+            status=status,
+            summary=summary,
+            href=href,
+            primary_count=critical,
+            primary_label="critical",
+            secondary_count=high,
+            secondary_label="high",
+            actions=[
+                {"label": "Blockers", "href": href, "variant": "primary"},
+                {"label": "Policies", "href": "/settings/policy-profiles", "variant": "secondary"},
+            ],
+            metadata={"blockers": blockers},
+        ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="deployment",
+            label="Deployment Gates",
+            status="info",
+            summary="Deployment gate status unavailable.",
+            href="/settings/policy-profiles",
+        ))
+
+    snapshot = worker_snapshot if worker_snapshot is not None else _worker_freshness_snapshot()
+    try:
+        if snapshot.get("available"):
+            stale = int(snapshot.get("stale_count") or 0)
+            pending = int(snapshot.get("pending_count") or 0)
+            total = int(snapshot.get("running") or snapshot.get("fleet_size") or snapshot.get("total") or 0)
+            if stale:
+                status = "critical"
+                summary = f"{stale} stale worker(s) can invalidate benchmarks and fail-closed scans."
+            elif pending:
+                status = "warning"
+                summary = f"{pending} pending worker(s) are not yet build-current."
+            elif total:
+                status = "ok"
+                summary = f"{total} worker(s) are build-current."
+            else:
+                status = "info"
+                summary = "No workers are currently reporting."
+            items.append(_dashboard_product_status_item(
+                item_id="workers",
+                label="Workers",
+                status=status,
+                summary=summary,
+                href="/",
+                primary_count=stale,
+                primary_label="stale",
+                secondary_count=pending,
+                secondary_label="pending",
+                actions=[
+                    {"label": "Worker controls", "href": "/", "variant": "primary"},
+                    {"label": "Pending scans", "href": "/scans?status=pending", "variant": "secondary"},
+                ],
+                metadata={
+                    "stale_workers": snapshot.get("stale_names") or [],
+                    "pending_workers": snapshot.get("pending_names") or [],
+                    "total": total,
+                },
+            ))
+        else:
+            items.append(_dashboard_product_status_item(
+                item_id="workers",
+                label="Workers",
+                status="info",
+                summary="Worker freshness is unavailable.",
+                href="/",
+            ))
+    except Exception:
+        items.append(_dashboard_product_status_item(
+            item_id="workers",
+            label="Workers",
+            status="info",
+            summary="Worker freshness is unavailable.",
+            href="/",
+        ))
+
+    order = ["dast", "asm", "ai_gate", "model_intake", "exceptions", "deployment", "workers"]
+    by_id = {str(item.get("id")): item for item in items}
+    return [by_id[item_id] for item_id in order if item_id in by_id]
 
 
 async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -8298,13 +8762,16 @@ async def dashboard():
                 first_seen_at DESC
             LIMIT 10
         """)
-        action_center = await _build_dashboard_action_center(conn)
+        worker_snapshot = _worker_freshness_snapshot()
+        action_center = await _build_dashboard_action_center(conn, worker_snapshot=worker_snapshot)
+        product_status = await _build_dashboard_product_status(conn, worker_snapshot=worker_snapshot)
 
     return {
         "metrics": dict(metrics) if metrics else {},
         "recent_scans": [dict(s) for s in recent_scans],
         "recent_findings": [dict(f) for f in recent_findings],
         "action_center": action_center,
+        "product_status": product_status,
     }
 
 
