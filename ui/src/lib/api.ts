@@ -161,6 +161,32 @@ export interface ArsenalContractsResponse {
   contracts: Record<string, ArsenalContractDefinition>
 }
 
+export interface ScopeCheck {
+  name: string
+  status: string
+  message: string
+}
+
+export interface ScopeReceiptPreview {
+  receipt_id: string
+  input_scope: Record<string, unknown>
+  normalized_scope: Record<string, unknown>
+  verdict: string
+  checks: ScopeCheck[]
+  blocked_by: string[]
+  warnings: string[]
+  environment: string
+  allowed_hosts: string[]
+  allowed_root_domains: string[]
+  redirect_destinations: Array<Record<string, unknown>>
+}
+
+export interface ScopePreviewResponse {
+  scope_receipt: ScopeReceiptPreview
+  persisted: boolean
+  execution_enabled: boolean
+}
+
 export interface ArsenalTool {
   tool_name: string
   family: string
@@ -1237,6 +1263,23 @@ export async function getArsenalCommands(): Promise<ArsenalCommandsResponse> {
 export async function getArsenalContracts(): Promise<ArsenalContractsResponse> {
   const res = await fetch(`${API_URL}/arsenal/contracts`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch mission contracts'))
+  return res.json()
+}
+
+export async function previewScopeReceipt(payload: {
+  url: string
+  target_id?: string
+  allowed_hosts?: string[]
+  allowed_root_domains?: string[]
+  environment?: string
+  redirect_urls?: string[]
+}): Promise<ScopePreviewResponse> {
+  const res = await fetch(`${API_URL}/arsenal/scope/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to preview scope receipt'))
   return res.json()
 }
 

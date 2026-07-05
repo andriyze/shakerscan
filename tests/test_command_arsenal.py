@@ -54,6 +54,17 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
         assert "execute_shell" not in cmd["name"]
 
 
+def test_scope_preview_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["scope.preview"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/arsenal/scope/preview"
+    assert "scope_receipt" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 

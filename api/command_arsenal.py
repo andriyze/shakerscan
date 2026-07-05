@@ -328,6 +328,24 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         evidence_contract=("tool_status_rows",),
         timeout_seconds=15,
     ),
+    ArsenalCommand(
+        name="scope.preview",
+        family="governance",
+        description="Validate and persist a fail-closed scope receipt preview without executing work.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/arsenal/scope/preview",
+        parameters_schema={
+            "url": {"type": "string"},
+            "allowed_hosts": {"type": "array", "items": {"type": "string"}},
+            "allowed_root_domains": {"type": "array", "items": {"type": "string"}},
+            "environment": {"type": "string"},
+            "redirect_urls": {"type": "array", "items": {"type": "string"}},
+        },
+        evidence_contract=("scope_receipt", "blocked_by", "checks"),
+        timeout_seconds=15,
+    ),
 )
 
 

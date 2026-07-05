@@ -6,12 +6,14 @@ import {
   getArsenalCommands,
   getArsenalContracts,
   getArsenalTools,
+  previewScopeReceipt,
   type ArsenalCommand,
   type ArsenalCommandsResponse,
   type ArsenalContractDefinition,
   type ArsenalContractsResponse,
   type ArsenalTool,
   type ArsenalToolsResponse,
+  type ScopeReceiptPreview,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 
@@ -200,6 +202,14 @@ export default function ArsenalSettingsPage() {
   const [commands, setCommands] = useState<ArsenalCommandsResponse | null>(null)
   const [contracts, setContracts] = useState<ArsenalContractsResponse | null>(null)
   const [tools, setTools] = useState<ArsenalToolsResponse | null>(null)
+  const [scopeUrl, setScopeUrl] = useState('https://app.example.com/')
+  const [scopeHosts, setScopeHosts] = useState('app.example.com')
+  const [scopeRoots, setScopeRoots] = useState('example.com')
+  const [scopeEnvironment, setScopeEnvironment] = useState('production')
+  const [scopeRedirects, setScopeRedirects] = useState('')
+  const [scopePreview, setScopePreview] = useState<ScopeReceiptPreview | null>(null)
+  const [scopeLoading, setScopeLoading] = useState(false)
+  const [scopeError, setScopeError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -243,6 +253,32 @@ export default function ArsenalSettingsPage() {
     [contracts]
   )
   const visibleTools = tools?.tools || []
+
+  function splitLines(value: string): string[] {
+    return value
+      .split(/[\n,]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+
+  async function previewScope() {
+    setScopeLoading(true)
+    setScopeError(null)
+    try {
+      const response = await previewScopeReceipt({
+        url: scopeUrl,
+        allowed_hosts: splitLines(scopeHosts),
+        allowed_root_domains: splitLines(scopeRoots),
+        environment: scopeEnvironment,
+        redirect_urls: splitLines(scopeRedirects),
+      })
+      setScopePreview(response.scope_receipt)
+    } catch (err) {
+      setScopeError(err instanceof Error ? err.message : 'Failed to preview scope receipt')
+    } finally {
+      setScopeLoading(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -310,6 +346,97 @@ export default function ArsenalSettingsPage() {
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
             ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-blue-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Scope Receipt Preview</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">no execution</Badge>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <label className="block">
+            <span className="text-xs text-gray-400">URL</span>
+            <input
+              value={scopeUrl}
+              onChange={(event) => setScopeUrl(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Environment</span>
+            <select
+              value={scopeEnvironment}
+              onChange={(event) => setScopeEnvironment(event.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            >
+              <option value="production">production</option>
+              <option value="staging">staging</option>
+              <option value="preview">preview</option>
+              <option value="lab">lab</option>
+              <option value="development">development</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Allowed hosts</span>
+            <textarea
+              value={scopeHosts}
+              onChange={(event) => setScopeHosts(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-gray-400">Allowed root domains</span>
+            <textarea
+              value={scopeRoots}
+              onChange={(event) => setScopeRoots(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+          <label className="block lg:col-span-2">
+            <span className="text-xs text-gray-400">Redirect destinations to validate</span>
+            <textarea
+              value={scopeRedirects}
+              onChange={(event) => setScopeRedirects(event.target.value)}
+              rows={2}
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button type="button" variant="secondary" onClick={() => void previewScope()} disabled={scopeLoading}>
+            {scopeLoading ? 'Validating...' : 'Preview receipt'}
+          </Button>
+          {scopeError && <span role="alert" className="text-sm text-red-300">{scopeError}</span>}
+        </div>
+        {scopePreview && (
+          <div className="mt-4 rounded-md border border-gray-800 bg-gray-950 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className={scopePreview.verdict === 'allowed' ? statusClass('read_only') : scopePreview.verdict === 'blocked' ? statusClass('out_of_scope') : statusClass('dry_run')}>
+                {scopePreview.verdict}
+              </Badge>
+              <span className="font-mono text-xs text-gray-400">{scopePreview.receipt_id}</span>
+              <span className="text-xs text-gray-500">persisted receipt preview</span>
+            </div>
+            <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+              <div>host: <span className="text-gray-300">{String(scopePreview.normalized_scope.host || 'none')}</span></div>
+              <div>blocked: <span className="text-gray-300">{scopePreview.blocked_by.length ? scopePreview.blocked_by.join(', ') : 'none'}</span></div>
+              <div>warnings: <span className="text-gray-300">{scopePreview.warnings.length ? scopePreview.warnings.join(', ') : 'none'}</span></div>
+              <div>redirects: <span className="text-gray-300">{scopePreview.redirect_destinations.length}</span></div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {scopePreview.checks.slice(0, 8).map((check) => (
+                <Badge key={`${check.name}-${check.status}`} className={check.status === 'passed' ? statusClass('read_only') : check.status === 'blocked' ? statusClass('out_of_scope') : statusClass('dry_run')}>
+                  {check.name}: {check.status}
+                </Badge>
+              ))}
+            </div>
           </div>
         )}
       </Card>

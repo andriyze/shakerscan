@@ -128,12 +128,14 @@ from target_dedupe import (
 import check_registry
 
 try:
+    from action_scope import evaluate_scope, receipt_to_dict
     from command_arsenal import describe_contracts as describe_arsenal_contracts
     from command_arsenal import describe_commands as describe_arsenal_commands
     from command_arsenal import describe_tools as describe_arsenal_tools
 except ModuleNotFoundError as exc:
-    if exc.name != "command_arsenal":
+    if exc.name not in {"command_arsenal", "action_scope"}:
         raise
+    from api.action_scope import evaluate_scope, receipt_to_dict
     from api.command_arsenal import describe_contracts as describe_arsenal_contracts
     from api.command_arsenal import describe_commands as describe_arsenal_commands
     from api.command_arsenal import describe_tools as describe_arsenal_tools
@@ -3099,6 +3101,15 @@ class AIScanReplayRequest(BaseModel):
     transcript_index: Optional[int] = Field(default=None, ge=0)
     requested_by: Optional[str] = "api"
     confirm_production: bool = False
+
+
+class ScopePreviewRequest(BaseModel):
+    url: str
+    target_id: Optional[str] = None
+    allowed_hosts: list[str] = Field(default_factory=list)
+    allowed_root_domains: list[str] = Field(default_factory=list)
+    environment: str = Field(default="production")
+    redirect_urls: list[str] = Field(default_factory=list)
 
 
 class FindingsBulkRetestRequest(BaseModel):
@@ -11569,6 +11580,61 @@ async def arsenal_commands():
 async def arsenal_contracts():
     """Read-only mission, context, trace, receipt, hypothesis, and evidence-instance contracts."""
     return describe_arsenal_contracts()
+
+
+@app.post("/arsenal/scope/preview")
+async def arsenal_scope_preview(req: ScopePreviewRequest):
+    """Validate and persist a scope receipt preview without queueing or executing work."""
+    target_uuid = None
+    if req.target_id:
+        try:
+            target_uuid = uuid.UUID(str(req.target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID when supplied")
+    receipt = evaluate_scope(
+        req.url,
+        allowed_hosts=req.allowed_hosts,
+        allowed_root_domains=req.allowed_root_domains,
+        environment=req.environment,
+        redirect_urls=req.redirect_urls,
+        target_id=str(target_uuid) if target_uuid else None,
+    )
+    payload = receipt_to_dict(receipt)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO scope_receipts
+                (id, target_id, input_scope, normalized_scope, verdict, blocked_by, warnings,
+                 checks, environment, allowed_hosts, allowed_root_domains, redirect_destinations)
+            VALUES ($1,$2,$3::jsonb,$4::jsonb,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10::jsonb,$11::jsonb,$12::jsonb)
+            ON CONFLICT (id) DO UPDATE SET
+                target_id = EXCLUDED.target_id,
+                input_scope = EXCLUDED.input_scope,
+                normalized_scope = EXCLUDED.normalized_scope,
+                verdict = EXCLUDED.verdict,
+                blocked_by = EXCLUDED.blocked_by,
+                warnings = EXCLUDED.warnings,
+                checks = EXCLUDED.checks,
+                environment = EXCLUDED.environment,
+                allowed_hosts = EXCLUDED.allowed_hosts,
+                allowed_root_domains = EXCLUDED.allowed_root_domains,
+                redirect_destinations = EXCLUDED.redirect_destinations,
+                created_at = NOW()
+            """,
+            payload["receipt_id"],
+            target_uuid,
+            json.dumps(payload["input_scope"]),
+            json.dumps(payload["normalized_scope"]),
+            payload["verdict"],
+            json.dumps(payload["blocked_by"]),
+            json.dumps(payload["warnings"]),
+            json.dumps(payload["checks"]),
+            payload["environment"],
+            json.dumps(payload["allowed_hosts"]),
+            json.dumps(payload["allowed_root_domains"]),
+            json.dumps(payload["redirect_destinations"]),
+        )
+    return {"scope_receipt": payload, "persisted": True, "execution_enabled": False}
 
 
 @app.get("/arsenal/tools")

@@ -138,6 +138,12 @@ called at real sites — verify before re-proposing any of it:
   `ToolReceipt`, `CampaignAction`, `Hypothesis`, and `EvidenceInstance`, including secret-handling
   policy and safety invariants. `/settings/arsenal` renders these contracts without adding planning,
   approval, or execution power.
+- **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
+  now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
+  Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
+  hosts outside the provided allowed scope, and supplied redirect destinations that leave scope.
+  `POST /arsenal/scope/preview` persists `scope_receipts` without queueing work, and
+  `/settings/arsenal` exposes the read-only receipt preview.
 - **AI red-team scan-level replay phase 1** — `POST /ai/scans/{scan_id}/replay` now queues focused
   AI Gate reruns from a completed campaign using the original target, probe pack, profile, and
   environment. It can rerun skipped probe IDs, errored families, one selected family, or the full
@@ -248,9 +254,11 @@ raw shell execution or LLM-produced verified findings.
    inventory, ASM gaps/activity, scans, findings, AI targets, Model Intake, evidence, deployment
    decisions, and currently integrated tool status. Tool status must distinguish `catalog_only`,
    `wired`, `installed`, `runnable`, `gated`, `waived`, and `disabled`.
-4. **Scope and approval receipts for state-changing actions:** introduce a central `ActionScopeGuard`
-   and durable approval records for scan submission, ASM improve/test, focused family campaigns,
-   AI Gate scans/replay, Model Intake artifact fetches, retests, and future command/MCP adapters.
+4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
+   `ActionScopeGuard` and persisted `ScopeReceipt` previews. Remaining work is wiring durable
+   `ApprovalReceipt` records and enforcing receipts on scan submission, ASM improve/test, focused
+   family campaigns, AI Gate scans/replay, Model Intake artifact fetches, retests, and future
+   command/MCP adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -377,10 +385,12 @@ and audit traces.
    `dangerous`. Every command declares status (`contract`, `read_only`, `dry_run`, `gated`,
    `proof_backed`, `experimental`, `catalog_only`, `out_of_scope`), required confirmations, scope
    fields, redaction contract, and evidence contract.
-6. Add central `ActionScopeGuard` and durable `ScopeReceipt` / `ApprovalReceipt` records before any
-   new state-changing Command Arsenal execution path. Scope checks must fail closed for malformed
-   URLs, scheme-relative URLs, userinfo tricks, punycode/Unicode confusion, trailing-dot hosts,
-   loopback/private ranges outside lab policy, broad CIDRs, and redirect destinations that leave scope.
+6. DONE phase 1 for scope previews: add central `ActionScopeGuard` and durable `ScopeReceipt`
+   preview records before any new state-changing Command Arsenal execution path. Scope checks now
+   fail closed for malformed URLs, scheme-relative URLs, userinfo tricks, punycode/Unicode confusion,
+   trailing-dot hosts, loopback/private ranges outside lab policy, broad CIDRs, hosts outside the
+   provided allowed scope, and supplied redirect destinations that leave scope. Remaining work is
+   durable `ApprovalReceipt` enforcement and requiring receipts on the existing state-changing routes.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.

@@ -1163,6 +1163,53 @@ async def run_schema_migrations(pool) -> None:
                 ON finding_exceptions(finding_id)
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS scope_receipts (
+                    id TEXT PRIMARY KEY,
+                    target_id UUID,
+                    input_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    normalized_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    verdict TEXT NOT NULL,
+                    blocked_by JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    checks JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    environment TEXT NOT NULL DEFAULT 'production',
+                    allowed_hosts JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    allowed_root_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    redirect_destinations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT scope_receipts_verdict_check
+                        CHECK (verdict IN ('allowed','blocked','needs_approval'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scope_receipts_created_at
+                ON scope_receipts(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scope_receipts_target
+                ON scope_receipts(target_id, created_at DESC) WHERE target_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS approval_receipts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    scope_receipt_id TEXT REFERENCES scope_receipts(id) ON DELETE SET NULL,
+                    risk_tier TEXT NOT NULL,
+                    confirmations JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    approved_by TEXT,
+                    denial_reason TEXT,
+                    expires_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT approval_receipts_risk_check
+                        CHECK (risk_tier IN ('active','intrusive','credential','dangerous')),
+                    CONSTRAINT approval_receipts_approved_or_denied_check
+                        CHECK (approved_by IS NOT NULL OR denial_reason IS NOT NULL)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_approval_receipts_scope
+                ON approval_receipts(scope_receipt_id)
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     name TEXT NOT NULL UNIQUE,
