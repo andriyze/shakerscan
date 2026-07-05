@@ -520,8 +520,8 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
     """SQL fragment for the findings `source_type` filter (first-class taxonomy).
 
     Values: dast / ai / ai_gate / ai_session / model_intake / asm / manual.
-    model_intake and the AI sources filter separately from dast (R8); the UI still
-    groups them as DAST vs AI.
+    model_intake, ASM, manual, and the AI sources filter separately from DAST;
+    the UI exposes this same product taxonomy.
     """
     if source_type == "ai":
         return " AND (f.source IN ('ai_gate', 'ai_session') OR f.ai_target_id IS NOT NULL)"

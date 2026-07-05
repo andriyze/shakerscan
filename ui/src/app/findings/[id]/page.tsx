@@ -24,7 +24,7 @@ import {
   type RetestRecord,
   type EvidenceObject
 } from '@/lib/api'
-import { FINDING_STATUSES, RETEST_VERDICT_LABELS } from '@/lib/constants'
+import { FINDING_STATUSES, RETEST_VERDICT_LABELS, type FindingSourceType } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 import {
   Card,
@@ -38,14 +38,28 @@ import {
   useToast,
 } from '@/components/ui'
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }
-  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
-    return 'AI'
+  if (finding.source === 'ai_gate' || finding.ai_target_id) {
+    return 'AI Gate'
+  }
+  if (finding.source === 'ai_session') {
+    return 'AI Session'
+  }
+  if (finding.source === 'asm') {
+    return 'ASM'
+  }
+  if (finding.source === 'manual') {
+    return 'Manual'
   }
   return 'DAST'
+}
+
+function isAiReplayFinding(finding: Finding): boolean {
+  const sourceType = getFindingSourceType(finding)
+  return sourceType === 'AI Gate' || sourceType === 'AI Session'
 }
 
 function InfoItem({ label, children }: { label: string; children: React.ReactNode }) {
@@ -449,7 +463,7 @@ function FindingDetailContent() {
     try {
       setRetestLoading(true)
       setRetestMessage(null)
-      const aiFinding = getFindingSourceType(finding) === 'AI'
+      const aiFinding = isAiReplayFinding(finding)
       const effectiveMode = selectedRetestMode
       const queued = aiFinding
         ? await retestAiFinding(finding.id, {
@@ -494,7 +508,7 @@ function FindingDetailContent() {
       ? JSON.stringify(finding.evidence, null, 2)
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
-  const isAiFinding = finding ? getFindingSourceType(finding) === 'AI' : false
+  const isAiFinding = finding ? isAiReplayFinding(finding) : false
   const latestRetest = retestHistory[0]
   // An inconclusive retest that is retryable means "we couldn't decide, try
   // again" — distinct from a terminal verdict. Surfaced so users understand the

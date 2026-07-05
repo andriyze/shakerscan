@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
 import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type SortOption, type SortOrder } from '@/lib/constants'
+import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
 import {
   Card,
   ConfirmDialog,
@@ -57,16 +57,29 @@ const VERIFICATION_VERDICTS = [
 const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
-  { value: 'ai', label: 'AI' },
-  { value: 'model_intake', label: 'Model Intake' }
+  { value: 'ai_gate', label: 'AI Gate' },
+  { value: 'model_intake', label: 'Model Intake' },
+  { value: 'asm', label: 'ASM' },
+  { value: 'manual', label: 'Manual' },
 ] as const
 
-function getFindingSourceType(finding: Finding): 'AI' | 'DAST' | 'Model Intake' {
+type FindingSourceTypeFilter = 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'model_intake' | 'asm' | 'manual'
+
+function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'model_intake' || finding.tool === 'model_intake') {
     return 'Model Intake'
   }
-  if (finding.source === 'ai_gate' || finding.source === 'ai_session' || finding.ai_target_id) {
-    return 'AI'
+  if (finding.source === 'ai_gate' || finding.ai_target_id) {
+    return 'AI Gate'
+  }
+  if (finding.source === 'ai_session') {
+    return 'AI Session'
+  }
+  if (finding.source === 'asm') {
+    return 'ASM'
+  }
+  if (finding.source === 'manual') {
+    return 'Manual'
   }
   return 'DAST'
 }
@@ -178,7 +191,7 @@ function FindingsContent() {
       const data = await getFindings({
         severity: severityFilter || undefined,
         status: statusFilter || undefined,
-        source_type: sourceTypeFilter ? (sourceTypeFilter as 'dast' | 'ai' | 'model_intake') : undefined,
+        source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
         root_domain: domainFilter || undefined,
         scan_id: scanIdFilter || undefined,
         target_id: targetIdFilter || undefined,
@@ -428,13 +441,13 @@ function FindingsContent() {
         {/* Source Type Filter */}
         <div className="flex items-center gap-2">
           <label className="text-sm text-gray-400">Type:</label>
-          <div className="inline-flex rounded-lg border border-gray-800 bg-gray-900 p-0.5">
+          <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
             {SOURCE_TYPE_OPTIONS.map((option) => (
               <button
                 key={option.label}
                 type="button"
                 onClick={() => setFilter('source_type', option.value || undefined)}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
                   sourceTypeFilter === option.value
                     ? 'bg-blue-600 text-white'
                     : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'

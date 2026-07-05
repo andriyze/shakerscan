@@ -563,7 +563,7 @@ export interface Finding {
   ai_target_id?: string | null
   ai_target_url?: string
   ai_target_name?: string
-  source?: 'scan' | 'manual' | 'ai_session' | 'ai_gate' | string
+  source?: 'scan' | 'manual' | 'ai_session' | 'ai_gate' | 'model_intake' | 'asm' | string
   evidence?: string | Record<string, unknown>
   request?: string
   response?: string
@@ -1521,7 +1521,7 @@ export async function scanTarget(targetId: string, options: Record<string, unkno
 export async function getFindings(params?: {
   severity?: string
   status?: string
-  source_type?: 'dast' | 'ai' | 'model_intake'
+  source_type?: 'dast' | 'ai' | 'ai_gate' | 'ai_session' | 'model_intake' | 'asm' | 'manual'
   limit?: number
   offset?: number
   root_domain?: string

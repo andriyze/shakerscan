@@ -50,6 +50,9 @@ called at real sites — verify before re-proposing any of it:
   `scheduler_state`, while the dispatcher/scheduler persist the latest decision under
   `targets.metadata_json.asm_last_decision`. The ASM page renders the live and last recorded
   scheduler decision plus remaining daily/domain budget.
+- **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
+  as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
+  instead of collapsing product sources into only DAST vs AI.
 - **Benchmark** — two-user run + post-retest re-score + fleet gate + invariant/active gates;
   scorecards committed to `results/benchmark-runs/`.
 
@@ -98,9 +101,8 @@ class.
    links; activity rows still need to show the decision alongside scan history.
 3. Add an Exceptions Queue page/filter for `finding_exceptions`: expiring soon, expired, missing
    owner/approver, no compensating controls, policy-scoped, and target-scoped.
-4. Make finding filters use product taxonomy consistently: `dast`, `ai_gate`, `model_intake`,
-   `asm`, and `manual` (the API already accepts these in `_finding_source_type_clause`; the UI must
-   make the distinction visible everywhere).
+4. DONE: make finding filters use product taxonomy consistently. Remaining polish is to add product
+   counts/quick links in Action Center and dashboards, not to expose the filter itself.
 
 **Done when:** a junior operator can answer, from one screen, "what is risky, what is blocked, what
 will run next, and which button fixes the next blocker" without reading scan JSON or worker logs.
