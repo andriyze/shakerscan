@@ -10968,6 +10968,140 @@ def _asm_recommendation(
     }
 
 
+def _scan_role_label(scan_role: Any) -> str:
+    role = str(scan_role or "")
+    if role == asm_inventory.ASM_RECON_ROLE:
+        return "Discovery"
+    if role == asm_inventory.ASM_BATCH_ROLE:
+        return "Test batch"
+    return "Scan"
+
+
+def _event_time(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if value else None
+
+
+def _build_asm_campaign_timeline(
+    *,
+    scheduler_state: dict[str, Any] | None,
+    activity: list[dict[str, Any]],
+    next_schedule: dict[str, Any] | None = None,
+    active_scans: list[dict[str, Any]] | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Derived operator timeline for one target's Continuous ASM state.
+
+    This intentionally merges scheduler, recurring schedule, active scan, and
+    recent implementation-scan facts without creating another persistence
+    model. The order answers "what is happening now, what runs next, why did it
+    wait, and what just happened?"
+    """
+    events: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(event: dict[str, Any]) -> None:
+        key = (str(event.get("kind") or ""), str(event.get("id") or event.get("scan_id") or event.get("timestamp") or event.get("title") or ""))
+        if key in seen:
+            return
+        seen.add(key)
+        events.append({k: v for k, v in event.items() if v is not None})
+
+    for row in active_scans or []:
+        scan_id = str(row.get("id") or "")
+        if not scan_id:
+            continue
+        label = _scan_role_label(row.get("scan_role"))
+        add({
+            "id": f"active-{scan_id}",
+            "kind": "active_scan",
+            "title": f"Active {label.lower()}",
+            "status": row.get("status"),
+            "detail": row.get("current_phase") or "This target already has queued/running work.",
+            "timestamp": _event_time(row.get("started_at") or row.get("created_at")),
+            "scan_id": scan_id,
+            "campaign_id": str(row.get("campaign_id")) if row.get("campaign_id") else None,
+            "href": f"/scans/{scan_id}",
+        })
+
+    decision = (scheduler_state or {}).get("decision") if isinstance(scheduler_state, dict) else None
+    if isinstance(decision, dict):
+        action = str(decision.get("action") or "none")
+        blocked_by = decision.get("blocked_by")
+        add({
+            "id": "scheduler-live",
+            "kind": "scheduler_decision",
+            "title": f"Scheduler decision: {action}",
+            "status": str(blocked_by or action),
+            "detail": decision.get("reason") or "No scheduler reason was returned.",
+            "timestamp": _event_time(decision.get("recorded_at")),
+        })
+        if decision.get("next_eligible_at"):
+            add({
+                "id": "next-eligible",
+                "kind": "next_eligible",
+                "title": "Next eligible time",
+                "status": "waiting",
+                "detail": "Continuous ASM can try again after this policy window or rate limit clears.",
+                "timestamp": _event_time(decision.get("next_eligible_at")),
+            })
+
+    if next_schedule:
+        schedule_id = str(next_schedule.get("id") or "")
+        frequency = next_schedule.get("frequency") or "scheduled"
+        time_of_day = next_schedule.get("time_of_day") or ""
+        add({
+            "id": f"schedule-{schedule_id}" if schedule_id else "schedule-next",
+            "kind": "scheduled_wave",
+            "title": "Next recurring ASM coverage wave",
+            "status": "scheduled",
+            "detail": f"{frequency} at {time_of_day} UTC".strip(),
+            "timestamp": _event_time(next_schedule.get("next_run_at")),
+            "schedule_id": schedule_id or None,
+            "href": "/schedules",
+        })
+
+    last_decision = (scheduler_state or {}).get("last_decision") if isinstance(scheduler_state, dict) else None
+    if isinstance(last_decision, dict):
+        add({
+            "id": "scheduler-last",
+            "kind": "last_scheduler_decision",
+            "title": "Last recorded scheduler decision",
+            "status": str(last_decision.get("blocked_by") or last_decision.get("action") or "recorded"),
+            "detail": last_decision.get("reason") or "Recorded by dispatcher/schedule.",
+            "timestamp": _event_time(last_decision.get("recorded_at")),
+            "scan_id": str(last_decision.get("active_scan_id")) if last_decision.get("active_scan_id") else None,
+            "href": f"/scans/{last_decision.get('active_scan_id')}" if last_decision.get("active_scan_id") else None,
+        })
+
+    for row in activity:
+        scan_id = str(row.get("id") or "")
+        label = _scan_role_label(row.get("scan_role"))
+        attempts = row.get("attempt_status_counts") if isinstance(row.get("attempt_status_counts"), dict) else {}
+        completed = attempts.get("completed") if attempts else None
+        detail_bits = []
+        if row.get("campaign_requested_by"):
+            detail_bits.append(f"triggered by {row['campaign_requested_by']}")
+        if completed is not None:
+            detail_bits.append(f"{completed} completed attempt(s)")
+        if row.get("error_message"):
+            detail_bits.append(str(row["error_message"]))
+        add({
+            "id": f"activity-{scan_id}",
+            "kind": "activity",
+            "title": label,
+            "status": row.get("status"),
+            "detail": "; ".join(detail_bits) or row.get("current_phase") or "Recent ASM implementation scan.",
+            "timestamp": _event_time(row.get("completed_at") or row.get("started_at") or row.get("created_at")),
+            "scan_id": scan_id,
+            "campaign_id": str(row.get("campaign_id")) if row.get("campaign_id") else None,
+            "href": f"/scans/{scan_id}" if scan_id else None,
+        })
+
+    return events[: max(1, int(limit or 12))]
+
+
 async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
@@ -11611,6 +11745,33 @@ async def asm_activity(
         if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", uuid.UUID(target_id)):
             raise HTTPException(status_code=404, detail="Target not found")
         scheduler_state = await _asm_scheduler_state(conn, r, target_id)
+        next_schedule = await conn.fetchrow(
+            """
+            SELECT id, schedule_kind, frequency, day_of_week, time_of_day, timezone,
+                   next_run_at, last_run_at
+            FROM schedules
+            WHERE target_id = $1
+              AND is_active = true
+              AND (
+                COALESCE(schedule_kind, 'normal_scan') = 'asm_improve'
+                OR COALESCE(scan_options->>'kind', '') = 'asm_improve'
+              )
+            ORDER BY next_run_at NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            uuid.UUID(target_id),
+        )
+        active_rows = await conn.fetch(
+            """
+            SELECT id, scan_role, status, current_phase, created_at, started_at, campaign_id
+            FROM scans
+            WHERE target_id = $1
+              AND status IN ('pending', 'queued', 'running')
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            uuid.UUID(target_id),
+        )
         rows = await conn.fetch(
             """
             SELECT s.id, s.job_id, s.scan_role, s.scan_type, s.status, s.current_phase, s.progress,
@@ -11647,7 +11808,20 @@ async def asm_activity(
         cid = str(row["campaign_id"]) if row["campaign_id"] else None
         item["attempt_status_counts"] = attempt_counts.get(cid, {}) if cid else {}
         activity.append(item)
-    return {"activity": activity, "scheduler_state": scheduler_state}
+    timeline = _build_asm_campaign_timeline(
+        scheduler_state=scheduler_state,
+        activity=activity,
+        next_schedule=row_to_dict(next_schedule) if next_schedule else None,
+        active_scans=[row_to_dict(row) for row in active_rows],
+        limit=limit,
+    )
+    return {
+        "activity": activity,
+        "scheduler_state": scheduler_state,
+        "next_schedule": row_to_dict(next_schedule) if next_schedule else None,
+        "active_scans": [row_to_dict(row) for row in active_rows],
+        "timeline": timeline,
+    }
 
 
 @app.post("/ai/ops/route")

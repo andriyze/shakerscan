@@ -493,9 +493,25 @@ export interface AsmActivity {
   attempt_status_counts?: Record<string, number>
 }
 
+export interface AsmTimelineEvent {
+  id: string
+  kind: 'active_scan' | 'scheduler_decision' | 'next_eligible' | 'scheduled_wave' | 'last_scheduler_decision' | 'activity' | string
+  title: string
+  status?: string | null
+  detail?: string | null
+  timestamp?: string | null
+  scan_id?: string | null
+  campaign_id?: string | null
+  schedule_id?: string | null
+  href?: string | null
+}
+
 export interface AsmActivityResponse {
   activity: AsmActivity[]
   scheduler_state?: AsmSchedulerState
+  next_schedule?: Record<string, unknown> | null
+  active_scans?: Array<Record<string, unknown>>
+  timeline?: AsmTimelineEvent[]
 }
 
 export interface AsmActionResponse {

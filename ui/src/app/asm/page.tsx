@@ -41,6 +41,7 @@ import {
   type AsmGaps,
   type AsmPolicy,
   type AsmSchedulerState,
+  type AsmTimelineEvent,
   type Target,
 } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -1057,7 +1058,24 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
   )
 }
 
-function ActivityCard({ activity, schedulerState }: { activity: AsmActivity[]; schedulerState?: AsmSchedulerState | null }) {
+const TIMELINE_BADGE: Record<string, string> = {
+  active_scan: 'bg-blue-500/15 text-blue-300',
+  scheduler_decision: 'bg-gray-800 text-gray-300',
+  next_eligible: 'bg-yellow-500/15 text-yellow-300',
+  scheduled_wave: 'bg-purple-500/15 text-purple-300',
+  last_scheduler_decision: 'bg-gray-800 text-gray-400',
+  activity: 'bg-gray-800 text-gray-300',
+}
+
+function ActivityCard({
+  activity,
+  schedulerState,
+  timeline,
+}: {
+  activity: AsmActivity[]
+  schedulerState?: AsmSchedulerState | null
+  timeline?: AsmTimelineEvent[]
+}) {
   const decision = schedulerState?.decision
   const lastDecision = schedulerState?.last_decision
   const activeScanId = decision?.active_scan_id || schedulerState?.active_scan_ids?.[0] || lastDecision?.active_scan_id
@@ -1069,7 +1087,7 @@ function ActivityCard({ activity, schedulerState }: { activity: AsmActivity[]; s
     <Card className="p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-5 w-5 text-blue-400" />
-        <h2 className="text-sm font-medium text-gray-300">ASM activity</h2>
+        <h2 className="text-sm font-medium text-gray-300">Target campaign timeline</h2>
       </div>
       {schedulerState && (
         <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
@@ -1109,8 +1127,41 @@ function ActivityCard({ activity, schedulerState }: { activity: AsmActivity[]; s
           )}
         </div>
       )}
-      {activity.length === 0 ? (
-        <EmptyState message="No ASM activity yet" hint="Run discovery or improve coverage to start building the activity history." />
+      {timeline && timeline.length > 0 ? (
+        <div className="space-y-2">
+          {timeline.map((event) => {
+            const content = (
+              <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-gray-200">{event.title}</span>
+                    {event.status && (
+                      <Badge className={TIMELINE_BADGE[event.kind] || STATUS_BADGE[event.status] || 'bg-gray-700/50 text-gray-300'}>
+                        {event.status.replace(/_/g, ' ')}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500">{event.detail || 'No detail recorded.'}</div>
+                  {event.campaign_id && (
+                    <div className="mt-1 truncate font-mono text-[11px] text-gray-600">campaign {event.campaign_id}</div>
+                  )}
+                </div>
+                <div className="shrink-0 text-right text-xs text-gray-500">
+                  {event.timestamp ? formatDate(event.timestamp) : '—'}
+                </div>
+              </div>
+            )
+            return event.href ? (
+              <Link key={event.id} href={event.href}>
+                {content}
+              </Link>
+            ) : (
+              <div key={event.id}>{content}</div>
+            )
+          })}
+        </div>
+      ) : activity.length === 0 ? (
+        <EmptyState message="No ASM timeline yet" hint="Run discovery or improve coverage to start building the target campaign history." />
       ) : (
         <div className="space-y-2">
           {activity.slice(0, 8).map((item) => {
@@ -1152,6 +1203,7 @@ function TargetView({ targetId }: { targetId: string }) {
   const [gaps, setGaps] = useState<AsmGaps | null>(null)
   const [activity, setActivity] = useState<AsmActivity[]>([])
   const [activitySchedulerState, setActivitySchedulerState] = useState<AsmSchedulerState | null>(null)
+  const [timeline, setTimeline] = useState<AsmTimelineEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -1172,6 +1224,7 @@ function TargetView({ targetId }: { targetId: string }) {
         setGaps(gapData)
         setActivity(activityData.activity)
         setActivitySchedulerState(activityData.scheduler_state || gapData?.scheduler_state || null)
+        setTimeline(activityData.timeline || [])
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false))
@@ -1263,7 +1316,7 @@ function TargetView({ targetId }: { targetId: string }) {
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <GapsCard gaps={gaps} loading={loading} />
-        <ActivityCard activity={activity} schedulerState={activitySchedulerState} />
+        <ActivityCard activity={activity} schedulerState={activitySchedulerState} timeline={timeline} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">

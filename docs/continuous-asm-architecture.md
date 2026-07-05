@@ -23,13 +23,14 @@ that ASM should expose as family/proof/workflow gaps.
 modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
 internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
 authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
-evidence. The backend foundations are ahead of the operator workflow: one target campaign timeline,
-AI red-team campaign UX, and guided Model Intake trust UX are the next product priorities. First-pass
-next-action / skip-reason state is now live: ASM policy/gaps/improve/activity return
-`scheduler_state`, and dispatcher/scheduler decisions persist to
-`targets.metadata_json.asm_last_decision`. ASM waves are now a first-class schedule kind
-(`schedules.schedule_kind='asm_improve'`) with legacy `scan_options.kind='asm_improve'`
-compatibility.
+evidence. The backend foundations are ahead of the operator workflow: AI red-team campaign UX and
+guided Model Intake trust UX are the next product priorities. First-pass next-action / skip-reason
+state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
+dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. ASM waves are
+now a first-class schedule kind (`schedules.schedule_kind='asm_improve'`) with legacy
+`scan_options.kind='asm_improve'` compatibility. ASM activity now also returns a derived target
+campaign `timeline` that merges scheduler state, next ASM schedule, active scans, and recent
+campaign activity.
 
 ---
 
@@ -137,8 +138,8 @@ Shipped pieces:
   `scheduler_state`; dispatcher/scheduler runs persist the latest decision under
   `targets.metadata_json.asm_last_decision`.
 - `/asm` gives users a rollup, coverage advisor, one-click Improve Coverage action, target
-  inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, ASM
-  activity, policy presets, local-time window helper, and new-surface feed.
+  inventory, coverage gaps, live/last scheduler decisions, remaining daily/domain budget, target
+  campaign timeline, policy presets, local-time window helper, and new-surface feed.
 - `/schedules` gives users a first typed UI/API path for recurring ASM waves through
   `schedule_kind='asm_improve'`. Legacy `scan_options.kind='asm_improve'` rows are still decoded for
   compatibility.
@@ -528,10 +529,11 @@ Recommended UI:
 
 - **Attack Surface (`/asm`):** one primary action, `Improve coverage`, that chooses recon vs. test
   batch based on current state. Keep manual `Run recon` and `Test next batch` secondary.
-- **Target campaign timeline:** show background dispatcher state, next recurring ASM-wave schedule,
-  current active scan/batch, last activity, last skip/block reason, and next eligible time in one
-  place. A user should not have to know whether work came from `run_asm_dispatch`,
-  `run_due_schedules`, or a manual Improve Coverage click.
+- **Target campaign timeline:** `GET /targets/{id}/asm/activity` returns a derived `timeline` with
+  background dispatcher state, next recurring ASM-wave schedule, current active scan/batch, last
+  activity, last skip/block reason, and next eligible time in one place. A user should not have to
+  know whether work came from `run_asm_dispatch`, `run_due_schedules`, or a manual Improve Coverage
+  click.
 - **Skip/block reasons:** expose rate cap, daily cap, UTC window, weekday window, min interval,
   active scan, missing auth, missing second user, stale worker, and no claimable endpoints as
   user-facing states instead of silent "nothing happened" behavior.
@@ -752,10 +754,11 @@ New quality gaps to track:
 
 Remaining product work from the 2026-07-05 audit:
 
-- Make ASM schedule kind first-class in the schedule API/DB while preserving legacy
-  `scan_options.kind='asm_improve'` rows and accepting old schedule clients.
-- Add a target campaign timeline that unifies background ASM policy, recurring ASM waves, manual
-  Improve Coverage actions, and implementation scan/activity rows.
+- Expand ASM schedule editing beyond the typed schedule kind: advanced batch fields, endpoint
+  filter, focused family selection, and Lab/deep BOLA gating where relevant.
+- Enrich the target campaign timeline with direct remediation/edit actions once each action has a
+  tested confirmation boundary. Phase 1 derives timeline facts from scheduler state, schedules,
+  active scans, and implementation scan/activity rows.
 - Add UI tests for ASM schedule creation/editing, advanced batch fields, endpoint filter, focused
   family selection, Lab/deep BOLA gating, and skip-reason display.
 

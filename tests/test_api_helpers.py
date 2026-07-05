@@ -665,6 +665,56 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
     assert queued["asm_opts"] == {"batch_size": 25}
 
 
+def test_asm_campaign_timeline_merges_scheduler_schedule_active_and_activity():
+    timeline = api_module._build_asm_campaign_timeline(
+        scheduler_state={
+            "decision": {
+                "action": "none",
+                "blocked_by": "daily_cap",
+                "reason": "daily cap reached",
+                "next_eligible_at": "2026-07-05T12:00:00",
+            },
+            "last_decision": {
+                "action": "test",
+                "reason": "scheduled ASM test queued",
+                "recorded_at": "2026-07-05T01:00:00",
+                "active_scan_id": "scan-active",
+            },
+        },
+        active_scans=[{
+            "id": "scan-active",
+            "scan_role": api_module.asm_inventory.ASM_BATCH_ROLE,
+            "status": "running",
+            "current_phase": "Testing endpoint batch",
+            "created_at": "2026-07-05T00:50:00",
+            "campaign_id": "campaign-active",
+        }],
+        next_schedule={
+            "id": "sched-1",
+            "frequency": "daily",
+            "time_of_day": "02:00",
+            "next_run_at": "2026-07-06T02:00:00",
+        },
+        activity=[{
+            "id": "scan-old",
+            "scan_role": api_module.asm_inventory.ASM_RECON_ROLE,
+            "status": "completed",
+            "campaign_requested_by": "improve",
+            "campaign_id": "campaign-old",
+            "completed_at": "2026-07-04T02:05:00",
+            "attempt_status_counts": {"completed": 3},
+        }],
+    )
+
+    kinds = [event["kind"] for event in timeline]
+    assert kinds[:4] == ["active_scan", "scheduler_decision", "next_eligible", "scheduled_wave"]
+    assert "last_scheduler_decision" in kinds
+    assert "activity" in kinds
+    assert timeline[0]["href"] == "/scans/scan-active"
+    assert timeline[3]["href"] == "/schedules"
+    assert any(event["detail"] == "daily cap reached" for event in timeline)
+
+
 # ----- finding exception queue filters -------------------------------------
 
 class _ExceptionQueueConn:
