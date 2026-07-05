@@ -130,6 +130,11 @@ called at real sites — verify before re-proposing any of it:
   recent completed AI Gate runs for the same AI target, probe pack, profile, and environment. The
   scan-detail campaign panel shows previous-run links, findings/coverage/executed/skipped/error
   deltas, decision changes, and a compact comparable-run table.
+- **Model Intake saved trust anchors phase 1** — `/model-intake/trust-anchors` now stores reusable
+  operator trust roots (PEM and/or SHA-256 fingerprint) with owner/profile metadata. Model Intake scan
+  requests can pass `trust_anchor_ids`; the API expands active anchors into the existing trusted-key
+  material before queueing, and the UI can create, select, refresh, and deactivate anchors in strict
+  trust mode.
 - **Findings product taxonomy UI** — the findings list and detail pages now expose the API taxonomy
   as distinct `DAST`, `AI Gate`, `AI Session`, `Model Intake`, `ASM`, and `Manual` badges/filters
   instead of collapsing product sources into only DAST vs AI.
@@ -186,9 +191,9 @@ ordering and more exact implementation boundaries:
 - `/targets/{id}/asm/activity` now returns scan/campaign rows, attempt counts, and the shared
   scheduler decision object. Dashboard Action Center items now expose structured safe CTAs; the next
   dashboard gap is richer product counts/quick links, not the base action contract.
-- Model Intake has the low-level trust fields in API/UI and now has guided trust modes plus a
-  pre-submit preview. The next slice is saved trust-anchor management and policy-profile integration,
-  not more low-level signature fields.
+- Model Intake has the low-level trust fields in API/UI, guided trust modes, pre-submit preview, and
+  saved trust-anchor selection/creation. The next slice is tighter policy-profile binding and
+  exception UX, not more low-level signature fields.
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, and same-context run comparison on scan detail. Remaining AI Gate
@@ -198,11 +203,11 @@ ordering and more exact implementation boundaries:
 
 These are the next commit-sized slices, in order:
 
-1. **Model Intake saved trust anchors:** add saved trust-anchor management/selection and connect
-   strict policy profiles to explicit operator anchors.
-2. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
+1. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
+2. **Model Intake policy binding/exception UX:** bind strict saved policy profiles to required saved
+   anchors and make trust exceptions/expiry explicit in deployment decisions.
 3. **Richer AI campaign history:** expand same-context scan-detail comparison into target-level
    longitudinal reporting after the saved-anchor and detector-recall slices.
 
@@ -224,7 +229,8 @@ Use this order when choosing between otherwise-valid work:
   decisions are phase 1 done. Selected transcript replay and same-context scan comparison are also
   phase 1 done. Remaining work is target-level longitudinal history/reporting.
 - **P2: Model Intake trust UX.** Guided trust modes and pre-submit trust preview are phase 1 done;
-  remaining work is saved trust anchors, policy-profile anchor binding, and clearer exception flows.
+  saved trust anchors and scan selection are also phase 1 done. Remaining work is policy-profile
+  anchor binding and clearer exception flows.
 - **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
   retention/sweeper, redaction consistency, and audit/export manifests.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
@@ -315,18 +321,20 @@ target-level history remains a later polish item.
 key URL/PEM, signature value, trusted keys, hash, payload, and padding. The form now adds guided
 trust modes plus a pre-submit pass/fail/advisory preview, so users can see why checksum, signature,
 trusted-root, governance, or approval evidence will block or remain advisory before queueing.
-Remaining ergonomics work is saved trust-anchor selection and policy-profile anchor binding.
+Saved trust-anchor selection/creation/deactivation is now implemented for strict trust mode.
+Remaining ergonomics work is policy-profile anchor binding and clearer exception handling.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
    signature + inline key`, `trusted key fingerprint`, and `metadata-supplied evidence`.
 2. DONE: add a pre-submit validation/preview panel that states exactly which trust requirements will pass,
    fail, or be advisory under the selected policy profile.
-3. PARTIAL: clear warnings now explain when metadata-supplied keys are evidence but not an operator
-   trust root. Still add a saved trust-anchor selector/manager.
-4. PARTIAL: helper tests cover each preview mode's core trust semantics; keep the existing API/e2e
-   signature tests proving trusted verification is reachable only with operator-supplied trust
-   material, and add browser/e2e coverage around saved anchors when that feature lands.
+3. DONE: clear warnings explain when metadata-supplied keys are evidence but not an operator trust
+   root, and strict mode now has a saved trust-anchor selector/manager.
+4. PARTIAL: helper tests cover each preview mode's core trust semantics plus saved-anchor expansion.
+   Keep the existing API/e2e signature tests proving trusted verification is reachable only with
+   operator-supplied trust material, and add deeper end-to-end coverage around policy-profile anchor
+   binding when that feature lands.
 
 **Done when:** a developer can submit a model with a valid trust configuration without knowing every
 low-level signature field, and the UI explains why "signature present" is not the same as "trusted."

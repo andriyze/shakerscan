@@ -2871,6 +2871,7 @@ class ModelIntakeScanRequest(BaseModel):
     # Scalar-or-list, matching the scanner internals (_iter_str_tokens / _iter_pem_blocks).
     signature_trusted_keys: Optional[Union[str, list[str]]] = None
     signature_trusted_key_sha256: Optional[Union[str, list[str]]] = None
+    trust_anchor_ids: Optional[list[str]] = None
     model_card_url: Optional[str] = None
     deployment_approved: bool = False
     require_deployment_approval: bool = True
@@ -2891,6 +2892,16 @@ class ModelIntakeResolveRequest(BaseModel):
     filename: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=15, ge=1, le=60)
+
+
+class ModelIntakeTrustAnchorRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    public_key_pem: Optional[str] = None
+    public_key_sha256: Optional[str] = None
+    policy_profile: Optional[str] = "production"
+    owner: Optional[str] = None
+    is_active: bool = True
 
 
 AI_TARGET_TYPES = {"api_chat", "widget", "rag", "agent_trace", "mcp_trace"}
@@ -6271,6 +6282,148 @@ def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = No
     return "http"
 
 
+def _str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _validate_model_intake_trust_anchor_request(req: ModelIntakeTrustAnchorRequest) -> None:
+    if not req.name.strip():
+        raise HTTPException(status_code=422, detail="name is required")
+    if not (str(req.public_key_pem or "").strip() or str(req.public_key_sha256 or "").strip()):
+        raise HTTPException(status_code=422, detail="public_key_pem or public_key_sha256 is required")
+    sha = str(req.public_key_sha256 or "").strip()
+    if sha and not re.fullmatch(r"[a-fA-F0-9]{64}", sha):
+        raise HTTPException(status_code=422, detail="public_key_sha256 must be a 64-character SHA-256 hex digest")
+
+
+def _merge_model_intake_trust_anchor_material(
+    request: ModelIntakeScanRequest,
+    anchors: list[dict[str, Any]],
+) -> ModelIntakeScanRequest:
+    trusted_keys = _str_list(request.signature_trusted_keys)
+    trusted_fingerprints = _str_list(request.signature_trusted_key_sha256)
+    selected: list[dict[str, str]] = []
+    for anchor in anchors:
+        pem = str(anchor.get("public_key_pem") or "").strip()
+        fingerprint = str(anchor.get("public_key_sha256") or "").strip()
+        if pem and pem not in trusted_keys:
+            trusted_keys.append(pem)
+        if fingerprint and fingerprint not in trusted_fingerprints:
+            trusted_fingerprints.append(fingerprint)
+        selected.append({
+            "id": str(anchor.get("id") or ""),
+            "name": str(anchor.get("name") or ""),
+            "policy_profile": str(anchor.get("policy_profile") or ""),
+        })
+    metadata = dict(request.metadata_json or {})
+    if selected:
+        metadata["selected_trust_anchors"] = selected
+    return request.model_copy(update={
+        "signature_trusted_keys": trusted_keys or None,
+        "signature_trusted_key_sha256": trusted_fingerprints or None,
+        "metadata_json": metadata,
+    })
+
+
+async def _expand_model_intake_saved_trust_anchors(request: ModelIntakeScanRequest) -> ModelIntakeScanRequest:
+    anchor_ids = [uuid.UUID(item) for item in _str_list(request.trust_anchor_ids)]
+    if not anchor_ids:
+        return request
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM model_intake_trust_anchors
+            WHERE id = ANY($1::uuid[]) AND is_active = true
+            """,
+            anchor_ids,
+        )
+    if len(rows) != len(set(anchor_ids)):
+        raise HTTPException(status_code=400, detail="One or more selected Model Intake trust anchors were not found or are inactive")
+    return _merge_model_intake_trust_anchor_material(request, [row_to_dict(row) for row in rows])
+
+
+@app.get("/model-intake/trust-anchors")
+async def list_model_intake_trust_anchors(active_only: bool = True):
+    where = "WHERE is_active = true" if active_only else ""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT * FROM model_intake_trust_anchors {where} ORDER BY is_active DESC, policy_profile NULLS LAST, name"
+        )
+    return {"trust_anchors": [row_to_dict(row) for row in rows]}
+
+
+@app.post("/model-intake/trust-anchors")
+async def create_model_intake_trust_anchor(req: ModelIntakeTrustAnchorRequest):
+    _validate_model_intake_trust_anchor_request(req)
+    async with db_pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO model_intake_trust_anchors
+                    (name, description, public_key_pem, public_key_sha256, policy_profile, owner, is_active)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                RETURNING *
+                """,
+                req.name.strip(),
+                req.description,
+                str(req.public_key_pem or "").strip() or None,
+                str(req.public_key_sha256 or "").strip().lower() or None,
+                str(req.policy_profile or "").strip().lower() or None,
+                req.owner,
+                req.is_active,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="Model Intake trust anchor name already exists")
+    return row_to_dict(row)
+
+
+@app.patch("/model-intake/trust-anchors/{anchor_id}")
+async def update_model_intake_trust_anchor(anchor_id: str, req: ModelIntakeTrustAnchorRequest):
+    _validate_model_intake_trust_anchor_request(req)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE model_intake_trust_anchors SET
+                name=$2, description=$3, public_key_pem=$4, public_key_sha256=$5,
+                policy_profile=$6, owner=$7, is_active=$8, updated_at=NOW()
+            WHERE id=$1
+            RETURNING *
+            """,
+            uuid.UUID(anchor_id),
+            req.name.strip(),
+            req.description,
+            str(req.public_key_pem or "").strip() or None,
+            str(req.public_key_sha256 or "").strip().lower() or None,
+            str(req.policy_profile or "").strip().lower() or None,
+            req.owner,
+            req.is_active,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
+    return row_to_dict(row)
+
+
+@app.delete("/model-intake/trust-anchors/{anchor_id}")
+async def deactivate_model_intake_trust_anchor(anchor_id: str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE model_intake_trust_anchors
+            SET is_active=false, updated_at=NOW()
+            WHERE id=$1
+            RETURNING *
+            """,
+            uuid.UUID(anchor_id),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Model Intake trust anchor not found")
+    return {"deactivated": True, "trust_anchor": row_to_dict(row)}
+
+
 def _hf_api_model_info(repo_id: str, revision: str | None, timeout_seconds: int) -> dict[str, Any]:
     suffix = f"/revision/{urllib.parse.quote(revision, safe='')}" if revision and revision != "main" else ""
     # `blobs=true` asks the Hub to include file metadata, including LFS sha256/size
@@ -6612,6 +6765,7 @@ async def _enrich_model_intake_scan_request(request: ModelIntakeScanRequest) -> 
 async def scan_model_intake(request: ModelIntakeScanRequest):
     """Queue a model artifact intake scan."""
     request = await _enrich_model_intake_scan_request(request)
+    request = await _expand_model_intake_saved_trust_anchors(request)
     artifact_ref = (request.artifact_url or "").strip()
     if not artifact_ref:
         raise HTTPException(status_code=400, detail="artifact_url is required")
@@ -6638,6 +6792,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "signature_payload": request.signature_payload,
         "signature_trusted_keys": request.signature_trusted_keys,
         "signature_trusted_key_sha256": request.signature_trusted_key_sha256,
+        "trust_anchor_ids": request.trust_anchor_ids or [],
         "model_card_url": request.model_card_url,
         "deployment_approved": request.deployment_approved,
         "require_deployment_approval": request.require_deployment_approval,

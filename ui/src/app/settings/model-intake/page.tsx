@@ -22,6 +22,9 @@ import {
 } from 'lucide-react'
 import {
   getAITestScenarios,
+  createModelIntakeTrustAnchor,
+  deactivateModelIntakeTrustAnchor,
+  getModelIntakeTrustAnchors,
   getPolicyProfiles,
   resolveModelIntakeReference,
   submitModelIntakeScan,
@@ -31,6 +34,7 @@ import {
   type ModelIntakePreset,
   type ModelIntakeResolveResponse,
   type ModelIntakeScanRequest,
+  type ModelIntakeTrustAnchor,
   type PolicyProfile as SavedPolicyProfile,
 } from '@/lib/api'
 import {
@@ -316,6 +320,15 @@ export default function ModelIntakeSettingsPage() {
   const [savedPolicyProfiles, setSavedPolicyProfiles] = useState<SavedPolicyProfile[]>([])
   const [policyProfilesLoading, setPolicyProfilesLoading] = useState(true)
   const [policyProfilesError, setPolicyProfilesError] = useState<string | null>(null)
+  const [savedTrustAnchors, setSavedTrustAnchors] = useState<ModelIntakeTrustAnchor[]>([])
+  const [selectedTrustAnchorIds, setSelectedTrustAnchorIds] = useState<string[]>([])
+  const [trustAnchorsLoading, setTrustAnchorsLoading] = useState(true)
+  const [trustAnchorsError, setTrustAnchorsError] = useState<string | null>(null)
+  const [newAnchorName, setNewAnchorName] = useState('')
+  const [newAnchorSha256, setNewAnchorSha256] = useState('')
+  const [newAnchorPem, setNewAnchorPem] = useState('')
+  const [newAnchorOwner, setNewAnchorOwner] = useState('')
+  const [savingAnchor, setSavingAnchor] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<IntakeFormErrors>({})
@@ -352,10 +365,25 @@ export default function ModelIntakeSettingsPage() {
     }
   }, [])
 
+  const loadTrustAnchors = useCallback(async () => {
+    setTrustAnchorsLoading(true)
+    try {
+      const payload = await getModelIntakeTrustAnchors(true)
+      setSavedTrustAnchors(payload.trust_anchors || [])
+      setTrustAnchorsError(null)
+    } catch (err) {
+      setSavedTrustAnchors([])
+      setTrustAnchorsError(err instanceof Error ? err.message : 'Failed to load saved trust anchors')
+    } finally {
+      setTrustAnchorsLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadScenario()
     loadPolicyProfiles()
-  }, [loadScenario, loadPolicyProfiles])
+    loadTrustAnchors()
+  }, [loadScenario, loadPolicyProfiles, loadTrustAnchors])
 
   const selectedPlatform = platform === 'auto'
     ? AUTO_PLATFORM_OPTION
@@ -372,6 +400,18 @@ export default function ModelIntakeSettingsPage() {
     () => savedPolicyProfiles.filter((profile) => profile.is_active),
     [savedPolicyProfiles]
   )
+  const selectedTrustAnchors = useMemo(
+    () => savedTrustAnchors.filter((anchor) => selectedTrustAnchorIds.includes(anchor.id)),
+    [savedTrustAnchors, selectedTrustAnchorIds]
+  )
+  const selectedAnchorFingerprints = selectedTrustAnchors
+    .map((anchor) => anchor.public_key_sha256 || '')
+    .filter(Boolean)
+    .join('\n')
+  const selectedAnchorPems = selectedTrustAnchors
+    .map((anchor) => anchor.public_key_pem || '')
+    .filter(Boolean)
+    .join('\n')
 
   function applyScanPayload(payload: ModelIntakeScanRequest) {
     setFieldErrors({})
@@ -489,6 +529,7 @@ export default function ModelIntakeSettingsPage() {
       signature_payload: includeSignatureOptions ? optionalText(signaturePayload) : undefined,
       signature_trusted_keys: includeTrustAnchor ? optionalText(signatureTrustedKeys) : undefined,
       signature_trusted_key_sha256: includeTrustAnchor ? optionalList(signatureTrustedKeySha256) : undefined,
+      trust_anchor_ids: includeTrustAnchor && selectedTrustAnchorIds.length ? selectedTrustAnchorIds : undefined,
       model_card_url: optionalText(modelCardUrl),
       deployment_approved: deploymentApproved,
       require_deployment_approval: requireDeploymentApproval,
@@ -504,6 +545,52 @@ export default function ModelIntakeSettingsPage() {
       throw new Error('Resolve or enter an artifact URL before queueing')
     }
     return payload
+  }
+
+  async function saveTrustAnchor() {
+    const fingerprintError = validateSha256ListField(newAnchorSha256)
+    if (fingerprintError) {
+      setError(fingerprintError)
+      return
+    }
+    setSavingAnchor(true)
+    setError(null)
+    try {
+      const anchor = await createModelIntakeTrustAnchor({
+        name: newAnchorName.trim(),
+        public_key_sha256: optionalText(newAnchorSha256),
+        public_key_pem: optionalText(newAnchorPem),
+        policy_profile: policyProfile,
+        owner: optionalText(newAnchorOwner),
+        is_active: true,
+      })
+      setSavedTrustAnchors((prev) => [...prev, anchor].sort((a, b) => a.name.localeCompare(b.name)))
+      setSelectedTrustAnchorIds((prev) => Array.from(new Set([...prev, anchor.id])))
+      setNewAnchorName('')
+      setNewAnchorSha256('')
+      setNewAnchorPem('')
+      setNewAnchorOwner('')
+      toast.success('Trust anchor saved')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save trust anchor'
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setSavingAnchor(false)
+    }
+  }
+
+  async function deactivateTrustAnchor(anchorId: string) {
+    try {
+      await deactivateModelIntakeTrustAnchor(anchorId)
+      setSavedTrustAnchors((prev) => prev.filter((anchor) => anchor.id !== anchorId))
+      setSelectedTrustAnchorIds((prev) => prev.filter((id) => id !== anchorId))
+      toast.success('Trust anchor deactivated')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to deactivate trust anchor'
+      setError(msg)
+      toast.error(msg)
+    }
   }
 
   function applyPreset(preset: ModelIntakePreset) {
@@ -673,7 +760,7 @@ export default function ModelIntakeSettingsPage() {
     expected_sha256: expectedSha256.trim() || (metadataUrl.trim() ? 'manifest' : ''),
     signature_url: signatureUrl.trim() || signatureValue.trim() || (parsedMetadata?.signature_url as string | undefined),
     signature_public_key: signaturePublicKey.trim() || signaturePublicKeyUrl.trim() || (parsedMetadata?.signature_public_key as string | undefined),
-    signature_trusted_keys: signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || (parsedMetadata?.signature_trusted_keys as string | undefined),
+    signature_trusted_keys: signatureTrustedKeys.trim() || signatureTrustedKeySha256.trim() || selectedAnchorPems || selectedAnchorFingerprints || (parsedMetadata?.signature_trusted_keys as string | undefined),
     model_card_url: modelCardUrl.trim() || (parsedMetadata?.model_card_url as string | undefined),
     deployment_approved: deploymentApproved || parsedMetadata?.deployment_approved,
   }
@@ -720,8 +807,8 @@ export default function ModelIntakeSettingsPage() {
     signaturePublicKeyUrl: previewIncludesUrlSignature ? signaturePublicKeyUrl : '',
     signaturePublicKey: previewIncludesInlineSignature ? signaturePublicKey : '',
     signatureValue: previewIncludesInlineSignature ? signatureValue : '',
-    signatureTrustedKeys: previewIncludesTrustAnchor ? signatureTrustedKeys : '',
-    signatureTrustedKeySha256: previewIncludesTrustAnchor ? signatureTrustedKeySha256 : '',
+    signatureTrustedKeys: previewIncludesTrustAnchor ? [signatureTrustedKeys, selectedAnchorPems].filter(Boolean).join('\n') : '',
+    signatureTrustedKeySha256: previewIncludesTrustAnchor ? [signatureTrustedKeySha256, selectedAnchorFingerprints].filter(Boolean).join('\n') : '',
     metadata: parsedMetadata,
     modelCardUrl,
   })
@@ -1076,29 +1163,102 @@ export default function ModelIntakeSettingsPage() {
           )}
 
           {trustMode === 'trusted_key_fingerprint' && (
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className={fieldClass}>
-                Trusted key SHA-256
-                <input
-                  value={signatureTrustedKeySha256}
-                  onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
-                  onBlur={() => validateField('signatureTrustedKeySha256')}
-                  aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
-                  className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
-                  placeholder="one or more fingerprints"
-                />
-                {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
-              </label>
-              <label className={fieldClass}>
-                Trusted key PEM
-                <textarea
-                  value={signatureTrustedKeys}
-                  onChange={(e) => setSignatureTrustedKeys(e.target.value)}
-                  className={textareaClass}
-                  rows={4}
-                  placeholder="Optional operator trust anchor PEM"
-                />
-              </label>
+            <div className="space-y-3">
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className={fieldClass}>
+                  Trusted key SHA-256
+                  <input
+                    value={signatureTrustedKeySha256}
+                    onChange={(e) => setSignatureTrustedKeySha256(e.target.value)}
+                    onBlur={() => validateField('signatureTrustedKeySha256')}
+                    aria-invalid={fieldErrors.signatureTrustedKeySha256 ? true : undefined}
+                    className={fieldErrors.signatureTrustedKeySha256 ? invalidFieldClass(inputClass) : inputClass}
+                    placeholder="one or more fingerprints"
+                  />
+                  {fieldErrors.signatureTrustedKeySha256 && <span role="alert" className="text-sm text-red-400">{fieldErrors.signatureTrustedKeySha256}</span>}
+                </label>
+                <label className={fieldClass}>
+                  Trusted key PEM
+                  <textarea
+                    value={signatureTrustedKeys}
+                    onChange={(e) => setSignatureTrustedKeys(e.target.value)}
+                    className={textareaClass}
+                    rows={4}
+                    placeholder="Optional operator trust anchor PEM"
+                  />
+                </label>
+              </div>
+
+              <div className="rounded border border-gray-800 bg-gray-900 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium text-gray-200">Saved trust anchors</div>
+                    <div className="mt-1 text-xs text-gray-500">Reusable operator roots. Selected anchors are included in the queued scan as trusted PEM/fingerprint material.</div>
+                  </div>
+                  <button type="button" onClick={loadTrustAnchors} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                    Refresh
+                  </button>
+                </div>
+                {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
+                {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
+                {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
+                  <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+                    No saved trust anchors yet. Save a fingerprint or PEM below, then select it for strict scans.
+                  </div>
+                )}
+                {savedTrustAnchors.length > 0 && (
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {savedTrustAnchors.map((anchor) => {
+                      const selected = selectedTrustAnchorIds.includes(anchor.id)
+                      return (
+                        <div key={anchor.id} className={`rounded border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
+                          <label className="flex min-w-0 items-start gap-2 text-sm text-gray-300">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) => {
+                                setSelectedTrustAnchorIds((prev) => event.target.checked
+                                  ? Array.from(new Set([...prev, anchor.id]))
+                                  : prev.filter((id) => id !== anchor.id)
+                                )
+                              }}
+                              className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
+                            />
+                            <span className="min-w-0">
+                              <span className="block break-words font-medium text-gray-100">{anchor.name}</span>
+                              <span className="mt-1 block break-words text-xs text-gray-500">
+                                {anchor.policy_profile || 'any profile'}{anchor.owner ? ` - ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` - ${anchor.public_key_sha256.slice(0, 12)}...` : ' - PEM anchor'}
+                              </span>
+                            </span>
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => deactivateTrustAnchor(anchor.id)}
+                            className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800"
+                          >
+                            Deactivate
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,0.7fr)_auto]">
+                  <input value={newAnchorName} onChange={(e) => setNewAnchorName(e.target.value)} className={inputClass} placeholder="Anchor name" />
+                  <input value={newAnchorOwner} onChange={(e) => setNewAnchorOwner(e.target.value)} className={inputClass} placeholder="Owner" />
+                  <input value={newAnchorSha256} onChange={(e) => setNewAnchorSha256(e.target.value)} className={inputClass} placeholder="Key SHA-256 fingerprint" />
+                  <textarea value={newAnchorPem} onChange={(e) => setNewAnchorPem(e.target.value)} className={textareaClass} rows={2} placeholder="Optional PEM" />
+                  <button
+                    type="button"
+                    onClick={saveTrustAnchor}
+                    disabled={savingAnchor || !newAnchorName.trim() || (!newAnchorSha256.trim() && !newAnchorPem.trim())}
+                    className="inline-flex items-center justify-center rounded bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+                  >
+                    {savingAnchor ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

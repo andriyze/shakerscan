@@ -1145,6 +1145,29 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_finding_exceptions_finding
                 ON finding_exceptions(finding_id)
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    public_key_pem TEXT,
+                    public_key_sha256 TEXT,
+                    policy_profile TEXT,
+                    owner TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT model_intake_trust_anchor_material_check
+                        CHECK (
+                            (public_key_pem IS NOT NULL AND btrim(public_key_pem) <> '')
+                            OR (public_key_sha256 IS NOT NULL AND btrim(public_key_sha256) <> '')
+                        )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_model_intake_trust_anchors_active
+                ON model_intake_trust_anchors(is_active, policy_profile)
+            """)
             # R9: durable AI surface inventory + attempt ledger (mirrors the DAST
             # target_endpoints + asm_endpoint_attempts pair for the AI surface).
             await conn.execute("""

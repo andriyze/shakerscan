@@ -187,6 +187,7 @@ export interface ModelIntakeScanRequest {
   signature_payload?: string
   signature_trusted_keys?: string | string[]
   signature_trusted_key_sha256?: string | string[]
+  trust_anchor_ids?: string[]
   model_card_url?: string
   deployment_approved?: boolean
   require_deployment_approval?: boolean
@@ -197,6 +198,19 @@ export interface ModelIntakeScanRequest {
   policy_profile?: string
   max_download_bytes?: number
   timeout_seconds?: number
+}
+
+export interface ModelIntakeTrustAnchor {
+  id: string
+  name: string
+  description?: string | null
+  public_key_pem?: string | null
+  public_key_sha256?: string | null
+  policy_profile?: string | null
+  owner?: string | null
+  is_active: boolean
+  created_at?: string
+  updated_at?: string
 }
 
 export interface ModelIntakeScanResponse {
@@ -1304,6 +1318,42 @@ export async function submitModelIntakeScan(data: ModelIntakeScanRequest): Promi
   })
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to submit model intake scan'))
+  }
+  return res.json()
+}
+
+export async function getModelIntakeTrustAnchors(activeOnly: boolean = true): Promise<{ trust_anchors: ModelIntakeTrustAnchor[] }> {
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors?active_only=${activeOnly}`)
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake trust anchors'))
+  }
+  return res.json()
+}
+
+export async function createModelIntakeTrustAnchor(data: {
+  name: string
+  description?: string
+  public_key_pem?: string
+  public_key_sha256?: string
+  policy_profile?: string
+  owner?: string
+  is_active?: boolean
+}): Promise<ModelIntakeTrustAnchor> {
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to save Model Intake trust anchor'))
+  }
+  return res.json()
+}
+
+export async function deactivateModelIntakeTrustAnchor(id: string): Promise<{ deactivated: boolean; trust_anchor: ModelIntakeTrustAnchor }> {
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    throw new Error(await getApiErrorMessage(res, 'Failed to deactivate Model Intake trust anchor'))
   }
   return res.json()
 }

@@ -924,6 +924,53 @@ def test_ai_campaign_history_reports_decision_change():
     assert history["previous_run"]["decision"] == "block"
 
 
+def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata():
+    request = api_module.ModelIntakeScanRequest(
+        artifact_url="https://models.example/model.safetensors",
+        signature_trusted_key_sha256=["a" * 64],
+        metadata_json={"license": "apache-2.0"},
+    )
+    merged = api_module._merge_model_intake_trust_anchor_material(
+        request,
+        [{
+            "id": "anchor-1",
+            "name": "prod-release-key",
+            "policy_profile": "production",
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----",
+            "public_key_sha256": "b" * 64,
+        }],
+    )
+
+    assert merged.signature_trusted_keys == ["-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----"]
+    assert merged.signature_trusted_key_sha256 == ["a" * 64, "b" * 64]
+    assert merged.metadata_json["license"] == "apache-2.0"
+    assert merged.metadata_json["selected_trust_anchors"] == [{
+        "id": "anchor-1",
+        "name": "prod-release-key",
+        "policy_profile": "production",
+    }]
+
+
+def test_model_intake_trust_anchor_request_requires_material():
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._validate_model_intake_trust_anchor_request(
+            api_module.ModelIntakeTrustAnchorRequest(name="empty")
+        )
+
+    assert exc.value.status_code == 422
+    assert "public_key_pem or public_key_sha256" in exc.value.detail
+
+
+def test_model_intake_trust_anchor_request_validates_fingerprint():
+    with pytest.raises(api_module.HTTPException) as exc:
+        api_module._validate_model_intake_trust_anchor_request(
+            api_module.ModelIntakeTrustAnchorRequest(name="bad", public_key_sha256="not-a-sha")
+        )
+
+    assert exc.value.status_code == 422
+    assert "64-character" in exc.value.detail
+
+
 # ----- finding exception queue filters -------------------------------------
 
 class _ExceptionQueueConn:
