@@ -18,14 +18,17 @@ that ASM should expose as family/proof/workflow gaps.
 **Related design:** [parallel-scan-architecture.md](parallel-scan-architecture.md),
 [multi-node-architecture.md](multi-node-architecture.md).
 
-**2026-07-05 audit note:** the backend foundations are ahead of the operator workflow. The current
-implementation plan lives in [proposed-next-steps.md](proposed-next-steps.md): first-class ASM
-schedule kinds, one target campaign timeline, AI red-team campaign UX, and guided Model Intake trust
-UX are the next product priorities. First-pass next-action /
-skip-reason state is now live: ASM policy/gaps/improve/activity return `scheduler_state`, and
-dispatcher/scheduler decisions persist to `targets.metadata_json.asm_last_decision`. The schedules UI
-has an ASM coverage-wave selector, but the API/DB contract still encodes it as
-`scan_options.kind='asm_improve'`.
+**2026-07-05 audit note:** Continuous ASM is the flagship surface for the product thesis in
+[proposed-next-steps.md](proposed-next-steps.md): proof-first Continuous Exposure Management for
+modern apps, APIs, and AI systems. External ASM vendors are strong at discovering and mapping unknown
+internet-facing assets; ShakerScan should differentiate by turning owned web/API surface into
+authenticated, replayable, proof-grade campaigns with honest coverage, attempt ledgers, and canonical
+evidence. The backend foundations are ahead of the operator workflow: first-class ASM schedule kinds,
+one target campaign timeline, AI red-team campaign UX, and guided Model Intake trust UX are the next
+product priorities. First-pass next-action / skip-reason state is now live:
+ASM policy/gaps/improve/activity return `scheduler_state`, and dispatcher/scheduler decisions
+persist to `targets.metadata_json.asm_last_decision`. The schedules UI has an ASM coverage-wave
+selector, but the API/DB contract still encodes it as `scan_options.kind='asm_improve'`.
 
 ---
 
@@ -60,6 +63,11 @@ editing.
 
 ShakerScan should evolve from "a scan is a one-shot job" into "a target has a living attack
 surface that is discovered, queued, tested, retried, and aged continuously."
+
+The goal is not to build the largest internet corpus first. The goal is to continuously convert
+owned inventory into family-aware, deterministic proof campaigns: recon freshness, endpoint and
+parameter inventory, auth/principal context, graph hypotheses, check-family attempts, proof
+instances, canonical findings, retests, exceptions, and deployment gates.
 
 Parallel Full Coverage scans and Continuous ASM should become two views over the same facts:
 

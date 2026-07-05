@@ -6,9 +6,11 @@
 **Scope:** Make a single logical scan of one target fan out across the worker fleet; expand dictionaries, checks, and budgets that this parallelism makes affordable.
 
 **2026-07-05 audit note:** the parallel substrate is no longer the main product gap. The latest
-roadmap is in [proposed-next-steps.md](proposed-next-steps.md): prioritize typed ASM schedule kinds,
-target campaign timeline, AI red-team campaign UX, and guided Model Intake trust UX before adding
-more fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
+roadmap is in [proposed-next-steps.md](proposed-next-steps.md): ShakerScan's north star is
+proof-first Continuous Exposure Management for owned web, API, and AI systems. Prioritize typed ASM
+schedule kinds, target campaign timeline, AI red-team campaign UX, guided Model Intake trust UX,
+graph consumers, externalized evidence, and registry-driven proof contracts before adding more
+fan-out knobs. The first ASM scheduler/dispatcher skip-reason contract is now live in ASM
 policy/gaps/improve/activity responses and persisted target metadata; Dashboard Action Center CTAs
 link to the safe next steps; the schedules UI has an ASM coverage-wave bridge, but the API/DB still
 encode it through `scan_options.kind='asm_improve'`.
@@ -142,6 +144,10 @@ The schedules UI already exposes ASM waves, but the API/DB still encode them as
 `scan_options.kind='asm_improve'` on normal schedules. The next UX should collapse these into one
 target campaign timeline showing "what runs next" and "why nothing ran" instead of exposing them as
 independent knobs.
+
+Strategic caution: parallelism is a means to run proof campaigns faster, not the differentiator on
+its own. Prefer worker-aware waves, family-specific proof contracts, and evidence completeness over
+larger shard counts.
 
 User-facing rules:
 

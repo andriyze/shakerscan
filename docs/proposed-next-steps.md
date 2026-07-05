@@ -1,4 +1,4 @@
-# Proposed Next Steps — DAST & ASM Quality
+# Proposed Next Steps — Proof-First Continuous Exposure Management
 
 **Status:** updated 2026-07-05 after reconciling this roadmap with
 `docs/archive/asm-parallel-improvement-plan.md`, `docs/parallel-scan-architecture.md`, and the
@@ -7,6 +7,43 @@ policy exceptions, Model Intake trust controls, AI Gate hardening, and ASM sched
 implemented and wired. This document lists only the *verified-remaining* work (gaps and unfinished
 layers) plus the architectural direction. Each remaining item cites the code symbol, route, or UI
 surface that proves its status, so it stays auditable. No item below is "already done."
+
+## Report reconciliation (2026-07-05)
+
+The supplied strategy report is directionally correct and should sharpen the roadmap. ShakerScan
+should be positioned as **proof-first Continuous Exposure Management for modern apps, APIs, and AI
+systems**, not as only a DAST scanner, only an ASM inventory, or an LLM hacking assistant.
+
+The durable product loop is:
+
+> continuous inventory -> application/resource graph -> campaign planner -> deterministic checks
+> -> proof engine -> evidence store -> canonical findings -> retest/deployment gates ->
+> continuous ASM loop.
+
+The report is partly stale because several operator and backend foundations have now shipped:
+Dashboard Action Center phase 1 plus structured CTAs, Exceptions Queue phase 1, ASM scheduler-state
+surfacing in policy/gaps/improve/activity, product-source finding taxonomy, low-level Model Intake
+trust controls, AI Gate hardening/report export/transcripts, evidence-object phase 1, and
+application-graph phase 1. Treat those as foundations, not open P0 items.
+
+The report remains correct on the larger gaps: the graph is not yet a campaign consumer, evidence is
+not yet externalized into proof instances, scanner execution is not yet fully registry-driven, Model
+Intake trust is too low-level, AI Gate review is scan-centric instead of campaign-centric, and ASM
+schedule/campaign semantics are still encoded through legacy scan concepts.
+
+Market positioning guidance:
+
+- External ASM vendors are strong at discovering and mapping internet-facing assets. Do not compete
+  first on internet-scale corpus. Compete on owned-surface testing quality: authenticated, replayable,
+  proof-grade campaigns with honest coverage and attempt ledgers.
+- DAST/API scanners are strong at crawl, audit, CI, and template execution. ShakerScan's wedge is
+  continuous endpoint inventory plus graph-driven authenticated proof campaigns and canonical
+  evidence across web, API, and AI surfaces.
+- AI red-team tools prove demand for automated AI probing. ShakerScan should differentiate on
+  campaign evidence, replay, control inventory, deterministic findings, and deployment gates.
+- Dedicated model-security vendors may go deeper on malware/backdoor analysis. ShakerScan should win
+  first on operational trust decisions: checksum/signature/trusted anchor/model-card/governance
+  evidence, clear claim-vs-trust semantics, exceptions, and gates.
 
 ## Done (do not re-list as TODO)
 
@@ -90,9 +127,9 @@ target layering: continuous inventory → application/resource graph → campaig
 check registry → deterministic check modules → proof engine → evidence object store → canonical
 finding model → retest loop → AI planner/analyst → continuous-ASM improvement loop. We have the
 inventory, ledger, coverage, proof taxonomy, canonical totals, first durable graph slice, and first
-inline evidence-object slice; the remaining platform gaps are **graph consumers**, **externalized
-evidence storage**, and **registry-driven execution** that turn detectors into a durable,
-audit-grade platform.
+inline evidence-object slice. The remaining platform gaps are **graph consumers**, **externalized
+evidence storage**, **registry-driven execution**, and **campaign-level operator UX** that turn
+detectors into a durable, audit-grade exposure-management platform.
 
 ## Remaining work / implementation plan (impact-ordered, verified)
 
@@ -142,6 +179,31 @@ These are the next commit-sized slices, in order:
 5. **Detector recall campaigns:** keep benchmark gaps as proof-backed work items: POST-body SQLi,
    NoSQL JSON/body routing, stored/reflected XSS browser proof, workflow/write-side BOLA, and
    graph-driven authz hypotheses.
+
+### Positioning-adjusted priority order
+
+Use this order when choosing between otherwise-valid work:
+
+- **P0: productize shipped foundations.** First-class schedule kinds, target campaign timeline, and
+  richer Action Center product counts/links. The base Action Center/CTAs and Exceptions Queue are
+  already done; the remaining P0 is to make schedule/campaign state understandable and typed.
+- **P1: make Continuous ASM the flagship.** Family-aware coverage quality, proof-quality gaps,
+  worker-aware waves, CT/new-surface inheritance, and Improve Coverage explanations that always say
+  what ran or why it waited.
+- **P1: close benchmark proof gaps.** Browser-first/stored XSS, POST-body SQLi, NoSQL JSON/body
+  routing, workflow/write-BOLA, mass assignment, JWT/session weakness, and deterministic retest
+  loops per verified family.
+- **P1: AI red-team campaign UX.** Campaign review, OWASP LLM/RAG/agent/MCP coverage matrix,
+  skipped/blocked probe reasons, replay/rerun, transcript evidence, control inventory, and deploy
+  decisions.
+- **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
+  and clear metadata-claim versus operator-trust semantics.
+- **P2: evidence store phase 2.** External object storage, `EvidenceInstance`-style proof instances,
+  retention/sweeper, redaction consistency, and audit/export manifests.
+- **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
+  telemetry schemas, safety gates, and family-specific run contracts.
+- **P3: multi-node and internet-scale ASM.** Do this only after local queue leases, object evidence,
+  worker freshness, campaign semantics, and proof/evidence invariants stay green.
 
 ### 1. Product-operability layer: one place that explains "what needs action"
 **Status: PHASE 1 DONE, DEEPER ACTIONS PARTIAL.** `/dashboard` now includes a server-backed
