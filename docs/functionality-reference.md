@@ -642,7 +642,7 @@ how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
 
 **Command Arsenal**: `GET /arsenal/commands` · `GET /arsenal/contracts` ·
-`POST /arsenal/scope/preview` · `GET /arsenal/tools`
+`POST /arsenal/scope/preview` · `POST /arsenal/approvals` · `GET /arsenal/tools`
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·

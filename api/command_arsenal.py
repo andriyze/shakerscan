@@ -346,6 +346,26 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         evidence_contract=("scope_receipt", "blocked_by", "checks"),
         timeout_seconds=15,
     ),
+    ArsenalCommand(
+        name="approval.record",
+        family="governance",
+        description="Persist an approval or denial receipt for an existing scope receipt without executing work.",
+        status="gated",
+        risk_tier="credential",
+        method="POST",
+        path="/arsenal/approvals",
+        scope_fields=("scope_receipt_id",),
+        parameters_schema={
+            "scope_receipt_id": {"type": "string"},
+            "risk_tier": {"type": "string", "enum": ["active", "intrusive", "credential", "dangerous"]},
+            "confirmations": {"type": "array", "items": {"type": "string"}},
+            "approved_by": {"type": "string"},
+            "denial_reason": {"type": "string"},
+        },
+        required_confirmations=("confirm_authorized",),
+        evidence_contract=("approval_receipt", "scope_receipt"),
+        timeout_seconds=15,
+    ),
 )
 
 

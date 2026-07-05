@@ -187,6 +187,23 @@ export interface ScopePreviewResponse {
   execution_enabled: boolean
 }
 
+export interface ApprovalReceipt {
+  id: string
+  scope_receipt_id: string
+  risk_tier: string
+  confirmations: string[]
+  approved_by?: string | null
+  denial_reason?: string | null
+  expires_at?: string | null
+  created_at?: string
+}
+
+export interface ApprovalReceiptResponse {
+  approval_receipt: ApprovalReceipt
+  scope_receipt: ScopeReceiptPreview
+  execution_enabled: boolean
+}
+
 export interface ArsenalTool {
   tool_name: string
   family: string
@@ -1280,6 +1297,23 @@ export async function previewScopeReceipt(payload: {
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to preview scope receipt'))
+  return res.json()
+}
+
+export async function createApprovalReceipt(payload: {
+  scope_receipt_id: string
+  risk_tier: string
+  confirmations?: string[]
+  approved_by?: string
+  denial_reason?: string
+  expires_at?: string
+}): Promise<ApprovalReceiptResponse> {
+  const res = await fetch(`${API_URL}/arsenal/approvals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create approval receipt'))
   return res.json()
 }
 

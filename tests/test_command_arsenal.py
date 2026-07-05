@@ -45,7 +45,14 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}
 
-    for name in ("asm.improve", "scan.focused_family", "finding.retest", "ai_gate.replay_probe", "model_intake.scan"):
+    for name in (
+        "asm.improve",
+        "scan.focused_family",
+        "finding.retest",
+        "ai_gate.replay_probe",
+        "model_intake.scan",
+        "approval.record",
+    ):
         cmd = commands[name]
         assert cmd["status"] == "gated"
         assert "confirm_authorized" in cmd["required_confirmations"]
@@ -63,6 +70,17 @@ def test_scope_preview_is_dry_run_not_execution():
     assert cmd["risk_tier"] == "read_only"
     assert cmd["path"] == "/arsenal/scope/preview"
     assert "scope_receipt" in cmd["evidence_contract"]
+
+
+def test_approval_record_is_gated_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["approval.record"]
+    assert cmd["status"] == "gated"
+    assert cmd["path"] == "/arsenal/approvals"
+    assert "confirm_authorized" in cmd["required_confirmations"]
+    assert "approval_receipt" in cmd["evidence_contract"]
 
 
 def test_mission_contract_catalog_is_contract_only():

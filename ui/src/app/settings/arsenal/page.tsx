@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
 import {
+  createApprovalReceipt,
   getArsenalCommands,
   getArsenalContracts,
   getArsenalTools,
   previewScopeReceipt,
+  type ApprovalReceipt,
   type ArsenalCommand,
   type ArsenalCommandsResponse,
   type ArsenalContractDefinition,
@@ -210,6 +212,12 @@ export default function ArsenalSettingsPage() {
   const [scopePreview, setScopePreview] = useState<ScopeReceiptPreview | null>(null)
   const [scopeLoading, setScopeLoading] = useState(false)
   const [scopeError, setScopeError] = useState<string | null>(null)
+  const [approvalRiskTier, setApprovalRiskTier] = useState('active')
+  const [approvalActor, setApprovalActor] = useState('operator')
+  const [denialReason, setDenialReason] = useState('')
+  const [approvalReceipt, setApprovalReceipt] = useState<ApprovalReceipt | null>(null)
+  const [approvalLoading, setApprovalLoading] = useState(false)
+  const [approvalError, setApprovalError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -273,10 +281,34 @@ export default function ArsenalSettingsPage() {
         redirect_urls: splitLines(scopeRedirects),
       })
       setScopePreview(response.scope_receipt)
+      setApprovalReceipt(null)
+      setApprovalError(null)
     } catch (err) {
       setScopeError(err instanceof Error ? err.message : 'Failed to preview scope receipt')
     } finally {
       setScopeLoading(false)
+    }
+  }
+
+  async function recordApproval(action: 'approve' | 'deny') {
+    if (!scopePreview) return
+    setApprovalLoading(true)
+    setApprovalError(null)
+    try {
+      const confirmations = ['confirm_authorized']
+      if (scopePreview.verdict === 'needs_approval') confirmations.push('confirm_scope_reviewed')
+      const response = await createApprovalReceipt({
+        scope_receipt_id: scopePreview.receipt_id,
+        risk_tier: approvalRiskTier,
+        confirmations,
+        approved_by: action === 'approve' ? approvalActor.trim() || 'operator' : undefined,
+        denial_reason: action === 'deny' ? denialReason.trim() || 'Denied during receipt preview' : undefined,
+      })
+      setApprovalReceipt(response.approval_receipt)
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : 'Failed to create approval receipt')
+    } finally {
+      setApprovalLoading(false)
     }
   }
 
@@ -436,6 +468,71 @@ export default function ArsenalSettingsPage() {
                   {check.name}: {check.status}
                 </Badge>
               ))}
+            </div>
+            <div className="mt-4 border-t border-gray-800 pt-3">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium text-white">Approval Receipt</span>
+                <Badge className="bg-gray-800 text-gray-300">no execution</Badge>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="block">
+                  <span className="text-xs text-gray-400">Risk tier</span>
+                  <select
+                    value={approvalRiskTier}
+                    onChange={(event) => setApprovalRiskTier(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  >
+                    <option value="active">active</option>
+                    <option value="intrusive">intrusive</option>
+                    <option value="credential">credential</option>
+                    <option value="dangerous">dangerous</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-400">Approved by</span>
+                  <input
+                    value={approvalActor}
+                    onChange={(event) => setApprovalActor(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-400">Denial reason</span>
+                  <input
+                    value={denialReason}
+                    onChange={(event) => setDenialReason(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => void recordApproval('approve')}
+                  disabled={approvalLoading || scopePreview.verdict === 'blocked'}
+                >
+                  Record approval
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void recordApproval('deny')}
+                  disabled={approvalLoading}
+                >
+                  Record denial
+                </Button>
+                {approvalError && <span role="alert" className="text-sm text-red-300">{approvalError}</span>}
+              </div>
+              {approvalReceipt && (
+                <div className="mt-3 rounded-md border border-gray-800 bg-gray-900 px-3 py-2 text-xs text-gray-400">
+                  Receipt: <span className="font-mono text-gray-200">{approvalReceipt.id}</span>
+                  <span className="mx-2 text-gray-700">|</span>
+                  {approvalReceipt.approved_by ? 'approved' : 'denied'}
+                  <span className="mx-2 text-gray-700">|</span>
+                  execution disabled
+                </div>
+              )}
             </div>
           </div>
         )}

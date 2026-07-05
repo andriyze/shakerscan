@@ -3112,6 +3112,15 @@ class ScopePreviewRequest(BaseModel):
     redirect_urls: list[str] = Field(default_factory=list)
 
 
+class ApprovalReceiptRequest(BaseModel):
+    scope_receipt_id: str
+    risk_tier: str = Field(pattern="^(active|intrusive|credential|dangerous)$")
+    confirmations: list[str] = Field(default_factory=list)
+    approved_by: Optional[str] = None
+    denial_reason: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
@@ -11582,6 +11591,28 @@ async def arsenal_contracts():
     return describe_arsenal_contracts()
 
 
+def _public_scope_receipt_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "input_scope",
+        "normalized_scope",
+        "blocked_by",
+        "warnings",
+        "checks",
+        "allowed_hosts",
+        "allowed_root_domains",
+        "redirect_destinations",
+    ):
+        payload[key] = _decode_json_value(payload.get(key))
+    return payload
+
+
+def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["confirmations"] = _decode_json_value(payload.get("confirmations")) or []
+    return payload
+
+
 @app.post("/arsenal/scope/preview")
 async def arsenal_scope_preview(req: ScopePreviewRequest):
     """Validate and persist a scope receipt preview without queueing or executing work."""
@@ -11635,6 +11666,48 @@ async def arsenal_scope_preview(req: ScopePreviewRequest):
             json.dumps(payload["redirect_destinations"]),
         )
     return {"scope_receipt": payload, "persisted": True, "execution_enabled": False}
+
+
+@app.post("/arsenal/approvals")
+async def arsenal_create_approval(req: ApprovalReceiptRequest):
+    """Persist an approval or denial receipt for an existing scope receipt without executing work."""
+    approved_by = str(req.approved_by or "").strip() or None
+    denial_reason = str(req.denial_reason or "").strip() or None
+    if bool(approved_by) == bool(denial_reason):
+        raise HTTPException(status_code=400, detail="Provide exactly one of approved_by or denial_reason")
+
+    confirmations = [str(item).strip() for item in req.confirmations if str(item).strip()]
+    if approved_by and "confirm_authorized" not in confirmations:
+        raise HTTPException(status_code=400, detail="confirm_authorized is required for approval receipts")
+
+    async with db_pool.acquire() as conn:
+        scope_row = await conn.fetchrow("SELECT * FROM scope_receipts WHERE id=$1", req.scope_receipt_id)
+        if not scope_row:
+            raise HTTPException(status_code=404, detail="Scope receipt not found")
+        scope = _public_scope_receipt_row(scope_row)
+        if approved_by and scope.get("verdict") == "blocked":
+            raise HTTPException(status_code=400, detail="Blocked scope receipts cannot be approved")
+        if approved_by and scope.get("verdict") == "needs_approval" and "confirm_scope_reviewed" not in confirmations:
+            raise HTTPException(status_code=400, detail="confirm_scope_reviewed is required for needs_approval scope receipts")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO approval_receipts
+                (scope_receipt_id, risk_tier, confirmations, approved_by, denial_reason, expires_at)
+            VALUES ($1,$2,$3::jsonb,$4,$5,$6)
+            RETURNING *
+            """,
+            req.scope_receipt_id,
+            req.risk_tier,
+            json.dumps(confirmations),
+            approved_by,
+            denial_reason,
+            req.expires_at,
+        )
+    return {
+        "approval_receipt": _public_approval_receipt_row(row),
+        "scope_receipt": scope,
+        "execution_enabled": False,
+    }
 
 
 @app.get("/arsenal/tools")
