@@ -347,6 +347,56 @@ export interface Hypothesis {
   updated_at?: string
 }
 
+export interface HypothesisReportItem {
+  id: string
+  target_id?: string | null
+  campaign_id?: string | null
+  source: string
+  family: string
+  cwe?: string | null
+  title?: string | null
+  severity_guess?: string | null
+  confidence: number
+  dedupe_key: string
+  status: string
+  version: number
+  claim_state?: { owner?: string | null; lease_expires_at?: string | null }
+  smoke_score?: number | null
+  next_test_action?: Record<string, unknown> | null
+  terminal_reason?: string | null
+  endorsement_count: number
+  refutation_count: number
+  updated_at?: string
+  execution_enabled: boolean
+  can_promote_finding: boolean
+}
+
+export interface HypothesisMissingPrecondition {
+  requirement: string
+  count: number
+  sample_hypothesis_ids: string[]
+}
+
+export interface HypothesisSituationReport {
+  summary: {
+    generated_at: string
+    considered_count: number
+    status_counts: Record<string, number>
+    source_counts: Record<string, number>
+    family_counts: Record<string, number>
+    requester?: string | null
+    limit: number
+  }
+  hottest_unclaimed: HypothesisReportItem[]
+  requester_claims: HypothesisReportItem[]
+  avoid_resurfacing: HypothesisReportItem[]
+  live_blockers: HypothesisReportItem[]
+  missing_preconditions: HypothesisMissingPrecondition[]
+  execution_enabled: boolean
+  findings_created: number
+  board_truncated: boolean
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1700,6 +1750,17 @@ export async function getCampaignActions(limit: number = 20): Promise<{ campaign
 export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: Hypothesis[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypotheses'))
+  return res.json()
+}
+
+export async function getHypothesisSituationReport(
+  limit: number = 5,
+  requester: string = 'operator',
+): Promise<HypothesisSituationReport> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (requester) params.set('requester', requester)
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/situation-report?${params.toString()}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypothesis situation report'))
   return res.json()
 }
 

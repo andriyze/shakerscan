@@ -18,10 +18,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -12084,6 +12085,166 @@ def _public_hypothesis_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _parse_hypothesis_time(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _hypothesis_claim_active(hypothesis: dict[str, Any], now: datetime) -> bool:
+    lease_expires_at = _parse_hypothesis_time(hypothesis.get("claim_lease_expires_at"))
+    return bool(hypothesis.get("claim_owner") and lease_expires_at and lease_expires_at > now)
+
+
+def _hypothesis_report_row(hypothesis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(hypothesis.get("id") or ""),
+        "target_id": str(hypothesis.get("target_id")) if hypothesis.get("target_id") else None,
+        "campaign_id": str(hypothesis.get("campaign_id")) if hypothesis.get("campaign_id") else None,
+        "source": hypothesis.get("source"),
+        "family": hypothesis.get("family"),
+        "cwe": hypothesis.get("cwe"),
+        "title": hypothesis.get("title"),
+        "severity_guess": hypothesis.get("severity_guess"),
+        "confidence": hypothesis.get("confidence") or 0,
+        "dedupe_key": hypothesis.get("dedupe_key"),
+        "status": hypothesis.get("status"),
+        "version": hypothesis.get("version") or 0,
+        "claim_state": hypothesis.get("claim_state") or {
+            "owner": hypothesis.get("claim_owner"),
+            "lease_expires_at": hypothesis.get("claim_lease_expires_at"),
+        },
+        "smoke_score": hypothesis.get("smoke_score"),
+        "next_test_action": hypothesis.get("next_test_action") or {},
+        "terminal_reason": hypothesis.get("terminal_reason"),
+        "endorsement_count": len(hypothesis.get("endorsements") or []),
+        "refutation_count": len(hypothesis.get("refutations") or []),
+        "updated_at": hypothesis.get("updated_at"),
+        "execution_enabled": False,
+        "can_promote_finding": False,
+    }
+
+
+def _hypothesis_missing_preconditions(hypothesis: dict[str, Any]) -> list[str]:
+    action = hypothesis.get("next_test_action") or {}
+    if not isinstance(action, dict):
+        return []
+    requirements: set[str] = set()
+    for key in ("requires", "preconditions", "missing_preconditions", "missing"):
+        value = action.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                requirements.add(value.strip())
+        elif isinstance(value, list):
+            requirements.update(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, dict):
+            for name, present in value.items():
+                if present is False or present is None or str(present).lower() in {"missing", "required", "false"}:
+                    requirements.add(str(name).strip())
+    params = action.get("parameters") if isinstance(action.get("parameters"), dict) else {}
+    check_family = str(params.get("check_family") or action.get("check_family") or "").lower()
+    if check_family == "auth":
+        requirements.add("primary_auth")
+    if check_family == "bola" and bool(params.get("exploit_depth") or action.get("exploit_depth")):
+        requirements.update({"primary_auth", "second_user_auth"})
+    return sorted(item for item in requirements if item)
+
+
+def _hypothesis_situation_report(
+    rows: Sequence[Any],
+    *,
+    requester: Optional[str] = None,
+    limit: int = 5,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    bounded_limit = max(1, min(int(limit or 5), 25))
+    requester_key = requester.strip() if requester else None
+    hypotheses = [_public_hypothesis_row(row) for row in rows]
+    severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    terminal_statuses = {"refuted", "dead"}
+    status_counts = Counter(str(item.get("status") or "unknown") for item in hypotheses)
+    source_counts = Counter(str(item.get("source") or "unknown") for item in hypotheses)
+    family_counts = Counter(str(item.get("family") or "unknown") for item in hypotheses)
+
+    def hotness(item: dict[str, Any]) -> tuple[Any, ...]:
+        updated = _parse_hypothesis_time(item.get("updated_at")) or datetime.fromtimestamp(0, timezone.utc)
+        return (
+            severity_rank.get(str(item.get("severity_guess") or "").lower(), 0),
+            float(item.get("confidence") or 0),
+            float(item.get("smoke_score") or 0),
+            len(item.get("endorsements") or []),
+            -len(item.get("refutations") or []),
+            updated,
+        )
+
+    hottest_unclaimed = [
+        item
+        for item in hypotheses
+        if item.get("status") in {"open", "supported", "claimed", "testing"}
+        and not _hypothesis_claim_active(item, now)
+        and item.get("status") not in terminal_statuses
+    ]
+    requester_claims = [
+        item
+        for item in hypotheses
+        if requester_key
+        and item.get("claim_owner") == requester_key
+        and item.get("status") in {"claimed", "testing"}
+        and _hypothesis_claim_active(item, now)
+    ]
+    avoid_resurfacing = [item for item in hypotheses if item.get("status") in terminal_statuses]
+    live_blockers = [
+        item
+        for item in hypotheses
+        if item.get("status") in {"claimed", "testing"}
+        and _hypothesis_claim_active(item, now)
+        and (not requester_key or item.get("claim_owner") != requester_key)
+    ]
+
+    missing_preconditions: dict[str, dict[str, Any]] = {}
+    for item in hypotheses:
+        if item.get("status") in terminal_statuses:
+            continue
+        for requirement in _hypothesis_missing_preconditions(item):
+            bucket = missing_preconditions.setdefault(
+                requirement,
+                {"requirement": requirement, "count": 0, "sample_hypothesis_ids": []},
+            )
+            bucket["count"] += 1
+            if len(bucket["sample_hypothesis_ids"]) < bounded_limit:
+                bucket["sample_hypothesis_ids"].append(str(item.get("id")))
+
+    return {
+        "summary": {
+            "generated_at": now.isoformat(),
+            "considered_count": len(hypotheses),
+            "status_counts": dict(status_counts),
+            "source_counts": dict(source_counts),
+            "family_counts": dict(family_counts),
+            "requester": requester_key,
+            "limit": bounded_limit,
+        },
+        "hottest_unclaimed": [_hypothesis_report_row(item) for item in sorted(hottest_unclaimed, key=hotness, reverse=True)[:bounded_limit]],
+        "requester_claims": [_hypothesis_report_row(item) for item in sorted(requester_claims, key=hotness, reverse=True)[:bounded_limit]],
+        "avoid_resurfacing": [_hypothesis_report_row(item) for item in sorted(avoid_resurfacing, key=hotness, reverse=True)[:bounded_limit]],
+        "live_blockers": [_hypothesis_report_row(item) for item in sorted(live_blockers, key=hotness, reverse=True)[:bounded_limit]],
+        "missing_preconditions": sorted(missing_preconditions.values(), key=lambda item: (-item["count"], item["requirement"]))[:bounded_limit],
+        "execution_enabled": False,
+        "findings_created": 0,
+        "board_truncated": len(hypotheses) > bounded_limit,
+    }
+
+
 def _public_agent_context_pack_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -13691,6 +13852,35 @@ async def arsenal_hypotheses(
         "execution_enabled": False,
         "count": len(rows),
     }
+
+
+@app.get("/arsenal/hypotheses/situation-report")
+async def arsenal_hypothesis_situation_report(
+    limit: int = Query(5, ge=1, le=25),
+    target_id: Optional[str] = Query(None, description="Filter report to one target."),
+    requester: Optional[str] = Query(None, description="Claim owner/requester to summarize owned work for."),
+):
+    """Return bounded hypothesis context without exposing the full board by default."""
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    query_limit = min(max(limit * 20, 50), 250)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM hypotheses
+            WHERE ($2::uuid IS NULL OR target_id = $2)
+            ORDER BY updated_at DESC
+            LIMIT $1
+            """,
+            query_limit,
+            target_uuid,
+        )
+    return _hypothesis_situation_report(rows, requester=requester, limit=limit)
 
 
 @app.post("/arsenal/hypotheses")

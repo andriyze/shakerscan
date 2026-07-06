@@ -15,6 +15,7 @@ import {
   getCampaignActions,
   getCommandResults,
   getHypotheses,
+  getHypothesisSituationReport,
   generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
@@ -33,6 +34,8 @@ import {
   type CampaignAction,
   type CommandResult,
   type Hypothesis,
+  type HypothesisReportItem,
+  type HypothesisSituationReport,
   type OperationPlan,
   type OperationPlanResponse,
   type ArsenalTool,
@@ -270,6 +273,63 @@ function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
   )
 }
 
+function HypothesisReportRow({ item }: { item: HypothesisReportItem }) {
+  const claimOwner = item.claim_state?.owner
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all font-mono text-sm text-white">{item.family}</span>
+            <Badge className={statusClass(item.status)}>{item.status}</Badge>
+            {item.severity_guess && <Badge className={riskClass(item.severity_guess)}>{item.severity_guess}</Badge>}
+            <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
+            {claimOwner && <Badge className="bg-blue-500/15 text-blue-300">claim {claimOwner}</Badge>}
+          </div>
+          <p className="mt-1 break-words text-sm text-gray-400">
+            {item.title || item.dedupe_key}
+          </p>
+        </div>
+        <div className="text-right text-xs text-gray-500">
+          <div className="font-mono text-gray-300">{Math.round((item.confidence || 0) * 100)}%</div>
+          <div>confidence</div>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
+        <Badge className="bg-gray-800 text-gray-300">v{item.version}</Badge>
+        <Badge className="bg-gray-800 text-gray-300">endorse {item.endorsement_count}</Badge>
+        <Badge className="bg-gray-800 text-gray-300">refute {item.refutation_count}</Badge>
+        {item.terminal_reason && <Badge className="bg-red-500/15 text-red-300">{item.terminal_reason}</Badge>}
+      </div>
+    </div>
+  )
+}
+
+function SituationBucket({
+  title,
+  items,
+  empty,
+}: {
+  title: string
+  items: HypothesisReportItem[]
+  empty: string
+}) {
+  return (
+    <div className="min-w-0">
+      <h3 className="mb-2 text-sm font-medium text-gray-200">{title}</h3>
+      {items.length === 0 ? (
+        <div className="rounded-md border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">{empty}</div>
+      ) : (
+        <div className="grid gap-2">
+          {items.map((item) => (
+            <HypothesisReportRow key={item.id} item={item} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ToolRow({ tool }: { tool: ArsenalTool }) {
   const Icon = tool.status === 'runnable' || tool.status === 'installed' ? CheckCircle2 : tool.status === 'wired' || tool.status === 'gated' ? ShieldCheck : XCircle
   return (
@@ -471,6 +531,7 @@ export default function ArsenalSettingsPage() {
   const [recentCommandResults, setRecentCommandResults] = useState<CommandResult[]>([])
   const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
   const [recentHypotheses, setRecentHypotheses] = useState<Hypothesis[]>([])
+  const [hypothesisSituation, setHypothesisSituation] = useState<HypothesisSituationReport | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
@@ -501,6 +562,7 @@ export default function ArsenalSettingsPage() {
         planData,
         commandResultData,
         campaignActionData,
+        hypothesisSituationData,
         hypothesisData,
         contextData,
         traceData,
@@ -512,6 +574,7 @@ export default function ArsenalSettingsPage() {
         getOperationPlans(5),
         getCommandResults(5),
         getCampaignActions(5),
+        getHypothesisSituationReport(5, approvalActor || 'operator'),
         getHypotheses(5),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
@@ -523,6 +586,7 @@ export default function ArsenalSettingsPage() {
       setRecentPlans(planData.operation_plans)
       setRecentCommandResults(commandResultData.command_results)
       setRecentCampaignActions(campaignActionData.campaign_actions)
+      setHypothesisSituation(hypothesisSituationData)
       setRecentHypotheses(hypothesisData.hypotheses)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
@@ -892,25 +956,61 @@ export default function ArsenalSettingsPage() {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Boxes className="h-4 w-4 text-violet-300" aria-hidden="true" />
-            <h2 className="font-medium text-white">Hypothesis Board</h2>
+            <h2 className="font-medium text-white">Hypothesis Situation</h2>
           </div>
-          <Badge className="bg-gray-800 text-gray-300">leads only</Badge>
+          <div className="flex flex-wrap gap-1.5">
+            <Badge className="bg-gray-800 text-gray-300">bounded report</Badge>
+            {hypothesisSituation?.board_truncated && <Badge className="bg-amber-500/15 text-amber-300">board truncated</Badge>}
+          </div>
         </div>
         <p className="mb-3 text-sm text-gray-400">
-          Deduped leads for graph, scanner, AI Gate, Model Intake, and manual signals. These records cannot verify findings.
+          Bounded context for graph, scanner, AI Gate, Model Intake, and manual leads. These records cannot verify findings.
         </p>
         {loading ? (
           <div className="space-y-3">
             <Skeleton className="h-24" />
             <Skeleton className="h-24" />
           </div>
-        ) : recentHypotheses.length === 0 ? (
+        ) : !hypothesisSituation || hypothesisSituation.summary.considered_count === 0 ? (
           <EmptyState message="No hypotheses recorded yet." />
         ) : (
-          <div className="grid gap-2">
-            {recentHypotheses.slice(0, 5).map((hypothesis) => (
-              <HypothesisRow key={hypothesis.id} hypothesis={hypothesis} />
-            ))}
+          <div className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <Stat label="considered" value={hypothesisSituation.summary.considered_count} />
+              <Stat label="hot unclaimed" value={hypothesisSituation.hottest_unclaimed.length} />
+              <Stat label="live blockers" value={hypothesisSituation.live_blockers.length} tone="text-amber-300" />
+              <Stat label="avoid resurfacing" value={hypothesisSituation.avoid_resurfacing.length} tone="text-red-300" />
+            </div>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <SituationBucket title="Hot Unclaimed" items={hypothesisSituation.hottest_unclaimed} empty="No unclaimed hypotheses in the bounded report." />
+              <SituationBucket title="Your Claims" items={hypothesisSituation.requester_claims} empty="No active claims for the requester." />
+              <SituationBucket title="Live Blockers" items={hypothesisSituation.live_blockers} empty="No live claims blocking this requester." />
+              <SituationBucket title="Avoid Resurfacing" items={hypothesisSituation.avoid_resurfacing} empty="No refuted or dead hypotheses in the bounded report." />
+            </div>
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-gray-200">Missing Preconditions</h3>
+              {hypothesisSituation.missing_preconditions.length === 0 ? (
+                <div className="rounded-md border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">No missing preconditions in the bounded report.</div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {hypothesisSituation.missing_preconditions.map((item) => (
+                    <Badge key={item.requirement} className="bg-amber-500/15 text-amber-300">
+                      {item.requirement}: {item.count}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+            {recentHypotheses.length > 0 && (
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-gray-200">Recent Board Entries</h3>
+                <div className="grid gap-2">
+                  {recentHypotheses.slice(0, 5).map((hypothesis) => (
+                    <HypothesisRow key={hypothesis.id} hypothesis={hypothesis} />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>

@@ -879,9 +879,11 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    `POST /arsenal/hypotheses/{id}/signals` / `hypothesis.signal`. Refuter signals can
    weaken/support/question a claim, but only deterministic replay, cryptographic evidence,
    parser/protocol evidence, or human-approved review policy can change finding status.
-6. Add bounded situation reports for agents/operators: hottest unclaimed hypotheses, claims owned by
-   the requester, refuted/dead hypotheses to avoid resurfacing, live blockers, and missing
-   preconditions. Do not expose the entire board by default.
+6. DONE phase 1: add bounded situation reports for agents/operators via
+   `GET /arsenal/hypotheses/situation-report`, `hypothesis.situation_report`, and the Arsenal UI:
+   hottest unclaimed hypotheses, claims owned by the requester, refuted/dead hypotheses to avoid
+   resurfacing, live blockers, and missing preconditions. The report caps each bucket and reads a
+   bounded recent board window instead of exposing the entire board by default.
 7. Promotion rule: hypotheses can become findings only through the existing proof taxonomy. AI/source
    graph/tool rationale can attach as context, but cannot promote severity or proof state by itself.
 8. Dedup rule: target, route/object/principal, vulnerability family, parameter/body path, and proof

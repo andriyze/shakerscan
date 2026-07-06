@@ -10,7 +10,7 @@ import os
 import sys
 import types
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1476,6 +1476,79 @@ def test_hypothesis_signal_redacts_and_is_non_executing():
     assert signal["confidence_delta"] == -0.4
     assert "secret-token" not in json.dumps(signal)
     assert signal["metadata_json"]["authorization"] != "Bearer secret-token"
+
+
+def test_hypothesis_situation_report_is_bounded_and_separates_work():
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+
+    def row(
+        *,
+        status: str,
+        family: str,
+        severity: str = "medium",
+        confidence: float = 0.5,
+        owner: str | None = None,
+        lease_delta: timedelta | None = None,
+        next_test_action: dict[str, object] | None = None,
+        terminal_reason: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "id": uuid.uuid4(),
+            "source": "app_graph",
+            "family": family,
+            "cwe": "CWE-639",
+            "title": f"{family} lead",
+            "severity_guess": severity,
+            "confidence": confidence,
+            "dedupe_key": f"{family}:{status}:{uuid.uuid4()}",
+            "status": status,
+            "version": 1,
+            "claim_owner": owner,
+            "claim_lease_expires_at": (now + lease_delta).isoformat() if lease_delta else None,
+            "smoke_score": 0.2,
+            "evidence_object_ids": json.dumps([]),
+            "tool_receipt_ids": json.dumps([]),
+            "next_test_action": json.dumps(next_test_action or {}),
+            "endorsements": json.dumps([{"source": "app_graph"}]),
+            "refutations": json.dumps([]),
+            "terminal_reason": terminal_reason,
+            "metadata_json": json.dumps({}),
+            "updated_at": now.isoformat(),
+        }
+
+    hot = row(
+        status="open",
+        family="bola",
+        severity="high",
+        confidence=0.9,
+        next_test_action={"command": "asm.improve", "parameters": {"check_family": "bola", "exploit_depth": True}},
+    )
+    owned = row(status="claimed", family="xss", owner="agent-a", lease_delta=timedelta(minutes=10))
+    blocked = row(status="testing", family="sqli", owner="agent-b", lease_delta=timedelta(minutes=10))
+    expired = row(status="claimed", family="bfla", owner="agent-c", lease_delta=timedelta(minutes=-10))
+    refuted = row(status="refuted", family="secret", terminal_reason="manual refuter rejected")
+    dead = row(status="dead", family="config", terminal_reason="route removed")
+
+    report = api_module._hypothesis_situation_report(
+        [owned, blocked, refuted, hot, dead, expired],
+        requester="agent-a",
+        limit=2,
+        now=now,
+    )
+
+    assert report["execution_enabled"] is False
+    assert report["findings_created"] == 0
+    assert report["summary"]["considered_count"] == 6
+    assert report["summary"]["status_counts"]["claimed"] == 2
+    assert len(report["hottest_unclaimed"]) == 2
+    assert report["hottest_unclaimed"][0]["family"] == "bola"
+    assert {item["family"] for item in report["requester_claims"]} == {"xss"}
+    assert {item["family"] for item in report["live_blockers"]} == {"sqli"}
+    assert {item["status"] for item in report["avoid_resurfacing"]} == {"refuted", "dead"}
+    requirements = {item["requirement"]: item for item in report["missing_preconditions"]}
+    assert requirements["primary_auth"]["count"] == 1
+    assert requirements["second_user_auth"]["count"] == 1
+    assert all("metadata_json" not in item for item in report["hottest_unclaimed"])
 
 
 def test_record_command_result_redacts_result_json_and_returns_public_row():

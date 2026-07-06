@@ -189,14 +189,20 @@ def test_hypothesis_commands_do_not_execute_scanners_or_create_findings():
     commands = {item["name"]: item for item in payload["commands"]}
 
     list_cmd = commands["hypothesis.list"]
+    report_cmd = commands["hypothesis.situation_report"]
     record_cmd = commands["hypothesis.record"]
     claim_cmd = commands["hypothesis.claim"]
 
     assert list_cmd["status"] == "read_only"
+    assert report_cmd["status"] == "read_only"
     assert record_cmd["status"] == "dry_run"
     assert claim_cmd["status"] == "dry_run"
+    assert report_cmd["risk_tier"] == "read_only"
     assert record_cmd["risk_tier"] == "read_only"
     assert claim_cmd["risk_tier"] == "read_only"
+    assert report_cmd["path"] == "/arsenal/hypotheses/situation-report"
+    assert "hottest_unclaimed" in report_cmd["evidence_contract"]
+    assert "missing_preconditions" in report_cmd["evidence_contract"]
     assert record_cmd["path"] == "/arsenal/hypotheses"
     assert claim_cmd["path"] == "/arsenal/hypotheses/{hypothesis_id}/claim"
     assert "hypothesis_row" in record_cmd["evidence_contract"]
