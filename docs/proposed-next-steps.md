@@ -427,8 +427,9 @@ ordering and more exact implementation boundaries:
 - AI Gate has transcripts, reports, adaptive probes, MCP readiness, control evidence, a first
   campaign review surface on scan detail, scan-level rerun actions for skipped/errors/family/all,
   per-transcript replay actions, same-context run comparison on scan detail, and target-level
-  longitudinal campaign history on the AI Gate target surface. Remaining AI Gate gaps are deeper
-  readiness trends and report export from the target-level history view.
+  longitudinal campaign history on the AI Gate target surface. Target history now includes phase-1
+  readiness trends and a content-free export with run report links. Remaining AI Gate gaps are deeper
+  trend visualization and richer campaign evidence manifests.
 
 ### Immediate implementation sequence
 
@@ -550,8 +551,9 @@ Use this order when choosing between otherwise-valid work:
   subfinder, Playwright, AI Gate probe execution, and Model Intake signature verification.
 - **P2: AI red-team campaign UX.** Scan-detail campaign review, coverage matrix, skipped reasons,
   transcript/report links, finding-level replay entry points, scan-level rerun actions, selected
-  transcript replay, same-context scan comparison, and target-level history are phase 1 done.
-  Remaining work is export/readiness trend polish from target history and campaign evidence manifests.
+  transcript replay, same-context scan comparison, target-level history, phase-1 readiness trends,
+  and target-history export links are phase 1 done. Remaining work is deeper trend visualization and
+  campaign evidence manifests.
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
   scan selection, strict policy-profile anchor binding, and deployment-decision anchor gaps are phase 1
   done. Remaining work is exception remediation workflow depth and campaign evidence export.
@@ -783,7 +785,9 @@ now renders a campaign review card backed by `ai_gate.coverage_matrix`, `executi
 probes, errored families, selected families, selected transcript probes, or all probes.
 `GET /ai/scans/{scan_id}/campaign-history` returns same-context run comparison for the campaign
 panel, and `GET /ai/targets/{target_id}/campaign-history` plus `/settings/ai-gate` now expose
-target-level longitudinal run/context history outside a single scan detail page.
+target-level longitudinal run/context history outside a single scan detail page. `GET
+/ai/targets/{target_id}/campaign-history/export` returns a content-free JSON export with readiness
+trends and per-run red-team report links.
 
 **Implement:**
 1. DONE: add an AI Red-Team Campaign view grouping target, environment, profile, probe pack, readiness,
@@ -795,13 +799,15 @@ target-level longitudinal run/context history outside a single scan detail page.
    for skipped/errors/family/all modes and also preserves production confirmation. Selected
    transcript replay now exists through `mode=transcript` and uses the same production gate.
    Same-context campaign history/comparison now exists on scan detail. Target-level longitudinal
-   run/context reporting now exists on the AI Gate target page.
+   run/context reporting now exists on the AI Gate target page, with phase-1 readiness trend summary
+   and a content-free campaign-history export link.
 4. DONE for the base Action Center: missing AI control-baseline gaps already appear there; remaining
    AI Gate campaign work is richer readiness/campaign history, not the first blocker card.
 
 **Done when:** an AI red-team run can be reviewed, rerun, compared across runs, and defended as a
 campaign artifact instead of a loose scan report. Phase 1 now satisfies this on scan detail and on
-the AI Gate target page; export/readiness trend polish remains later work.
+the AI Gate target page; deeper trend visualization and richer campaign evidence manifests remain
+later work.
 
 ### 5. Model Intake trust UX
 **Status: PARTIAL, PHASE 1 UI DONE.** The API and UI now carry real signature/trust-anchor fields:

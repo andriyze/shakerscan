@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Bot, CheckCircle2, Clipboard, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
+import { Bot, CheckCircle2, Clipboard, Download, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
 import {
   Button,
   Card,
@@ -1318,15 +1318,28 @@ export default function AIGateSettingsPage() {
                         <div className="text-sm font-medium text-gray-200">Campaign history</div>
                         <p className="mt-1 text-xs text-gray-500">Recent AI Gate runs for this target across probe packs, profiles, and environments.</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => loadTargetCampaignHistory(target.id)}
-                        disabled={campaignHistoryLoading}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
-                      >
-                        <RefreshCw className={`h-3.5 w-3.5 ${campaignHistoryLoading ? 'animate-spin' : ''}`} />
-                        {campaignHistory ? 'Refresh history' : 'Load history'}
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        {campaignHistory && (
+                          <a
+                            href={`${API_URL}/ai/targets/${target.id}/campaign-history/export?limit=12`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+                          >
+                            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                            Export history
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => loadTargetCampaignHistory(target.id)}
+                          disabled={campaignHistoryLoading}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${campaignHistoryLoading ? 'animate-spin' : ''}`} />
+                          {campaignHistory ? 'Refresh history' : 'Load history'}
+                        </button>
+                      </div>
                     </div>
                     {campaignHistoryError && (
                       <p role="alert" className="mt-2 break-words text-xs text-amber-300">{campaignHistoryError}</p>
@@ -1355,6 +1368,23 @@ export default function AIGateSettingsPage() {
                             <div className="mt-1 text-lg font-semibold text-blue-200">{campaignHistory.summary.budget_stopped_runs}</div>
                           </div>
                         </div>
+                        {campaignHistory.readiness_trends?.overall && (
+                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-gray-500">Readiness trend</span>
+                              <span className="rounded bg-gray-800 px-2 py-0.5 text-gray-200">{formatCampaignLabel(campaignHistory.readiness_trends.overall.state)}</span>
+                              {campaignHistory.readiness_trends.overall.coverage_delta !== null && campaignHistory.readiness_trends.overall.coverage_delta !== undefined && (
+                                <span className="text-gray-400">coverage {formatDelta(campaignHistory.readiness_trends.overall.coverage_delta)}</span>
+                              )}
+                              {campaignHistory.readiness_trends.overall.findings_delta !== null && campaignHistory.readiness_trends.overall.findings_delta !== undefined && (
+                                <span className="text-gray-400">findings {formatDelta(campaignHistory.readiness_trends.overall.findings_delta)}</span>
+                              )}
+                              {campaignHistory.readiness_trends.overall.errors_delta !== null && campaignHistory.readiness_trends.overall.errors_delta !== undefined && (
+                                <span className="text-gray-400">errors {formatDelta(campaignHistory.readiness_trends.overall.errors_delta)}</span>
+                              )}
+                            </div>
+                          </div>
+                        )}
 
                         {campaignHistory.contexts.length > 0 && (
                           <div className="grid gap-2 lg:grid-cols-2">

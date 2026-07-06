@@ -1109,6 +1109,39 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
     assert rag_context["deltas"]["findings_count"] == -2
     assert rag_context["deltas"]["executed"] == 2
     assert rag_context["deltas"]["decision_changed"] is True
+    assert history["readiness_trends"]["overall"]["state"] == "improving"
+    assert history["readiness_trends"]["overall"]["coverage_delta"] == 50
+    assert history["readiness_trends"]["overall"]["findings_delta"] == -2
+    assert history["readiness_trends"]["contexts"][0]["trend"]["latest_run_id"] == "scan-4"
+
+
+def test_ai_target_campaign_history_export_is_content_free_with_report_links():
+    latest_rag = _ai_history_row("scan-4", decision="allow", executed=4, skipped=0, findings_count=0)
+    previous_rag = _ai_history_row("scan-3", decision="block", executed=2, skipped=1, findings_count=2)
+    history = api_module._build_ai_target_campaign_history(
+        "target-ai",
+        [latest_rag, previous_rag],
+        limit=12,
+    )
+
+    export = api_module._build_ai_target_campaign_history_export(
+        history,
+        generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    )
+
+    assert export["schema_version"] == "2026-07-06.ai-target-campaign-history-export.v1"
+    assert len(export["export_hash"]) == 64
+    assert export["content_included"] is False
+    assert export["transcripts_included"] is False
+    assert export["readiness_trends"]["overall"]["state"] == "improving"
+    assert export["report_links"][0] == {
+        "scan_id": "scan-4",
+        "scan_url": "/scans/scan-4",
+        "redteam_report_url": "/scans/scan-4/ai-redteam-report",
+    }
+    serialized = json.dumps(export).lower()
+    assert '"turns"' not in serialized
+    assert '"response_excerpt"' not in serialized
 
 
 def test_deployment_decision_exception_hygiene_summary():

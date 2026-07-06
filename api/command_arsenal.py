@@ -325,6 +325,22 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=20,
     ),
     ArsenalCommand(
+        name="ai_gate.target_history_export",
+        family="ai_gate",
+        description="Read a content-free AI Gate target campaign-history export with readiness trends and report links.",
+        status="read_only",
+        risk_tier="read_only",
+        method="GET",
+        path="/ai/targets/{target_id}/campaign-history/export",
+        scope_fields=("target_id",),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        evidence_contract=("export_hash", "readiness_trends", "campaign_runs", "redteam_report_links"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
         name="ai_gate.replay_probe",
         family="ai_gate",
         description="Queue focused AI Gate replay using original target/profile/probe context.",

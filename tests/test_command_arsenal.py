@@ -49,6 +49,7 @@ def test_command_catalog_contains_required_initial_commands():
         "tool_receipt.list",
         "deployment.decision",
         "tool.status",
+        "ai_gate.target_history_export",
     ):
         assert name in commands
         assert commands[name]["status"] == "read_only"
@@ -115,6 +116,18 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     assert sweep["risk_tier"] == "read_only"
     assert sweep["path"] == "/evidence/retention/sweep"
     assert sweep["parameters_schema"]["dry_run"]["default"] is True
+
+
+def test_ai_gate_target_history_export_is_read_only_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["ai_gate.target_history_export"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/ai/targets/{target_id}/campaign-history/export"
+    assert "readiness_trends" in cmd["evidence_contract"]
+    assert "redteam_report_links" in cmd["evidence_contract"]
 
 
 def test_target_principal_matrix_commands_are_non_executing_inventory():

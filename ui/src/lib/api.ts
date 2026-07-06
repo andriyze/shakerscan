@@ -2824,6 +2824,22 @@ export interface AiTargetCampaignHistoryContext {
   latest_run?: AiScanCampaignHistoryRun | null
   previous_run?: AiScanCampaignHistoryRun | null
   deltas?: AiScanCampaignHistory['deltas'] | null
+  readiness_trend?: AiReadinessTrend | null
+}
+
+export interface AiReadinessTrend {
+  state: string
+  latest_run_id?: string | null
+  previous_run_id?: string | null
+  coverage_pct?: number | null
+  coverage_delta?: number | null
+  findings_count?: number | null
+  findings_delta?: number | null
+  errors?: number | null
+  errors_delta?: number | null
+  decision?: string | null
+  decision_changed: boolean
+  stopped_by_request_budget: boolean
 }
 
 export interface AiTargetCampaignHistory {
@@ -2831,6 +2847,16 @@ export interface AiTargetCampaignHistory {
   runs: AiScanCampaignHistoryRun[]
   contexts: AiTargetCampaignHistoryContext[]
   latest_run?: AiScanCampaignHistoryRun | null
+  readiness_trends?: {
+    overall: AiReadinessTrend
+    contexts: Array<{
+      probe_pack?: string | null
+      scan_profile?: string | null
+      environment?: string | null
+      runs_count: number
+      trend: AiReadinessTrend
+    }>
+  }
   summary: {
     total_runs: number
     contexts: number

@@ -5929,14 +5929,29 @@ def _build_ai_target_campaign_history(target_id: str, scan_rows: list[Any], *, l
             "latest_run": latest,
             "previous_run": previous,
             "deltas": deltas,
+            "readiness_trend": _ai_readiness_trend(latest, previous),
         })
 
     latest_run = entries[0] if entries else None
+    previous_run = entries[1] if len(entries) > 1 else None
     return {
         "ai_target_id": str(target_id),
         "runs": entries,
         "contexts": context_summaries,
         "latest_run": latest_run,
+        "readiness_trends": {
+            "overall": _ai_readiness_trend(latest_run, previous_run),
+            "contexts": [
+                {
+                    "probe_pack": item.get("probe_pack"),
+                    "scan_profile": item.get("scan_profile"),
+                    "environment": item.get("environment"),
+                    "runs_count": item.get("runs_count"),
+                    "trend": item.get("readiness_trend"),
+                }
+                for item in context_summaries
+            ],
+        },
         "summary": {
             "total_runs": len(entries),
             "contexts": len(context_summaries),
@@ -5944,6 +5959,102 @@ def _build_ai_target_campaign_history(target_id: str, scan_rows: list[Any], *, l
             "errored_runs": sum(1 for entry in entries if entry.get("errors", 0) > 0),
             "budget_stopped_runs": sum(1 for entry in entries if entry.get("stopped_by_request_budget")),
         },
+    }
+
+
+def _ai_readiness_trend(latest: dict[str, Any] | None, previous: dict[str, Any] | None) -> dict[str, Any]:
+    def _num(row: dict[str, Any] | None, key: str) -> int:
+        if not row:
+            return 0
+        try:
+            return int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    if not latest:
+        return {
+            "state": "no_runs",
+            "latest_run_id": None,
+            "previous_run_id": None,
+            "coverage_pct": None,
+            "coverage_delta": None,
+            "findings_delta": None,
+            "errors_delta": None,
+            "decision_changed": False,
+        }
+    coverage_delta = None
+    findings_delta = None
+    errors_delta = None
+    decision_changed = False
+    if previous:
+        coverage_delta = _num(latest, "coverage_pct") - _num(previous, "coverage_pct")
+        findings_delta = _num(latest, "findings_count") - _num(previous, "findings_count")
+        errors_delta = _num(latest, "errors") - _num(previous, "errors")
+        decision_changed = latest.get("decision") != previous.get("decision")
+    if not previous:
+        state = "baseline"
+    elif _num(latest, "errors") > 0:
+        state = "regressed"
+    elif latest.get("decision") == "block":
+        state = "blocked"
+    elif (coverage_delta or 0) > 0 and (errors_delta or 0) <= 0:
+        state = "improving"
+    elif (coverage_delta or 0) < 0 or (errors_delta or 0) > 0:
+        state = "regressed"
+    else:
+        state = "stable"
+    return {
+        "state": state,
+        "latest_run_id": latest.get("id"),
+        "previous_run_id": previous.get("id") if previous else None,
+        "coverage_pct": latest.get("coverage_pct"),
+        "coverage_delta": coverage_delta,
+        "findings_count": latest.get("findings_count"),
+        "findings_delta": findings_delta,
+        "errors": latest.get("errors"),
+        "errors_delta": errors_delta,
+        "decision": latest.get("decision"),
+        "decision_changed": decision_changed,
+        "stopped_by_request_budget": bool(latest.get("stopped_by_request_budget")),
+    }
+
+
+def _build_ai_target_campaign_history_export(
+    history: dict[str, Any],
+    *,
+    generated_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    runs = history.get("runs") if isinstance(history.get("runs"), list) else []
+    export_core = {
+        "ai_target_id": history.get("ai_target_id"),
+        "summary": history.get("summary") or {},
+        "readiness_trends": history.get("readiness_trends") or {},
+        "run_ids": [item.get("id") for item in runs if isinstance(item, dict)],
+    }
+    export_hash = hashlib.sha256(
+        json.dumps(export_core, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "2026-07-06.ai-target-campaign-history-export.v1",
+        "generated_at": generated.isoformat(),
+        "export_hash": export_hash,
+        "content_included": False,
+        "transcripts_included": False,
+        "ai_target_id": history.get("ai_target_id"),
+        "summary": history.get("summary") or {},
+        "readiness_trends": history.get("readiness_trends") or {},
+        "contexts": history.get("contexts") or [],
+        "runs": runs,
+        "report_links": [
+            {
+                "scan_id": item.get("id"),
+                "scan_url": item.get("ui_url"),
+                "redteam_report_url": f"/scans/{item.get('id')}/ai-redteam-report" if item.get("id") else None,
+            }
+            for item in runs
+            if isinstance(item, dict)
+        ],
     }
 
 
@@ -7839,6 +7950,37 @@ async def get_ai_target_campaign_history(target_id: str, limit: int = Query(12, 
             limit,
         )
     return _build_ai_target_campaign_history(str(target_uuid), list(rows), limit=limit)
+
+
+@app.get("/ai/targets/{target_id}/campaign-history/export")
+async def get_ai_target_campaign_history_export(target_id: str, limit: int = Query(12, ge=1, le=50)):
+    """Return a content-free AI Gate target history export with readiness trends."""
+    try:
+        target_uuid = uuid.UUID(target_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid AI target id")
+
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT id FROM ai_targets WHERE id = $1", target_uuid)
+        if not target:
+            raise HTTPException(status_code=404, detail="AI Gate target not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, ai_target_id, target_url, options, result, run_kind, status,
+                   score, grade, findings_count, created_at, completed_at
+            FROM scans
+            WHERE ai_target_id = $1
+              AND status = 'completed'
+              AND run_kind LIKE 'ai_%'
+              AND result IS NOT NULL
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+            LIMIT $2
+            """,
+            target_uuid,
+            limit,
+        )
+    history = _build_ai_target_campaign_history(str(target_uuid), list(rows), limit=limit)
+    return _build_ai_target_campaign_history_export(history)
 
 
 @app.post("/ai/targets")
