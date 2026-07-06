@@ -465,6 +465,20 @@ def test_local_agent_plan_command_is_dry_run_not_execution():
     assert "operation_plan" in cmd["evidence_contract"]
 
 
+def test_local_agent_parse_plan_command_is_fail_closed_dry_run():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["local_agent.parse_plan"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "POST"
+    assert cmd["path"] == "/agents/local/plan/parse"
+    assert cmd["scope_fields"] == ["context_pack_id"]
+    assert "validation_errors" in cmd["evidence_contract"]
+    assert "raw_output" in cmd["redaction_contract"]
+
+
 def test_local_agent_test_command_is_harmless_ping():
     payload = arsenal.describe_commands()
     commands = {item["name"]: item for item in payload["commands"]}

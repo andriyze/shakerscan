@@ -2385,6 +2385,154 @@ def test_local_agent_dry_run_plan_rejects_unknown_agent():
     assert "Unknown local agent" in exc.value.detail
 
 
+def _local_agent_parser_context_row(context_id: str = "22222222-2222-4222-8222-222222222222") -> dict[str, object]:
+    return {
+        "id": context_id,
+        "context_version": "2026-07-05.v1",
+        "target_id": None,
+        "context_hash": "d" * 64,
+        "target_summary": {
+            "target_id": "target-1",
+            "url": "https://api.example.com",
+            "root_domain": "example.com",
+            "environment": "production",
+        },
+        "current_surface": {},
+        "current_gaps": [],
+        "hypotheses_summary": [],
+        "findings_summary": [],
+        "allowed_commands": ["asm.gaps", "local_agent.test"],
+        "disallowed_commands": [{"command": "scan.focused_family", "reason": "gated:active"}],
+        "known_preconditions": {},
+        "context_pack": {
+            "target_summary": {
+                "target_id": "target-1",
+                "url": "https://api.example.com",
+                "root_domain": "example.com",
+                "environment": "production",
+            },
+            "allowed_commands": ["asm.gaps", "local_agent.test"],
+            "disallowed_commands": [{"command": "scan.focused_family", "reason": "gated:active"}],
+            "known_preconditions": {},
+            "context_hash": "d" * 64,
+        },
+        "validation_errors": [],
+        "validation_warnings": [],
+        "status": "recorded",
+        "created_by": "test",
+    }
+
+
+def _local_agent_parser_candidate(**overrides) -> dict[str, object]:
+    candidate = {
+        "objective": "Review target coverage",
+        "planner": {"kind": "local_agent", "agent": "codex"},
+        "context_hash": "d" * 64,
+        "target_scope": {
+            "target_id": "target-1",
+            "url": "https://api.example.com",
+            "allowed_hosts": ["api.example.com"],
+            "allowed_root_domains": ["example.com"],
+            "environment": "production",
+        },
+        "risk_tier": "read_only",
+        "actions": [{
+            "command": "asm.gaps",
+            "parameters": {},
+            "risk_tier": "read_only",
+            "reason": "Inspect coverage before queueing any gated work",
+        }],
+        "stop_conditions": ["scope_blocked"],
+        "success_criteria": ["operation_plan_validated", "no_execution_performed"],
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+class _LocalAgentParserFakeConn:
+    async def fetchrow(self, query, *args):
+        if "FROM agent_context_packs" in query:
+            return _local_agent_parser_context_row()
+        return None
+
+
+def _parse_local_agent_candidate(candidate_or_raw):
+    raw = candidate_or_raw if isinstance(candidate_or_raw, str) else json.dumps(candidate_or_raw)
+    req = api_module.LocalAgentPlanParseRequest(
+        agent="codex",
+        context_pack_id="22222222-2222-4222-8222-222222222222",
+        raw_output=raw,
+        created_by="test",
+    )
+    return asyncio.run(api_module._parse_local_agent_candidate_plan(_LocalAgentParserFakeConn(), req))
+
+
+def test_local_agent_candidate_parser_accepts_exact_context_bound_plan():
+    result = _parse_local_agent_candidate(_local_agent_parser_candidate())
+
+    assert result["accepted"] is True
+    assert result["candidate_persisted"] is False
+    assert result["execution_enabled"] is False
+    assert result["local_agent_spawned"] is False
+    assert result["operation_plan"]["actions"][0]["command"] == "asm.gaps"
+    assert result["operation_plan"]["planner"]["planner_execution_enabled"] is False
+    assert result["validation_errors"] == []
+
+
+def test_local_agent_candidate_parser_rejects_ambiguous_output_and_raw_commands():
+    result = _parse_local_agent_candidate("Here is the plan:\n{}")
+
+    assert result["accepted"] is False
+    assert any(error.startswith("planner_output_not_single_json_object") for error in result["validation_errors"])
+
+    raw_command = _local_agent_parser_candidate(actions=[{
+        "command": "run_shell",
+        "parameters": {"shell": "curl_this_url https://evil.example"},
+        "risk_tier": "read_only",
+    }])
+    result = _parse_local_agent_candidate(raw_command)
+
+    assert result["accepted"] is False
+    assert "action_0_unknown_command:run_shell" in result["validation_errors"]
+    assert any(error.startswith("hidden_state_changing_request:") for error in result["validation_errors"])
+
+
+def test_local_agent_candidate_parser_rejects_missing_risk_tier_and_scope_widening():
+    missing_risk = _local_agent_parser_candidate(actions=[{
+        "command": "asm.gaps",
+        "parameters": {},
+    }])
+    result = _parse_local_agent_candidate(missing_risk)
+
+    assert result["accepted"] is False
+    assert "action_0_risk_tier_required:asm.gaps" in result["validation_errors"]
+
+    widened = _local_agent_parser_candidate(target_scope={
+        "target_id": "target-1",
+        "url": "https://evil.example.net",
+        "allowed_hosts": ["evil.example.net"],
+        "allowed_root_domains": ["example.net"],
+        "environment": "production",
+    })
+    result = _parse_local_agent_candidate(widened)
+
+    assert result["accepted"] is False
+    assert "target_scope_host_outside_context:evil.example.net" in result["validation_errors"]
+    assert "target_scope_root_outside_context:example.net" in result["validation_errors"]
+
+
+def test_local_agent_candidate_parser_rejects_unbounded_parameters():
+    candidate = _local_agent_parser_candidate(actions=[{
+        "command": "local_agent.test",
+        "parameters": {"agent": "codex", "timeout_seconds": 5, "max_output_bytes": 999999},
+        "risk_tier": "read_only",
+    }])
+    result = _parse_local_agent_candidate(candidate)
+
+    assert result["accepted"] is False
+    assert "action_0_parameter_above_maximum:max_output_bytes" in result["validation_errors"]
+
+
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
     req = api_module.PolicyProfileRequest(
         name="strict",

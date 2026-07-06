@@ -1040,10 +1040,10 @@ then make `lfi`/`rce`/`ssrf` runnable only when their deterministic proof contra
 through `build_report`.
 
 ### 11. Planner evaluation and local-agent planning boundaries
-**Status: DRY-RUN PHASE 1 DONE; REAL ADAPTERS DISABLED.** Local-agent planning should remain dry-run
-only until the Command Arsenal, mandatory receipt enforcement, context packs, parser/output
-validation, and planner evals are stable. T3MP3ST's local-agent pattern is useful as a planner
-harness, not as raw execution power.
+**Status: DRY-RUN PHASE 1 + STRICT PARSER VALIDATION DONE; REAL ADAPTERS DISABLED.** Local-agent
+planning should remain dry-run only until the Command Arsenal, mandatory receipt enforcement,
+context packs, parser/output validation, and planner evals are stable. T3MP3ST's local-agent pattern
+is useful as a planner harness, not as raw execution power.
 
 **Implement:**
 1. DONE phase 1: add fixed planner eval fixtures for: keep target covered, run BOLA, SQLi only, production AI Gate
@@ -1058,8 +1058,8 @@ harness, not as raw execution power.
    support, timeout support, sandbox/read-only support, output caps, and risk notes.
 4. DONE phase 1: local-agent-labeled dry-run planning exists without spawning local planners.
    It consumes saved context packs and persists server-validated `OperationPlan` rows. Real
-   local-agent CLI adapters remain disabled until stricter receipt enforcement and parser/output
-   validation land.
+   local-agent CLI adapters remain disabled until stricter receipt enforcement and fixture-gated
+   prompt-based planner experiments land.
 5. Strip provider API-key environment variables when spawning local planners. Do not pass secrets,
    cookies, bearer tokens, private keys, raw transcripts, or raw request/response bodies by default.
 6. Local agents may propose `OperationPlan` JSON and summarize redacted evidence. They may not execute
@@ -1068,11 +1068,15 @@ harness, not as raw execution power.
 7. DONE phase 1: dry-run APIs now include `GET /agents/local` for capability matrix,
    `POST /agents/local/test` for harmless bounded capability/version ping, and
    `POST /agents/local/plan` for deterministic context-pack-to-`OperationPlan` creation. Remaining
-   optional real-adapter work is parsed local-agent output validation and fixture-gated prompt-based
-   planner experiments. `/ai/ops/route` remains the only execution gateway.
-8. Reject ambiguous planner output. If a local agent lacks JSON mode, post-parse validation must fail
-   closed on unknown commands, missing risk tiers, widened scope, hidden state-changing action
-   requests, missing confirmations, or unbounded parameters.
+   optional real-adapter work is fixture-gated prompt-based planner experiments. `/ai/ops/route`
+   remains the only execution gateway.
+8. DONE phase 1: reject ambiguous planner output through `POST /agents/local/plan/parse` /
+   `local_agent.parse_plan`. Candidate local-agent output must be a single exact JSON
+   `OperationPlan` object bound to the supplied context-pack hash and target scope; validation fails
+   closed on unknown commands, missing risk tiers, catalog risk mismatch, commands outside the
+   context pack, widened scope, hidden state-changing action requests, missing confirmations, and
+   unbounded parameters. The parser does not persist candidate plans, spawn local agents, queue work,
+   or enable execution.
 9. DONE phase 1: add `POST /agents/local/test` only as a harmless capability/version ping with
    timeout/output caps, environment stripping, no secrets, no prompt, no planner execution, no target
    state mutation, and no queued scanner work.
