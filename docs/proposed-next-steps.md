@@ -185,6 +185,11 @@ called at real sites — verify before re-proposing any of it:
   rejects executed-action claims in traces, checks linked context/plan hashes, and keeps
   `execution_enabled=false`. `/settings/arsenal` can record and review context/trace rows from the
   same dry-run operator workflow.
+- **Local-agent capability discovery phase 1** — `GET /agents/local` returns read-only capability
+  records for Codex, Claude Code, OpenCode, and Hermes-style local planners: binary detection,
+  optional version probe, auth-artifact existence only, support flags, prompt/output caps, and risk
+  notes. It never reads auth artifact contents, never forwards provider API keys, and keeps
+  planner execution disabled. `/settings/arsenal` renders the same capability matrix.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -309,9 +314,9 @@ raw shell execution or LLM-produced verified findings.
    schema, risk tiers, scope receipt, approval receipt, tool receipt, campaign action, hypothesis, and
    `EvidenceInstance` schemas. DONE phase 1 for persisted dry-run `OperationPlan` validation records.
    DONE phase 1 for persisted `AgentContextPack` and `AgentDecisionTrace` validation records.
-   Remaining work is deeper context-pack generation from real target facts, planner evals, local-agent
-   capability records, and mandatory receipt enforcement; it still must add no new execution power
-   until receipts/gates are durable.
+   DONE phase 1 for read-only local-agent capability records. Remaining work is deeper context-pack
+   generation from real target facts, planner evals, local-agent dry-run planning, and mandatory
+   receipt enforcement; it still must add no new execution power until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -478,10 +483,10 @@ bounded context packs, decision traces, and audit receipts.
 7. Keep `/ai/ops/route` as the execution safety gateway. Local agents, AI Ops Router, scheduler, MCP,
    and UI should all use the same command schemas and scope/approval receipts; none may bypass the
    existing API handlers.
-8. Add local-agent capability records before any planner connector is usable. Each record must expose
-   binary presence, version, auth-detected status without reading auth artifact contents, headless/JSON
-   mode support, timeout support, workdir isolation support, network-disable support if any, max prompt
-   and output bytes, and adapter risk notes.
+8. DONE phase 1: add local-agent capability records before any planner connector is usable.
+   `GET /agents/local` exposes binary presence, optional version probe, auth-detected status without
+   reading auth artifact contents, headless/JSON mode support, timeout support, workdir isolation
+   support, network-disable support if any, max prompt and output bytes, and adapter risk notes.
 9. Strip provider API-key environment variables when spawning local planners. Send bounded context
    packs and command schemas; do not send secrets, cookies, bearer tokens, private keys, raw
    transcripts, or raw request/response bodies by default.

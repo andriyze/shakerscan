@@ -13,6 +13,7 @@ import {
   getArsenalContracts,
   getOperationPlans,
   getArsenalTools,
+  getLocalAgents,
   previewScopeReceipt,
   type AgentContextPack,
   type AgentContextPackResponse,
@@ -27,6 +28,8 @@ import {
   type OperationPlanResponse,
   type ArsenalTool,
   type ArsenalToolsResponse,
+  type LocalAgentCapability,
+  type LocalAgentsResponse,
   type ScopeReceiptPreview,
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui'
@@ -36,6 +39,7 @@ function statusClass(status: string): string {
     case 'runnable':
     case 'read_only':
     case 'proof_backed':
+    case 'available':
       return 'bg-green-500/15 text-green-300'
     case 'gated':
     case 'installed':
@@ -46,6 +50,7 @@ function statusClass(status: string): string {
       return 'bg-amber-500/15 text-amber-300'
     case 'catalog_only':
     case 'waived':
+    case 'missing':
       return 'bg-gray-800 text-gray-300'
     case 'disabled':
     case 'out_of_scope':
@@ -158,6 +163,49 @@ function ToolRow({ tool }: { tool: ArsenalTool }) {
   )
 }
 
+function LocalAgentRow({ agent }: { agent: LocalAgentCapability }) {
+  const Icon = agent.status === 'available' || agent.status === 'installed' ? CheckCircle2 : XCircle
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Icon className="h-4 w-4 text-gray-400" aria-hidden="true" />
+            <span className="font-mono text-sm text-white">{agent.agent}</span>
+            <Badge className={statusClass(agent.status)}>{agent.status}</Badge>
+            <Badge className="bg-gray-800 text-gray-300">planner disabled</Badge>
+          </div>
+          <p className="mt-2 text-sm text-gray-400">{agent.display_name}</p>
+        </div>
+        <div className="shrink-0 text-right text-xs text-gray-500">
+          <div>{agent.auth_detected ? agent.auth_detection_method : 'auth not detected'}</div>
+          {agent.version && (
+            <div className="mt-1 max-w-44 truncate font-mono text-gray-300">
+              version: {agent.version}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+        <div className="min-w-0 truncate">binary: <span className="font-mono text-gray-300">{agent.binary_path || 'not detected'}</span></div>
+        <div>auth contents read: <span className="text-gray-300">{agent.auth_artifact_contents_read ? 'yes' : 'no'}</span></div>
+        <div>headless prompt: <span className="text-gray-300">{agent.supports_headless_prompt ? 'supported' : 'not assumed'}</span></div>
+        <div>json mode: <span className="text-gray-300">{agent.supports_json_mode ? 'supported' : 'post-validate only'}</span></div>
+        <div>timeout: <span className="text-gray-300">{agent.supports_timeout ? 'supported' : 'not assumed'}</span></div>
+        <div>network disable: <span className="text-gray-300">{agent.supports_network_disable ? 'supported' : 'not assumed'}</span></div>
+      </div>
+      {agent.auth_artifacts.length > 0 && (
+        <div className="mt-2 truncate text-xs text-gray-500">
+          auth refs: <span className="font-mono text-gray-300">{agent.auth_artifacts.join(', ')}</span>
+        </div>
+      )}
+      {agent.version_probe_error && (
+        <p role="alert" className="mt-2 text-xs text-amber-300">{agent.version_probe_error}</p>
+      )}
+    </div>
+  )
+}
+
 function ContractRow({
   name,
   contract,
@@ -216,6 +264,7 @@ export default function ArsenalSettingsPage() {
   const [commands, setCommands] = useState<ArsenalCommandsResponse | null>(null)
   const [contracts, setContracts] = useState<ArsenalContractsResponse | null>(null)
   const [tools, setTools] = useState<ArsenalToolsResponse | null>(null)
+  const [localAgents, setLocalAgents] = useState<LocalAgentsResponse | null>(null)
   const [scopeUrl, setScopeUrl] = useState('https://app.example.com/')
   const [scopeHosts, setScopeHosts] = useState('app.example.com')
   const [scopeRoots, setScopeRoots] = useState('example.com')
@@ -253,10 +302,11 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, contractData, toolData, planData, contextData, traceData] = await Promise.all([
+      const [commandData, contractData, toolData, localAgentData, planData, contextData, traceData] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
         getArsenalTools({ probeVersions }),
+        getLocalAgents({ probeVersions }),
         getOperationPlans(5),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
@@ -264,6 +314,7 @@ export default function ArsenalSettingsPage() {
       setCommands(commandData)
       setContracts(contractData)
       setTools(toolData)
+      setLocalAgents(localAgentData)
       setRecentPlans(planData.operation_plans)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
@@ -293,6 +344,7 @@ export default function ArsenalSettingsPage() {
     [contracts]
   )
   const visibleTools = tools?.tools || []
+  const visibleLocalAgents = localAgents?.agents || []
   const selectedPlanCommand = useMemo(
     () => (commands?.commands || []).find((command) => command.name === planCommand),
     [commands, planCommand]
@@ -528,6 +580,45 @@ export default function ArsenalSettingsPage() {
           <div className="grid gap-3 xl:grid-cols-2">
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <TerminalSquare className="h-4 w-4 text-blue-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Local Agent Capabilities</h2>
+          </div>
+          {localAgents && (
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(localAgents.summary).map(([status, count]) => (
+                <Badge key={status} className={statusClass(status)}>{status}: {count}</Badge>
+              ))}
+            </div>
+          )}
+        </div>
+        {localAgents && (
+          <div className="mb-3 rounded-md border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+            Auth detection only: <span className="text-gray-300">{localAgents.auth_policy.detection_only ? 'yes' : 'no'}</span>
+            <span className="mx-2 text-gray-700">|</span>
+            auth contents read: <span className="text-gray-300">{localAgents.auth_policy.auth_artifact_contents_read ? 'yes' : 'no'}</span>
+            <span className="mx-2 text-gray-700">|</span>
+            planner execution: <span className="text-gray-300">{localAgents.planner_execution_enabled ? 'enabled' : 'disabled'}</span>
+          </div>
+        )}
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : visibleLocalAgents.length === 0 ? (
+          <EmptyState message="No local agents are registered." />
+        ) : (
+          <div className="grid gap-3 xl:grid-cols-2">
+            {visibleLocalAgents.map((agent) => (
+              <LocalAgentRow key={agent.agent} agent={agent} />
             ))}
           </div>
         )}

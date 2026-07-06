@@ -131,6 +131,7 @@ try:
     from action_scope import evaluate_scope, receipt_to_dict
     from command_arsenal import describe_contracts as describe_arsenal_contracts
     from command_arsenal import describe_commands as describe_arsenal_commands
+    from command_arsenal import describe_local_agents
     from command_arsenal import describe_tools as describe_arsenal_tools
 except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
@@ -138,6 +139,7 @@ except ModuleNotFoundError as exc:
     from api.action_scope import evaluate_scope, receipt_to_dict
     from api.command_arsenal import describe_contracts as describe_arsenal_contracts
     from api.command_arsenal import describe_commands as describe_arsenal_commands
+    from api.command_arsenal import describe_local_agents
     from api.command_arsenal import describe_tools as describe_arsenal_tools
 
 AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
@@ -12525,6 +12527,14 @@ async def arsenal_tools(
 ):
     """Read-only status catalog for already-integrated tool adapters."""
     return describe_arsenal_tools(probe_versions=bool(probe_versions))
+
+
+@app.get("/agents/local")
+async def local_agents(
+    probe_versions: bool = Query(False, description="Run short read-only version probes for detected local agent CLIs."),
+):
+    """Read-only local-agent capability matrix. Does not read auth artifacts or execute prompts."""
+    return describe_local_agents(probe_versions=bool(probe_versions))
 
 
 class AsmTestRequest(BaseModel):

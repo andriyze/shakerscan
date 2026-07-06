@@ -79,6 +79,24 @@ class ToolAdapterSpec:
     timeout_seconds: int = 5
 
 
+@dataclass(frozen=True)
+class LocalAgentSpec:
+    agent: str
+    display_name: str
+    binaries: tuple[str, ...]
+    version_args: tuple[str, ...]
+    auth_artifact_paths: tuple[str, ...]
+    supports_headless_prompt: bool
+    supports_read_only_mode: bool
+    supports_json_mode: bool
+    supports_timeout: bool
+    supports_workdir_isolation: bool
+    supports_network_disable: bool
+    max_prompt_bytes: int
+    max_output_bytes: int
+    risk_notes: tuple[str, ...]
+
+
 COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
         name="target.list",
@@ -340,6 +358,19 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="local_agent.list",
+        family="planner",
+        description="Read local planner capability records without reading auth artifacts or executing prompts.",
+        status="read_only",
+        risk_tier="read_only",
+        method="GET",
+        path="/agents/local",
+        parameters_schema={"probe_versions": {"type": "boolean"}},
+        evidence_contract=("local_agent_capability_rows",),
+        redaction_contract=("auth_artifact_contents", "environment_api_keys"),
+        timeout_seconds=15,
+    ),
+    ArsenalCommand(
         name="scope.preview",
         family="governance",
         description="Validate and persist a fail-closed scope receipt preview without executing work.",
@@ -489,6 +520,88 @@ TOOL_ADAPTERS: tuple[ToolAdapterSpec, ...] = (
     ToolAdapterSpec("playwright", "browser_proof", "Playwright browser proof execution.", "active", "wired", ("playwright",), ("--version",), (), "playwright-proof-v1", "browser-observation"),
     ToolAdapterSpec("ai_gate_probe_executor", "ai_red_team", "Internal AI Gate probe runner.", "active", "runnable", (), (), (), "ai-gate-transcript-v1", "deterministic-or-judge-evidence", "rerun-probe"),
     ToolAdapterSpec("model_intake_signature_verifier", "model_trust", "Internal cryptographic signature verifier.", "passive", "runnable", (), (), (), "model-intake-summary-v1", "cryptographic-signature-verification"),
+)
+
+
+LOCAL_AGENT_SPECS: tuple[LocalAgentSpec, ...] = (
+    LocalAgentSpec(
+        agent="codex",
+        display_name="Codex",
+        binaries=("codex",),
+        version_args=("--version",),
+        auth_artifact_paths=("~/.codex/auth.json", "~/.codex/config.toml"),
+        supports_headless_prompt=True,
+        supports_read_only_mode=False,
+        supports_json_mode=False,
+        supports_timeout=True,
+        supports_workdir_isolation=True,
+        supports_network_disable=False,
+        max_prompt_bytes=120_000,
+        max_output_bytes=32_000,
+        risk_notes=(
+            "capability detection only; planner execution is not enabled",
+            "auth artifacts are checked for existence only and never read",
+            "no API-key environment variables may be forwarded to future planner processes",
+        ),
+    ),
+    LocalAgentSpec(
+        agent="claude-code",
+        display_name="Claude Code",
+        binaries=("claude", "claude-code"),
+        version_args=("--version",),
+        auth_artifact_paths=("~/.claude.json", "~/.claude", "~/.config/claude"),
+        supports_headless_prompt=True,
+        supports_read_only_mode=False,
+        supports_json_mode=False,
+        supports_timeout=True,
+        supports_workdir_isolation=True,
+        supports_network_disable=False,
+        max_prompt_bytes=120_000,
+        max_output_bytes=32_000,
+        risk_notes=(
+            "capability detection only; planner execution is not enabled",
+            "auth artifacts are checked for existence only and never read",
+            "json output must be post-validated because native JSON mode is not assumed",
+        ),
+    ),
+    LocalAgentSpec(
+        agent="opencode",
+        display_name="OpenCode",
+        binaries=("opencode",),
+        version_args=("--version",),
+        auth_artifact_paths=("~/.config/opencode", "~/.opencode"),
+        supports_headless_prompt=True,
+        supports_read_only_mode=False,
+        supports_json_mode=False,
+        supports_timeout=True,
+        supports_workdir_isolation=True,
+        supports_network_disable=False,
+        max_prompt_bytes=120_000,
+        max_output_bytes=32_000,
+        risk_notes=(
+            "capability detection only; planner execution is not enabled",
+            "auth artifacts are checked for existence only and never read",
+        ),
+    ),
+    LocalAgentSpec(
+        agent="hermes",
+        display_name="Hermes",
+        binaries=("hermes",),
+        version_args=("--version",),
+        auth_artifact_paths=("~/.config/hermes", "~/.hermes"),
+        supports_headless_prompt=False,
+        supports_read_only_mode=False,
+        supports_json_mode=False,
+        supports_timeout=True,
+        supports_workdir_isolation=True,
+        supports_network_disable=False,
+        max_prompt_bytes=64_000,
+        max_output_bytes=16_000,
+        risk_notes=(
+            "catalog entry only unless a binary is present",
+            "planner execution is not enabled",
+        ),
+    ),
 )
 
 
@@ -794,6 +907,25 @@ def _resolve_binary(spec: ToolAdapterSpec) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _resolve_agent_binary(spec: LocalAgentSpec) -> tuple[str | None, str | None]:
+    for binary in spec.binaries:
+        resolved = shutil.which(binary)
+        if resolved:
+            return resolved, "path"
+    return None, None
+
+
+def _detect_auth_artifacts(spec: LocalAgentSpec) -> tuple[bool, str, list[str]]:
+    detected: list[str] = []
+    for raw_path in spec.auth_artifact_paths:
+        expanded = os.path.expanduser(raw_path)
+        if os.path.exists(expanded):
+            detected.append(raw_path)
+    if detected:
+        return True, "artifact-exists", detected
+    return False, "none", []
+
+
 def _probe_version(binary_path: str, args: tuple[str, ...], timeout_seconds: int) -> tuple[str | None, str | None]:
     if not args:
         return None, None
@@ -812,6 +944,39 @@ def _probe_version(binary_path: str, args: tuple[str, ...], timeout_seconds: int
     if proc.returncode != 0 and not first_line:
         return None, f"version command exited {proc.returncode}"
     return first_line[:200] if first_line else None, None
+
+
+def _local_agent_to_dict(spec: LocalAgentSpec, *, probe_versions: bool) -> dict[str, Any]:
+    binary_path, binary_detection = _resolve_agent_binary(spec)
+    auth_detected, auth_detection_method, auth_artifacts = _detect_auth_artifacts(spec)
+    version = None
+    version_probe_error = None
+    if binary_path and probe_versions:
+        version, version_probe_error = _probe_version(binary_path, spec.version_args, timeout_seconds=5)
+
+    return {
+        "agent": spec.agent,
+        "display_name": spec.display_name,
+        "binary_path": binary_path,
+        "binary_detection": binary_detection,
+        "version": version,
+        "version_probe_error": version_probe_error,
+        "auth_detected": auth_detected,
+        "auth_detection_method": auth_detection_method,
+        "auth_artifacts": auth_artifacts,
+        "auth_artifact_contents_read": False,
+        "supports_headless_prompt": spec.supports_headless_prompt,
+        "supports_read_only_mode": spec.supports_read_only_mode,
+        "supports_json_mode": spec.supports_json_mode,
+        "supports_timeout": spec.supports_timeout,
+        "supports_workdir_isolation": spec.supports_workdir_isolation,
+        "supports_network_disable": spec.supports_network_disable,
+        "max_prompt_bytes": spec.max_prompt_bytes,
+        "max_output_bytes": spec.max_output_bytes,
+        "risk_notes": list(spec.risk_notes),
+        "planner_execution_enabled": False,
+        "status": "available" if binary_path and auth_detected else ("installed" if binary_path else "missing"),
+    }
 
 
 def _tool_to_dict(spec: ToolAdapterSpec, *, probe_versions: bool) -> dict[str, Any]:
@@ -865,5 +1030,28 @@ def describe_tools(*, probe_versions: bool = False) -> dict[str, Any]:
         "probe_versions": bool(probe_versions),
         "status_labels": list(TOOL_STATUSES),
         "tools": tools,
+        "summary": counts,
+    }
+
+
+def describe_local_agents(*, probe_versions: bool = False) -> dict[str, Any]:
+    """Return read-only capability records for optional local planner agents."""
+    agents = [_local_agent_to_dict(spec, probe_versions=probe_versions) for spec in LOCAL_AGENT_SPECS]
+    counts: dict[str, int] = {}
+    for agent in agents:
+        counts[str(agent["status"])] = counts.get(str(agent["status"]), 0) + 1
+    return {
+        "schema_version": ARSENAL_SCHEMA_VERSION,
+        "maturity": "read_only",
+        "execution_enabled": False,
+        "planner_execution_enabled": False,
+        "probe_versions": bool(probe_versions),
+        "auth_policy": {
+            "detection_only": True,
+            "auth_artifact_contents_read": False,
+            "strip_provider_api_key_environment_on_future_spawn": True,
+            "sensitive_values_returned": False,
+        },
+        "agents": agents,
         "summary": counts,
     }

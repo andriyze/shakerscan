@@ -35,6 +35,7 @@ def test_command_catalog_contains_required_initial_commands():
         "operation_plan.list",
         "agent_context_pack.list",
         "agent_decision_trace.list",
+        "local_agent.list",
         "evidence.get",
         "deployment.decision",
         "tool.status",
@@ -197,3 +198,31 @@ def test_tool_status_can_probe_installed_version(monkeypatch):
     assert tools["nuclei"]["status"] == "runnable"
     assert tools["nuclei"]["binary_path"] == "/usr/bin/nuclei"
     assert tools["nuclei"]["version"] == "nuclei v3.0.0"
+
+
+def test_local_agent_catalog_is_read_only_and_does_not_read_auth(monkeypatch):
+    monkeypatch.setattr(arsenal.shutil, "which", lambda name: f"/usr/local/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(arsenal.os.path, "exists", lambda path: path.endswith("/.codex/auth.json"))
+
+    payload = arsenal.describe_local_agents()
+    agents = {item["agent"]: item for item in payload["agents"]}
+
+    assert payload["execution_enabled"] is False
+    assert payload["planner_execution_enabled"] is False
+    assert payload["auth_policy"]["auth_artifact_contents_read"] is False
+    assert agents["codex"]["status"] == "available"
+    assert agents["codex"]["auth_detected"] is True
+    assert agents["codex"]["auth_artifact_contents_read"] is False
+    assert agents["codex"]["planner_execution_enabled"] is False
+    assert agents["claude-code"]["status"] == "missing"
+
+
+def test_local_agent_list_command_is_read_only():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["local_agent.list"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/agents/local"
+    assert "local_agent_capability_rows" in cmd["evidence_contract"]

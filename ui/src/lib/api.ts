@@ -380,6 +380,46 @@ export interface ArsenalToolsResponse {
   summary: Record<string, number>
 }
 
+export interface LocalAgentCapability {
+  agent: string
+  display_name: string
+  binary_path?: string | null
+  binary_detection?: string | null
+  version?: string | null
+  version_probe_error?: string | null
+  auth_detected: boolean
+  auth_detection_method: string
+  auth_artifacts: string[]
+  auth_artifact_contents_read: boolean
+  supports_headless_prompt: boolean
+  supports_read_only_mode: boolean
+  supports_json_mode: boolean
+  supports_timeout: boolean
+  supports_workdir_isolation: boolean
+  supports_network_disable: boolean
+  max_prompt_bytes: number
+  max_output_bytes: number
+  risk_notes: string[]
+  planner_execution_enabled: boolean
+  status: string
+}
+
+export interface LocalAgentsResponse {
+  schema_version: string
+  maturity: string
+  execution_enabled: boolean
+  planner_execution_enabled: boolean
+  probe_versions: boolean
+  auth_policy: {
+    detection_only: boolean
+    auth_artifact_contents_read: boolean
+    strip_provider_api_key_environment_on_future_spawn: boolean
+    sensitive_values_returned: boolean
+  }
+  agents: LocalAgentCapability[]
+  summary: Record<string, number>
+}
+
 export interface Scan {
   id: string
   target_url: string
@@ -1524,6 +1564,15 @@ export async function getArsenalTools(params?: { probeVersions?: boolean }): Pro
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/arsenal/tools${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch tool status'))
+  return res.json()
+}
+
+export async function getLocalAgents(params?: { probeVersions?: boolean }): Promise<LocalAgentsResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.probeVersions) searchParams.set('probe_versions', 'true')
+  const query = searchParams.toString()
+  const res = await fetch(`${API_URL}/agents/local${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch local agents'))
   return res.json()
 }
 
