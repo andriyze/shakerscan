@@ -15626,6 +15626,78 @@ def _schedule_timeline_event(row: Any) -> dict[str, Any]:
     }
 
 
+def _evidence_instance_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    evidence_object_id = str(r["evidence_object_id"]) if r.get("evidence_object_id") else None
+    tool_receipt_id = str(r["tool_receipt_id"]) if r.get("tool_receipt_id") else None
+    finding_id = str(r["finding_id"]) if r.get("finding_id") else None
+    scan_id = str(r["scan_id"]) if r.get("scan_id") else None
+    target_id = r.get("target_id") or r.get("scan_target_id") or r.get("finding_target_id")
+    concrete_url = r.get("concrete_url") or r.get("scan_target_url")
+    proof_state = str(r.get("proof_state") or "unverified")
+    return {
+        "event_id": f"evidence_instance:{r.get('id')}",
+        "kind": "evidence_instance",
+        "command": "evidence.instance.record",
+        "action_name": "evidence_bound",
+        "status": "evidence_bound",
+        "risk_tier": "read_only",
+        "target_id": str(target_id) if target_id else None,
+        "target_url": concrete_url,
+        "scan_id": scan_id,
+        "campaign_id": str(r["campaign_id"]) if r.get("campaign_id") else None,
+        "campaign_action_id": str(r["campaign_action_id"]) if r.get("campaign_action_id") else None,
+        "finding_ids": [finding_id] if finding_id else [],
+        "evidence_object_ids": [evidence_object_id] if evidence_object_id else [],
+        "tool_receipt_ids": [tool_receipt_id] if tool_receipt_id else [],
+        "proof_state": proof_state,
+        "object_id": r.get("object_id"),
+        "retention_policy": r.get("retention_policy"),
+        "blocked_by": [],
+        "next_action": f"/evidence/{evidence_object_id}" if evidence_object_id else None,
+        "operator_message": f"Evidence instance recorded ({proof_state})",
+        "created_at": r.get("created_at"),
+    }
+
+
+def _refuter_review_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    evidence_ids = _decode_json_value(r.get("evidence_object_ids")) or []
+    tool_ids = _decode_json_value(r.get("tool_receipt_ids")) or []
+    finding_id = str(r["finding_id"]) if r.get("finding_id") else None
+    hypothesis_id = str(r["hypothesis_id"]) if r.get("hypothesis_id") else None
+    target_id = r.get("target_id") or r.get("finding_target_id") or r.get("hypothesis_target_id")
+    signal = str(r.get("refuter_signal") or "question")
+    verdict = r.get("refuter_verdict")
+    return {
+        "event_id": f"refuter_review:{r.get('id')}",
+        "kind": "refuter_review",
+        "command": "refuter_review.record",
+        "action_name": "refuter_review",
+        "status": "completed" if verdict else "refuter_requested",
+        "risk_tier": "read_only",
+        "target_id": str(target_id) if target_id else None,
+        "campaign_id": str(r["campaign_id"]) if r.get("campaign_id") else None,
+        "finding_ids": [finding_id] if finding_id else [],
+        "hypothesis_ids": [hypothesis_id] if hypothesis_id else [],
+        "evidence_object_ids": [str(item) for item in evidence_ids],
+        "tool_receipt_ids": [str(item) for item in tool_ids],
+        "refuter_signal": signal,
+        "refuter_verdict": verdict,
+        "verdict_basis": r.get("verdict_basis"),
+        "blocked_by": [],
+        "next_action": (
+            f"/findings/{finding_id}" if finding_id else
+            ("/settings/arsenal?tab=hypotheses" if hypothesis_id else "/settings/arsenal?tab=refuters")
+        ),
+        "operator_message": (
+            f"Refuter verdict recorded: {verdict}" if verdict else
+            f"Refuter signal recorded: {signal}"
+        ),
+        "created_at": r.get("created_at"),
+    }
+
+
 @app.get("/timeline")
 async def mission_timeline(
     limit: int = Query(50, ge=1, le=200),
@@ -15633,6 +15705,8 @@ async def mission_timeline(
     include_campaign_actions: bool = Query(True, description="Include campaign/action records not already represented by a command result."),
     include_scans: bool = Query(True, description="Include recent scans not tied to a command result."),
     include_schedules: bool = Query(True, description="Include upcoming recurring schedules."),
+    include_evidence: bool = Query(True, description="Include evidence-instance binding events."),
+    include_refuters: bool = Query(True, description="Include refuter review/signal events."),
 ):
     """Read-only cross-product mission timeline.
 
@@ -15703,6 +15777,45 @@ async def mission_timeline(
                 hidden_roles,
             )
             events.extend(_scan_timeline_event(row) for row in scan_rows)
+
+        if include_evidence:
+            evidence_rows = await conn.fetch(
+                """
+                SELECT ei.*,
+                       ca.campaign_id AS campaign_id,
+                       s.target_id AS scan_target_id,
+                       s.target_url AS scan_target_url,
+                       f.target_id AS finding_target_id
+                FROM evidence_instances ei
+                LEFT JOIN campaign_actions ca ON ei.campaign_action_id = ca.id
+                LEFT JOIN scans s ON ei.scan_id = s.id
+                LEFT JOIN findings f ON ei.finding_id = f.id
+                WHERE ($2::uuid IS NULL OR ei.target_id = $2 OR s.target_id = $2 OR f.target_id = $2)
+                ORDER BY ei.created_at DESC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+            )
+            events.extend(_evidence_instance_timeline_event(row) for row in evidence_rows)
+
+        if include_refuters:
+            refuter_rows = await conn.fetch(
+                """
+                SELECT rr.*,
+                       f.target_id AS finding_target_id,
+                       h.target_id AS hypothesis_target_id
+                FROM refuter_reviews rr
+                LEFT JOIN findings f ON rr.finding_id = f.id
+                LEFT JOIN hypotheses h ON rr.hypothesis_id = h.id
+                WHERE ($2::uuid IS NULL OR rr.target_id = $2 OR f.target_id = $2 OR h.target_id = $2)
+                ORDER BY rr.created_at DESC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+            )
+            events.extend(_refuter_review_timeline_event(row) for row in refuter_rows)
 
         upcoming: list[dict[str, Any]] = []
         if include_schedules:

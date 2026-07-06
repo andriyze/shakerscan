@@ -456,8 +456,9 @@ raw shell execution or LLM-produced verified findings.
 2. **Unified Action Center + mission timeline:** DONE phase 1 — `GET /timeline` merges command-result
    audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
    feed with explicit statuses. DONE phase 1 for campaign-action audit records mirrored from command
-   results plus read-only timeline support for standalone action rows. Remaining work is evidence
-   export/replay + refuter events on the same feed.
+   results plus read-only timeline support for standalone action rows. DONE phase 1 for durable
+   evidence-instance binding events and refuter review/signal events on the same feed. Remaining work
+   is packaged evidence export/replay events once richer export/replay bundles exist.
 3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
    Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
    registry, not the external tool registry, and not a shell runner. Every command result must carry
@@ -595,8 +596,9 @@ blocked, and provide safe remediation links without making users infer state fro
    the trust controls, and links exception hygiene.
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
    recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with
-   an optional `target_id` filter. Remaining sources to fold in are evidence export/replay events and
-   refuter requests, once those subsystems exist.
+   an optional `target_id` filter. DONE phase 1: the feed also includes standalone campaign actions,
+   durable evidence-instance binding events, and refuter review/signal events. Packaged evidence
+   export/replay events remain open until richer export/replay bundles exist.
 8. DONE phase 1: timeline statuses are explicit and API-backed: `planned`, `blocked`, `approval_required`,
    `approved`, `queued`, `running`, `completed`, `partial`, `degraded`, `failed`, `cancelled`,
    `evidence_bound`, `retest_scheduled`, and `refuter_requested`.
@@ -713,8 +715,10 @@ Command Arsenal boundaries:
     `campaign_actions` mirrors command-result audit rows into action-shaped records,
     `GET /arsenal/campaign-actions` exposes them read-only, `campaign_action.list` advertises the
     surface, `/settings/arsenal` renders the campaign action ledger, and the mission timeline can
-    include standalone action rows without duplicating mirrored command-result events. Remaining work
-    is richer execution-gateway action transitions and evidence/refuter events.
+    include standalone action rows without duplicating mirrored command-result events. DONE phase 1:
+    the timeline also includes evidence-instance binding events and refuter review/signal events.
+    Remaining work is richer execution-gateway action transitions and packaged evidence export/replay
+    events.
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.

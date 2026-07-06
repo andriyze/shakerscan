@@ -3023,9 +3023,75 @@ def test_campaign_action_event_uses_live_scan_status_and_refs():
     assert ev["target_id"] == "99999999-9999-4999-8999-999999999999"
 
 
+def test_evidence_instance_timeline_event_is_evidence_bound():
+    row = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "evidence_object_id": "33333333-3333-4333-8333-333333333333",
+        "scan_id": "44444444-4444-4444-8444-444444444444",
+        "target_id": None,
+        "scan_target_id": None,
+        "finding_target_id": "99999999-9999-4999-8999-999999999999",
+        "scan_target_url": "https://app.example.com",
+        "campaign_id": "77777777-7777-4777-8777-777777777777",
+        "campaign_action_id": "88888888-8888-4888-8888-888888888888",
+        "tool_receipt_id": "55555555-5555-4555-8555-555555555555",
+        "concrete_url": "https://app.example.com/api/orders/1",
+        "object_id": "order:1",
+        "retention_policy": "standard",
+        "proof_state": "exploited",
+        "created_at": datetime(2026, 7, 6, 13, tzinfo=timezone.utc),
+    }
+
+    ev = api_module._evidence_instance_timeline_event(row)
+
+    assert ev["kind"] == "evidence_instance"
+    assert ev["status"] == "evidence_bound"
+    assert ev["target_id"] == "99999999-9999-4999-8999-999999999999"
+    assert ev["finding_ids"] == ["22222222-2222-4222-8222-222222222222"]
+    assert ev["evidence_object_ids"] == ["33333333-3333-4333-8333-333333333333"]
+    assert ev["tool_receipt_ids"] == ["55555555-5555-4555-8555-555555555555"]
+    assert ev["campaign_id"] == "77777777-7777-4777-8777-777777777777"
+    assert ev["next_action"] == "/evidence/33333333-3333-4333-8333-333333333333"
+
+
+def test_refuter_review_timeline_event_is_refuter_requested_without_mutation():
+    row = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "target_id": None,
+        "finding_target_id": "99999999-9999-4999-8999-999999999999",
+        "hypothesis_target_id": None,
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "hypothesis_id": None,
+        "campaign_id": "77777777-7777-4777-8777-777777777777",
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "evidence_object_ids": json.dumps(["33333333-3333-4333-8333-333333333333"]),
+        "tool_receipt_ids": json.dumps(["55555555-5555-4555-8555-555555555555"]),
+        "created_at": datetime(2026, 7, 6, 13, tzinfo=timezone.utc),
+    }
+
+    ev = api_module._refuter_review_timeline_event(row)
+
+    assert ev["kind"] == "refuter_review"
+    assert ev["status"] == "refuter_requested"
+    assert ev["risk_tier"] == "read_only"
+    assert ev["target_id"] == "99999999-9999-4999-8999-999999999999"
+    assert ev["finding_ids"] == ["22222222-2222-4222-8222-222222222222"]
+    assert ev["evidence_object_ids"] == ["33333333-3333-4333-8333-333333333333"]
+    assert ev["tool_receipt_ids"] == ["55555555-5555-4555-8555-555555555555"]
+    assert ev["next_action"] == "/findings/22222222-2222-4222-8222-222222222222"
+
+
 class _TimelinePool:
-    def __init__(self, cr_rows, scan_rows, schedule_rows):
-        self._cr, self._scans, self._schedules = cr_rows, scan_rows, schedule_rows
+    def __init__(self, cr_rows, scan_rows, schedule_rows, action_rows=None, evidence_rows=None, refuter_rows=None):
+        self._cr = cr_rows
+        self._scans = scan_rows
+        self._schedules = schedule_rows
+        self._actions = action_rows or []
+        self._evidence = evidence_rows or []
+        self._refuters = refuter_rows or []
 
     def acquire(self):
         pool = self
@@ -3039,6 +3105,12 @@ class _TimelinePool:
                         # table roots first.
                         if "FROM schedules sc" in query:
                             return pool._schedules
+                        if "FROM evidence_instances ei" in query:
+                            return pool._evidence
+                        if "FROM refuter_reviews rr" in query:
+                            return pool._refuters
+                        if "FROM campaign_actions ca" in query:
+                            return pool._actions
                         if "FROM scans s" in query:
                             return pool._scans
                         if "FROM command_results cr" in query:
@@ -3075,16 +3147,61 @@ def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
         "next_run_at": datetime(2026, 7, 7, 2, tzinfo=timezone.utc),
         "last_run_at": datetime(2026, 7, 6, 2, tzinfo=timezone.utc),
     }
-    monkeypatch.setattr(api_module, "db_pool", _TimelinePool([cr_row], [scan_row], [schedule_row]))
+    evidence_row = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "evidence_object_id": "33333333-3333-4333-8333-333333333333",
+        "scan_id": "44444444-4444-4444-8444-444444444444",
+        "target_id": None,
+        "scan_target_id": "99999999-9999-4999-8999-999999999999",
+        "scan_target_url": "https://app.example.com",
+        "campaign_id": None,
+        "campaign_action_id": None,
+        "tool_receipt_id": None,
+        "concrete_url": "https://app.example.com/api/orders/1",
+        "object_id": "order:1",
+        "retention_policy": "standard",
+        "proof_state": "exploited",
+        "created_at": datetime(2026, 7, 6, 11, tzinfo=timezone.utc),
+    }
+    refuter_row = {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "target_id": None,
+        "finding_target_id": "99999999-9999-4999-8999-999999999999",
+        "hypothesis_target_id": None,
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+        "hypothesis_id": None,
+        "campaign_id": None,
+        "refuter_signal": "question",
+        "refuter_verdict": None,
+        "verdict_basis": "signal_only",
+        "evidence_object_ids": json.dumps(["33333333-3333-4333-8333-333333333333"]),
+        "tool_receipt_ids": json.dumps([]),
+        "created_at": datetime(2026, 7, 6, 10, tzinfo=timezone.utc),
+    }
+    monkeypatch.setattr(
+        api_module,
+        "db_pool",
+        _TimelinePool([cr_row], [scan_row], [schedule_row], evidence_rows=[evidence_row], refuter_rows=[refuter_row]),
+    )
 
     result = asyncio.run(api_module.mission_timeline(limit=50))
 
     assert result["execution_enabled"] is False
     assert result["statuses"][0] == "planned"
-    # Two past events, newest first (command result @12:00 before scan @prev day).
-    assert [e["event_id"] for e in result["events"]] == ["cmd-1", "55555555-5555-4555-8555-555555555555"]
+    # Past events are merged and sorted newest first.
+    assert [e["event_id"] for e in result["events"]] == [
+        "cmd-1",
+        "evidence_instance:11111111-1111-4111-8111-111111111111",
+        "refuter_review:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "55555555-5555-4555-8555-555555555555",
+    ]
     assert result["events"][0]["status"] == "running"       # live scan status
-    assert result["events"][1]["kind"] == "scan"
+    assert result["events"][1]["kind"] == "evidence_instance"
+    assert result["events"][1]["status"] == "evidence_bound"
+    assert result["events"][2]["kind"] == "refuter_review"
+    assert result["events"][2]["status"] == "refuter_requested"
+    assert result["events"][3]["kind"] == "scan"
     # Schedules are upcoming, not past events.
     assert len(result["upcoming"]) == 1
     up = result["upcoming"][0]
