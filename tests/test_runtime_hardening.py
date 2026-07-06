@@ -98,3 +98,14 @@ def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     assert '[ "$RUNTIME_MODE_EXPLICIT" -eq 0 ] && [ -f "$LOCAL_BUILD_MARKER" ]' in script
     assert 'USE_PREBUILT=0' in script
     assert 'rm -f "$LOCAL_BUILD_MARKER"' in script
+
+
+def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
+    script = (ROOT / "scanner.sh").read_text()
+
+    assert "show_worker_logs" in script
+    assert "worker_log_containers" in script
+    assert "docker ps -a --filter name=shakerscan-worker" in script
+    assert 'if [ "$SERVICE" = "worker" ] || [ "$SERVICE" = "workers" ]; then' in script
+    assert 'awk -v name="$container"' in script
+    assert "compose logs -f worker" in script

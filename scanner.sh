@@ -1302,6 +1302,7 @@ print_help() {
     echo "  status             Show service status"
     echo "  scale <N>          Scale to N workers (1-20)"
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
+    echo "                       worker aggregates all shakerscan-worker* containers"
     echo "  scan <target>      Quick scan a target"
     echo "  scan-full <target> Full assessment scan"
     echo "  scan-smart <target> Smart adaptive scan"
@@ -1503,12 +1504,58 @@ show_logs() {
             compose logs --tail=100
         fi
     else
+        if [ "$SERVICE" = "worker" ] || [ "$SERVICE" = "workers" ]; then
+            show_worker_logs "$FOLLOW"
+            return $?
+        fi
         if [ "$FOLLOW" = "-f" ]; then
             compose logs -f $SERVICE
         else
             compose logs --tail=100 $SERVICE
         fi
     fi
+}
+
+worker_log_containers() {
+    docker ps -a --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null | sort
+}
+
+show_worker_logs() {
+    local follow_arg="${1:-}"
+    local containers
+    local container
+    local pids=""
+    local status=0
+
+    containers="$(worker_log_containers)"
+    if [ -z "$containers" ]; then
+        echo -e "${YELLOW}No shakerscan-worker containers found; falling back to Compose worker logs.${NC}"
+        if [ "$follow_arg" = "-f" ]; then
+            compose logs -f worker
+        else
+            compose logs --tail=100 worker
+        fi
+        return $?
+    fi
+
+    if [ "$follow_arg" = "-f" ]; then
+        for container in $containers; do
+            (
+                docker logs --tail=100 -f "$container" 2>&1 |
+                    awk -v name="$container" '{ print "[" name "] " $0; fflush(); }'
+            ) &
+            pids="$pids $!"
+        done
+        for pid in $pids; do
+            wait "$pid" || status=1
+        done
+        return "$status"
+    fi
+
+    for container in $containers; do
+        docker logs --tail=100 "$container" 2>&1 |
+            awk -v name="$container" '{ print "[" name "] " $0; fflush(); }'
+    done
 }
 
 quick_scan() {
