@@ -707,6 +707,7 @@ def _due_schedule():
 def test_schedule_kind_normalizer_supports_typed_and_legacy_contracts():
     assert api_module._normalize_schedule_kind("normal_scan", {}) == "normal_scan"
     assert api_module._normalize_schedule_kind("asm_improve", {}) == "asm_improve"
+    assert api_module._normalize_schedule_kind("evidence_retention_sweep", {}) == "evidence_retention_sweep"
     assert api_module._normalize_schedule_kind(None, {"kind": "asm_improve"}) == "asm_improve"
 
     with pytest.raises(ValueError):
@@ -714,6 +715,21 @@ def test_schedule_kind_normalizer_supports_typed_and_legacy_contracts():
 
     with pytest.raises(ValueError):
         api_module._normalize_schedule_kind("bad_kind", {})
+
+
+def test_scheduled_retention_sweep_request_defaults_to_dry_run_and_requires_approval_for_execute():
+    req = api_module._scheduled_retention_sweep_request({
+        "retention_class": "short",
+        "older_than_days": 90,
+        "limit": 10,
+    })
+    assert req.dry_run is True
+    assert req.retention_class == "short"
+    assert req.older_than_days == 90
+    assert req.limit == 10
+
+    with pytest.raises(ValueError):
+        api_module._scheduled_retention_sweep_request({"dry_run": False})
 
 
 def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatch):
@@ -744,6 +760,43 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
+
+
+def test_run_due_schedules_runs_retention_sweep_schedule(monkeypatch):
+    schedule = _due_schedule()
+    schedule["schedule_kind"] = "evidence_retention_sweep"
+    schedule["scan_options"] = {
+        "retention_class": "short",
+        "older_than_days": 90,
+        "limit": 10,
+    }
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    executed_sql = "\n".join(query for query, _args in conn.executes)
+    assert "INSERT INTO scans" not in executed_sql
+    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert redis_client.rpush_calls == []
+    assert redis_client.hset_calls == []
+
+
+def test_run_due_schedules_retries_invalid_retention_sweep_schedule(monkeypatch):
+    schedule = _due_schedule()
+    schedule["schedule_kind"] = "evidence_retention_sweep"
+    schedule["scan_options"] = {"dry_run": False}
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    executed_sql = "\n".join(query for query, _args in conn.executes)
+    assert "INSERT INTO scans" not in executed_sql
+    assert "UPDATE schedules SET next_run_at" in executed_sql
+    assert "UPDATE schedules SET last_run_at" not in executed_sql
 
 
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):

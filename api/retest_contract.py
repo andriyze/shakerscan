@@ -809,7 +809,7 @@ async def run_schema_migrations(pool) -> None:
                 UPDATE schedules
                 SET schedule_kind = 'normal_scan'
                 WHERE schedule_kind IS NULL
-                   OR schedule_kind NOT IN ('normal_scan', 'asm_improve')
+                   OR schedule_kind NOT IN ('normal_scan', 'asm_improve', 'evidence_retention_sweep')
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_schedules_kind_next_run

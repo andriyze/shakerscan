@@ -74,7 +74,7 @@ except ModuleNotFoundError:
 
 VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
-VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve"}
+VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve", "evidence_retention_sweep"}
 
 
 def utc_now() -> datetime:
@@ -2263,6 +2263,68 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
     return candidate.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
 
 
+def _scheduled_retention_sweep_request(scan_options: dict[str, Any]):
+    allowed = {
+        "dry_run",
+        "older_than_days",
+        "retention_class",
+        "limit",
+        "delete_local_files",
+        "approval_receipt_id",
+    }
+    fields = {key: scan_options[key] for key in allowed if key in scan_options}
+    fields.setdefault("dry_run", True)
+    if fields.get("dry_run") is False and not fields.get("approval_receipt_id"):
+        raise ValueError("Scheduled evidence retention execution requires approval_receipt_id")
+    return EvidenceRetentionSweepRequest(**fields)
+
+
+async def _run_scheduled_retention_sweep(
+    pool: asyncpg.Pool,
+    schedule: Any,
+    scan_options: dict[str, Any],
+    now: datetime,
+) -> bool:
+    schedule_id = schedule["id"]
+    original_pool = db_pool
+    try:
+        req = _scheduled_retention_sweep_request(scan_options)
+        globals()["db_pool"] = pool
+        result = await evidence_retention_sweep(req)
+        next_run = calculate_next_run(
+            schedule["frequency"],
+            schedule["day_of_week"],
+            schedule["time_of_day"] or "02:00",
+            schedule["timezone"] or "UTC",
+            schedule["jitter_minutes"] or 0,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW() WHERE id = $3",
+                now,
+                next_run,
+                schedule_id,
+            )
+        print(
+            f"[scheduler] Evidence retention sweep schedule {str(schedule_id)[:8]} "
+            f"completed dry_run={req.dry_run} candidates={result.get('candidate_count', 0)}",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        retry_at = now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
+                retry_at,
+                schedule_id,
+            )
+        print(f"[scheduler] Evidence retention sweep failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+        return False
+    finally:
+        globals()["db_pool"] = original_pool
+
+
 async def run_due_schedules(pool: asyncpg.Pool):
     """Check for and execute due scheduled scans.
 
@@ -2292,6 +2354,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
             schedule_kind = _schedule_kind_from_row(schedule)
         except ValueError as exc:
             print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+            continue
+        scan_options = dict(_schedule_options_dict(schedule['scan_options']))
+
+        if schedule_kind == "evidence_retention_sweep":
+            await _run_scheduled_retention_sweep(pool, schedule, scan_options, now)
             continue
 
         async with pool.acquire() as conn:
@@ -2339,8 +2406,6 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # Use the shared helper so JSONB shapes (raw string vs decoded
             # dict, depending on asyncpg version / column type) are handled
             # consistently with the rest of the codebase.
-            scan_options = dict(_schedule_options_dict(schedule['scan_options']))
-
             # §9: ASM-aware schedule. schedule_kind='asm_improve' queues a bounded coverage
             # wave (test if claimable, else recon) instead of a full scan — the
             # "keep this target covered" cadence, spread across the schedule. Legacy

@@ -798,17 +798,20 @@ the next safe action" from stored command/campaign records.
 **Status: PARTIAL.** The backend can run scheduled ASM waves (`api.run_due_schedules`) and a
 background dispatcher (`api.run_asm_dispatch`), while `/asm` exposes per-target policy and now shows
 live/persisted scheduler decisions. `/schedules` has a visible ASM coverage-wave option and the
-API/DB now expose first-class schedule kinds (`normal_scan`, `asm_improve`) with legacy
-`scan_options.kind` compatibility. `/schedules` can now create and edit ASM waves with batch size,
-stale-days, endpoint filter, focused family, and Lab/deep gating; due-run execution honors those
-per-schedule settings when counting claimable work and enqueueing batches. `/targets/{id}/asm/activity`
+API/DB now expose first-class schedule kinds (`normal_scan`, `asm_improve`,
+`evidence_retention_sweep`) with legacy `scan_options.kind` compatibility. `/schedules` can now
+create and edit ASM waves with batch size, stale-days, endpoint filter, focused family, and Lab/deep
+gating; due-run execution honors those per-schedule settings when counting claimable work and
+enqueueing batches. Retention schedules run bounded evidence sweeps from `scan_options`, default to
+dry-run, and require an approval receipt before scheduled execution can delete evidence. `/targets/{id}/asm/activity`
 now exposes and the ASM UI renders a derived campaign timeline that combines scheduler decisions,
 next eligible time, next recurring ASM wave, active scans, last scheduler decision, and recent
 activity. Remaining work is remediation actions from the timeline, not schedule payload depth.
 
 **Implement:**
-1. DONE: introduce a typed schedule kind (`normal_scan`, `asm_improve`) in API/DB/UI with
-   migration/backfill and legacy `scan_options.kind` decode.
+1. DONE: introduce typed schedule kinds (`normal_scan`, `asm_improve`,
+   `evidence_retention_sweep`) in API/DB with migration/backfill and legacy `scan_options.kind`
+   decode. UI coverage for evidence-retention schedules remains a workflow-depth follow-up.
 2. DONE: show one unified target timeline: background dispatcher decision, recurring schedule next run,
    current active scan/ASM batch, last activity, and last skip reason.
 3. DONE: `/schedules` creates/edits ASM waves without pretending they have a DAST `scan_type`; it
@@ -1007,8 +1010,8 @@ claims installed/runnable status without a resolved binary or internal implement
 runnable adapter lacks parser/proof metadata. Worker finalization now emits record-only `ToolReceipt`
 rows for the internal AI Gate probe executor and Model Intake signature verifier on success/failure,
 stamping returned receipt ids into scan results without changing findings or proof state. External
-DAST/ASM tools are not yet wired to emit receipts automatically, remote S3/MinIO-style object storage
-is still open, and scheduled retention automation is still open.
+DAST/ASM tools are not yet wired to emit receipts automatically, and remote S3/MinIO-style object
+storage is still open.
 
 **Implement:**
 1. DONE phase 1: externalize `storage_uri` from `inline:` to local object storage for large objects.
@@ -1026,8 +1029,10 @@ is still open, and scheduled retention automation is still open.
    DONE phase 1: deliberate bundle export requests with `record_event=true` write durable
    `export_events` rows, and `GET /timeline` exposes those events without evidence content. DONE
    phase 1: `GET /evidence/export-bundle?format=zip` returns a content-free metadata archive with
-   manifest, bundle descriptor, replay plan, archive hash, filename, and download headers. Background
-   scheduling remains open.
+   manifest, bundle descriptor, replay plan, archive hash, filename, and download headers. DONE phase
+   1: `schedule_kind=evidence_retention_sweep` runs bounded retention sweeps from schedule
+   `scan_options`, defaults to `dry_run=true`, advances only after success, and requires
+   `approval_receipt_id` before any scheduled `dry_run=false` execution.
 3. DONE phase 1: split canonical `Finding` from `EvidenceInstance {concrete_url, object_id, payload_variant,
    request_response_refs, principal_pair, proof_observation, campaign_action_id, tool_receipt_id,
    redaction_profile, hash, retention_policy}` as durable record-only rows. Finding promotion still
