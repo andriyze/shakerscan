@@ -2384,7 +2384,11 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
     assert result["action_state"]["command_result_id"] == result["command_result"]["id"]
 
 
-def test_arsenal_execute_unwired_read_only_command_is_adapter_pending_not_approval_required():
+def test_arsenal_execute_dispatches_scan_result(monkeypatch):
+    async def fake_scan_result(scan_id):
+        return {"scan_id": scan_id, "result": {"score": 100}}
+
+    monkeypatch.setattr(api_module, "get_scan_result", fake_scan_result)
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn,
@@ -2394,15 +2398,25 @@ def test_arsenal_execute_unwired_read_only_command_is_adapter_pending_not_approv
         ),
     ))
 
-    assert result["dispatched"] is False
-    assert result["dry_run"] is True
-    assert result["execution_blocked_reason"] == "dispatch_adapter_pending"
-    assert conn.recorded and conn.recorded[0]["status"] == "blocked"
+    assert result["dispatched"] is True
+    assert result["dry_run"] is False
+    assert result["result"]["scan_id"] == "11111111-1111-4111-8111-111111111111"
+    assert conn.recorded and conn.recorded[0]["status"] == "completed"
     assert conn.recorded[0]["command"] == "scan.result"
-    assert result["action_state"]["phase"] == "blocked"
-    assert result["action_state"]["adapter_status"] == "pending"
-    assert result["action_state"]["blocked_reason"] == "dispatch_adapter_pending"
-    assert result["action_state"]["gate"]["missing_confirmations"] == []
+    assert result["command_result"]["command"] == "scan.result"
+    assert result["action_state"]["phase"] == "completed"
+    assert result["action_state"]["adapter_status"] == "dispatched"
+
+
+def test_arsenal_read_only_and_dry_run_catalog_commands_have_gateway_adapters():
+    commands = api_module._operation_plan_allowed_commands()
+    missing = sorted(
+        name
+        for name, spec in commands.items()
+        if spec.get("status") in {"read_only", "dry_run"}
+        and name not in api_module._arsenal_readonly_adapters()
+    )
+    assert missing == []
 
 
 def test_arsenal_execute_gated_dry_runs_without_execute():

@@ -15748,6 +15748,22 @@ async def _arsenal_dispatch_target_principal_matrix(p: dict[str, Any]) -> dict[s
     return await list_target_principal_matrix(target_id, limit=_int_or_none(p.get("limit")) or 200)
 
 
+async def _arsenal_dispatch_target_principal_matrix_record(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="target.principal_matrix.record requires a target_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(TargetEndpointExpectationRequest) and v is not None}
+    return await upsert_target_principal_matrix(target_id, TargetEndpointExpectationRequest(**fields))
+
+
+async def _arsenal_dispatch_exposure_graph_get(p: dict[str, Any]) -> dict[str, Any]:
+    return await exposure_graph(
+        focus=p.get("focus"),
+        include_resolved=bool(p.get("include_resolved")),
+        limit=_int_or_none(p.get("limit")) or 500,
+    )
+
+
 async def _arsenal_dispatch_asm_gaps(p: dict[str, Any]) -> dict[str, Any]:
     target_id = str(p.get("target_id") or "").strip()
     if not target_id:
@@ -15755,16 +15771,128 @@ async def _arsenal_dispatch_asm_gaps(p: dict[str, Any]) -> dict[str, Any]:
     return await asm_gaps(target_id)
 
 
+async def _arsenal_dispatch_asm_activity(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="asm.activity requires a target_id parameter")
+    return await asm_activity(target_id, limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_scan_result(p: dict[str, Any]) -> dict[str, Any]:
+    scan_id = str(p.get("scan_id") or "").strip()
+    if not scan_id:
+        raise HTTPException(status_code=400, detail="scan.result requires a scan_id parameter")
+    return await get_scan_result(scan_id)
+
+
+class _ArsenalQueryRequest:
+    def __init__(self, query_params: dict[str, Any]):
+        self.query_params = query_params
+
+
+async def _arsenal_dispatch_finding_list(p: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "severity", "status", "source_type", "target_id", "ai_target_id",
+        "scan_id", "root_domain", "verification_verdict", "verification_mode",
+        "verified_only", "search", "seen_within_days", "first_seen_within_days",
+        "resolved_within_days", "sort_by", "sort_order", "limit", "offset",
+    }
+    query = {k: v for k, v in p.items() if k in allowed and v is not None}
+    return await list_findings(
+        _ArsenalQueryRequest(query),
+        severity=p.get("severity"),
+        status=p.get("status"),
+        source_type=p.get("source_type"),
+        target_id=p.get("target_id"),
+        ai_target_id=p.get("ai_target_id"),
+        scan_id=p.get("scan_id"),
+        root_domain=p.get("root_domain"),
+        verification_verdict=p.get("verification_verdict"),
+        verification_mode=p.get("verification_mode"),
+        verified_only=bool(p.get("verified_only")),
+        search=p.get("search"),
+        seen_within_days=_int_or_none(p.get("seen_within_days")),
+        first_seen_within_days=_int_or_none(p.get("first_seen_within_days")),
+        resolved_within_days=_int_or_none(p.get("resolved_within_days")),
+        sort_by=p.get("sort_by"),
+        sort_order=p.get("sort_order") or "desc",
+        limit=_int_or_none(p.get("limit")) or 100,
+        offset=_int_or_none(p.get("offset")) or 0,
+    )
+
+
+async def _arsenal_dispatch_finding_get(p: dict[str, Any]) -> dict[str, Any]:
+    finding_id = str(p.get("finding_id") or "").strip()
+    if not finding_id:
+        raise HTTPException(status_code=400, detail="finding.get requires a finding_id parameter")
+    return await get_finding(finding_id)
+
+
 async def _arsenal_dispatch_operation_plan_list(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_operation_plans(limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_operation_plan_preview(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_create_operation_plan(OperationPlanRequest(**p))
 
 
 async def _arsenal_dispatch_agent_context_pack_list(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_agent_context_packs(limit=_int_or_none(p.get("limit")) or 20)
 
 
+async def _arsenal_dispatch_agent_context_pack_record(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_create_agent_context_pack(AgentContextPackRequest(**p))
+
+
+async def _arsenal_dispatch_agent_context_pack_generate_from_target(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_create_agent_context_pack_from_target(AgentContextPackFromTargetRequest(**p))
+
+
+async def _arsenal_dispatch_agent_decision_trace_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_agent_decision_traces(limit=_int_or_none(p.get("limit")) or 20)
+
+
+async def _arsenal_dispatch_agent_decision_trace_record(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_create_agent_decision_trace(AgentDecisionTraceRequest(**p))
+
+
 async def _arsenal_dispatch_hypothesis_list(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_hypotheses(limit=_int_or_none(p.get("limit")) or 20, target_id=p.get("target_id"), status=p.get("status"))
+
+
+async def _arsenal_dispatch_hypothesis_situation_report(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_hypothesis_situation_report(
+        limit=_int_or_none(p.get("limit")) or 5,
+        target_id=p.get("target_id"),
+        requester=p.get("requester"),
+    )
+
+
+async def _arsenal_dispatch_hypothesis_record(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_record_hypothesis(HypothesisRequest(**p))
+
+
+async def _arsenal_dispatch_hypothesis_claim(p: dict[str, Any]) -> dict[str, Any]:
+    hypothesis_id = str(p.get("hypothesis_id") or "").strip()
+    if not hypothesis_id:
+        raise HTTPException(status_code=400, detail="hypothesis.claim requires a hypothesis_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(HypothesisClaimRequest) and v is not None}
+    return await arsenal_claim_hypothesis(hypothesis_id, HypothesisClaimRequest(**fields))
+
+
+async def _arsenal_dispatch_hypothesis_signal(p: dict[str, Any]) -> dict[str, Any]:
+    hypothesis_id = str(p.get("hypothesis_id") or "").strip()
+    if not hypothesis_id:
+        raise HTTPException(status_code=400, detail="hypothesis.signal requires a hypothesis_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(HypothesisSignalRequest) and v is not None}
+    return await arsenal_append_hypothesis_signal(hypothesis_id, HypothesisSignalRequest(**fields))
+
+
+async def _arsenal_dispatch_hypothesis_generate_from_graph(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="hypothesis.generate_from_graph requires a target_id parameter")
+    return await generate_application_graph_hypotheses(target_id, created_by=p.get("created_by") or "arsenal.execute")
 
 
 async def _arsenal_dispatch_campaign_get(p: dict[str, Any]) -> dict[str, Any]:
@@ -15774,6 +15902,22 @@ async def _arsenal_dispatch_campaign_get(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_campaign_detail(campaign_id, action_limit=_int_or_none(p.get("action_limit")) or 50)
 
 
+async def _arsenal_dispatch_campaign_action_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_campaign_actions(limit=_int_or_none(p.get("limit")) or 20, target_id=p.get("target_id"))
+
+
+async def _arsenal_dispatch_campaign_create(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_create_campaign(CampaignRequest(**p))
+
+
+async def _arsenal_dispatch_campaign_link_action(p: dict[str, Any]) -> dict[str, Any]:
+    campaign_id = str(p.get("campaign_id") or "").strip()
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="campaign.link_action requires a campaign_id parameter")
+    fields = {k: v for k, v in p.items() if k in _arsenal_model_fields(CampaignActionLinkRequest) and v is not None}
+    return await arsenal_link_campaign_action(campaign_id, CampaignActionLinkRequest(**fields))
+
+
 async def _arsenal_dispatch_ai_target_list(p: dict[str, Any]) -> dict[str, Any]:
     return await list_ai_targets(
         include_inactive=bool(p.get("include_inactive")),
@@ -15781,6 +15925,35 @@ async def _arsenal_dispatch_ai_target_list(p: dict[str, Any]) -> dict[str, Any]:
         limit=_int_or_none(p.get("limit")) or 100,
         offset=_int_or_none(p.get("offset")) or 0,
     )
+
+
+async def _arsenal_dispatch_ai_gate_target_history_export(p: dict[str, Any]) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="ai_gate.target_history_export requires a target_id parameter")
+    return await get_ai_target_campaign_history_export(target_id, limit=_int_or_none(p.get("limit")) or 12)
+
+
+async def _arsenal_dispatch_model_intake_trust_preview(p: dict[str, Any]) -> dict[str, Any]:
+    profile = str(p.get("policy_profile") or "production").strip() or "production"
+    trust_mode = str(p.get("trust_mode") or "saved_anchor").strip() or "saved_anchor"
+    return {
+        "trust_preview": {
+            "policy_profile": profile,
+            "trust_mode": trust_mode,
+            "ui_path": f"/settings/model-intake?remediate=trust&policy_profile={urllib.parse.quote(profile)}&trust_mode={urllib.parse.quote(trust_mode)}",
+        },
+        "execution_enabled": False,
+    }
+
+
+async def _arsenal_dispatch_evidence_get(p: dict[str, Any]) -> dict[str, Any]:
+    if p.get("evidence_id"):
+        return await get_evidence_object(str(p.get("evidence_id")))
+    finding_id = str(p.get("finding_id") or "").strip()
+    if not finding_id:
+        raise HTTPException(status_code=400, detail="evidence.get requires finding_id or evidence_id")
+    return await list_finding_evidence(finding_id)
 
 
 async def _arsenal_dispatch_evidence_export_manifest(p: dict[str, Any]) -> dict[str, Any]:
@@ -15810,12 +15983,64 @@ async def _arsenal_dispatch_evidence_instance_list(p: dict[str, Any]) -> dict[st
     )
 
 
+async def _arsenal_dispatch_evidence_instance_record(p: dict[str, Any]) -> dict[str, Any]:
+    allowed = _arsenal_model_fields(EvidenceInstanceRequest)
+    return await record_evidence_instance(EvidenceInstanceRequest(**{k: v for k, v in p.items() if k in allowed and v is not None}))
+
+
 async def _arsenal_dispatch_tool_receipt_list(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_tool_receipts(
         limit=_int_or_none(p.get("limit")) or 20,
         tool_name=p.get("tool_name"),
         status=p.get("status"),
     )
+
+
+async def _arsenal_dispatch_tool_receipt_record(p: dict[str, Any]) -> dict[str, Any]:
+    allowed = _arsenal_model_fields(ToolReceiptRequest)
+    return await arsenal_record_tool_receipt(ToolReceiptRequest(**{k: v for k, v in p.items() if k in allowed and v is not None}))
+
+
+async def _arsenal_dispatch_deployment_decision(p: dict[str, Any]) -> dict[str, Any]:
+    scan_id = str(p.get("scan_id") or "").strip()
+    if not scan_id:
+        raise HTTPException(status_code=400, detail="deployment.decision requires a scan_id parameter")
+    return await get_scan_deployment_decision(scan_id)
+
+
+async def _arsenal_dispatch_local_agent_plan_dry_run(p: dict[str, Any]) -> dict[str, Any]:
+    return await local_agent_dry_run_plan(LocalAgentPlanRequest(**p))
+
+
+async def _arsenal_dispatch_local_agent_parse_plan(p: dict[str, Any]) -> dict[str, Any]:
+    return await local_agent_parse_candidate_plan(LocalAgentPlanParseRequest(**p))
+
+
+async def _arsenal_dispatch_local_agent_test(p: dict[str, Any]) -> dict[str, Any]:
+    return await local_agent_test(LocalAgentTestRequest(**p))
+
+
+async def _arsenal_dispatch_scope_preview(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_scope_preview(ScopePreviewRequest(**p))
+
+
+async def _arsenal_dispatch_refuter_review_list(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_refuter_reviews(
+        limit=_int_or_none(p.get("limit")) or 20,
+        subject_type=p.get("subject_type"),
+        subject_id=p.get("subject_id"),
+    )
+
+
+async def _arsenal_dispatch_refuter_review_summary(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_refuter_review_summary(
+        limit=_int_or_none(p.get("limit")) or 20,
+        finding_window=_int_or_none(p.get("finding_window")) or 200,
+    )
+
+
+async def _arsenal_dispatch_refuter_review_record(p: dict[str, Any]) -> dict[str, Any]:
+    return await arsenal_record_refuter_review(RefuterReviewRequest(**p))
 
 
 async def _arsenal_dispatch_asm_improve(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
@@ -15940,20 +16165,52 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "mission.timeline": _arsenal_dispatch_mission_timeline,
         "tool.status": _arsenal_dispatch_tool_status,
         "local_agent.list": _arsenal_dispatch_local_agent_list,
+        "local_agent.plan_dry_run": _arsenal_dispatch_local_agent_plan_dry_run,
+        "local_agent.parse_plan": _arsenal_dispatch_local_agent_parse_plan,
+        "local_agent.test": _arsenal_dispatch_local_agent_test,
+        "scope.preview": _arsenal_dispatch_scope_preview,
         "target.list": _arsenal_dispatch_target_list,
         "target.get": _arsenal_dispatch_target_get,
         "target.principals": _arsenal_dispatch_target_principals,
         "target.principal_matrix": _arsenal_dispatch_target_principal_matrix,
+        "target.principal_matrix.record": _arsenal_dispatch_target_principal_matrix_record,
+        "exposure.graph.get": _arsenal_dispatch_exposure_graph_get,
         "asm.gaps": _arsenal_dispatch_asm_gaps,
+        "asm.activity": _arsenal_dispatch_asm_activity,
+        "scan.result": _arsenal_dispatch_scan_result,
+        "finding.list": _arsenal_dispatch_finding_list,
+        "finding.get": _arsenal_dispatch_finding_get,
         "operation_plan.list": _arsenal_dispatch_operation_plan_list,
+        "operation_plan.preview": _arsenal_dispatch_operation_plan_preview,
         "agent_context_pack.list": _arsenal_dispatch_agent_context_pack_list,
+        "agent_context_pack.record": _arsenal_dispatch_agent_context_pack_record,
+        "agent_context_pack.generate_from_target": _arsenal_dispatch_agent_context_pack_generate_from_target,
+        "agent_decision_trace.list": _arsenal_dispatch_agent_decision_trace_list,
+        "agent_decision_trace.record": _arsenal_dispatch_agent_decision_trace_record,
         "hypothesis.list": _arsenal_dispatch_hypothesis_list,
+        "hypothesis.situation_report": _arsenal_dispatch_hypothesis_situation_report,
+        "hypothesis.record": _arsenal_dispatch_hypothesis_record,
+        "hypothesis.claim": _arsenal_dispatch_hypothesis_claim,
+        "hypothesis.signal": _arsenal_dispatch_hypothesis_signal,
+        "hypothesis.generate_from_graph": _arsenal_dispatch_hypothesis_generate_from_graph,
         "campaign.get": _arsenal_dispatch_campaign_get,
+        "campaign_action.list": _arsenal_dispatch_campaign_action_list,
+        "campaign.create": _arsenal_dispatch_campaign_create,
+        "campaign.link_action": _arsenal_dispatch_campaign_link_action,
         "ai_target.list": _arsenal_dispatch_ai_target_list,
+        "ai_gate.target_history_export": _arsenal_dispatch_ai_gate_target_history_export,
+        "model_intake.trust_preview": _arsenal_dispatch_model_intake_trust_preview,
+        "evidence.get": _arsenal_dispatch_evidence_get,
         "evidence.export_manifest": _arsenal_dispatch_evidence_export_manifest,
         "evidence.export_bundle": _arsenal_dispatch_evidence_export_bundle,
         "evidence_instance.list": _arsenal_dispatch_evidence_instance_list,
+        "evidence_instance.record": _arsenal_dispatch_evidence_instance_record,
         "tool_receipt.list": _arsenal_dispatch_tool_receipt_list,
+        "tool_receipt.record": _arsenal_dispatch_tool_receipt_record,
+        "deployment.decision": _arsenal_dispatch_deployment_decision,
+        "refuter_review.list": _arsenal_dispatch_refuter_review_list,
+        "refuter_review.summary": _arsenal_dispatch_refuter_review_summary,
+        "refuter_review.record": _arsenal_dispatch_refuter_review_record,
     }
 
 

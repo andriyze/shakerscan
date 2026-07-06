@@ -490,8 +490,11 @@ raw shell execution or LLM-produced verified findings.
    dry-run with a recorded `approval_required`/`blocked` audit row. The dispatch registry wires
    read-only `target.list`, `campaign.list`, `campaign.get`, `command_result.list`, `mission.timeline`,
    `tool.status`, `local_agent.list`, `asm.gaps`, `operation_plan.list`, `agent_context_pack.list`, and
-   `hypothesis.list`, read-only target/principal/evidence/export/tool-receipt inspection commands,
-   plus gated `asm.improve`, `asm.test`, `asm.recon`, `finding.retest`, `scan.focused_family`,
+   `hypothesis.list`, plus all currently catalogued read-only/dry-run product commands for target
+   principal matrices, exposure graph, ASM activity, scan/finding/evidence/deployment reads, AI Gate
+   history export, Model Intake trust preview, local-agent dry-run planning, scope/plan/context/trace
+   records, campaign actions, hypotheses, refuter reviews, evidence instances, and tool receipts. It
+   also wires gated `asm.improve`, `asm.test`, `asm.recon`, `finding.retest`, `scan.focused_family`,
    `ai_gate.scan`, `ai_gate.replay_probe`, `model_intake.scan`, and `evidence.retention_sweep`
    through their existing handlers (each records its own command result); gate-approved commands
    without a wired adapter return `dispatch_adapter_pending` rather than a shortcut. DONE phase 2 for
