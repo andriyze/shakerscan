@@ -2249,6 +2249,9 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
     assert conn.recorded[0]["command"] == "campaign.list"
     assert result["command_result"]["command"] == "campaign.list"
     assert result["command_result"]["status"] == "completed"
+    assert result["action_state"]["phase"] == "completed"
+    assert result["action_state"]["adapter_status"] == "dispatched"
+    assert result["action_state"]["command_result_id"] == result["command_result"]["id"]
 
 
 def test_arsenal_execute_gated_dry_runs_without_execute():
@@ -2262,6 +2265,9 @@ def test_arsenal_execute_gated_dry_runs_without_execute():
     assert conn.recorded and conn.recorded[0]["status"] == "approval_required"
     assert conn.recorded[0]["created_by"] == "pytest"
     assert result["command_result"]["created_by"] == "pytest"
+    assert result["action_state"]["phase"] == "approval_required"
+    assert result["action_state"]["transition"]["reason"] == "execute_not_requested"
+    assert result["action_state"]["gate"]["execute_requested"] is False
 
 
 def test_arsenal_execute_gated_blocked_when_flag_disabled(monkeypatch):
@@ -2297,6 +2303,9 @@ def test_arsenal_execute_gated_dispatches_when_gate_satisfied(monkeypatch):
     ))
     assert result["dispatched"] is True
     assert result["operation_id"] == "op-1"
+    assert result["action_state"]["phase"] == "queued"
+    assert result["action_state"]["operation_id"] == "op-1"
+    assert result["action_state"]["adapter_status"] == "dispatched"
 
 
 def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
@@ -2315,6 +2324,9 @@ def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
     ))
     assert result["execution_blocked_reason"] == "dispatch_adapter_pending"
     assert conn.recorded and conn.recorded[0]["status"] == "blocked"
+    assert result["action_state"]["phase"] == "blocked"
+    assert result["action_state"]["blocked_reason"] == "dispatch_adapter_pending"
+    assert result["action_state"]["adapter_status"] == "pending"
 
 
 def test_arsenal_execute_dispatches_target_list(monkeypatch):

@@ -468,10 +468,11 @@ raw shell execution or LLM-produced verified findings.
    enforcement on current state-changing API routes. DONE phase 1 for command-result audit records on
    successful queued product actions. DONE phase 1 for blocked/approval-required command-result rows,
    durable campaign-action audit records (`campaign_actions` / `GET /arsenal/campaign-actions`), and
-   a read-only cross-product mission timeline (`GET /timeline`). Remaining work is standalone
-   execution-gateway action state, runtime destination re-checks, and later optional real local-agent
-   adapter parsing behind stricter gates; it still must add no new execution power until receipts,
-   command audit records, parser validation, and evidence gates are durable.
+   a read-only cross-product mission timeline (`GET /timeline`). DONE phase 1 for standalone
+   execution-gateway action state in `/arsenal/execute` responses. Remaining work is adapter-specific
+   runtime destination re-checks and later optional real local-agent adapter parsing behind stricter
+   gates; it still must add no new execution power until receipts, command audit records, parser
+   validation, and evidence gates are durable.
 2. **Unified Action Center + mission timeline:** DONE phase 1 — `GET /timeline` merges command-result
    audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
    feed with explicit statuses. DONE phase 1 for campaign-action audit records mirrored from command
@@ -495,7 +496,9 @@ raw shell execution or LLM-produced verified findings.
    through their existing handlers (each records its own command result); gate-approved commands
    without a wired adapter return `dispatch_adapter_pending` rather than a shortcut. DONE phase 2 for
    mission-campaign linkage on dispatched results and returned persisted `command_result` rows with
-   tool/evidence receipt refs when present. Remaining work is richer action transition/state detail.
+   tool/evidence receipt refs when present. DONE phase 3 for execution-gateway `action_state`
+   transition details covering catalog status, risk, confirmation gate state, adapter status, blocked
+   reason, operation id, and command-result id.
    External binaries may be
    used only behind narrow adapters; the command schema still never exposes raw shell, arbitrary
    Python/Node execution, or generic "run this command" behavior.
@@ -770,7 +773,8 @@ Command Arsenal boundaries:
     the timeline also includes evidence-instance binding events and refuter review/signal events.
     DONE phase 1: `evidence.export_bundle` exposes content-free bundle descriptors with replay/read
     paths. DONE phase 1: explicit durable content-free export events are now recorded and surfaced on
-    the timeline. Remaining work is richer execution-gateway action transitions.
+    the timeline. DONE phase 1: `/arsenal/execute` responses include `action_state` transition detail
+    for completed, approval-required, blocked, adapter-pending, and dispatched commands.
 18. DONE phase 1: blocked and approval-required command-result records are written before the
     enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
     is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.

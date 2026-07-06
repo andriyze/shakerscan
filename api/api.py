@@ -15957,6 +15957,57 @@ async def _validate_arsenal_execute_request(conn, req: ArsenalExecuteRequest) ->
     return command, status, risk_tier
 
 
+def _arsenal_action_state(
+    req: ArsenalExecuteRequest,
+    command_spec: dict[str, Any],
+    *,
+    catalog_status: str,
+    risk_tier: str,
+    phase: str,
+    dispatched: bool,
+    dry_run: bool,
+    execution_enabled: bool,
+    operation_id: str | None = None,
+    command_result: dict[str, Any] | None = None,
+    blocked_reason: str | None = None,
+    gate_enabled: bool | None = None,
+    missing_confirmations: list[str] | None = None,
+    adapter_status: str | None = None,
+) -> dict[str, Any]:
+    required = list(command_spec.get("required_confirmations") or [])
+    supplied = [str(item) for item in (req.confirmations or [])]
+    missing = missing_confirmations if missing_confirmations is not None else [
+        item for item in required if item not in supplied
+    ]
+    command_result_id = command_result.get("id") if isinstance(command_result, dict) else None
+    return {
+        "command": req.command,
+        "catalog_status": catalog_status,
+        "risk_tier": risk_tier,
+        "phase": phase,
+        "transition": {
+            "from": "requested",
+            "to": phase,
+            "reason": blocked_reason,
+        },
+        "gate": {
+            "execute_requested": bool(req.execute),
+            "execute_feature_enabled": gate_enabled,
+            "required_confirmations": required,
+            "supplied_confirmations": supplied,
+            "missing_confirmations": missing,
+            "approval_receipt_id": req.approval_receipt_id,
+        },
+        "adapter_status": adapter_status,
+        "dispatched": dispatched,
+        "dry_run": dry_run,
+        "execution_enabled": execution_enabled,
+        "operation_id": operation_id,
+        "command_result_id": command_result_id,
+        "blocked_reason": blocked_reason,
+    }
+
+
 async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
     command, status, risk_tier = await _validate_arsenal_execute_request(conn, req)
 
@@ -15983,6 +16034,19 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "result": result,
             "operation_id": cr["id"],
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase="completed",
+                dispatched=True,
+                dry_run=False,
+                execution_enabled=True,
+                operation_id=cr["id"],
+                command_result=cr,
+                adapter_status="dispatched",
+            ),
             "execution_enabled": True,
         }
 
@@ -16017,6 +16081,22 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "execution_blocked_reason": blocked_reason,
             "operation_id": cr["id"] if cr else None,
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase=result_status,
+                dispatched=False,
+                dry_run=True,
+                execution_enabled=False,
+                operation_id=cr["id"] if cr else None,
+                command_result=cr,
+                blocked_reason=blocked_reason,
+                gate_enabled=gate_on,
+                missing_confirmations=missing_confs,
+                adapter_status="not_dispatched",
+            ),
             "execution_enabled": False,
         }
 
@@ -16052,6 +16132,22 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
             "execution_blocked_reason": "dispatch_adapter_pending",
             "operation_id": cr["id"] if cr else None,
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase="blocked",
+                dispatched=False,
+                dry_run=False,
+                execution_enabled=False,
+                operation_id=cr["id"] if cr else None,
+                command_result=cr,
+                blocked_reason="dispatch_adapter_pending",
+                gate_enabled=gate_on,
+                missing_confirmations=[],
+                adapter_status="pending",
+            ),
             "execution_enabled": False,
         }
 
@@ -16068,6 +16164,21 @@ async def _arsenal_execute(conn, req: ArsenalExecuteRequest) -> dict[str, Any]:
         "result": result,
         "operation_id": operation_id,
         "command_result": command_result,
+        "action_state": _arsenal_action_state(
+            req,
+            command,
+            catalog_status=status,
+            risk_tier=risk_tier,
+            phase=str(result.get("status") or "dispatched") if isinstance(result, dict) else "dispatched",
+            dispatched=True,
+            dry_run=False,
+            execution_enabled=True,
+            operation_id=operation_id,
+            command_result=command_result,
+            gate_enabled=gate_on,
+            missing_confirmations=[],
+            adapter_status="dispatched",
+        ),
         "execution_enabled": True,
     }
 
@@ -16099,6 +16210,19 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "result": result,
             "operation_id": cr["id"],
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                _command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase="completed",
+                dispatched=True,
+                dry_run=False,
+                execution_enabled=True,
+                operation_id=cr["id"],
+                command_result=cr,
+                adapter_status="dispatched",
+            ),
             "execution_enabled": True,
         }
 
@@ -16133,6 +16257,22 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "execution_blocked_reason": blocked_reason,
             "operation_id": cr["id"] if cr else None,
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                _command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase=result_status,
+                dispatched=False,
+                dry_run=True,
+                execution_enabled=False,
+                operation_id=cr["id"] if cr else None,
+                command_result=cr,
+                blocked_reason=blocked_reason,
+                gate_enabled=gate_on,
+                missing_confirmations=missing_confs,
+                adapter_status="not_dispatched",
+            ),
             "execution_enabled": False,
         }
 
@@ -16169,6 +16309,22 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
             "execution_blocked_reason": "dispatch_adapter_pending",
             "operation_id": cr["id"] if cr else None,
             "command_result": cr,
+            "action_state": _arsenal_action_state(
+                req,
+                _command,
+                catalog_status=status,
+                risk_tier=risk_tier,
+                phase="blocked",
+                dispatched=False,
+                dry_run=False,
+                execution_enabled=False,
+                operation_id=cr["id"] if cr else None,
+                command_result=cr,
+                blocked_reason="dispatch_adapter_pending",
+                gate_enabled=gate_on,
+                missing_confirmations=[],
+                adapter_status="pending",
+            ),
             "execution_enabled": False,
         }
 
@@ -16185,6 +16341,21 @@ async def _arsenal_execute_detached(req: ArsenalExecuteRequest) -> dict[str, Any
         "result": result,
         "operation_id": operation_id,
         "command_result": command_result,
+        "action_state": _arsenal_action_state(
+            req,
+            _command,
+            catalog_status=status,
+            risk_tier=risk_tier,
+            phase=str(result.get("status") or "dispatched") if isinstance(result, dict) else "dispatched",
+            dispatched=True,
+            dry_run=False,
+            execution_enabled=True,
+            operation_id=operation_id,
+            command_result=command_result,
+            gate_enabled=gate_on,
+            missing_confirmations=[],
+            adapter_status="dispatched",
+        ),
         "execution_enabled": True,
     }
 
