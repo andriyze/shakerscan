@@ -1422,6 +1422,111 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
     assert non_strict.trust_anchor_ids is None
 
 
+def test_model_intake_evidence_export_is_content_free():
+    scan_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    payload = {
+        "id": scan_id,
+        "target_id": target_id,
+        "target_url": "https://models.example.com/releases/model.safetensors?token=secret-token",
+        "status": "completed",
+        "run_kind": "model_intake",
+        "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "completed_at": datetime(2026, 7, 6, 0, 1, tzinfo=timezone.utc),
+        "score": 91,
+        "grade": "A",
+        "findings_count": 0,
+        "result": {
+            "model_intake": {
+                "summary": {
+                    "artifact_name": "Release model",
+                    "artifact_ref": "https://models.example.com/releases/model.safetensors?token=secret-token",
+                    "source_kind": "http",
+                    "extension": ".safetensors",
+                    "sha256": "a" * 64,
+                    "expected_sha256": "a" * 64,
+                    "checksum_status": "verified",
+                    "checksum_match": True,
+                    "checksum_policy_status": "pass",
+                    "format_posture": "safer_static_format",
+                    "signature_verification_status": "verified",
+                    "signature_verified": True,
+                    "signature_valid": True,
+                    "signature_trusted_root": True,
+                    "signature_key_fingerprint": "f" * 64,
+                    "signature_trust_anchors_configured": True,
+                    "signature_cryptographically_verified": True,
+                    "signature_verifier": "cryptography",
+                    "strict_governance": True,
+                    "deployment_environment": "production",
+                    "deployment_approved": True,
+                    "license_policy_status": "permissive",
+                    "sbom_policy_status": "valid",
+                    "malware_policy_status": "clean",
+                    "eval_policy_status": "passed",
+                    "approval_policy_status": "valid",
+                    "aibom_completeness": 0.95,
+                },
+                "metadata": {
+                    "api_key": "secret-value",
+                    "signature_public_key": "-----BEGIN PUBLIC KEY-----SECRET-----END PUBLIC KEY-----",
+                },
+                "aibom": {
+                    "serial_number": "urn:shakerscan:aibom:test",
+                    "components": [{"name": "tokenizer", "version": "1.0.0"}],
+                    "completeness": {"score": 0.95},
+                },
+                "supply_chain": {
+                    "signature": {"status": "verified", "public_key_pem": "SECRET KEY"},
+                    "license_policy": {"status": "permissive", "license": "apache-2.0"},
+                    "sbom_policy": {"status": "valid"},
+                    "malware_policy": {"status": "clean"},
+                    "eval_policy": {"status": "passed"},
+                    "approval_policy": {"status": "valid"},
+                },
+                "checks": {
+                    "checksum": True,
+                    "signature_verification": True,
+                    "approval_evidence": True,
+                    "unsafe_serialization": True,
+                },
+                "runtime_destinations": [
+                    {
+                        "role": "artifact",
+                        "requested_url": "https://models.example.com/releases/model.safetensors?token=secret-token",
+                        "final_url": "https://cdn.example.com/releases/model.safetensors?token=secret-token",
+                    }
+                ],
+            }
+        },
+    }
+
+    export = api_module._model_intake_evidence_export(
+        payload,
+        generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    )
+
+    assert export["schema_version"] == "2026-07-06.model-intake-evidence-export.v1"
+    assert len(export["export_hash"]) == 64
+    assert export["content_included"] is False
+    assert export["metadata_included"] is False
+    assert export["artifact_included"] is False
+    assert export["signature_material_included"] is False
+    assert export["artifact"]["artifact_ref_hash"]
+    assert export["artifact"]["label"] == "models.example.com/releases/model.safetensors"
+    assert export["trust_summary"]["signature_verified"] is True
+    assert export["policy_summary"]["deployment_environment"] == "production"
+    assert export["check_statuses"]["checksum"] is True
+    assert export["runtime_destinations"]["destination_count"] == 1
+    assert export["runtime_destinations"]["roles"] == ["artifact"]
+    assert export["replay_plan"]["scan_result_path"] == f"/scans/{scan_id}/result"
+    serialized = json.dumps(export).lower()
+    assert "secret-token" not in serialized
+    assert "secret-value" not in serialized
+    assert "public key" not in serialized
+    assert "final_url" not in serialized
+
+
 def test_state_changing_request_models_accept_approval_receipt_id():
     receipt_id = "11111111-1111-4111-8111-111111111111"
 

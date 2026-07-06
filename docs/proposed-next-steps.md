@@ -598,9 +598,9 @@ Use this order when choosing between otherwise-valid work:
   target-history export links, per-context readiness trend chips, and content-free campaign evidence
   manifest summaries are phase 1 done. Remaining work is advanced longitudinal trend visualization.
 - **P2: Model Intake trust UX.** Guided trust modes, pre-submit trust preview, saved trust anchors,
-  scan selection, strict policy-profile anchor binding, deployment-decision anchor gaps, and the first
-  exception metadata repair flow are phase 1 done. Remaining work is campaign evidence export plus
-  broader exception lifecycle automation.
+  scan selection, strict policy-profile anchor binding, deployment-decision anchor gaps, the first
+  exception metadata repair flow, and content-free Model Intake evidence exports are phase 1 done.
+  Remaining work is broader exception lifecycle automation.
 - **P2: registry-driven execution.** Migrate scanner execution and report rollups to proof contracts,
   telemetry schemas, safety gates, and family-specific run contracts.
 - **P2/P3: planner evals and local-agent planning.** Only after read-only Command Arsenal and safety
@@ -691,8 +691,8 @@ Command Arsenal boundaries:
 - Product commands should stay human/action-oriented: `target.list`, `domain.list`,
   `exposure.graph.get`, `asm.gaps`, `asm.improve`, `asm.recon`, `asm.test`, `scan.submit`,
   `scan.focused_family`, `finding.retest`, `ai_gate.scan`, `ai_gate.replay_probe`,
-  `model_intake.trust_preview`, `model_intake.scan`, `evidence.export_manifest`,
-  `evidence.export_bundle`,
+  `model_intake.trust_preview`, `model_intake.evidence_export`, `model_intake.scan`,
+  `evidence.export_manifest`, `evidence.export_bundle`,
   `deployment.decision`, `exception.request`, and `tool.status`.
 - Product commands should not describe low-level binaries: no `run_sqlmap`, `run_nmap`,
   `curl_this_url`, `execute_shell`, or `run_python_code` command should appear in Command Arsenal.
@@ -880,8 +880,10 @@ trusted-root, governance, or approval evidence will block or remain advisory bef
 Saved trust-anchor selection/creation/deactivation is now implemented for strict trust mode.
 Policy profiles can now bind required saved trust anchors, and matching strict Model Intake scans
 inherit those anchors before cryptographic trust evaluation. Dashboard Model Intake blockers now open
-the trust-remediation route state. Remaining ergonomics work is clearer exception remediation after
-deployment decisions surface anchor gaps and exception expiry/hygiene.
+the trust-remediation route state. `GET /model-intake/scans/{scan_id}/evidence-export` and
+`model_intake.evidence_export` now return content-free trust/AIBOM/policy/replay hashes without
+artifact bytes, metadata JSON, signatures, keys, model cards, or runtime URLs. Remaining ergonomics
+work is broader exception lifecycle automation.
 
 **Implement:**
 1. DONE: add a signature-mode segmented control: `checksum only`, `signature URL + key URL`, `inline
@@ -891,10 +893,10 @@ deployment decisions surface anchor gaps and exception expiry/hygiene.
 3. DONE: clear warnings explain when metadata-supplied keys are evidence but not an operator trust
    root, and strict mode now has a saved trust-anchor selector/manager.
 4. DONE/PARTIAL: helper tests cover each preview mode's core trust semantics, saved-anchor expansion,
-   policy-profile required-anchor binding, deployment-decision anchor gaps, and exception hygiene.
-   Keep the existing API/e2e signature tests proving trusted verification is reachable only with
-   operator-supplied trust material; add deeper remediation-action coverage with the remaining
-   exception workflow work.
+   policy-profile required-anchor binding, deployment-decision anchor gaps, exception hygiene, and
+   content-free Model Intake evidence export. Keep the existing API/e2e signature tests proving trusted
+   verification is reachable only with operator-supplied trust material; add deeper remediation-action
+   coverage with the remaining exception workflow work.
 
 **Done when:** a developer can submit a model with a valid trust configuration without knowing every
 low-level signature field, and the UI explains why "signature present" is not the same as "trusted."

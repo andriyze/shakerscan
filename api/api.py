@@ -7916,6 +7916,151 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
     return response
 
 
+def _content_free_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _model_intake_status_map(value: Any) -> dict[str, Any]:
+    mapping = value if isinstance(value, dict) else {}
+    out: dict[str, Any] = {}
+    for key, item in mapping.items():
+        if isinstance(item, dict):
+            out[str(key)] = item.get("status")
+        elif isinstance(item, bool) or item is None:
+            out[str(key)] = item
+        elif isinstance(item, (str, int, float)):
+            out[str(key)] = item
+        else:
+            out[str(key)] = str(type(item).__name__)
+    return out
+
+
+def _model_intake_evidence_export(scan_payload: dict[str, Any], *, generated_at: Optional[datetime] = None) -> dict[str, Any]:
+    result = _decode_json_value(scan_payload.get("result")) or {}
+    model_intake = result.get("model_intake") if isinstance(result, dict) else {}
+    model_intake = model_intake if isinstance(model_intake, dict) else {}
+    summary = model_intake.get("summary") if isinstance(model_intake.get("summary"), dict) else {}
+    checks = model_intake.get("checks") if isinstance(model_intake.get("checks"), dict) else {}
+    aibom = model_intake.get("aibom") if isinstance(model_intake.get("aibom"), dict) else {}
+    supply_chain = model_intake.get("supply_chain") if isinstance(model_intake.get("supply_chain"), dict) else {}
+    runtime_destinations = model_intake.get("runtime_destinations") if isinstance(model_intake.get("runtime_destinations"), list) else []
+    artifact_ref = str(summary.get("artifact_ref") or scan_payload.get("target_url") or "")
+    artifact = {
+        "name": summary.get("artifact_name"),
+        "label": _short_url_label(artifact_ref),
+        "artifact_ref_hash": hashlib.sha256(artifact_ref.encode("utf-8", "ignore")).hexdigest() if artifact_ref else None,
+        "source_kind": summary.get("source_kind"),
+        "extension": summary.get("extension"),
+        "sha256": summary.get("sha256"),
+        "sha256_scope": summary.get("sha256_scope"),
+        "expected_sha256": summary.get("expected_sha256"),
+        "format_posture": summary.get("format_posture"),
+    }
+    trust_summary = {
+        "checksum_status": summary.get("checksum_status"),
+        "checksum_match": summary.get("checksum_match"),
+        "checksum_policy_status": summary.get("checksum_policy_status"),
+        "signature_verification_status": summary.get("signature_verification_status"),
+        "signature_verified": summary.get("signature_verified"),
+        "signature_valid": summary.get("signature_valid"),
+        "signature_trusted_root": summary.get("signature_trusted_root"),
+        "signature_key_fingerprint": summary.get("signature_key_fingerprint"),
+        "signature_trust_anchors_configured": summary.get("signature_trust_anchors_configured"),
+        "signature_verifier": summary.get("signature_verifier"),
+        "signature_cryptographically_verified": summary.get("signature_cryptographically_verified"),
+    }
+    policy_summary = {
+        "strict_governance": summary.get("strict_governance"),
+        "deployment_environment": summary.get("deployment_environment"),
+        "deployment_approved": summary.get("deployment_approved"),
+        "license_policy_status": summary.get("license_policy_status"),
+        "sbom_policy_status": summary.get("sbom_policy_status"),
+        "malware_policy_status": summary.get("malware_policy_status"),
+        "eval_policy_status": summary.get("eval_policy_status"),
+        "approval_policy_status": summary.get("approval_policy_status"),
+        "aibom_completeness": summary.get("aibom_completeness"),
+    }
+    evidence_hashes = {
+        "summary_hash": _content_free_hash(summary),
+        "checks_hash": _content_free_hash(_model_intake_status_map(checks)),
+        "aibom_hash": _content_free_hash(aibom),
+        "supply_chain_hash": _content_free_hash(supply_chain),
+        "runtime_destinations_hash": _content_free_hash(runtime_destinations),
+    }
+    runtime_summary = {
+        "destination_count": len(runtime_destinations),
+        "roles": sorted({
+            str(item.get("role") or item.get("kind") or "unknown")
+            for item in runtime_destinations
+            if isinstance(item, dict)
+        }),
+        "hash": evidence_hashes["runtime_destinations_hash"],
+    }
+    generated = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    scan_id = str(scan_payload.get("id") or "")
+    export_core = {
+        "scan_id": scan_id,
+        "artifact_ref_hash": artifact.get("artifact_ref_hash"),
+        "trust_summary": trust_summary,
+        "policy_summary": policy_summary,
+        "check_statuses": _model_intake_status_map(checks),
+        "evidence_hashes": evidence_hashes,
+    }
+    return {
+        "schema_version": "2026-07-06.model-intake-evidence-export.v1",
+        "generated_at": generated.isoformat(),
+        "export_hash": _content_free_hash(export_core),
+        "content_included": False,
+        "artifact_included": False,
+        "metadata_included": False,
+        "signature_material_included": False,
+        "scan": {
+            "id": scan_id,
+            "status": scan_payload.get("status"),
+            "created_at": _iso_or_none(scan_payload.get("created_at")),
+            "completed_at": _iso_or_none(scan_payload.get("completed_at")),
+            "score": scan_payload.get("score"),
+            "grade": scan_payload.get("grade"),
+            "findings_count": scan_payload.get("findings_count"),
+        },
+        "artifact": artifact,
+        "trust_summary": trust_summary,
+        "policy_summary": policy_summary,
+        "check_statuses": _model_intake_status_map(checks),
+        "runtime_destinations": runtime_summary,
+        "evidence_hashes": evidence_hashes,
+        "replay_plan": {
+            "type": "api_read_replay",
+            "content_included": False,
+            "scan_result_path": f"/scans/{scan_id}/result" if scan_id else None,
+            "deployment_decision_path": f"/scans/{scan_id}/deployment-decision" if scan_id else None,
+            "model_intake_rescan_path": f"/model-intake/targets/{scan_payload.get('target_id')}/rescan" if scan_payload.get("target_id") else None,
+            "finding_filter_path": f"/findings?scan_id={scan_id}&source_type=model_intake" if scan_id else None,
+        },
+    }
+
+
+@app.get("/model-intake/scans/{scan_id}/evidence-export")
+async def get_model_intake_evidence_export(scan_id: str):
+    try:
+        scan_uuid = uuid.UUID(str(scan_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="scan_id must be a UUID")
+    async with db_pool.acquire() as conn:
+        scan = await conn.fetchrow("SELECT * FROM scans WHERE id=$1", scan_uuid)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    payload = row_to_dict(scan)
+    result = _decode_json_value(payload.get("result")) or {}
+    if payload.get("run_kind") != "model_intake" and not (isinstance(result, dict) and isinstance(result.get("model_intake"), dict)):
+        raise HTTPException(status_code=404, detail="Model Intake scan not found")
+    payload["result"] = result
+    payload["options"] = _sanitize_scan_options(payload.get("options"))
+    return _model_intake_evidence_export(payload)
+
+
 @app.post("/model-intake/targets/{target_id}/rescan")
 async def rescan_model_intake_target(target_id: str):
     """Re-queue a model intake scan for an existing model target.
@@ -16043,6 +16188,13 @@ async def _arsenal_dispatch_model_intake_trust_preview(p: dict[str, Any]) -> dic
     }
 
 
+async def _arsenal_dispatch_model_intake_evidence_export(p: dict[str, Any]) -> dict[str, Any]:
+    scan_id = str(p.get("scan_id") or "").strip()
+    if not scan_id:
+        raise HTTPException(status_code=400, detail="model_intake.evidence_export requires a scan_id parameter")
+    return await get_model_intake_evidence_export(scan_id)
+
+
 async def _arsenal_dispatch_evidence_get(p: dict[str, Any]) -> dict[str, Any]:
     if p.get("evidence_id"):
         return await get_evidence_object(str(p.get("evidence_id")))
@@ -16296,6 +16448,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
         "ai_target.list": _arsenal_dispatch_ai_target_list,
         "ai_gate.target_history_export": _arsenal_dispatch_ai_gate_target_history_export,
         "model_intake.trust_preview": _arsenal_dispatch_model_intake_trust_preview,
+        "model_intake.evidence_export": _arsenal_dispatch_model_intake_evidence_export,
         "evidence.get": _arsenal_dispatch_evidence_get,
         "evidence.export_manifest": _arsenal_dispatch_evidence_export_manifest,
         "evidence.export_bundle": _arsenal_dispatch_evidence_export_bundle,

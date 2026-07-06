@@ -34,6 +34,7 @@ def test_command_catalog_contains_required_initial_commands():
         "finding.get",
         "ai_target.list",
         "model_intake.trust_preview",
+        "model_intake.evidence_export",
         "operation_plan.list",
         "campaign_action.list",
         "hypothesis.list",
@@ -134,6 +135,19 @@ def test_ai_gate_target_history_export_is_read_only_command():
     assert cmd["path"] == "/ai/targets/{target_id}/campaign-history/export"
     assert "readiness_trends" in cmd["evidence_contract"]
     assert "redteam_report_links" in cmd["evidence_contract"]
+
+
+def test_model_intake_evidence_export_is_read_only_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["model_intake.evidence_export"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/model-intake/scans/{scan_id}/evidence-export"
+    assert "export_hash" in cmd["evidence_contract"]
+    assert "replay_plan" in cmd["evidence_contract"]
+    assert "signature_public_key" in cmd["redaction_contract"]
 
 
 def test_target_principal_matrix_commands_are_non_executing_inventory():
