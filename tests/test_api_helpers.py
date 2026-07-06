@@ -507,8 +507,10 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     ai_item = next(item for item in items if item["id"] == "ai-control-baseline-gaps")
 
     assert ai_item["count"] == 1
-    assert ai_item["href"] == "/settings/ai-gate"
+    assert ai_item["href"] == "/settings/ai-gate?remediate=controls"
+    assert ai_item["actions"][0]["href"] == "/settings/ai-gate?remediate=controls"
     assert ai_item["actions"][1]["href"] == "/findings?source_type=ai&status=active"
+    assert ai_item["samples"][0]["href"] == "/settings/ai-gate?remediate=controls"
     assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 
@@ -589,7 +591,8 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     assert by_id["asm"]["actions"][1]["href"] == "/schedules?create=true&target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["ai_gate"]["status"] == "warning"
     assert by_id["ai_gate"]["secondary_label"] == "control gaps"
-    assert by_id["ai_gate"]["actions"][0]["href"] == "/settings/ai-gate"
+    assert by_id["ai_gate"]["href"] == "/settings/ai-gate?remediate=controls"
+    assert by_id["ai_gate"]["actions"][0]["href"] == "/settings/ai-gate?remediate=controls"
     assert by_id["ai_gate"]["actions"][1]["href"] == "/findings?source_type=ai&status=active"
     assert by_id["model_intake"]["status"] == "critical"
     assert by_id["model_intake"]["href"] == "/settings/model-intake?remediate=trust"

@@ -599,8 +599,9 @@ blocked, and provide safe remediation links without making users infer state fro
    remediation links: DAST cards route to active findings, failed scans, running scans, or new-scan
    entry as appropriate; ASM cards route to the selected target timeline and preselected schedule
    creation; exception cards route directly to expired, expiring, or missing-controls queues; AI Gate
-   cards route to control gaps or AI findings; worker cards route to dashboard worker controls and
-   pending scans. DONE for Model Intake trust blockers: `/settings/model-intake?remediate=trust`
+   cards route to control gaps or AI findings; `/settings/ai-gate?remediate=controls` now sorts and
+   highlights targets with missing control evidence; worker cards route to dashboard worker controls
+   and pending scans. DONE for Model Intake trust blockers: `/settings/model-intake?remediate=trust`
    selects strict trusted-anchor mode, highlights the trust controls, and links exception hygiene.
 7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
    recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with

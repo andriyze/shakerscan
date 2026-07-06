@@ -8841,12 +8841,12 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ai_actions = [
             {
                 "label": "AI findings" if active_findings else "Control gaps",
-                "href": "/findings?source_type=ai&status=active" if active_findings else "/settings/ai-gate",
+                "href": "/findings?source_type=ai&status=active" if active_findings else "/settings/ai-gate?remediate=controls",
                 "variant": "primary",
             },
             {
                 "label": "Control gaps" if active_findings else "AI findings",
-                "href": "/settings/ai-gate" if active_findings else "/findings?source_type=ai&status=active",
+                "href": "/settings/ai-gate?remediate=controls" if active_findings else "/findings?source_type=ai&status=active",
                 "variant": "secondary",
             },
         ]
@@ -8855,7 +8855,7 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             label="AI Gate",
             status=status,
             summary=summary,
-            href="/settings/ai-gate",
+            href="/settings/ai-gate?remediate=controls" if missing_controls and not active_findings else "/settings/ai-gate",
             primary_count=active_findings,
             primary_label="findings",
             secondary_count=missing_controls,
@@ -9417,7 +9417,7 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 samples.append({
                     "label": target.get("name") or target.get("endpoint_url") or target.get("id"),
                     "detail": ", ".join(item["missing"][:3]),
-                    "href": "/settings/ai-gate",
+                    "href": "/settings/ai-gate?remediate=controls",
                 })
             items.append(_action_center_item(
                 item_id="ai-control-baseline-gaps",
@@ -9425,10 +9425,10 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                 category="AI Gate",
                 title="AI targets are missing control evidence",
                 detail="Production, high-risk, or baseline-enforced AI targets are missing required governance/control metadata.",
-                href="/settings/ai-gate",
+                href="/settings/ai-gate?remediate=controls",
                 action_label="Review AI targets",
                 actions=[
-                    {"label": "AI Gate", "href": "/settings/ai-gate", "variant": "primary"},
+                    {"label": "Control gaps", "href": "/settings/ai-gate?remediate=controls", "variant": "primary"},
                     {"label": "AI findings", "href": "/findings?source_type=ai&status=active", "variant": "secondary"},
                 ],
                 count=len(missing_targets),

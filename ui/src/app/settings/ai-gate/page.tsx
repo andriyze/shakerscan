@@ -344,6 +344,7 @@ export default function AIGateSettingsPage() {
   const [showDemoTargets, setShowDemoTargets] = useState(false)
   const [demoRunning, setDemoRunning] = useState(false)
   const [demoResult, setDemoResult] = useState<AIDemoRunResponse | null>(null)
+  const [controlRemediationMode, setControlRemediationMode] = useState(false)
 
   const [name, setName] = useState('')
   const [targetType, setTargetType] = useState<AITargetType>(initialType.value)
@@ -419,6 +420,10 @@ export default function AIGateSettingsPage() {
   useEffect(() => {
     loadTargets()
   }, [loadTargets])
+
+  useEffect(() => {
+    setControlRemediationMode(new URLSearchParams(window.location.search).get('remediate') === 'controls')
+  }, [])
 
   useEffect(() => {
     loadInventory()
@@ -756,10 +761,18 @@ export default function AIGateSettingsPage() {
   const formControlSummary = scenario
     ? controlSummary(targetType, formMetadata, scenario.readiness_controls || [])
     : null
-  const visibleTargets = useMemo(
-    () => targets.filter((target) => showDemoTargets || !isCalibrationLikeTarget(target, true)),
-    [targets, showDemoTargets]
-  )
+  const visibleTargets = useMemo(() => {
+    const filtered = targets.filter((target) => showDemoTargets || !isCalibrationLikeTarget(target, true))
+    if (!controlRemediationMode || !scenario) return filtered
+    const readinessControls = scenario.readiness_controls || []
+    return [...filtered].sort((a, b) => {
+      const aMissing = controlSummary(a.target_type, a.metadata_json || {}, readinessControls).missing.length
+      const bMissing = controlSummary(b.target_type, b.metadata_json || {}, readinessControls).missing.length
+      if (aMissing && !bMissing) return -1
+      if (!aMissing && bMissing) return 1
+      return bMissing - aMissing
+    })
+  }, [controlRemediationMode, scenario, showDemoTargets, targets])
   const inventoryCandidates = useMemo(
     () => (inventory?.candidates || []).slice(0, 5),
     [inventory]
@@ -1171,8 +1184,9 @@ export default function AIGateSettingsPage() {
               const campaignHistory = campaignHistories[target.id]
               const campaignHistoryError = campaignHistoryErrors[target.id]
               const campaignHistoryLoading = loadingCampaignHistory === target.id
+              const isControlRemediationTarget = Boolean(controlRemediationMode && targetControlSummary?.missing.length)
               return (
-                <Card key={target.id} className="p-4">
+                <Card key={target.id} className={`p-4 ${isControlRemediationTarget ? 'border-yellow-500/50 bg-yellow-500/5' : ''}`}>
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1180,6 +1194,7 @@ export default function AIGateSettingsPage() {
                         <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
                         {isDemoTarget && <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
                         {target.production_mode && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
+                        {isControlRemediationTarget && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-200">control gap</span>}
                       </div>
                       <div className="mt-1 break-all text-sm text-gray-500">{target.method} {target.endpoint_url}</div>
                       <div className="mt-1 text-xs text-gray-500">
