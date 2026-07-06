@@ -1337,6 +1337,7 @@ def test_public_campaign_action_row_decodes_json_fields():
 
 
 def test_public_hypothesis_row_decodes_json_and_never_promotes_findings():
+    lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
     row = {
         "id": uuid.uuid4(),
         "source": "app_graph",
@@ -1345,7 +1346,7 @@ def test_public_hypothesis_row_decodes_json_and_never_promotes_findings():
         "status": "open",
         "version": 2,
         "claim_owner": "agent-a",
-        "claim_lease_expires_at": "2026-07-06T12:00:00+00:00",
+        "claim_lease_expires_at": lease_expires_at,
         "evidence_object_ids": json.dumps(["evidence-1"]),
         "tool_receipt_ids": json.dumps([]),
         "next_test_action": json.dumps({"command": "asm.gaps"}),
@@ -1360,8 +1361,37 @@ def test_public_hypothesis_row_decodes_json_and_never_promotes_findings():
     assert public["next_test_action"] == {"command": "asm.gaps"}
     assert public["endorsements"] == [{"source": "app_graph"}]
     assert public["claim_state"]["owner"] == "agent-a"
+    assert public["claim_state"]["active"] is True
+    assert public["claim_state"]["expired"] is False
     assert public["can_promote_finding"] is False
     assert public["execution_enabled"] is False
+
+
+def test_public_hypothesis_row_marks_expired_claim_effectively_open():
+    row = {
+        "id": uuid.uuid4(),
+        "source": "app_graph",
+        "family": "bola",
+        "dedupe_key": "GET /api/orders/{id}:order.id",
+        "status": "claimed",
+        "version": 2,
+        "claim_owner": "agent-a",
+        "claim_lease_expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+        "evidence_object_ids": json.dumps([]),
+        "tool_receipt_ids": json.dumps([]),
+        "next_test_action": json.dumps({}),
+        "endorsements": json.dumps([]),
+        "refutations": json.dumps([]),
+        "metadata_json": json.dumps({}),
+    }
+
+    public = api_module._public_hypothesis_row(row)
+
+    assert public["status"] == "claimed"
+    assert public["effective_status"] == "open"
+    assert public["claim_state"]["active"] is False
+    assert public["claim_state"]["expired"] is True
+    assert public["claimable"] is True
 
 
 def test_canonical_hypothesis_request_redacts_and_normalizes():
@@ -1509,7 +1539,7 @@ def test_hypothesis_signal_redacts_and_is_non_executing():
 
 
 def test_hypothesis_situation_report_is_bounded_and_separates_work():
-    now = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
 
     def row(
         *,
@@ -1569,7 +1599,8 @@ def test_hypothesis_situation_report_is_bounded_and_separates_work():
     assert report["execution_enabled"] is False
     assert report["findings_created"] == 0
     assert report["summary"]["considered_count"] == 6
-    assert report["summary"]["status_counts"]["claimed"] == 2
+    assert report["summary"]["status_counts"]["claimed"] == 1
+    assert report["summary"]["status_counts"]["open"] == 2
     assert len(report["hottest_unclaimed"]) == 2
     assert report["hottest_unclaimed"][0]["family"] == "bola"
     assert {item["family"] for item in report["requester_claims"]} == {"xss"}

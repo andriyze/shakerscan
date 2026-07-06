@@ -891,8 +891,10 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    produce the stored `dedupe_key`, and `_upsert_hypothesis` matches existing target/family/key rows
    across signal sources so a new source endorses the existing hypothesis instead of creating another
    card.
-9. Claim rule: use compare-and-set on hypothesis `version`; expired claims become open again, while
-   confirmed/refuted/dead hypotheses are not claimable.
+9. DONE phase 1: claim rule uses compare-and-set on hypothesis `version`, keeps
+   confirmed/refuted/dead hypotheses unclaimable, and now exposes expired claimed/testing rows with
+   `effective_status: open`, `claim_state.expired`, and `claimable: true`; `status=open` list queries
+   include those expired claims.
 
 **Done when:** the scanner can state "`GET /api/orders` produces `order.id` owned by user1;
 `GET /api/orders/{id}` consumes it -> test user2 read/mutate" from a persisted graph and schedule

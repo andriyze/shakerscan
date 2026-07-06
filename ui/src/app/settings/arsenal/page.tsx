@@ -235,15 +235,17 @@ function CampaignActionRow({ action }: { action: CampaignAction }) {
 
 function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
   const claimOwner = hypothesis.claim_state?.owner || hypothesis.claim_owner
+  const displayStatus = hypothesis.effective_status || hypothesis.status
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-all font-mono text-sm text-white">{hypothesis.family}</span>
-            <Badge className={statusClass(hypothesis.status)}>{hypothesis.status}</Badge>
+            <Badge className={statusClass(displayStatus)}>{displayStatus}</Badge>
             {hypothesis.severity_guess && <Badge className={riskClass(hypothesis.severity_guess)}>{hypothesis.severity_guess}</Badge>}
             <Badge className="bg-gray-800 text-gray-300">{hypothesis.source}</Badge>
+            {hypothesis.claim_state?.expired && <Badge className="bg-amber-500/15 text-amber-300">claim expired</Badge>}
           </div>
           <p className="mt-1 break-words text-sm text-gray-400">
             {hypothesis.title || hypothesis.description || hypothesis.dedupe_key}
@@ -275,16 +277,18 @@ function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
 
 function HypothesisReportRow({ item }: { item: HypothesisReportItem }) {
   const claimOwner = item.claim_state?.owner
+  const displayStatus = item.effective_status || item.status
   return (
     <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-all font-mono text-sm text-white">{item.family}</span>
-            <Badge className={statusClass(item.status)}>{item.status}</Badge>
+            <Badge className={statusClass(displayStatus)}>{displayStatus}</Badge>
             {item.severity_guess && <Badge className={riskClass(item.severity_guess)}>{item.severity_guess}</Badge>}
             <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
             {claimOwner && <Badge className="bg-blue-500/15 text-blue-300">claim {claimOwner}</Badge>}
+            {item.claim_state?.expired && <Badge className="bg-amber-500/15 text-amber-300">expired</Badge>}
           </div>
           <p className="mt-1 break-words text-sm text-gray-400">
             {item.title || item.dedupe_key}

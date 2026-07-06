@@ -261,6 +261,8 @@ def test_contracts_encode_planner_and_secret_boundaries():
     assert "parser failure cannot create verified findings" in contracts["ToolReceipt"]["invariants"]
     assert "hypotheses cannot directly alter finding proof_state or severity" in contracts["Hypothesis"]["invariants"]
     assert "target/family/dedupe dimensions identify a lead across signal sources" in contracts["Hypothesis"]["invariants"]
+    assert "effective_status" in contracts["Hypothesis"]["fields"]
+    assert "claimable" in contracts["Hypothesis"]["fields"]
 
 
 def test_tool_status_catalog_is_honest_without_version_probe(monkeypatch):

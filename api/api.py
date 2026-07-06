@@ -12077,10 +12077,22 @@ def _public_hypothesis_row(row: Any) -> dict[str, Any]:
         "metadata_json",
     ):
         payload[key] = _decode_json_value(payload.get(key)) or ([] if key not in {"next_test_action", "metadata_json"} else {})
+    lease_expires_at = _parse_hypothesis_time(payload.get("claim_lease_expires_at"))
+    now = datetime.now(timezone.utc)
+    claim_active = bool(payload.get("claim_owner") and lease_expires_at and lease_expires_at > now)
+    claim_expired = bool(payload.get("claim_owner") and lease_expires_at and lease_expires_at <= now)
+    effective_status = payload.get("status")
+    if effective_status in {"claimed", "testing"} and claim_expired:
+        effective_status = "open"
     payload["claim_state"] = {
         "owner": payload.get("claim_owner"),
         "lease_expires_at": payload.get("claim_lease_expires_at"),
+        "active": claim_active,
+        "expired": claim_expired,
+        "effective_status": effective_status,
     }
+    payload["effective_status"] = effective_status
+    payload["claimable"] = effective_status not in {"refuted", "promoted", "dead"} and not claim_active
     payload["can_promote_finding"] = False
     payload["execution_enabled"] = False
     return payload
@@ -12118,7 +12130,9 @@ def _hypothesis_report_row(hypothesis: dict[str, Any]) -> dict[str, Any]:
         "severity_guess": hypothesis.get("severity_guess"),
         "confidence": hypothesis.get("confidence") or 0,
         "dedupe_key": hypothesis.get("dedupe_key"),
-        "status": hypothesis.get("status"),
+        "status": hypothesis.get("effective_status") or hypothesis.get("status"),
+        "stored_status": hypothesis.get("status"),
+        "effective_status": hypothesis.get("effective_status") or hypothesis.get("status"),
         "version": hypothesis.get("version") or 0,
         "claim_state": hypothesis.get("claim_state") or {
             "owner": hypothesis.get("claim_owner"),
@@ -12173,7 +12187,7 @@ def _hypothesis_situation_report(
     hypotheses = [_public_hypothesis_row(row) for row in rows]
     severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
     terminal_statuses = {"refuted", "dead"}
-    status_counts = Counter(str(item.get("status") or "unknown") for item in hypotheses)
+    status_counts = Counter(str(item.get("effective_status") or item.get("status") or "unknown") for item in hypotheses)
     source_counts = Counter(str(item.get("source") or "unknown") for item in hypotheses)
     family_counts = Counter(str(item.get("family") or "unknown") for item in hypotheses)
 
@@ -12191,7 +12205,7 @@ def _hypothesis_situation_report(
     hottest_unclaimed = [
         item
         for item in hypotheses
-        if item.get("status") in {"open", "supported", "claimed", "testing"}
+        if (item.get("effective_status") or item.get("status")) in {"open", "supported", "claimed", "testing"}
         and not _hypothesis_claim_active(item, now)
         and item.get("status") not in terminal_statuses
     ]
@@ -12200,14 +12214,14 @@ def _hypothesis_situation_report(
         for item in hypotheses
         if requester_key
         and item.get("claim_owner") == requester_key
-        and item.get("status") in {"claimed", "testing"}
+        and (item.get("effective_status") or item.get("status")) in {"claimed", "testing"}
         and _hypothesis_claim_active(item, now)
     ]
     avoid_resurfacing = [item for item in hypotheses if item.get("status") in terminal_statuses]
     live_blockers = [
         item
         for item in hypotheses
-        if item.get("status") in {"claimed", "testing"}
+        if (item.get("effective_status") or item.get("status")) in {"claimed", "testing"}
         and _hypothesis_claim_active(item, now)
         and (not requester_key or item.get("claim_owner") != requester_key)
     ]
@@ -13934,9 +13948,24 @@ async def arsenal_hypotheses(
             SELECT *
             FROM hypotheses
             WHERE ($2::uuid IS NULL OR target_id = $2)
-              AND ($3::text IS NULL OR status = $3)
+              AND (
+                $3::text IS NULL
+                OR status = $3
+                OR (
+                  $3::text = 'open'
+                  AND status IN ('claimed','testing')
+                  AND claim_lease_expires_at IS NOT NULL
+                  AND claim_lease_expires_at < NOW()
+                )
+              )
             ORDER BY
-              CASE status WHEN 'open' THEN 0 WHEN 'supported' THEN 1 WHEN 'claimed' THEN 2 ELSE 3 END,
+              CASE
+                WHEN status = 'open' THEN 0
+                WHEN status IN ('claimed','testing') AND claim_lease_expires_at < NOW() THEN 0
+                WHEN status = 'supported' THEN 1
+                WHEN status = 'claimed' THEN 2
+                ELSE 3
+              END,
               updated_at DESC
             LIMIT $1
             """,

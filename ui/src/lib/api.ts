@@ -328,10 +328,12 @@ export interface Hypothesis {
   confidence: number
   dedupe_key: string
   status: string
+  effective_status?: string
   version: number
   claim_owner?: string | null
   claim_lease_expires_at?: string | null
-  claim_state?: { owner?: string | null; lease_expires_at?: string | null }
+  claim_state?: { owner?: string | null; lease_expires_at?: string | null; active?: boolean; expired?: boolean; effective_status?: string }
+  claimable?: boolean
   smoke_score?: number | null
   evidence_object_ids: string[]
   tool_receipt_ids: string[]
@@ -359,8 +361,10 @@ export interface HypothesisReportItem {
   confidence: number
   dedupe_key: string
   status: string
+  stored_status?: string
+  effective_status?: string
   version: number
-  claim_state?: { owner?: string | null; lease_expires_at?: string | null }
+  claim_state?: { owner?: string | null; lease_expires_at?: string | null; active?: boolean; expired?: boolean; effective_status?: string }
   smoke_score?: number | null
   next_test_action?: Record<string, unknown> | null
   terminal_reason?: string | null
