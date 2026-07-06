@@ -863,8 +863,9 @@ adapt it into ShakerScan's proof model: leads are coordinated work items, not fi
    severity guess, confidence, source (`app_graph`, `source_ingest`, `ai_planner`, `scanner_signal`,
    `ai_gate`, `model_intake`, `manual`), dedupe key, status, version, claim lease, smoke score,
    evidence refs, tool receipt refs, next test action, endorsements, refutations, and terminal reason.
-   `/arsenal/hypotheses` records/endorses deduped leads, lists them read-only, and exposes
-   compare-and-set claim leasing without creating findings or queueing work.
+   `/arsenal/hypotheses` records/endorses deduped leads, lists them read-only, exposes
+   compare-and-set claim leasing, and `/settings/arsenal` renders the read-only Hypothesis Board
+   without creating findings or queueing work.
 3. Make an `ApplicationGraph` consumer that emits BOLA/BFLA/BOPLA/tenant/workflow hypotheses from
    persisted producer->object->consumer facts. Example: "`GET /api/orders` produces `order.id` owned
    by user1; `GET /api/orders/{id}` consumes it -> test user2 read/mutate."

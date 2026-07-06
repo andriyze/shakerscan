@@ -314,6 +314,39 @@ export interface CampaignAction {
   created_at?: string
 }
 
+export interface Hypothesis {
+  id: string
+  target_id?: string | null
+  campaign_id?: string | null
+  campaign_action_id?: string | null
+  source: string
+  family: string
+  cwe?: string | null
+  title?: string | null
+  description?: string | null
+  severity_guess?: string | null
+  confidence: number
+  dedupe_key: string
+  status: string
+  version: number
+  claim_owner?: string | null
+  claim_lease_expires_at?: string | null
+  claim_state?: { owner?: string | null; lease_expires_at?: string | null }
+  smoke_score?: number | null
+  evidence_object_ids: string[]
+  tool_receipt_ids: string[]
+  next_test_action?: Record<string, unknown> | null
+  endorsements: Array<Record<string, unknown>>
+  refutations: Array<Record<string, unknown>>
+  terminal_reason?: string | null
+  metadata_json: Record<string, unknown>
+  can_promote_finding: boolean
+  execution_enabled: boolean
+  created_by?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
 export interface LocalAgentPlanRequest {
   agent: string
   context_pack_id: string
@@ -1661,6 +1694,12 @@ export async function getCommandResults(limit: number = 20): Promise<{ command_r
 export async function getCampaignActions(limit: number = 20): Promise<{ campaign_actions: CampaignAction[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/campaign-actions?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign action records'))
+  return res.json()
+}
+
+export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: Hypothesis[]; execution_enabled: boolean; count: number }> {
+  const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypotheses'))
   return res.json()
 }
 

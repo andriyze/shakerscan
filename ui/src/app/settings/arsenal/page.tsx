@@ -14,6 +14,7 @@ import {
   getArsenalContracts,
   getCampaignActions,
   getCommandResults,
+  getHypotheses,
   generateAgentContextPackFromTarget,
   getOperationPlans,
   getArsenalTools,
@@ -31,6 +32,7 @@ import {
   type ArsenalContractsResponse,
   type CampaignAction,
   type CommandResult,
+  type Hypothesis,
   type OperationPlan,
   type OperationPlanResponse,
   type ArsenalTool,
@@ -224,6 +226,46 @@ function CampaignActionRow({ action }: { action: CampaignAction }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function HypothesisRow({ hypothesis }: { hypothesis: Hypothesis }) {
+  const claimOwner = hypothesis.claim_state?.owner || hypothesis.claim_owner
+  return (
+    <div className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all font-mono text-sm text-white">{hypothesis.family}</span>
+            <Badge className={statusClass(hypothesis.status)}>{hypothesis.status}</Badge>
+            {hypothesis.severity_guess && <Badge className={riskClass(hypothesis.severity_guess)}>{hypothesis.severity_guess}</Badge>}
+            <Badge className="bg-gray-800 text-gray-300">{hypothesis.source}</Badge>
+          </div>
+          <p className="mt-1 break-words text-sm text-gray-400">
+            {hypothesis.title || hypothesis.description || hypothesis.dedupe_key}
+          </p>
+        </div>
+        <div className="text-right text-xs text-gray-500">
+          <div className="font-mono text-gray-300">{Math.round((hypothesis.confidence || 0) * 100)}%</div>
+          <div>confidence</div>
+        </div>
+      </div>
+      <div className="mt-2 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
+        <div>hypothesis: <span className="break-all font-mono text-gray-300">{hypothesis.id}</span></div>
+        <div>version: <span className="font-mono text-gray-300">{hypothesis.version}</span></div>
+        <div>campaign: <span className="break-all font-mono text-gray-300">{hypothesis.campaign_id || 'none'}</span></div>
+        <div>claim: <span className="break-all font-mono text-gray-300">{claimOwner || 'open'}</span></div>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {hypothesis.evidence_object_ids.slice(0, 3).map((id) => (
+          <Badge key={id} className="bg-gray-800 text-gray-300">evidence {id.slice(0, 8)}</Badge>
+        ))}
+        {hypothesis.tool_receipt_ids.slice(0, 3).map((id) => (
+          <Badge key={id} className="bg-gray-800 text-gray-300">tool {id.slice(0, 8)}</Badge>
+        ))}
+        <Badge className="bg-gray-800 text-gray-300">not a finding</Badge>
+      </div>
     </div>
   )
 }
@@ -428,6 +470,7 @@ export default function ArsenalSettingsPage() {
   const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
   const [recentCommandResults, setRecentCommandResults] = useState<CommandResult[]>([])
   const [recentCampaignActions, setRecentCampaignActions] = useState<CampaignAction[]>([])
+  const [recentHypotheses, setRecentHypotheses] = useState<Hypothesis[]>([])
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
@@ -458,6 +501,7 @@ export default function ArsenalSettingsPage() {
         planData,
         commandResultData,
         campaignActionData,
+        hypothesisData,
         contextData,
         traceData,
       ] = await Promise.all([
@@ -468,6 +512,7 @@ export default function ArsenalSettingsPage() {
         getOperationPlans(5),
         getCommandResults(5),
         getCampaignActions(5),
+        getHypotheses(5),
         getAgentContextPacks(5),
         getAgentDecisionTraces(5),
       ])
@@ -478,6 +523,7 @@ export default function ArsenalSettingsPage() {
       setRecentPlans(planData.operation_plans)
       setRecentCommandResults(commandResultData.command_results)
       setRecentCampaignActions(campaignActionData.campaign_actions)
+      setRecentHypotheses(hypothesisData.hypotheses)
       setRecentContextPacks(contextData.context_packs)
       setRecentDecisionTraces(traceData.decision_traces)
     } catch (err) {
@@ -837,6 +883,33 @@ export default function ArsenalSettingsPage() {
           <div className="grid gap-3 xl:grid-cols-2">
             {contractEntries.map(([name, contract]) => (
               <ContractRow key={name} name={name} contract={contract} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Boxes className="h-4 w-4 text-violet-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Hypothesis Board</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">leads only</Badge>
+        </div>
+        <p className="mb-3 text-sm text-gray-400">
+          Deduped leads for graph, scanner, AI Gate, Model Intake, and manual signals. These records cannot verify findings.
+        </p>
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+        ) : recentHypotheses.length === 0 ? (
+          <EmptyState message="No hypotheses recorded yet." />
+        ) : (
+          <div className="grid gap-2">
+            {recentHypotheses.slice(0, 5).map((hypothesis) => (
+              <HypothesisRow key={hypothesis.id} hypothesis={hypothesis} />
             ))}
           </div>
         )}
