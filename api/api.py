@@ -2286,11 +2286,9 @@ async def _run_scheduled_retention_sweep(
     now: datetime,
 ) -> bool:
     schedule_id = schedule["id"]
-    original_pool = db_pool
     try:
         req = _scheduled_retention_sweep_request(scan_options)
-        globals()["db_pool"] = pool
-        result = await evidence_retention_sweep(req)
+        result = await _evidence_retention_sweep(req, pool=pool)
         next_run = calculate_next_run(
             schedule["frequency"],
             schedule["day_of_week"],
@@ -2318,11 +2316,9 @@ async def _run_scheduled_retention_sweep(
                 "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
                 retry_at,
                 schedule_id,
-            )
+        )
         print(f"[scheduler] Evidence retention sweep failed for schedule {str(schedule_id)[:8]}: {exc}", flush=True)
         return False
-    finally:
-        globals()["db_pool"] = original_pool
 
 
 async def run_due_schedules(pool: asyncpg.Pool):
@@ -19815,13 +19811,17 @@ async def evidence_export_bundle(
 
 @app.post("/evidence/retention/sweep")
 async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
+    return await _evidence_retention_sweep(req, pool=db_pool)
+
+
+async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool: asyncpg.Pool):
     """Preview or execute bounded evidence-object retention cleanup.
 
     Defaults to dry-run and never selects legal_hold evidence. Execution removes
     matching DB rows and, when requested, their local object-store files.
     """
     command_result: dict[str, Any] | None = None
-    async with db_pool.acquire() as conn:
+    async with pool.acquire() as conn:
         # Executing the sweep (dry_run=false) deletes durable evidence, so it is a
         # gated state-changing action: it goes through the same approval-receipt
         # enforcement as scans/retests. A preview (dry_run=true) is read-only.

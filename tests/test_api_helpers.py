@@ -772,6 +772,8 @@ def test_run_due_schedules_runs_retention_sweep_schedule(monkeypatch):
     }
     conn = _FakeConn([schedule])
     redis_client = _RecordingRedis()
+    sentinel_pool = object()
+    monkeypatch.setattr(api_module, "db_pool", sentinel_pool)
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
     asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
@@ -781,6 +783,7 @@ def test_run_due_schedules_runs_retention_sweep_schedule(monkeypatch):
     assert "UPDATE schedules SET last_run_at" in executed_sql
     assert redis_client.rpush_calls == []
     assert redis_client.hset_calls == []
+    assert api_module.db_pool is sentinel_pool
 
 
 def test_run_due_schedules_retries_invalid_retention_sweep_schedule(monkeypatch):
