@@ -263,6 +263,95 @@ export interface OperationPlanResponse {
   validated: boolean
 }
 
+export interface AgentContextPackRequest {
+  context_version?: string
+  target_id?: string
+  context_hash: string
+  target_summary?: Record<string, unknown>
+  current_surface?: Record<string, unknown>
+  current_gaps?: Array<Record<string, unknown>>
+  hypotheses_summary?: Array<Record<string, unknown>>
+  findings_summary?: Array<Record<string, unknown>>
+  allowed_commands?: string[]
+  disallowed_commands?: Array<Record<string, unknown>>
+  known_preconditions?: Record<string, unknown>
+  redaction_profile?: string
+  created_by?: string
+}
+
+export interface AgentContextPack {
+  id: string
+  context_version: string
+  target_id?: string | null
+  context_hash: string
+  target_summary: Record<string, unknown>
+  current_surface: Record<string, unknown>
+  current_gaps: Array<Record<string, unknown>>
+  hypotheses_summary: Array<Record<string, unknown>>
+  findings_summary: Array<Record<string, unknown>>
+  allowed_commands: string[]
+  disallowed_commands: Array<Record<string, unknown>>
+  known_preconditions: Record<string, unknown>
+  redaction_profile: string
+  context_pack: Record<string, unknown>
+  validation_errors: string[]
+  validation_warnings: string[]
+  status: string
+  created_by?: string | null
+  created_at?: string
+  execution_enabled: boolean
+}
+
+export interface AgentContextPackResponse {
+  context_pack: AgentContextPack
+  execution_enabled: boolean
+  validated: boolean
+}
+
+export interface AgentDecisionTraceStep {
+  kind: string
+  command?: string | null
+  status?: string
+  reason?: string | null
+  refs?: string[]
+}
+
+export interface AgentDecisionTraceRequest {
+  operation_plan_id?: string
+  context_pack_id?: string
+  planner?: Record<string, unknown>
+  context_hash: string
+  command_schema_version?: string
+  steps?: AgentDecisionTraceStep[]
+  final_rationale?: string
+  redaction_profile?: string
+  created_by?: string
+}
+
+export interface AgentDecisionTrace {
+  id: string
+  operation_plan_id?: string | null
+  context_pack_id?: string | null
+  planner: Record<string, unknown>
+  context_hash: string
+  command_schema_version: string
+  steps: AgentDecisionTraceStep[]
+  final_rationale?: string | null
+  redaction_profile: string
+  validation_errors: string[]
+  validation_warnings: string[]
+  status: string
+  created_by?: string | null
+  created_at?: string
+  execution_enabled: boolean
+}
+
+export interface AgentDecisionTraceResponse {
+  decision_trace: AgentDecisionTrace
+  execution_enabled: boolean
+  validated: boolean
+}
+
 export interface ArsenalTool {
   tool_name: string
   family: string
@@ -1394,6 +1483,38 @@ export async function createOperationPlan(payload: OperationPlanRequest): Promis
 export async function getOperationPlans(limit: number = 20): Promise<{ operation_plans: OperationPlan[]; execution_enabled: boolean; count: number }> {
   const res = await fetch(`${API_URL}/arsenal/plans?limit=${limit}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load operation plans'))
+  return res.json()
+}
+
+export async function createAgentContextPack(payload: AgentContextPackRequest): Promise<AgentContextPackResponse> {
+  const res = await fetch(`${API_URL}/arsenal/context-packs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to record context pack'))
+  return res.json()
+}
+
+export async function getAgentContextPacks(limit: number = 20): Promise<{ context_packs: AgentContextPack[]; execution_enabled: boolean; count: number }> {
+  const res = await fetch(`${API_URL}/arsenal/context-packs?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load context packs'))
+  return res.json()
+}
+
+export async function createAgentDecisionTrace(payload: AgentDecisionTraceRequest): Promise<AgentDecisionTraceResponse> {
+  const res = await fetch(`${API_URL}/arsenal/decision-traces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to record decision trace'))
+  return res.json()
+}
+
+export async function getAgentDecisionTraces(limit: number = 20): Promise<{ decision_traces: AgentDecisionTrace[]; execution_enabled: boolean; count: number }> {
+  const res = await fetch(`${API_URL}/arsenal/decision-traces?limit=${limit}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load decision traces'))
   return res.json()
 }
 

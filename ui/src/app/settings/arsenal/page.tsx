@@ -3,13 +3,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Boxes, CheckCircle2, RefreshCw, ShieldCheck, TerminalSquare, XCircle } from 'lucide-react'
 import {
+  createAgentContextPack,
+  createAgentDecisionTrace,
   createOperationPlan,
   createApprovalReceipt,
+  getAgentContextPacks,
+  getAgentDecisionTraces,
   getArsenalCommands,
   getArsenalContracts,
   getOperationPlans,
   getArsenalTools,
   previewScopeReceipt,
+  type AgentContextPack,
+  type AgentContextPackResponse,
+  type AgentDecisionTrace,
+  type AgentDecisionTraceResponse,
   type ApprovalReceipt,
   type ArsenalCommand,
   type ArsenalCommandsResponse,
@@ -230,6 +238,12 @@ export default function ArsenalSettingsPage() {
   const [recentPlans, setRecentPlans] = useState<OperationPlan[]>([])
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
+  const [contextResult, setContextResult] = useState<AgentContextPackResponse | null>(null)
+  const [traceResult, setTraceResult] = useState<AgentDecisionTraceResponse | null>(null)
+  const [recentContextPacks, setRecentContextPacks] = useState<AgentContextPack[]>([])
+  const [recentDecisionTraces, setRecentDecisionTraces] = useState<AgentDecisionTrace[]>([])
+  const [contextTraceLoading, setContextTraceLoading] = useState(false)
+  const [contextTraceError, setContextTraceError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -239,16 +253,20 @@ export default function ArsenalSettingsPage() {
     if (probeVersions) setProbing(true)
     else setLoading(true)
     try {
-      const [commandData, contractData, toolData, planData] = await Promise.all([
+      const [commandData, contractData, toolData, planData, contextData, traceData] = await Promise.all([
         getArsenalCommands(),
         getArsenalContracts(),
         getArsenalTools({ probeVersions }),
         getOperationPlans(5),
+        getAgentContextPacks(5),
+        getAgentDecisionTraces(5),
       ])
       setCommands(commandData)
       setContracts(contractData)
       setTools(toolData)
       setRecentPlans(planData.operation_plans)
+      setRecentContextPacks(contextData.context_packs)
+      setRecentDecisionTraces(traceData.decision_traces)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Command Arsenal status')
     } finally {
@@ -369,6 +387,79 @@ export default function ArsenalSettingsPage() {
       setPlanError(err instanceof Error ? err.message : 'Failed to validate operation plan')
     } finally {
       setPlanLoading(false)
+    }
+  }
+
+  async function recordContextAndTrace() {
+    setContextTraceLoading(true)
+    setContextTraceError(null)
+    try {
+      const allowedCommands = commands?.commands
+        .filter((command) => command.status === 'read_only' || command.status === 'dry_run')
+        .slice(0, 12)
+        .map((command) => command.name) || ['target.list', 'asm.gaps', 'operation_plan.preview']
+      const contextResponse = await createAgentContextPack({
+        context_hash: planContextHash,
+        target_summary: {
+          url: scopeUrl,
+          environment: scopeEnvironment,
+          allowed_hosts: splitLines(scopeHosts),
+          allowed_root_domains: splitLines(scopeRoots),
+        },
+        current_surface: {
+          source: 'settings-arsenal',
+          commands_loaded: commands?.commands.length || 0,
+          tools_loaded: tools?.tools.length || 0,
+        },
+        current_gaps: [
+          { kind: 'operator_review', reason: planObjective },
+        ],
+        findings_summary: [],
+        hypotheses_summary: [],
+        allowed_commands: allowedCommands,
+        disallowed_commands: (commands?.commands || [])
+          .filter((command) => command.status === 'gated' || command.status === 'catalog_only' || command.status === 'out_of_scope')
+          .slice(0, 8)
+          .map((command) => ({ command: command.name, reason: `${command.status}:${command.risk_tier}` })),
+        known_preconditions: {
+          scope_receipt: scopePreview?.receipt_id || 'missing',
+          approval_receipt: approvalReceipt?.approved_by ? approvalReceipt.id : 'missing',
+          execution_enabled: false,
+        },
+        created_by: approvalActor.trim() || 'operator',
+      })
+      const traceResponse = await createAgentDecisionTrace({
+        context_pack_id: contextResponse.context_pack.id,
+        operation_plan_id: planResult?.operation_plan.id,
+        planner: { kind: 'ui', name: 'settings-arsenal', version: commands?.schema_version || 'unknown' },
+        context_hash: contextResponse.context_pack.context_hash,
+        command_schema_version: commands?.schema_version || 'unknown',
+        steps: [
+          {
+            kind: 'proposed_action',
+            command: planCommand,
+            status: 'planned',
+            reason: 'operator dry-run planning trace',
+            refs: planResult?.operation_plan.id ? [planResult.operation_plan.id] : [contextResponse.context_pack.id],
+          },
+          {
+            kind: 'summary',
+            status: 'recorded',
+            reason: 'No command execution was requested or enabled.',
+            refs: [contextResponse.context_pack.id],
+          },
+        ],
+        final_rationale: 'Recorded bounded context and dry-run decision trace for operator review.',
+        created_by: approvalActor.trim() || 'operator',
+      })
+      setContextResult(contextResponse)
+      setTraceResult(traceResponse)
+      setRecentContextPacks((packs) => [contextResponse.context_pack, ...packs].slice(0, 5))
+      setRecentDecisionTraces((traces) => [traceResponse.decision_trace, ...traces].slice(0, 5))
+    } catch (err) {
+      setContextTraceError(err instanceof Error ? err.message : 'Failed to record context and trace')
+    } finally {
+      setContextTraceLoading(false)
     }
   }
 
@@ -539,6 +630,109 @@ export default function ArsenalSettingsPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <TerminalSquare className="h-4 w-4 text-blue-300" aria-hidden="true" />
+            <h2 className="font-medium text-white">Context Packs and Decision Traces</h2>
+          </div>
+          <Badge className="bg-gray-800 text-gray-300">dry-run records</Badge>
+        </div>
+        <div className="rounded-md border border-gray-800 bg-gray-950 p-3 text-sm text-gray-400">
+          <div className="grid gap-2 md:grid-cols-3">
+            <div>
+              <span className="text-xs text-gray-500">context hash</span>
+              <div className="truncate font-mono text-xs text-gray-300">{planContextHash}</div>
+            </div>
+            <div>
+              <span className="text-xs text-gray-500">planner</span>
+              <div className="text-gray-300">settings-arsenal</div>
+            </div>
+            <div>
+              <span className="text-xs text-gray-500">execution</span>
+              <div className="text-gray-300">disabled</div>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void recordContextAndTrace()}
+              disabled={contextTraceLoading || !commands?.commands.length}
+            >
+              {contextTraceLoading ? 'Recording...' : 'Record context + trace'}
+            </Button>
+            {contextTraceError && <span role="alert" className="text-sm text-red-300">{contextTraceError}</span>}
+          </div>
+        </div>
+        {(contextResult || traceResult) && (
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {contextResult && (
+              <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={contextResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
+                    {contextResult.context_pack.status}
+                  </Badge>
+                  <span className="font-mono text-xs text-gray-400">{contextResult.context_pack.id}</span>
+                  <span className="text-xs text-gray-500">context pack</span>
+                </div>
+                <div className="mt-2 text-xs text-gray-500">
+                  errors: <span className="text-gray-300">{contextResult.context_pack.validation_errors.length ? contextResult.context_pack.validation_errors.join(', ') : 'none'}</span>
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  allowed commands: <span className="text-gray-300">{contextResult.context_pack.allowed_commands.slice(0, 6).join(', ') || 'none'}</span>
+                </div>
+              </div>
+            )}
+            {traceResult && (
+              <div className="rounded-md border border-gray-800 bg-gray-950 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={traceResult.validated ? statusClass('read_only') : statusClass('out_of_scope')}>
+                    {traceResult.decision_trace.status}
+                  </Badge>
+                  <span className="font-mono text-xs text-gray-400">{traceResult.decision_trace.id}</span>
+                  <span className="text-xs text-gray-500">decision trace</span>
+                </div>
+                <div className="mt-2 text-xs text-gray-500">
+                  errors: <span className="text-gray-300">{traceResult.decision_trace.validation_errors.length ? traceResult.decision_trace.validation_errors.join(', ') : 'none'}</span>
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  steps: <span className="text-gray-300">{traceResult.decision_trace.steps.length}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {(recentContextPacks.length > 0 || recentDecisionTraces.length > 0) && (
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <div className="space-y-2">
+              <h3 className="text-xs font-medium uppercase text-gray-500">Recent context packs</h3>
+              {recentContextPacks.slice(0, 5).map((pack) => (
+                <div key={pack.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-gray-400">{pack.id}</span>
+                    <Badge className={pack.status === 'recorded' ? statusClass('read_only') : statusClass('out_of_scope')}>{pack.status}</Badge>
+                  </div>
+                  <div className="mt-1 truncate font-mono text-xs text-gray-600">{pack.context_hash}</div>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xs font-medium uppercase text-gray-500">Recent decision traces</h3>
+              {recentDecisionTraces.slice(0, 5).map((trace) => (
+                <div key={trace.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-gray-400">{trace.id}</span>
+                    <Badge className={trace.status === 'recorded' ? statusClass('read_only') : statusClass('out_of_scope')}>{trace.status}</Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-gray-600">{trace.steps.length} steps / {trace.command_schema_version}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </Card>

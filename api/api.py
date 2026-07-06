@@ -3177,6 +3177,42 @@ class OperationPlanRequest(BaseModel):
     created_by: Optional[str] = None
 
 
+class AgentContextPackRequest(BaseModel):
+    context_version: str = Field(default="2026-07-05.v1")
+    target_id: Optional[str] = None
+    context_hash: str
+    target_summary: dict[str, Any] = Field(default_factory=dict)
+    current_surface: dict[str, Any] = Field(default_factory=dict)
+    current_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    hypotheses_summary: list[dict[str, Any]] = Field(default_factory=list)
+    findings_summary: list[dict[str, Any]] = Field(default_factory=list)
+    allowed_commands: list[str] = Field(default_factory=list)
+    disallowed_commands: list[dict[str, Any]] = Field(default_factory=list)
+    known_preconditions: dict[str, Any] = Field(default_factory=dict)
+    redaction_profile: str = Field(default="agent-plan-default")
+    created_by: Optional[str] = None
+
+
+class AgentDecisionTraceStep(BaseModel):
+    kind: str
+    command: Optional[str] = None
+    status: str = Field(default="planned")
+    reason: Optional[str] = None
+    refs: list[str] = Field(default_factory=list)
+
+
+class AgentDecisionTraceRequest(BaseModel):
+    operation_plan_id: Optional[str] = None
+    context_pack_id: Optional[str] = None
+    planner: dict[str, Any] = Field(default_factory=dict)
+    context_hash: str
+    command_schema_version: str = Field(default="unknown")
+    steps: list[AgentDecisionTraceStep] = Field(default_factory=list)
+    final_rationale: Optional[str] = None
+    redaction_profile: str = Field(default="agent-trace-default")
+    created_by: Optional[str] = None
+
+
 class FindingsBulkRetestRequest(BaseModel):
     finding_ids: Optional[list[str]] = None
     severity: Optional[str] = None
@@ -11729,6 +11765,39 @@ def _public_operation_plan_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_agent_context_pack_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "target_summary",
+        "current_surface",
+        "current_gaps",
+        "hypotheses_summary",
+        "findings_summary",
+        "allowed_commands",
+        "disallowed_commands",
+        "known_preconditions",
+        "context_pack",
+        "validation_errors",
+        "validation_warnings",
+    ):
+        payload[key] = _decode_json_value(payload.get(key))
+    payload["execution_enabled"] = False
+    return payload
+
+
+def _public_agent_decision_trace_row(row: Any) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    for key in (
+        "planner",
+        "steps",
+        "validation_errors",
+        "validation_warnings",
+    ):
+        payload[key] = _decode_json_value(payload.get(key))
+    payload["execution_enabled"] = False
+    return payload
+
+
 RISK_TIER_ORDER = {
     "read_only": 0,
     "passive": 1,
@@ -11781,6 +11850,207 @@ def _canonical_operation_plan(req: OperationPlanRequest) -> dict[str, Any]:
     payload["budget"] = redact_sensitive(payload.get("budget") or {}, redact_strings=True, scrub_text=True)
     payload["constraints"] = redact_sensitive(payload.get("constraints") or {}, redact_strings=True, scrub_text=True)
     return payload
+
+
+FORBIDDEN_AGENT_CONTEXT_KEYS = {
+    "authorization",
+    "authorization_header",
+    "auth_header",
+    "bearer_token",
+    "cookie",
+    "cookies",
+    "private_key",
+    "raw_private_key",
+    "raw_request",
+    "raw_response",
+    "raw_transcript",
+    "raw_transcripts",
+    "secret",
+    "token",
+}
+
+
+def _contains_forbidden_context_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in FORBIDDEN_AGENT_CONTEXT_KEYS:
+                return True
+            if _contains_forbidden_context_key(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_forbidden_context_key(item) for item in value)
+    return False
+
+
+def _redact_agent_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    scrubbed = redact_text(value)
+    return re.sub(r"(?i)\bsecret[-_a-z0-9]*\b", "***", scrubbed)
+
+
+def _redact_agent_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for key, nested in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in FORBIDDEN_AGENT_CONTEXT_KEYS and nested not in (None, "", [], {}):
+                out[key] = "***"
+            else:
+                out[key] = _redact_agent_payload(nested)
+        return redact_sensitive(out, redact_strings=True, scrub_text=True)
+    if isinstance(value, list):
+        return [_redact_agent_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_agent_payload(item) for item in value)
+    if isinstance(value, str):
+        return _redact_agent_text(value)
+    return value
+
+
+def _canonical_agent_context_pack(req: AgentContextPackRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    payload["context_version"] = str(payload.get("context_version") or "").strip() or "2026-07-05.v1"
+    payload["context_hash"] = str(payload.get("context_hash") or "").strip().lower()
+    payload["redaction_profile"] = str(payload.get("redaction_profile") or "").strip() or "agent-plan-default"
+    payload["allowed_commands"] = [
+        str(item).strip() for item in payload.get("allowed_commands", []) if str(item).strip()
+    ]
+    payload["target_summary"] = _redact_agent_payload(payload.get("target_summary") or {})
+    payload["current_surface"] = _redact_agent_payload(payload.get("current_surface") or {})
+    payload["current_gaps"] = _redact_agent_payload(payload.get("current_gaps") or [])
+    payload["hypotheses_summary"] = _redact_agent_payload(payload.get("hypotheses_summary") or [])
+    payload["findings_summary"] = _redact_agent_payload(payload.get("findings_summary") or [])
+    payload["disallowed_commands"] = _redact_agent_payload(payload.get("disallowed_commands") or [])
+    payload["known_preconditions"] = _redact_agent_payload(payload.get("known_preconditions") or {})
+    return payload
+
+
+async def _validate_agent_context_pack(conn, req: AgentContextPackRequest) -> tuple[dict[str, Any], list[str], list[str], str]:
+    original = req.model_dump(mode="json")
+    payload = _canonical_agent_context_pack(req)
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("context_hash") or "")):
+        errors.append("context_hash_must_be_sha256_hex")
+    if _contains_forbidden_context_key(original):
+        errors.append("context_pack_contains_forbidden_raw_or_secret_field")
+    target_uuid = None
+    target_id = str(payload.get("target_id") or "").strip()
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(target_id)
+        except ValueError:
+            errors.append("target_id_must_be_uuid")
+        else:
+            exists = await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid)
+            if not exists:
+                errors.append("target_not_found")
+    commands = _operation_plan_allowed_commands()
+    for name in payload.get("allowed_commands") or []:
+        if name not in commands:
+            errors.append(f"allowed_command_unknown:{name}")
+    for item in payload.get("disallowed_commands") or []:
+        if isinstance(item, dict):
+            command = str(item.get("command") or "").strip()
+            if command and command not in commands:
+                warnings.append(f"disallowed_command_unknown:{command}")
+    if not payload.get("target_summary"):
+        warnings.append("target_summary_empty")
+    if not payload.get("allowed_commands"):
+        warnings.append("allowed_commands_empty")
+    payload["target_id"] = str(target_uuid) if target_uuid else None
+    payload["context_pack"] = {
+        "context_version": payload["context_version"],
+        "target_summary": payload.get("target_summary") or {},
+        "current_surface": payload.get("current_surface") or {},
+        "current_gaps": payload.get("current_gaps") or [],
+        "hypotheses_summary": payload.get("hypotheses_summary") or [],
+        "findings_summary": payload.get("findings_summary") or [],
+        "allowed_commands": payload.get("allowed_commands") or [],
+        "disallowed_commands": payload.get("disallowed_commands") or [],
+        "known_preconditions": payload.get("known_preconditions") or {},
+        "redaction_profile": payload["redaction_profile"],
+        "context_hash": payload["context_hash"],
+    }
+    return payload, errors, warnings, "invalid" if errors else "recorded"
+
+
+def _canonical_agent_decision_trace(req: AgentDecisionTraceRequest) -> dict[str, Any]:
+    payload = req.model_dump(mode="json")
+    payload["context_hash"] = str(payload.get("context_hash") or "").strip().lower()
+    payload["command_schema_version"] = str(payload.get("command_schema_version") or "").strip() or "unknown"
+    payload["redaction_profile"] = str(payload.get("redaction_profile") or "").strip() or "agent-trace-default"
+    payload["planner"] = _redact_agent_payload(payload.get("planner") or {})
+    payload["steps"] = [
+        {
+            "kind": str(step.get("kind") or "").strip(),
+            "command": str(step.get("command") or "").strip() or None,
+            "status": str(step.get("status") or "planned").strip() or "planned",
+            "reason": _redact_agent_text(str(step.get("reason") or "").strip()) if step.get("reason") else None,
+            "refs": [str(ref).strip() for ref in step.get("refs", []) if str(ref).strip()],
+        }
+        for step in payload.get("steps", [])
+        if str(step.get("kind") or "").strip()
+    ]
+    if payload.get("final_rationale"):
+        payload["final_rationale"] = _redact_agent_text(str(payload.get("final_rationale") or ""))
+    return payload
+
+
+async def _validate_agent_decision_trace(conn, req: AgentDecisionTraceRequest) -> tuple[dict[str, Any], list[str], list[str], str]:
+    original = req.model_dump(mode="json")
+    payload = _canonical_agent_decision_trace(req)
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("context_hash") or "")):
+        errors.append("context_hash_must_be_sha256_hex")
+    if _contains_forbidden_context_key(original):
+        errors.append("decision_trace_contains_forbidden_raw_or_secret_field")
+    if not payload.get("steps"):
+        errors.append("steps_required")
+    commands = _operation_plan_allowed_commands()
+    for index, step in enumerate(payload.get("steps") or []):
+        command_name = step.get("command")
+        if command_name and command_name not in commands:
+            errors.append(f"step_{index}_unknown_command:{command_name}")
+        if step.get("kind") == "executed_action":
+            errors.append(f"step_{index}_executed_action_not_allowed_in_dry_run_trace")
+    context_pack_id = str(payload.get("context_pack_id") or "").strip()
+    if context_pack_id:
+        try:
+            context_uuid = uuid.UUID(context_pack_id)
+        except ValueError:
+            errors.append("context_pack_id_must_be_uuid")
+        else:
+            context_row = await conn.fetchrow("SELECT * FROM agent_context_packs WHERE id=$1", context_uuid)
+            if not context_row:
+                errors.append("context_pack_not_found")
+            elif str(context_row["context_hash"] or "").lower() != payload["context_hash"]:
+                errors.append("context_pack_hash_mismatch")
+            payload["context_pack_id"] = str(context_uuid)
+    else:
+        payload["context_pack_id"] = None
+        warnings.append("context_pack_id_missing")
+    operation_plan_id = str(payload.get("operation_plan_id") or "").strip()
+    if operation_plan_id:
+        try:
+            plan_uuid = uuid.UUID(operation_plan_id)
+        except ValueError:
+            errors.append("operation_plan_id_must_be_uuid")
+        else:
+            plan_row = await conn.fetchrow("SELECT context_hash FROM operation_plans WHERE id=$1", plan_uuid)
+            if not plan_row:
+                errors.append("operation_plan_not_found")
+            elif str(plan_row["context_hash"] or "").lower() != payload["context_hash"]:
+                errors.append("operation_plan_hash_mismatch")
+            payload["operation_plan_id"] = str(plan_uuid)
+    else:
+        payload["operation_plan_id"] = None
+    if not payload.get("final_rationale"):
+        warnings.append("final_rationale_empty")
+    return payload, errors, warnings, "invalid" if errors else "recorded"
 
 
 async def _validate_operation_plan(conn, req: OperationPlanRequest) -> tuple[dict[str, Any], list[str], list[str], str]:
@@ -12120,6 +12390,130 @@ async def arsenal_operation_plans(limit: int = Query(20, ge=1, le=100)):
         )
     return {
         "operation_plans": [_public_operation_plan_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
+    }
+
+
+@app.post("/arsenal/context-packs")
+async def arsenal_create_agent_context_pack(req: AgentContextPackRequest):
+    """Validate and persist a bounded AgentContextPack without exposing execution power."""
+    async with db_pool.acquire() as conn:
+        payload, errors, warnings, status = await _validate_agent_context_pack(conn, req)
+        target_id = uuid.UUID(payload["target_id"]) if payload.get("target_id") else None
+        row = await conn.fetchrow(
+            """
+            INSERT INTO agent_context_packs (
+                context_version, target_id, context_hash, target_summary, current_surface,
+                current_gaps, hypotheses_summary, findings_summary, allowed_commands,
+                disallowed_commands, known_preconditions, redaction_profile, context_pack,
+                validation_errors, validation_warnings, status, created_by
+            ) VALUES (
+                $1,$2,$3,$4::jsonb,$5::jsonb,
+                $6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,
+                $10::jsonb,$11::jsonb,$12,$13::jsonb,
+                $14::jsonb,$15::jsonb,$16,$17
+            )
+            RETURNING *
+            """,
+            payload["context_version"],
+            target_id,
+            payload["context_hash"],
+            json.dumps(payload.get("target_summary") or {}),
+            json.dumps(payload.get("current_surface") or {}),
+            json.dumps(payload.get("current_gaps") or []),
+            json.dumps(payload.get("hypotheses_summary") or []),
+            json.dumps(payload.get("findings_summary") or []),
+            json.dumps(payload.get("allowed_commands") or []),
+            json.dumps(payload.get("disallowed_commands") or []),
+            json.dumps(payload.get("known_preconditions") or {}),
+            payload["redaction_profile"],
+            json.dumps(payload.get("context_pack") or {}),
+            json.dumps(errors),
+            json.dumps(warnings),
+            status,
+            str(payload.get("created_by") or "").strip() or None,
+        )
+    return {
+        "context_pack": _public_agent_context_pack_row(row),
+        "execution_enabled": False,
+        "validated": not errors,
+    }
+
+
+@app.get("/arsenal/context-packs")
+async def arsenal_agent_context_packs(limit: int = Query(20, ge=1, le=100)):
+    """Read recent bounded AgentContextPack records."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM agent_context_packs
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return {
+        "context_packs": [_public_agent_context_pack_row(row) for row in rows],
+        "execution_enabled": False,
+        "count": len(rows),
+    }
+
+
+@app.post("/arsenal/decision-traces")
+async def arsenal_create_agent_decision_trace(req: AgentDecisionTraceRequest):
+    """Validate and persist an AgentDecisionTrace audit record without executing actions."""
+    async with db_pool.acquire() as conn:
+        payload, errors, warnings, status = await _validate_agent_decision_trace(conn, req)
+        operation_plan_id = uuid.UUID(payload["operation_plan_id"]) if payload.get("operation_plan_id") else None
+        context_pack_id = uuid.UUID(payload["context_pack_id"]) if payload.get("context_pack_id") else None
+        row = await conn.fetchrow(
+            """
+            INSERT INTO agent_decision_traces (
+                operation_plan_id, context_pack_id, planner, context_hash, command_schema_version,
+                steps, final_rationale, redaction_profile, validation_errors,
+                validation_warnings, status, created_by
+            ) VALUES (
+                $1,$2,$3::jsonb,$4,$5,
+                $6::jsonb,$7,$8,$9::jsonb,
+                $10::jsonb,$11,$12
+            )
+            RETURNING *
+            """,
+            operation_plan_id,
+            context_pack_id,
+            json.dumps(payload.get("planner") or {}),
+            payload["context_hash"],
+            payload["command_schema_version"],
+            json.dumps(payload.get("steps") or []),
+            str(payload.get("final_rationale") or "").strip() or None,
+            payload["redaction_profile"],
+            json.dumps(errors),
+            json.dumps(warnings),
+            status,
+            str(payload.get("created_by") or "").strip() or None,
+        )
+    return {
+        "decision_trace": _public_agent_decision_trace_row(row),
+        "execution_enabled": False,
+        "validated": not errors,
+    }
+
+
+@app.get("/arsenal/decision-traces")
+async def arsenal_agent_decision_traces(limit: int = Query(20, ge=1, le=100)):
+    """Read recent AgentDecisionTrace audit records."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM agent_decision_traces
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return {
+        "decision_traces": [_public_agent_decision_trace_row(row) for row in rows],
         "execution_enabled": False,
         "count": len(rows),
     }

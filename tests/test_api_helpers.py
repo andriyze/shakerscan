@@ -1288,6 +1288,55 @@ def test_operation_plan_canonicalization_redacts_parameters_and_normalizes_lists
     assert canonical["target_scope"]["authorization"] != "Bearer secret"
 
 
+def test_agent_context_pack_canonicalization_redacts_and_normalizes_commands():
+    pack = api_module.AgentContextPackRequest(
+        context_hash="B" * 64,
+        target_summary={"url": "https://app.example.com", "api_key": "secret-value"},
+        current_surface={"endpoint_count": 3, "authorization": "Bearer secret"},
+        allowed_commands=["asm.gaps", ""],
+        known_preconditions={"cookies": "session=secret"},
+    )
+
+    canonical = api_module._canonical_agent_context_pack(pack)
+
+    assert canonical["context_hash"] == "b" * 64
+    assert canonical["allowed_commands"] == ["asm.gaps"]
+    assert canonical["target_summary"]["api_key"] != "secret-value"
+    assert canonical["current_surface"]["authorization"] != "Bearer secret"
+    assert canonical["known_preconditions"]["cookies"] != "session=secret"
+
+
+def test_agent_context_pack_forbidden_raw_fields_are_detected():
+    assert api_module._contains_forbidden_context_key({"raw_transcripts": ["secret"]}) is True
+    assert api_module._contains_forbidden_context_key({"nested": {"private_key": "secret"}}) is True
+    assert api_module._contains_forbidden_context_key({"evidence_ids": ["evidence-1"]}) is False
+
+
+def test_agent_decision_trace_canonicalization_redacts_reason_and_refs():
+    trace = api_module.AgentDecisionTraceRequest(
+        context_hash="C" * 64,
+        planner={"kind": "local_agent", "api_key": "secret-value"},
+        command_schema_version="2026-07-05.v1",
+        steps=[{
+            "kind": "proposed_action",
+            "command": "asm.gaps",
+            "status": "planned",
+            "reason": "Use bearer token secret-token",
+            "refs": [" evidence-1 ", ""],
+        }],
+        final_rationale="No raw secret-token should remain",
+    )
+
+    canonical = api_module._canonical_agent_decision_trace(trace)
+
+    assert canonical["context_hash"] == "c" * 64
+    assert canonical["planner"]["api_key"] != "secret-value"
+    assert canonical["steps"][0]["command"] == "asm.gaps"
+    assert canonical["steps"][0]["refs"] == ["evidence-1"]
+    assert "secret-token" not in canonical["steps"][0]["reason"]
+    assert "secret-token" not in canonical["final_rationale"]
+
+
 def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
     req = api_module.PolicyProfileRequest(
         name="strict",

@@ -33,6 +33,8 @@ def test_command_catalog_contains_required_initial_commands():
         "ai_target.list",
         "model_intake.trust_preview",
         "operation_plan.list",
+        "agent_context_pack.list",
+        "agent_decision_trace.list",
         "evidence.get",
         "deployment.decision",
         "tool.status",
@@ -82,6 +84,28 @@ def test_operation_plan_preview_is_dry_run_not_execution():
     assert cmd["risk_tier"] == "read_only"
     assert cmd["path"] == "/arsenal/plans"
     assert "operation_plan" in cmd["evidence_contract"]
+
+
+def test_agent_context_pack_record_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["agent_context_pack.record"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/arsenal/context-packs"
+    assert "context_pack" in cmd["evidence_contract"]
+
+
+def test_agent_decision_trace_record_is_dry_run_not_execution():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["agent_decision_trace.record"]
+    assert cmd["status"] == "dry_run"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["path"] == "/arsenal/decision-traces"
+    assert "decision_trace" in cmd["evidence_contract"]
 
 
 def test_approval_record_is_gated_not_execution():

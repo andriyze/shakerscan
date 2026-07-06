@@ -1246,6 +1246,67 @@ async def run_schema_migrations(pool) -> None:
                 ON operation_plans(scope_receipt_id, created_at DESC) WHERE scope_receipt_id IS NOT NULL
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_context_packs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    context_version TEXT NOT NULL,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    context_hash TEXT NOT NULL,
+                    target_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    current_surface JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    current_gaps JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    hypotheses_summary JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    findings_summary JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    allowed_commands JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    disallowed_commands JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    known_preconditions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    redaction_profile TEXT NOT NULL DEFAULT 'agent-plan-default',
+                    context_pack JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    validation_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'recorded',
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT agent_context_packs_status_check
+                        CHECK (status IN ('recorded','invalid'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_context_packs_created_at
+                ON agent_context_packs(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_context_packs_hash
+                ON agent_context_packs(context_hash)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_decision_traces (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    operation_plan_id UUID REFERENCES operation_plans(id) ON DELETE SET NULL,
+                    context_pack_id UUID REFERENCES agent_context_packs(id) ON DELETE SET NULL,
+                    planner JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    context_hash TEXT NOT NULL,
+                    command_schema_version TEXT NOT NULL,
+                    steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    final_rationale TEXT,
+                    redaction_profile TEXT NOT NULL DEFAULT 'agent-trace-default',
+                    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    validation_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'recorded',
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT agent_decision_traces_status_check
+                        CHECK (status IN ('recorded','invalid'))
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_decision_traces_created_at
+                ON agent_decision_traces(created_at DESC)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_decision_traces_plan
+                ON agent_decision_traces(operation_plan_id, created_at DESC) WHERE operation_plan_id IS NOT NULL
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_intake_trust_anchors (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     name TEXT NOT NULL UNIQUE,

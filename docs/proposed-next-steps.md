@@ -179,6 +179,12 @@ called at real sites — verify before re-proposing any of it:
   approval receipts, and receipt/scope consistency; `GET /arsenal/plans` returns recent plans with
   validation errors/warnings and `execution_enabled=false`. `/settings/arsenal` can create and review
   these dry-run plan records from the same scope/approval receipt workflow.
+- **AgentContextPack / AgentDecisionTrace persistence phase 1** — `POST /arsenal/context-packs`
+  validates and stores bounded redacted planning context without exposing raw transcripts, secrets, or
+  execution power; `POST /arsenal/decision-traces` validates and stores dry-run operational traces,
+  rejects executed-action claims in traces, checks linked context/plan hashes, and keeps
+  `execution_enabled=false`. `/settings/arsenal` can record and review context/trace rows from the
+  same dry-run operator workflow.
 - **ActionScopeGuard and persisted scope receipt preview phase 1** — `api.action_scope.evaluate_scope`
   now fail-closes malformed URLs, scheme-relative URLs, userinfo, trailing-dot hosts,
   Unicode/punycode confusion, loopback/private/reserved ranges outside lab policy, broad CIDRs,
@@ -302,9 +308,10 @@ raw shell execution or LLM-produced verified findings.
    `OperationPlan`, `AgentContextPack`, `AgentDecisionTrace`, Command Arsenal schemas, command result
    schema, risk tiers, scope receipt, approval receipt, tool receipt, campaign action, hypothesis, and
    `EvidenceInstance` schemas. DONE phase 1 for persisted dry-run `OperationPlan` validation records.
-   Remaining work is AgentContextPack/DecisionTrace persistence, maturity labels on every
-   agent-facing surface, and validators around those contracts; it still must add no new execution
-   power until receipts/gates are durable.
+   DONE phase 1 for persisted `AgentContextPack` and `AgentDecisionTrace` validation records.
+   Remaining work is deeper context-pack generation from real target facts, planner evals, local-agent
+   capability records, and mandatory receipt enforcement; it still must add no new execution power
+   until receipts/gates are durable.
 2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
    a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
    retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
@@ -442,11 +449,14 @@ bounded context packs, decision traces, and audit receipts.
    summary, current surface, ASM/family gaps, hypothesis summary, active findings with proof
    state/evidence IDs, allowed/disallowed commands, known preconditions, worker freshness, and
    `context_hash`. Prefer evidence IDs over raw evidence bodies; never send secrets or full
-   transcripts by default.
+   transcripts by default. DONE phase 1 persistence: `/arsenal/context-packs` validates, redacts,
+   stores, and lists bounded context packs with `execution_enabled=false`.
 3. DONE phase 1: define read-only `AgentDecisionTrace` schema for durable operational trace:
    planner kind/version, context hash, command schema version, proposed/rejected actions, missing
    inputs, approvals/denials, result summaries, evidence refs, and final rationale. Do not store
-   hidden chain-of-thought or raw secrets.
+   hidden chain-of-thought or raw secrets. DONE phase 1 persistence: `/arsenal/decision-traces`
+   validates, stores, and lists dry-run traces, rejects executed-action claims, and verifies linked
+   context/plan hash consistency.
 4. DONE phase 1: add a read-only Command Arsenal schema for product actions, not shell commands.
    `/arsenal/commands` currently includes the initial read-only commands plus gated placeholders for
    state-changing actions such as ASM improve, focused family scans, finding retest, AI probe replay,
