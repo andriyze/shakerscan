@@ -1147,6 +1147,8 @@ class RestJsonConversationTarget:
                 )
                 response_metadata: dict[str, Any] = {
                     "streaming_mode": self.streaming_mode,
+                    "request_url": request_url,
+                    "final_url": str(getattr(response, "url", "") or request_url),
                     "content_type": content_type,
                     "response_truncated": response_truncated,
                     "max_response_bytes": self.max_response_bytes,
@@ -1190,7 +1192,10 @@ class RestJsonConversationTarget:
                 )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-            response_metadata: dict[str, Any] = {"streaming_mode": self.streaming_mode}
+            response_metadata: dict[str, Any] = {
+                "streaming_mode": self.streaming_mode,
+                "request_url": request_url,
+            }
             if self.request_budget is not None:
                 response_metadata["request_budget"] = self.request_budget.to_dict()
             return ConversationExchange(

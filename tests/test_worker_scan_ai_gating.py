@@ -116,8 +116,17 @@ def test_runtime_scope_guard_blocks_dast_when_final_url_missing():
     assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "blocked"
 
 
-def test_runtime_scope_guard_skips_product_executors_until_adapters_capture_destinations():
+def test_runtime_scope_guard_allows_ai_gate_runtime_destination_in_scope():
     result = {
+        "ai_gate": {
+            "runtime_destinations": [
+                {
+                    "label": "ai_gate_request",
+                    "url": "https://app.example.com/api/chat",
+                    "final_url": "https://app.example.com/api/chat",
+                }
+            ],
+        },
         "findings": [{"title": "ai finding"}],
         "result": {"score": 75, "grade": "C"},
     }
@@ -129,7 +138,49 @@ def test_runtime_scope_guard_skips_product_executors_until_adapters_capture_dest
 
     assert checked.get("error") is None
     assert checked["findings"] == [{"title": "ai finding"}]
-    assert "scan_metadata" not in checked
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "allowed"
+
+
+def test_runtime_scope_guard_blocks_model_intake_runtime_redirect_out_of_scope():
+    result = {
+        "model_intake": {
+            "runtime_destinations": [
+                {
+                    "label": "artifact",
+                    "url": "https://app.example.com/models/safe.safetensors",
+                    "final_url": "https://evil.example.net/models/safe.safetensors",
+                }
+            ],
+        },
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 75, "grade": "C"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard(), "run_kind": "model_intake"},
+    )
+
+    assert checked["findings"] == []
+    assert checked["result"]["score"] is None
+    assert checked["scan_metadata"]["runtime_scope_blocked"] is True
+    assert "redirect_out_of_scope" in checked["error"]
+
+
+def test_runtime_scope_guard_blocks_product_executor_without_runtime_destination():
+    result = {
+        "ai_gate": {"runtime_destinations": []},
+        "findings": [{"title": "must not persist"}],
+        "result": {"score": 75, "grade": "C"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard(), "run_kind": "ai_api"},
+    )
+
+    assert checked["findings"] == []
+    assert "runtime_destination_unverified" in checked["error"]
 
 
 class _RuntimeScopeCommandResultConn:

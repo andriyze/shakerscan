@@ -3982,6 +3982,48 @@ def _ai_gate_sensitivity_summary(value: Any) -> dict[str, Any]:
     }
 
 
+def _ai_gate_runtime_destinations(
+    target: dict[str, Any],
+    transcripts: list[dict[str, Any]],
+    widget_summary: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    destinations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> None:
+        raw_url = str(url or "").strip()
+        raw_final = str(final_url or raw_url).strip()
+        if not raw_url and not raw_final:
+            return
+        key = (label, raw_url, raw_final)
+        if key in seen:
+            return
+        seen.add(key)
+        record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
+        if raw_final:
+            record["final_url"] = raw_final
+        if source:
+            record["source"] = source
+        destinations.append(record)
+
+    add("ai_target", target.get("endpoint_url"), source="configured_target")
+    for transcript in transcripts:
+        if not isinstance(transcript, dict):
+            continue
+        records = [transcript]
+        turns = transcript.get("turns")
+        if isinstance(turns, list):
+            records.extend(item for item in turns if isinstance(item, dict))
+        for record in records:
+            metadata = record.get("response_metadata") if isinstance(record.get("response_metadata"), dict) else {}
+            add("ai_gate_request", metadata.get("request_url"), metadata.get("final_url"), source="transcript")
+            widget_evidence = record.get("widget_evidence") if isinstance(record.get("widget_evidence"), dict) else {}
+            add("ai_widget_page", widget_evidence.get("page_url"), source="widget_evidence")
+    if isinstance(widget_summary, dict):
+        add("ai_widget_page", widget_summary.get("page_url"), source="widget_summary")
+    return _redact_secret_like_values(destinations)
+
+
 def _target_snapshot_for_manifest(target: dict[str, Any]) -> dict[str, Any]:
     credential = target.get("credential") if isinstance(target.get("credential"), dict) else {}
     return {
@@ -6373,6 +6415,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     safe_coverage_matrix = _redact_secret_like_values(coverage_matrix)
     safe_control_evidence = _redact_secret_like_values(control_evidence)
     safe_widget_summary = _redact_secret_like_values(widget_summary)
+    runtime_destinations = _ai_gate_runtime_destinations(target, safe_transcripts, safe_widget_summary)
 
     return {
         "result": {
@@ -6385,6 +6428,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             "scan_profile": scan_profile,
             "target_type": target_type,
             "target_name": target.get("name"),
+            "runtime_destinations": runtime_destinations,
             "transcripts": safe_transcripts,
             "statistics": statistics,
             "control_evidence": safe_control_evidence,

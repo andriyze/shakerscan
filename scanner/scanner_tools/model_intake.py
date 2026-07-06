@@ -550,6 +550,11 @@ def _download_http(
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         data = response.read(max_bytes + 1)
         headers = dict(response.headers.items())
+        final_url = ""
+        try:
+            final_url = str(response.geturl() or "")
+        except Exception:
+            final_url = ""
         content_range = _parse_content_range(headers.get("Content-Range"))
         content_length = headers.get("Content-Length")
         try:
@@ -571,6 +576,9 @@ def _download_http(
             truncated = len(data) > max_bytes or (declared_length is not None and declared_length > max_bytes)
         return data[:max_bytes], {
             "source": "http",
+            "requested_url": url,
+            "final_url": final_url or url,
+            "redirected": bool(final_url and final_url != url),
             "status": status,
             "content_type": headers.get("Content-Type"),
             "content_length": content_length,
@@ -633,6 +641,32 @@ def _download_cloud_object(ref: str, metadata: dict[str, Any], max_bytes: int, t
         "fetch_url": fetch_url,
         "cloud": cloud_ref,
     }
+
+
+def _runtime_destination(
+    label: str,
+    configured_url: Any,
+    fetch_meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    url = str(configured_url or "").strip()
+    meta = fetch_meta if isinstance(fetch_meta, dict) else {}
+    requested_url = str(meta.get("requested_url") or meta.get("fetch_url") or meta.get("url") or url).strip()
+    final_url = str(meta.get("final_url") or requested_url or url).strip()
+    if not requested_url and not final_url:
+        return None
+    record: dict[str, Any] = {
+        "label": label,
+        "url": requested_url or final_url,
+    }
+    if final_url:
+        record["final_url"] = final_url
+    if meta.get("status") is not None:
+        record["status"] = meta.get("status")
+    if meta.get("source"):
+        record["source"] = meta.get("source")
+    if meta.get("redirected") is not None:
+        record["redirected"] = bool(meta.get("redirected"))
+    return redact_model_intake_value(record)
 
 
 async def _fetch_artifact(
@@ -2431,6 +2465,20 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
     safe_signature_status = redact_model_intake_value(signature_status)
     safe_aibom = redact_model_intake_value(aibom)
     safe_findings = redact_model_intake_value(findings)
+    runtime_destinations = [
+        item for item in (
+            _runtime_destination("artifact", artifact_ref, artifact_meta),
+            _runtime_destination("metadata", metadata_url, metadata_fetch_meta) if metadata_url else None,
+            _runtime_destination("signature", signature_url, None) if signature_url else None,
+            _runtime_destination(
+                "signature_public_key",
+                options.get("signature_public_key_url") or metadata.get("signature_public_key_url"),
+                None,
+            ) if (options.get("signature_public_key_url") or metadata.get("signature_public_key_url")) else None,
+            _runtime_destination("model_card", model_card, None) if isinstance(model_card, str) else None,
+        )
+        if item
+    ]
     summary = {
         "artifact_name": name,
         "artifact_ref": safe_artifact_ref,
@@ -2491,6 +2539,7 @@ async def run_model_intake_scan(artifact_ref: str, raw_options: dict[str, Any] |
         "target": safe_artifact_ref,
         "model_intake": {
             "summary": summary,
+            "runtime_destinations": runtime_destinations,
             "artifact": {
                 "name": name,
                 "extension": ext,

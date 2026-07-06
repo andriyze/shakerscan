@@ -4548,22 +4548,101 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
             pass
 
 
-def _runtime_scope_guard_applies_to_dast(options: dict[str, Any]) -> bool:
+def _runtime_scope_guard_applies(options: dict[str, Any]) -> bool:
     guard = (options or {}).get("runtime_scope_guard")
-    if not isinstance(guard, dict) or not guard.get("requires_runtime_destination_check"):
-        return False
-    return str((options or {}).get("run_kind") or "").strip() not in (
-        AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
-    )
+    return isinstance(guard, dict) and bool(guard.get("requires_runtime_destination_check"))
+
+
+def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
+    run_kind = str((options or {}).get("run_kind") or "").strip()
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(label: str, url: Any, final_url: Any = None, *, source: str | None = None) -> None:
+        raw_url = str(url or "").strip()
+        raw_final = str(final_url or raw_url).strip()
+        if not raw_url and not raw_final:
+            return
+        key = (label, raw_url, raw_final)
+        if key in seen:
+            return
+        seen.add(key)
+        record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
+        if raw_final:
+            record["final_url"] = raw_final
+        if source:
+            record["source"] = source
+        records.append(record)
+
+    if run_kind in AI_GATE_RUN_KINDS:
+        ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
+        for item in ai_gate.get("runtime_destinations") or ():
+            if isinstance(item, dict):
+                add(str(item.get("label") or "ai_gate"), item.get("url"), item.get("final_url"), source=item.get("source"))
+        return records
+
+    if run_kind in MODEL_INTAKE_RUN_KINDS:
+        model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
+        for item in model_intake.get("runtime_destinations") or ():
+            if isinstance(item, dict):
+                add(str(item.get("label") or "model_intake"), item.get("url"), item.get("final_url"), source=item.get("source"))
+        return records
+
+    http = result.get("http") if isinstance(result.get("http"), dict) else {}
+    add("dast_final_url", http.get("final_url"), source="http_final_url")
+    return records
+
+
+def _evaluate_runtime_destination_records(
+    records: list[dict[str, Any]],
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    if not records:
+        return evaluate_runtime_destination_scope((options or {}).get("runtime_scope_guard"), None)
+
+    checks: list[dict[str, Any]] = []
+    blocked_by: list[str] = []
+    warnings: list[str] = []
+    for record in records:
+        url = str(record.get("url") or "").strip()
+        final_url = str(record.get("final_url") or url).strip()
+        redirects = [final_url] if url and final_url and final_url != url else None
+        check = evaluate_runtime_destination_scope(
+            (options or {}).get("runtime_scope_guard"),
+            url or final_url,
+            redirect_urls=redirects,
+        )
+        check["label"] = record.get("label")
+        check["source"] = record.get("source")
+        check["url"] = url or final_url
+        check["final_url"] = final_url or url
+        checks.append(check)
+        if check.get("status") != "allowed":
+            for reason in check.get("blocked_by") or ():
+                if reason not in blocked_by:
+                    blocked_by.append(reason)
+        for warning in check.get("warnings") or ():
+            if warning not in warnings:
+                warnings.append(warning)
+
+    first = checks[0] if checks else {}
+    return {
+        "verdict": "blocked" if blocked_by else "allowed",
+        "status": "blocked" if blocked_by else "allowed",
+        "blocked_by": blocked_by,
+        "warnings": warnings,
+        "checks": checks,
+        "destinations": records,
+        "runtime_scope_guard_present": True,
+        "scope_receipt_id": first.get("scope_receipt_id") or ((options or {}).get("runtime_scope_guard") or {}).get("scope_receipt_id"),
+    }
 
 
 def _apply_runtime_scope_guard_to_result(result: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
-    """Fail closed when a guarded DAST scan cannot prove its actual final URL is in scope."""
-    if not isinstance(result, dict) or result.get("error") or not _runtime_scope_guard_applies_to_dast(options):
+    """Fail closed when a guarded scan cannot prove touched runtime destinations are in scope."""
+    if not isinstance(result, dict) or result.get("error") or not _runtime_scope_guard_applies(options):
         return result
-    http = result.get("http") if isinstance(result.get("http"), dict) else {}
-    destination = http.get("final_url")
-    check = evaluate_runtime_destination_scope((options or {}).get("runtime_scope_guard"), destination)
+    check = _evaluate_runtime_destination_records(_runtime_destination_records(result, options), options)
     metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
     metadata["runtime_scope_check"] = check
     result["scan_metadata"] = metadata
