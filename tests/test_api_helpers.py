@@ -2306,7 +2306,7 @@ def test_arsenal_execute_gated_without_adapter_is_pending(monkeypatch):
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(
-            command="evidence.retention_sweep", parameters={"dry_run": False},
+            command="approval.record", parameters={"scope_receipt_id": "scope-1"},
             execute=True, confirmations=["confirm_authorized"],
         )
     ))
@@ -2476,6 +2476,77 @@ def test_arsenal_execute_gated_ai_gate_replay_dispatches_when_allowed(monkeypatc
     assert captured["scan_id"] == "44444444-4444-4444-8444-444444444444"
     assert captured["body"].mode == "family"
     assert captured["body"].probe_family == "rag"
+    assert captured["body"].approval_receipt_id == "r"
+
+
+def test_arsenal_execute_gated_ai_gate_scan_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_scan(target_id, body):
+        captured["target_id"] = target_id
+        captured["body"] = body
+        return {"operation_id": "op-ai-scan", "scan_id": "scan-ai", "status": "queued"}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "scan_ai_target", fake_scan)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="ai_gate.scan",
+            parameters={
+                "target_id": "55555555-5555-4555-8555-555555555555",
+                "probe_pack": "shaker-ai-smoke",
+                "scan_profile": "smoke",
+                "environment": "staging",
+            },
+            execute=True,
+            confirmations=["confirm_authorized", "confirm_production_when_applicable"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-ai-scan"
+    assert captured["target_id"] == "55555555-5555-4555-8555-555555555555"
+    assert captured["body"].probe_pack == "shaker-ai-smoke"
+    assert captured["body"].scan_profile == "smoke"
+    assert captured["body"].approval_receipt_id == "r"
+
+
+def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(monkeypatch):
+    monkeypatch.setattr(api_module, "_ai_ops_execute_enabled", lambda: True)
+    captured = {}
+
+    async def fake_validate(*args, **kwargs):
+        return {}
+
+    async def fake_sweep(body):
+        captured["body"] = body
+        return {"operation_id": "op-sweep", "dry_run": False, "deleted_count": 2}
+
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+
+    result = asyncio.run(api_module._arsenal_execute(
+        _BlockedRecordingConn(),
+        api_module.ArsenalExecuteRequest(
+            command="evidence.retention_sweep",
+            parameters={"dry_run": False, "older_than_days": 90, "retention_class": "short"},
+            execute=True,
+            confirmations=["confirm_authorized"],
+            approval_receipt_id="r",
+        ),
+    ))
+
+    assert result["dispatched"] is True
+    assert result["operation_id"] == "op-sweep"
+    assert captured["body"].dry_run is False
+    assert captured["body"].older_than_days == 90
     assert captured["body"].approval_receipt_id == "r"
 
 

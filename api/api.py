@@ -15784,6 +15784,19 @@ async def _arsenal_dispatch_finding_retest(p: dict[str, Any], approval_receipt_i
     return await retest_finding(finding_id, body, mode=p.get("mode"))
 
 
+async def _arsenal_dispatch_ai_gate_scan(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    target_id = str(p.get("target_id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="ai_gate.scan requires a target_id parameter")
+    fields = {
+        k: p[k]
+        for k in ("probe_pack", "scan_profile", "environment", "confirm_production", "ai_judge_enabled", "semantic_judge_enabled")
+        if p.get(k) is not None
+    }
+    body = AITargetScanRequest(approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"), **fields)
+    return await scan_ai_target(target_id, body)
+
+
 def _arsenal_model_fields(model_cls) -> set[str]:
     fields = getattr(model_cls, "model_fields", None)
     if isinstance(fields, dict):
@@ -15838,6 +15851,14 @@ async def _arsenal_dispatch_model_intake_scan(p: dict[str, Any], approval_receip
     return await scan_model_intake(body)
 
 
+async def _arsenal_dispatch_evidence_retention_sweep(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
+    allowed = _arsenal_model_fields(EvidenceRetentionSweepRequest)
+    fields = {k: v for k, v in p.items() if k in allowed and v is not None}
+    fields["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
+    body = EvidenceRetentionSweepRequest(**fields)
+    return await evidence_retention_sweep(body)
+
+
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
         "campaign.list": _arsenal_dispatch_campaign_list,
@@ -15869,8 +15890,10 @@ def _arsenal_gated_adapters() -> dict[str, Any]:
         "asm.recon": _arsenal_dispatch_asm_recon,
         "finding.retest": _arsenal_dispatch_finding_retest,
         "scan.focused_family": _arsenal_dispatch_scan_focused_family,
+        "ai_gate.scan": _arsenal_dispatch_ai_gate_scan,
         "ai_gate.replay_probe": _arsenal_dispatch_ai_gate_replay_probe,
         "model_intake.scan": _arsenal_dispatch_model_intake_scan,
+        "evidence.retention_sweep": _arsenal_dispatch_evidence_retention_sweep,
     }
 
 
@@ -19453,6 +19476,7 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
     Defaults to dry-run and never selects legal_hold evidence. Execution removes
     matching DB rows and, when requested, their local object-store files.
     """
+    command_result: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
         # Executing the sweep (dry_run=false) deletes durable evidence, so it is a
         # gated state-changing action: it goes through the same approval-receipt
@@ -19512,7 +19536,7 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
                     [item for item in candidates if str(item.get("id")) in deleted_ids]
                 )
         if not req.dry_run:
-            await _record_command_result(
+            command_result = await _record_command_result(
                 conn,
                 command="evidence.retention_sweep",
                 status="completed",
@@ -19530,7 +19554,7 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
                 },
                 next_action="/settings/arsenal?tab=timeline",
             )
-    return {
+    response = {
         "dry_run": req.dry_run,
         "candidate_count": len(candidates),
         "deleted_count": deleted_count,
@@ -19540,6 +19564,9 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
         "candidates": candidates,
         "execution_enabled": not req.dry_run,
     }
+    if command_result:
+        response["operation_id"] = command_result["id"]
+    return response
 
 
 @app.get("/evidence/{evidence_id}")

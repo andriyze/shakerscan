@@ -159,6 +159,7 @@ def test_state_changing_commands_are_gated_not_executable_shortcuts():
         "asm.improve",
         "scan.focused_family",
         "finding.retest",
+        "ai_gate.scan",
         "ai_gate.replay_probe",
         "model_intake.scan",
         "approval.record",
@@ -267,6 +268,7 @@ def test_gated_commands_advertise_approval_receipts():
         "asm.improve",
         "scan.focused_family",
         "finding.retest",
+        "ai_gate.scan",
         "ai_gate.replay_probe",
         "model_intake.scan",
     ):

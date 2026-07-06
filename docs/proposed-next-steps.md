@@ -474,11 +474,11 @@ raw shell execution or LLM-produced verified findings.
    `tool.status`, `local_agent.list`, `asm.gaps`, `operation_plan.list`, `agent_context_pack.list`, and
    `hypothesis.list`, read-only target/principal/evidence/export/tool-receipt inspection commands,
    plus gated `asm.improve`, `asm.test`, `asm.recon`, `finding.retest`, `scan.focused_family`,
-   `ai_gate.replay_probe`, and `model_intake.scan` through their existing handlers (each records its
-   own command result); gate-approved commands without a wired adapter return
-   `dispatch_adapter_pending` rather than a shortcut. DONE phase 2 for mission-campaign linkage on
-   dispatched results. Remaining work is AI Gate target-scan and evidence-retention execution
-   adapters plus tool/evidence receipt refs on the returned command result. External binaries may be
+   `ai_gate.scan`, `ai_gate.replay_probe`, `model_intake.scan`, and `evidence.retention_sweep`
+   through their existing handlers (each records its own command result); gate-approved commands
+   without a wired adapter return `dispatch_adapter_pending` rather than a shortcut. DONE phase 2 for
+   mission-campaign linkage on dispatched results. Remaining work is tool/evidence receipt refs on
+   the returned command result. External binaries may be
    used only behind narrow adapters; the command schema still never exposes raw shell, arbitrary
    Python/Node execution, or generic "run this command" behavior.
 4. **Scope and approval receipts for state-changing actions:** DONE phase 1 for central
