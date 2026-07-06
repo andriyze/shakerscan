@@ -3477,6 +3477,7 @@ class EvidenceRetentionSweepRequest(BaseModel):
     retention_class: Optional[str] = Field(default=None, pattern="^(standard|short|audit|legal_hold|sensitive)$")
     limit: int = Field(default=200, ge=1, le=1000)
     delete_local_files: bool = True
+    approval_receipt_id: Optional[str] = None
 
 
 class AgentDecisionTraceStep(BaseModel):
@@ -14442,6 +14443,12 @@ async def _upsert_hypothesis(conn, req: HypothesisRequest) -> dict[str, Any]:
             $12,$13::jsonb,$14::jsonb,$15::jsonb,
             jsonb_build_array($16::jsonb),$17::jsonb,$18
         )
+        ON CONFLICT (COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid), family, dedupe_key)
+        DO UPDATE SET
+            confidence = GREATEST(hypotheses.confidence, EXCLUDED.confidence),
+            endorsements = hypotheses.endorsements || EXCLUDED.endorsements,
+            version = hypotheses.version + 1,
+            updated_at = NOW()
         RETURNING *
         """,
         target_uuid,
@@ -14912,8 +14919,14 @@ async def _parse_local_agent_candidate_plan(
             if not command:
                 errors.append(f"action_{index}_unknown_command:{command_name}")
                 continue
-            if allowed and command_name not in allowed:
-                errors.append(f"action_{index}_command_not_allowed_by_context:{command_name}")
+            if allowed:
+                if command_name not in allowed:
+                    errors.append(f"action_{index}_command_not_allowed_by_context:{command_name}")
+            elif str(command.get("status") or "") not in {"read_only", "dry_run"}:
+                # Empty context allow-list: admit only read-only/dry-run inspection.
+                # A state-changing command must be explicitly allowed by the pack
+                # (and remains independently approval-gated).
+                errors.append(f"action_{index}_command_not_allowed_by_empty_context:{command_name}")
             if command_name in disallowed:
                 errors.append(f"action_{index}_command_disallowed_by_context:{command_name}")
             if not action.get("risk_tier"):
@@ -18257,6 +18270,11 @@ EVIDENCE_RETENTION_DAYS = {
     "legal_hold": None,
 }
 
+# Compliance-sensitive classes whose retention floor an operator-supplied
+# older_than_days may raise but never shorten. legal_hold (None above) is always
+# excluded from sweeps entirely.
+EVIDENCE_RETENTION_PROTECTED_CLASSES = frozenset({"audit", "sensitive"})
+
 
 def _evidence_manifest_entry(row: Any) -> dict[str, Any]:
     payload = _public_evidence_object_row(row)
@@ -18442,8 +18460,22 @@ def _evidence_retention_candidate(
         return None
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     age_days = max(0, int((current - created_at).total_seconds() // 86400))
-    threshold = older_than_days if older_than_days is not None else EVIDENCE_RETENTION_DAYS.get(retention_class)
-    if threshold is None or age_days < int(threshold):
+    class_days = EVIDENCE_RETENTION_DAYS.get(retention_class)
+    if class_days is None:
+        # legal_hold or an unknown class: never sweep (fail-closed).
+        return None
+    if older_than_days is not None:
+        # An operator override may only make retention MORE conservative for
+        # compliance-sensitive classes; it can never delete something younger
+        # than the class's own retention floor.
+        threshold = (
+            max(int(older_than_days), int(class_days))
+            if retention_class in EVIDENCE_RETENTION_PROTECTED_CLASSES
+            else int(older_than_days)
+        )
+    else:
+        threshold = int(class_days)
+    if age_days < threshold:
         return None
     storage_uri = str(payload.get("storage_uri") or "")
     return {
@@ -18656,12 +18688,27 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
     matching DB rows and, when requested, their local object-store files.
     """
     async with db_pool.acquire() as conn:
+        # Executing the sweep (dry_run=false) deletes durable evidence, so it is a
+        # gated state-changing action: it goes through the same approval-receipt
+        # enforcement as scans/retests. A preview (dry_run=true) is read-only.
+        if not req.dry_run:
+            await _validate_approval_receipt_for_action(
+                conn,
+                req.approval_receipt_id,
+                action_name="evidence.retention_sweep",
+                command="evidence.retention_sweep",
+                risk_tier="active",
+            )
         rows = await conn.fetch(
             """
             SELECT *
             FROM evidence_objects
             WHERE ($2::text IS NULL OR retention_class = $2)
               AND retention_class <> 'legal_hold'
+              AND NOT EXISTS (
+                  SELECT 1 FROM findings f
+                  WHERE f.id = evidence_objects.finding_id AND f.status = 'active'
+              )
             ORDER BY created_at ASC
             LIMIT $1
             """,
@@ -18684,6 +18731,10 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
                     DELETE FROM evidence_objects
                     WHERE id = ANY($1::uuid[])
                       AND retention_class <> 'legal_hold'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM findings f
+                          WHERE f.id = evidence_objects.finding_id AND f.status = 'active'
+                      )
                     RETURNING id
                     """,
                     candidate_ids,
@@ -18694,6 +18745,25 @@ async def evidence_retention_sweep(req: EvidenceRetentionSweepRequest):
                 file_result = _delete_local_evidence_files(
                     [item for item in candidates if str(item.get("id")) in deleted_ids]
                 )
+        if not req.dry_run:
+            await _record_command_result(
+                conn,
+                command="evidence.retention_sweep",
+                status="completed",
+                risk_tier="active",
+                approval_receipt_id=req.approval_receipt_id,
+                operator_message=(
+                    f"Swept {deleted_count} evidence object(s); "
+                    f"{len(file_result.get('deleted', []))} local file(s) removed"
+                ),
+                result_json={
+                    "retention_class": req.retention_class,
+                    "older_than_days": req.older_than_days,
+                    "candidate_count": len(candidates),
+                    "deleted_count": deleted_count,
+                },
+                next_action="/settings/arsenal?tab=timeline",
+            )
     return {
         "dry_run": req.dry_run,
         "candidate_count": len(candidates),

@@ -83,6 +83,21 @@ def _selector_path(selector: str) -> Path:
     return REPO_ROOT / selector.split("::", 1)[0]
 
 
+def _defined_function_names(path: Path) -> set[str]:
+    """All function/method names defined in a Python file (best-effort via AST)."""
+    import ast
+
+    names: set[str] = set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+    return names
+
+
 def validate_gate_mapping() -> list[str]:
     errors: list[str] = []
     for gate, selectors in GATES.items():
@@ -92,6 +107,14 @@ def validate_gate_mapping() -> list[str]:
             path = _selector_path(selector)
             if not path.exists():
                 errors.append(f"{gate}: selector path does not exist: {selector}")
+                continue
+            # A stale ::test_name would otherwise pass file-only validation and
+            # only fail (as a pytest error) at run time. Verify the referenced
+            # test function actually exists.
+            if "::" in selector:
+                test_name = selector.rsplit("::", 1)[1]
+                if test_name not in _defined_function_names(path):
+                    errors.append(f"{gate}: selector test not found: {selector}")
     return errors
 
 

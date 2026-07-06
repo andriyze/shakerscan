@@ -1459,9 +1459,29 @@ async def run_schema_migrations(pool) -> None:
                         CHECK (smoke_score IS NULL OR (smoke_score >= 0 AND smoke_score <= 1))
                 )
             """)
+            # Dedupe key must match the application find-or-create key, which is
+            # (target, family, dedupe_key) WITHOUT source — a new source endorses
+            # an existing lead rather than forking a duplicate card (roadmap §7.8).
+            # The original index included source; collapse any duplicates it
+            # allowed, then rebuild the index on the correct columns.
+            await conn.execute("""
+                DELETE FROM hypotheses h
+                USING (
+                    SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY
+                                   COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                                   family, dedupe_key
+                               ORDER BY created_at ASC, id ASC
+                           ) AS rn
+                    FROM hypotheses
+                ) dups
+                WHERE h.id = dups.id AND dups.rn > 1
+            """)
+            await conn.execute("DROP INDEX IF EXISTS idx_hypotheses_dedupe")
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_hypotheses_dedupe
-                ON hypotheses(COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid), source, family, dedupe_key)
+                ON hypotheses(COALESCE(target_id, '00000000-0000-0000-0000-000000000000'::uuid), family, dedupe_key)
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hypotheses_target_status

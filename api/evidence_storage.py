@@ -118,6 +118,17 @@ def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[
 
     sha = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
     expected = str(row.get("content_sha256") or "")
-    row["storage_integrity"] = "verified" if expected and sha == expected else "mismatch"
-    row["content"] = raw
+    if not expected:
+        # No stored hash to verify against (legacy object): return content but
+        # mark it unverified rather than claiming integrity.
+        row["storage_integrity"] = "not_checked"
+        row["content"] = raw
+    elif sha == expected:
+        row["storage_integrity"] = "verified"
+        row["content"] = raw
+    else:
+        # On-disk content does not match the recorded hash: withhold the tampered
+        # bytes instead of serving them as if they were the real evidence.
+        row["storage_integrity"] = "mismatch"
+        row["content"] = None
     return row

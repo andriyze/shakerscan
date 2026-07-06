@@ -2064,6 +2064,187 @@ def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     assert candidates[0]["age_days"] > candidates[0]["retention_days"]
 
 
+def _evidence_row(retention_class, created_at):
+    return {
+        "id": uuid.uuid4(),
+        "retention_class": retention_class,
+        "storage_uri": "inline:evidence_objects",
+        "created_at": created_at,
+    }
+
+
+def test_older_than_days_cannot_shorten_audit_or_sensitive_retention_floor():
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    # 120 days old: past sensitive (90d) but well within audit (2555d) and the
+    # explicit standard floor we test below.
+    created = datetime(2026, 3, 8, tzinfo=timezone.utc)
+    rows = [
+        _evidence_row("audit", created),
+        _evidence_row("sensitive", created),
+        _evidence_row("standard", created),
+    ]
+    # Aggressive override that would otherwise delete everything 1+ day old.
+    candidates = api_module._evidence_retention_candidates(rows, now=now, older_than_days=1)
+    classes = {c["retention_class"] for c in candidates}
+
+    # audit is floored at 2555d -> not a candidate; sensitive floored at 90d and
+    # 120d old -> IS a candidate (override only raises the floor, and 120>90);
+    # standard is not compliance-protected so the override applies -> candidate.
+    assert "audit" not in classes
+    assert "standard" in classes
+    sensitive = next((c for c in candidates if c["retention_class"] == "sensitive"), None)
+    assert sensitive is not None
+    assert sensitive["retention_days"] == api_module.EVIDENCE_RETENTION_DAYS["sensitive"]
+
+
+class _SweepConn:
+    """Fake conn for the retention-sweep endpoint: durable policy read, blocked
+    command_results INSERT capture, and empty evidence/finding fetches."""
+
+    def __init__(self, *, policy_on=False):
+        self.policy_on = policy_on
+        self.recorded = []
+
+    async def fetchval(self, query, *args):
+        if "FROM app_settings" in query:
+            return "true" if self.policy_on else None
+        return None
+
+    async def fetchrow(self, query, *args):
+        if "command_results" in query:
+            self.recorded.append({"command": args[0], "status": args[1]})
+            return {"id": "cmd-x", "command": args[0], "status": args[1], "created_at": None}
+        return None
+
+    async def fetch(self, query, *args):
+        return []
+
+
+def _pool_for(conn):
+    class _Pool:
+        def acquire(self):
+            class _A:
+                async def __aenter__(self_):
+                    return conn
+
+                async def __aexit__(self_, *e):
+                    return False
+
+            return _A()
+
+    return _Pool()
+
+
+def test_retention_sweep_execute_requires_approval_when_policy_on(monkeypatch):
+    conn = _SweepConn(policy_on=True)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    req = api_module.EvidenceRetentionSweepRequest(dry_run=False)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.evidence_retention_sweep(req))
+
+    assert exc.value.status_code == 409
+    assert conn.recorded and conn.recorded[0]["command"] == "evidence.retention_sweep"
+    assert conn.recorded[0]["status"] == "approval_required"
+
+
+def test_retention_sweep_dry_run_preview_needs_no_approval(monkeypatch):
+    conn = _SweepConn(policy_on=True)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    req = api_module.EvidenceRetentionSweepRequest(dry_run=True)
+
+    result = asyncio.run(api_module.evidence_retention_sweep(req))
+
+    assert result["dry_run"] is True
+    assert result["execution_enabled"] is False
+    assert conn.recorded == []  # preview records nothing and requires no receipt
+
+
+class _ClaimConn:
+    def __init__(self, *, update_row=None, current=None):
+        self.update_row = update_row
+        self.current = current
+
+    async def fetchrow(self, query, *args):
+        if "UPDATE hypotheses" in query and "status = 'claimed'" in query:
+            return self.update_row  # None simulates a compare-and-set miss
+        if "SELECT id, status, version" in query:
+            return self.current
+        return None
+
+
+HYP_ID = "77777777-7777-4777-8777-777777777777"
+
+
+def test_claim_hypothesis_409_on_stale_version(monkeypatch):
+    # CAS miss (wrong expected_version / terminal / active lease) -> UPDATE returns
+    # no row -> endpoint surfaces the current state as 409, never a silent success.
+    conn = _ClaimConn(update_row=None, current={
+        "id": HYP_ID, "status": "claimed", "version": 5,
+        "claim_owner": "other", "claim_lease_expires_at": None,
+    })
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    req = api_module.HypothesisClaimRequest(owner="me", expected_version=3, lease_seconds=300)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.arsenal_claim_hypothesis(HYP_ID, req))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "hypothesis_not_claimable"
+    assert exc.value.detail["version"] == 5
+
+
+def test_claim_hypothesis_success_returns_claimed(monkeypatch):
+    conn = _ClaimConn(update_row={
+        "id": HYP_ID, "status": "claimed", "version": 4, "family": "bola",
+        "claim_owner": "me", "claim_lease_expires_at": None,
+        "evidence_object_ids": [], "tool_receipt_ids": [], "endorsements": [],
+        "refutations": [], "next_test_action": None, "metadata_json": {},
+    })
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
+    req = api_module.HypothesisClaimRequest(owner="me", expected_version=3, lease_seconds=300)
+
+    result = asyncio.run(api_module.arsenal_claim_hypothesis(HYP_ID, req))
+
+    assert result["claimed"] is True
+    assert result["hypothesis"]["claim_owner"] == "me"
+
+
+def test_older_than_days_can_raise_but_not_lower_protected_floor():
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    created = datetime(2026, 3, 8, tzinfo=timezone.utc)  # 120 days old
+    # A longer override on sensitive (365 > 90) must protect the 120d object.
+    candidates = api_module._evidence_retention_candidates(
+        [_evidence_row("sensitive", created)], now=now, older_than_days=365
+    )
+    assert candidates == []
+
+
+def test_hydrate_withholds_content_on_integrity_mismatch(tmp_path):
+    import hashlib
+    from evidence_storage import hydrate_evidence_content, _local_storage_uri, local_evidence_path
+
+    good_sha = hashlib.sha256(b"real evidence").hexdigest()
+    uri = _local_storage_uri(good_sha)
+    fpath = local_evidence_path(tmp_path, uri)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    fpath.write_text("TAMPERED", encoding="utf-8")  # on-disk bytes != recorded hash
+
+    out = hydrate_evidence_content(
+        {"storage_uri": uri, "content_sha256": good_sha}, results_dir=tmp_path
+    )
+    assert out["storage_integrity"] == "mismatch"
+    assert out["content"] is None  # tampered bytes are withheld, not served
+
+    # And the verified path still returns content.
+    fpath.write_text("real evidence", encoding="utf-8")
+    ok = hydrate_evidence_content(
+        {"storage_uri": uri, "content_sha256": good_sha}, results_dir=tmp_path
+    )
+    assert ok["storage_integrity"] == "verified"
+    assert ok["content"] == "real evidence"
+
+
 def test_hypothesis_situation_report_is_bounded_and_separates_work():
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -2640,6 +2821,49 @@ def test_local_agent_candidate_parser_accepts_exact_context_bound_plan():
     assert result["operation_plan"]["actions"][0]["command"] == "asm.gaps"
     assert result["operation_plan"]["planner"]["planner_execution_enabled"] is False
     assert result["validation_errors"] == []
+
+
+def _empty_allowlist_conn():
+    row = _local_agent_parser_context_row()
+    row["allowed_commands"] = []
+    if isinstance(row.get("context_pack"), dict):
+        row["context_pack"]["allowed_commands"] = []
+
+    class _EmptyAllowConn:
+        async def fetchrow(self, query, *args):
+            if "FROM agent_context_packs" in query:
+                return row
+            return None
+
+    return _EmptyAllowConn()
+
+
+def _parse_with_conn(conn, candidate):
+    req = api_module.LocalAgentPlanParseRequest(
+        agent="codex",
+        context_pack_id="22222222-2222-4222-8222-222222222222",
+        raw_output=json.dumps(candidate),
+        created_by="test",
+    )
+    return asyncio.run(api_module._parse_local_agent_candidate_plan(conn, req))
+
+
+def test_parser_empty_allowlist_denies_state_changing_command():
+    candidate = _local_agent_parser_candidate(actions=[{
+        "command": "asm.improve", "parameters": {}, "risk_tier": "active",
+        "reason": "queue coverage work",
+    }])
+    result = _parse_with_conn(_empty_allowlist_conn(), candidate)
+
+    assert result["accepted"] is False
+    assert any("command_not_allowed_by_empty_context" in e for e in result["validation_errors"])
+
+
+def test_parser_empty_allowlist_still_permits_read_only_command():
+    # asm.gaps is read_only, so an empty context allow-list must not block it.
+    result = _parse_with_conn(_empty_allowlist_conn(), _local_agent_parser_candidate())
+
+    assert not any("command_not_allowed_by_empty_context" in e for e in result["validation_errors"])
 
 
 def test_local_agent_candidate_parser_rejects_ambiguous_output_and_raw_commands():

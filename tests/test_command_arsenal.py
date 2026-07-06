@@ -112,8 +112,11 @@ def test_evidence_manifest_and_retention_commands_are_bounded():
     assert bundle["path"] == "/evidence/export-bundle"
     assert "bundle_hash" in bundle["evidence_contract"]
     assert "api_read_replay" in bundle["evidence_contract"]
-    assert sweep["status"] == "dry_run"
-    assert sweep["risk_tier"] == "read_only"
+    # Executing the sweep deletes durable evidence, so it must be gated (not a
+    # read-only/dry-run shortcut that the operation-plan approval gate ignores).
+    assert sweep["status"] == "gated"
+    assert sweep["risk_tier"] == "active"
+    assert "confirm_authorized" in sweep["required_confirmations"]
     assert sweep["path"] == "/evidence/retention/sweep"
     assert sweep["parameters_schema"]["dry_run"]["default"] is True
 
