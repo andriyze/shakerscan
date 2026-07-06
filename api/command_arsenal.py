@@ -470,6 +470,22 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         timeout_seconds=15,
     ),
     ArsenalCommand(
+        name="mission.timeline",
+        family="governance",
+        description="Read the cross-product mission timeline: command results (with live scan status), recent scans, and upcoming schedules.",
+        status="read_only",
+        risk_tier="read_only",
+        method="GET",
+        path="/timeline",
+        scope_fields=("target_id",),
+        parameters_schema={
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "target_id": {"type": "string", "format": "uuid"},
+        },
+        evidence_contract=("timeline_events", "upcoming", "statuses"),
+        timeout_seconds=20,
+    ),
+    ArsenalCommand(
         name="agent_context_pack.list",
         family="governance",
         description="Read recent bounded AgentContextPack records.",

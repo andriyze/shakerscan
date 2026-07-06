@@ -977,11 +977,24 @@ async def _require_approval_receipt_if_policy_enabled(
     approval_receipt_id: str | None,
     *,
     action_name: str = "state_changing_action",
+    command: str | None = None,
+    risk_tier: str = "active",
 ) -> None:
     if approval_receipt_id:
         return
     if not await _approval_receipts_required(conn):
         return
+    await _record_blocked_command_result(
+        conn,
+        action_name=action_name,
+        command=command,
+        risk_tier=risk_tier,
+        status="approval_required",
+        blocked_by=["approval_receipt_required"],
+        operator_message=(
+            f"Blocked {_command_from_action(action_name)}: approval receipt required by automation policy"
+        ),
+    )
     raise HTTPException(
         status_code=409,
         detail={
@@ -12694,6 +12707,47 @@ async def _record_command_result(
     return _public_command_result_row(row)
 
 
+def _command_from_action(action_name: str) -> str:
+    """Map an enforcement action_name (e.g. 'scan.submit:quick') to a command name."""
+    base = str(action_name or "").split(":", 1)[0].strip()
+    return base or "state_changing_action"
+
+
+async def _record_blocked_command_result(
+    conn,
+    *,
+    action_name: str,
+    blocked_by: list[str],
+    operator_message: str,
+    status: str = "blocked",
+    risk_tier: str = "active",
+    command: str | None = None,
+    scope_receipt_id: str | None = None,
+    approval_receipt_id: str | uuid.UUID | None = None,
+) -> dict[str, Any] | None:
+    """Best-effort audit row for an action rejected by policy/scope before it queued.
+
+    This is what makes "nothing ran, because X blocked it" auditable with the same
+    operation id / receipt refs / blocked reasons as a successful queue. It is
+    best-effort on purpose: an audit-write failure must never mask or alter the
+    security rejection that is about to be raised.
+    """
+    try:
+        return await _record_command_result(
+            conn,
+            command=command or _command_from_action(action_name),
+            status=status,
+            risk_tier=risk_tier,
+            operator_message=operator_message,
+            blocked_by=list(blocked_by or []),
+            scope_receipt_id=scope_receipt_id,
+            approval_receipt_id=approval_receipt_id,
+            result_json={"action": action_name, "outcome": status},
+        )
+    except Exception:
+        return None
+
+
 def _context_pack_target_scope(context_pack: dict[str, Any]) -> dict[str, Any]:
     target_summary = context_pack.get("target_summary") if isinstance(context_pack.get("target_summary"), dict) else {}
     url = str(target_summary.get("url") or "").strip()
@@ -12839,54 +12893,86 @@ async def _validate_approval_receipt_for_action(
     target_url: str | None = None,
     target_id: str | uuid.UUID | None = None,
     action_name: str = "state_changing_action",
+    command: str | None = None,
+    risk_tier: str = "active",
+    record_blocked: bool = True,
 ) -> dict[str, Any] | None:
+    async def _deny(
+        reason: str,
+        message: str,
+        *,
+        http_status: int = 400,
+        approval_ref: str | None = None,
+        scope_ref: str | None = None,
+    ):
+        # Persist a durable "blocked" audit row before raising so a rejected
+        # request is as auditable as a queued one. FK-safe: only pass receipt
+        # refs whose rows actually exist.
+        if record_blocked:
+            await _record_blocked_command_result(
+                conn,
+                action_name=action_name,
+                command=command,
+                risk_tier=risk_tier,
+                status="blocked",
+                blocked_by=[reason],
+                operator_message=f"Blocked {_command_from_action(action_name)}: {message}",
+                approval_receipt_id=approval_ref,
+                scope_receipt_id=scope_ref,
+            )
+        raise HTTPException(status_code=http_status, detail=message)
+
     if not approval_receipt_id:
-        await _require_approval_receipt_if_policy_enabled(conn, None, action_name=action_name)
+        await _require_approval_receipt_if_policy_enabled(
+            conn, None, action_name=action_name, command=command, risk_tier=risk_tier
+        )
         return None
     try:
         approval_uuid = uuid.UUID(str(approval_receipt_id))
     except ValueError:
-        raise HTTPException(status_code=400, detail="approval_receipt_id must be a UUID")
+        await _deny("approval_receipt_id_invalid_uuid", "approval_receipt_id must be a UUID")
 
     approval_row = await conn.fetchrow("SELECT * FROM approval_receipts WHERE id=$1", approval_uuid)
     if not approval_row:
-        raise HTTPException(status_code=404, detail="Approval receipt not found")
+        await _deny("approval_receipt_not_found", "Approval receipt not found", http_status=404)
+    approval_ref = str(approval_uuid)
     approval = _public_approval_receipt_row(approval_row)
     if not approval.get("approved_by") or approval.get("denial_reason"):
-        raise HTTPException(status_code=400, detail="Approval receipt is not an approval")
+        await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
     confirmations = approval.get("confirmations") if isinstance(approval.get("confirmations"), list) else []
     if "confirm_authorized" not in confirmations:
-        raise HTTPException(status_code=400, detail="Approval receipt is missing confirm_authorized")
+        await _deny("approval_receipt_missing_confirm_authorized", "Approval receipt is missing confirm_authorized", approval_ref=approval_ref)
     expires_at = approval_row["expires_at"]
     if expires_at:
         now = datetime.now(timezone.utc)
         if expires_at.tzinfo is None:
             now = utc_now()
         if expires_at <= now:
-            raise HTTPException(status_code=400, detail="Approval receipt is expired")
+            await _deny("approval_receipt_expired", "Approval receipt is expired", approval_ref=approval_ref)
 
     scope_id = approval.get("scope_receipt_id")
     if not scope_id:
-        raise HTTPException(status_code=400, detail="Approval receipt is not linked to a scope receipt")
+        await _deny("approval_receipt_no_scope", "Approval receipt is not linked to a scope receipt", approval_ref=approval_ref)
     scope_row = await conn.fetchrow("SELECT * FROM scope_receipts WHERE id=$1", str(scope_id))
     if not scope_row:
-        raise HTTPException(status_code=404, detail="Linked scope receipt not found")
+        await _deny("scope_receipt_not_found", "Linked scope receipt not found", http_status=404, approval_ref=approval_ref)
+    scope_ref = str(scope_id)
     scope = _public_scope_receipt_row(scope_row)
     if scope.get("verdict") == "blocked":
-        raise HTTPException(status_code=400, detail="Linked scope receipt is blocked")
+        await _deny("scope_receipt_blocked", "Linked scope receipt is blocked", approval_ref=approval_ref, scope_ref=scope_ref)
     if scope.get("verdict") == "needs_approval" and "confirm_scope_reviewed" not in confirmations:
-        raise HTTPException(status_code=400, detail="Approval receipt is missing confirm_scope_reviewed")
+        await _deny("scope_receipt_needs_review", "Approval receipt is missing confirm_scope_reviewed", approval_ref=approval_ref, scope_ref=scope_ref)
 
     requested_target_id = str(target_id) if target_id else None
     scope_target_id = str(scope.get("target_id") or "")
     if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
-        raise HTTPException(status_code=400, detail="Approval receipt scope target does not match requested target")
+        await _deny("approval_scope_target_mismatch", "Approval receipt scope target does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
 
     if target_url:
         parsed = urllib.parse.urlparse(target_url if "://" in target_url else f"https://{target_url}")
         host = parsed.hostname or ""
         if host and not _host_matches_receipt_scope(host, scope):
-            raise HTTPException(status_code=400, detail="Approval receipt scope host does not match requested target")
+            await _deny("approval_scope_host_mismatch", "Approval receipt scope host does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
 
     return {
         "approval_receipt_id": approval["id"],
@@ -13036,6 +13122,210 @@ async def arsenal_command_results(limit: int = Query(20, ge=1, le=100)):
         "command_results": [_public_command_result_row(row) for row in rows],
         "execution_enabled": False,
         "count": len(rows),
+    }
+
+
+# --- Cross-product mission timeline (§1) -------------------------------------
+# Explicit, API-backed statuses so operators never infer state from scan JSON.
+TIMELINE_STATUSES = (
+    "planned", "blocked", "approval_required", "approved", "queued", "running",
+    "completed", "partial", "degraded", "failed", "cancelled", "evidence_bound",
+    "retest_scheduled", "refuter_requested",
+)
+
+_SCAN_STATUS_TO_TIMELINE = {
+    "pending": "queued",
+    "queued": "queued",
+    "running": "running",
+    "in_progress": "running",
+    "completed": "completed",
+    "failed": "failed",
+    "error": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+
+
+def _timeline_scan_status(raw: Any) -> str:
+    key = str(raw or "").strip().lower()
+    return _SCAN_STATUS_TO_TIMELINE.get(key, key or "queued")
+
+
+def _timeline_sort_key(event: dict[str, Any]) -> str:
+    # created_at has already passed through row_to_dict, which renders datetimes
+    # as ISO-8601 strings. Postgres TIMESTAMPTZ values come back UTC-normalized,
+    # so lexical order over these strings is chronological. None sorts last.
+    created = event.get("created_at")
+    return str(created) if created else ""
+
+
+def _command_result_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    cr_status = str(r.get("status") or "")
+    scan_status = r.get("scan_status")
+    # A live scan status supersedes the frozen command-result status once a scan
+    # exists; blocked/approval_required rows have no scan and keep their status.
+    status = _timeline_scan_status(scan_status) if scan_status else cr_status
+    scan_id = str(r["scan_id"]) if r.get("scan_id") else None
+    return {
+        "event_id": str(r.get("id")),
+        "kind": "command_result",
+        "command": r.get("command"),
+        "action_name": r.get("command"),
+        "status": status,
+        "risk_tier": r.get("risk_tier"),
+        "dry_run": bool(r.get("dry_run")),
+        "target_id": str(r["scan_target_id"]) if r.get("scan_target_id") else None,
+        "target_url": r.get("scan_target_url"),
+        "scan_id": scan_id,
+        "active_scan_id": scan_id if status in ("queued", "running") else None,
+        "operation_plan_id": str(r["operation_plan_id"]) if r.get("operation_plan_id") else None,
+        "campaign_id": str(r["campaign_id"]) if r.get("campaign_id") else None,
+        "scope_receipt_id": r.get("scope_receipt_id"),
+        "approval_receipt_id": str(r["approval_receipt_id"]) if r.get("approval_receipt_id") else None,
+        "finding_ids": _decode_json_value(r.get("finding_ids")) or [],
+        "evidence_object_ids": _decode_json_value(r.get("evidence_object_ids")) or [],
+        "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
+        "blocked_by": _decode_json_value(r.get("blocked_by")) or [],
+        "next_action": r.get("next_action"),
+        "operator_message": r.get("operator_message"),
+        "created_at": r.get("created_at"),
+    }
+
+
+def _scan_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    status = _timeline_scan_status(r.get("status"))
+    scan_id = str(r.get("id"))
+    return {
+        "event_id": scan_id,
+        "kind": "scan",
+        "command": None,
+        "action_name": f"scan:{r.get('run_kind') or 'web_dast'}",
+        "status": status,
+        "risk_tier": None,
+        "target_id": str(r["target_id"]) if r.get("target_id") else None,
+        "target_url": r.get("target_url"),
+        "scan_id": scan_id,
+        "active_scan_id": scan_id if status in ("queued", "running") else None,
+        "scan_type": r.get("scan_type"),
+        "grade": r.get("grade"),
+        "findings_count": r.get("findings_count"),
+        "blocked_by": [],
+        "next_action": f"/scans/{scan_id}",
+        "operator_message": None,
+        "created_at": r.get("created_at"),
+    }
+
+
+def _schedule_timeline_event(row: Any) -> dict[str, Any]:
+    r = row_to_dict(row)
+    kind = str(r.get("schedule_kind") or "normal_scan")
+    return {
+        "event_id": f"schedule:{r.get('id')}",
+        "kind": "schedule",
+        "command": "asm.improve" if kind == "asm_improve" else "scan.submit",
+        "action_name": f"schedule:{kind}",
+        "status": "planned",
+        "risk_tier": None,
+        "target_id": str(r["target_id"]) if r.get("target_id") else None,
+        "target_url": r.get("target_url"),
+        "next_eligible_at": r.get("next_run_at"),
+        "name": r.get("name"),
+        "scan_type": r.get("scan_type"),
+        "blocked_by": [],
+        "operator_message": (
+            f"Next {kind} for {r.get('target_url') or 'target'}"
+        ),
+        "created_at": r.get("last_run_at"),
+    }
+
+
+@app.get("/timeline")
+async def mission_timeline(
+    limit: int = Query(50, ge=1, le=200),
+    target_id: Optional[str] = Query(None, description="Filter events to one target."),
+    include_scans: bool = Query(True, description="Include recent scans not tied to a command result."),
+    include_schedules: bool = Query(True, description="Include upcoming recurring schedules."),
+):
+    """Read-only cross-product mission timeline.
+
+    Merges command-result audit rows (with live scan status joined in), recent
+    user-facing scans not tied to a command result, and upcoming schedules into
+    one normalized event feed with explicit, API-backed statuses. Read-only: it
+    computes nothing the browser would otherwise have to infer from scan JSON.
+    """
+    target_uuid = None
+    if target_id:
+        try:
+            target_uuid = uuid.UUID(str(target_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target_id must be a UUID")
+    hidden_roles = _hidden_scan_roles_for_list()
+
+    async with db_pool.acquire() as conn:
+        cr_rows = await conn.fetch(
+            """
+            SELECT cr.*,
+                   s.status AS scan_status,
+                   s.target_url AS scan_target_url,
+                   s.target_id AS scan_target_id
+            FROM command_results cr
+            LEFT JOIN scans s ON cr.scan_id = s.id
+            WHERE ($2::uuid IS NULL OR s.target_id = $2)
+            ORDER BY cr.created_at DESC
+            LIMIT $1
+            """,
+            limit,
+            target_uuid,
+        )
+        events = [_command_result_timeline_event(row) for row in cr_rows]
+
+        if include_scans:
+            scan_rows = await conn.fetch(
+                """
+                SELECT s.id, s.status, s.target_url, s.target_id, s.scan_type,
+                       s.run_kind, s.grade, s.findings_count, s.created_at
+                FROM scans s
+                WHERE (s.scan_role IS NULL OR s.scan_role <> ALL($3::text[]))
+                  AND NOT EXISTS (SELECT 1 FROM command_results cr WHERE cr.scan_id = s.id)
+                  AND ($2::uuid IS NULL OR s.target_id = $2)
+                ORDER BY s.created_at DESC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+                hidden_roles,
+            )
+            events.extend(_scan_timeline_event(row) for row in scan_rows)
+
+        upcoming: list[dict[str, Any]] = []
+        if include_schedules:
+            schedule_rows = await conn.fetch(
+                """
+                SELECT sc.id, sc.name, sc.target_id, t.url AS target_url,
+                       sc.frequency, sc.schedule_kind, sc.scan_type,
+                       sc.next_run_at, sc.last_run_at
+                FROM schedules sc
+                LEFT JOIN targets t ON sc.target_id = t.id
+                WHERE sc.is_active = true AND sc.next_run_at IS NOT NULL
+                  AND ($2::uuid IS NULL OR sc.target_id = $2)
+                ORDER BY sc.next_run_at ASC
+                LIMIT $1
+                """,
+                limit,
+                target_uuid,
+            )
+            upcoming = [_schedule_timeline_event(row) for row in schedule_rows]
+
+    events.sort(key=_timeline_sort_key, reverse=True)
+    events = events[:limit]
+    return {
+        "events": events,
+        "upcoming": upcoming,
+        "count": len(events),
+        "statuses": list(TIMELINE_STATUSES),
+        "execution_enabled": False,
     }
 
 
@@ -16050,6 +16340,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                     target_url=retest_inputs.get("target_url"),
                     target_id=finding_data.get("target_id"),
                     action_name="finding.bulk_retest",
+                    # One aggregate audit row covers the batch; skip per-finding
+                    # blocked rows to avoid flooding the timeline.
+                    record_blocked=False,
                 )
             except HTTPException as exc:
                 skipped.append({
@@ -16186,9 +16479,19 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                 next_action="/findings",
                 created_by=request.requested_by or "api",
             )
+        elif skipped:
+            # Nothing was queued: record a durable "blocked" audit row so the
+            # entirely-skipped batch is not invisible in the timeline.
+            command_result = await _record_blocked_command_result(
+                conn,
+                action_name="finding.bulk_retest",
+                blocked_by=sorted({item["reason"] for item in skipped if item.get("reason")}),
+                operator_message=f"Blocked finding.bulk_retest: 0 queued, {len(skipped)} skipped",
+                risk_tier="active",
+            )
 
     response = {
-        "status": "queued",
+        "status": "queued" if queued else "blocked",
         "mode": request.mode or "tiered",
         "queued_count": len(queued),
         "skipped_count": len(skipped),

@@ -319,8 +319,21 @@ called at real sites — verify before re-proposing any of it:
   records include operation id, command, status, risk tier, scope/approval receipts, scan/finding
   refs, blocked/skipped reasons when available, next action, and operator message.
   `GET /arsenal/command-results`, `command_result.list`, the `CommandResult` contract, and
-  `/settings/arsenal` expose the recent audit trail. Blocked/approval-required command-result rows
-  and campaign timeline integration remain open.
+  `/settings/arsenal` expose the recent audit trail.
+- **Blocked/denied command-result rows** — the enforcement path (`_require_approval_receipt_if_policy_enabled`,
+  `_validate_approval_receipt_for_action`) now writes a durable `command_results` row with status
+  `approval_required`/`blocked` and a specific `blocked_by` reason (e.g. `approval_receipt_expired`,
+  `approval_scope_host_mismatch`) before it raises, best-effort and FK-safe, so "nothing ran because
+  policy/scope blocked it" is auditable with the same operation id and receipt refs as a queued
+  action. Bulk retest records one aggregate blocked row when nothing queues.
+- **Cross-product mission timeline phase 1** — `GET /timeline` (Command Arsenal `mission.timeline`)
+  merges command-result audit rows (with live scan status joined in), recent user-facing scans not
+  tied to a command result, and upcoming schedules into one normalized event feed with the explicit
+  statuses (`planned`/`blocked`/`approval_required`/`queued`/`running`/`completed`/`partial`/
+  `degraded`/`failed`/`cancelled`/…) and event fields (`event_id`, `kind`, `command`, `status`,
+  `risk_tier`, `target_id`, `scan_id`, `active_scan_id`, `operation_plan_id`, `campaign_id`,
+  `blocked_by`, `next_eligible_at`, `operator_message`). Optional `target_id` filter. Campaign/action
+  execution records and evidence/refuter events remain open.
 - **Local-agent harmless capability ping phase 1** — `POST /agents/local/test` now runs only the
   configured version/capability command for known local-agent binaries with timeout/output caps,
   environment credential stripping, no prompt, no planner execution, no target state mutation, and no
@@ -433,14 +446,15 @@ raw shell execution or LLM-produced verified findings.
    facts. DONE phase 1 for local-agent-labeled deterministic dry-run `OperationPlan` creation from a
    context pack without spawning local-agent CLIs. DONE phase 1 for policy-required approval receipt
    enforcement on current state-changing API routes. DONE phase 1 for command-result audit records on
-   successful queued product actions. Remaining work is blocked/approval-required command-result rows,
+   successful queued product actions. DONE phase 1 for blocked/approval-required command-result rows
+   and a read-only cross-product mission timeline (`GET /timeline`). Remaining work is
    campaign/timeline execution records, runtime destination re-checks, and later optional real
    local-agent adapter parsing behind stricter gates; it still must add no new execution power until
    receipts, command audit records, parser validation, and evidence gates are durable.
-2. **Unified Action Center + mission timeline:** turn the existing product cards and ASM timeline into
-   a cross-product target/campaign timeline over ASM, scans, focused families, AI Gate, Model Intake,
-   retests, exceptions, deployment gates, worker freshness, evidence export/replay, and blocked/skipped
-   reasons.
+2. **Unified Action Center + mission timeline:** DONE phase 1 — `GET /timeline` merges command-result
+   audit rows (with live scan status), recent scans, and upcoming schedules into one normalized event
+   feed with explicit statuses. Remaining work is richer campaign/action execution records and
+   evidence export/replay + refuter events on the same feed.
 3. **Command Arsenal execution gateway, still no raw shell:** extend the schema-discoverable
    Command Arsenal into a gated product-action layer over existing API handlers. It is not the check
    registry, not the external tool registry, and not a shell runner. Every command result must carry
@@ -456,9 +470,10 @@ raw shell execution or LLM-produced verified findings.
    DONE phase 2 for optional receipt validation on AI Gate scans/replay, Model Intake scans, and
    finding retests. DONE phase 1 for policy-based mandatory enforcement across those existing
    state-changing routes via `/settings/automation`. DONE phase 1 for command-result audit rows on
-   successful queued operations. Remaining work is blocked/approval-required command-result rows,
-   campaign/action execution records, runtime redirect/resolution scope re-checks, and extending the
-   same enforcement model to future command/MCP adapters.
+   successful queued operations, and for blocked/approval-required rows written before the enforcement
+   path raises (best-effort, FK-safe). Remaining work is campaign/action execution records, runtime
+   redirect/resolution scope re-checks, and extending the same enforcement model to future command/MCP
+   adapters.
 5. **Continuous ASM quality lane:** make `/asm/coverage`, `/asm/gaps`, scan detail, Action Center,
    and the mission timeline agree on family-aware state: attempted, proved, partial, blocked by auth,
    blocked by second user, blocked by schedule/rate cap, stale, and worker-stale.
@@ -550,7 +565,9 @@ hygiene, ASM coverage/schedule facts, Model Intake signature trust, and AI contr
 The dashboard renders this as a prioritized Action Center. ASM policy/gaps/improve/activity now
 expose live `scheduler_state`, and dispatcher/scheduler decisions are persisted as
 `metadata_json.asm_last_decision`. `/settings/exceptions` now provides the first dedicated
-Exceptions Queue. Dashboard items now expose structured safe CTAs. Remaining work is product-level
+Exceptions Queue. Dashboard items now expose structured safe CTAs. `GET /timeline` now provides a
+read-only cross-product mission timeline (command results with live scan status + recent scans +
+upcoming schedules) with explicit API-backed statuses. Remaining work is product-level
 decision flow: summarize each product area, show blocker/stale/running counts, explain why work is
 blocked, and provide safe remediation links without making users infer state from scan JSON.
 
@@ -571,14 +588,14 @@ blocked, and provide safe remediation links without making users infer state fro
    readiness/control gaps, and open worker rebuild/scale controls. DONE for Model Intake trust
    blockers: `/settings/model-intake?remediate=trust` selects strict trusted-anchor mode, highlights
    the trust controls, and links exception hygiene.
-7. Add a cross-product mission timeline event model over background ASM dispatcher decisions,
-   recurring ASM waves, manual Improve Coverage actions, full coverage parent scans, focused family
-   campaigns, AI Gate campaign runs, Model Intake scans, finding retests, exception/deployment-gate
-   events, worker/fleet freshness, evidence export/replay events, and refuter requests.
-8. Timeline statuses should be explicit and API-backed: `planned`, `blocked`, `approval_required`,
+7. DONE phase 1: `GET /timeline` merges the command-result audit rows (with live scan status joined),
+   recent user-facing scans, and upcoming schedules into one normalized cross-product event feed with
+   an optional `target_id` filter. Remaining sources to fold in are evidence export/replay events and
+   refuter requests, once those subsystems exist.
+8. DONE phase 1: timeline statuses are explicit and API-backed: `planned`, `blocked`, `approval_required`,
    `approved`, `queued`, `running`, `completed`, `partial`, `degraded`, `failed`, `cancelled`,
    `evidence_bound`, `retest_scheduled`, and `refuter_requested`.
-9. Timeline events should carry at least: `event_id`, `campaign_id`, `target_id`,
+9. DONE phase 1: timeline events carry `event_id`, `campaign_id`, `target_id`,
    `operation_plan_id`, `kind`, `status`, `action_name`, `risk_tier`, `blocked_by`,
    `next_eligible_at`, `active_scan_id`, `evidence_object_ids`, `tool_receipt_ids`, and a concise
    `operator_message`.
@@ -682,16 +699,17 @@ Command Arsenal boundaries:
     next action, operator message, sanitized result summary, and created-by/source metadata.
 15. DONE phase 1: route successful current API actions into those command-result rows first: `/scans`, ASM
     recon/test/improve, AI Gate scan/replay, Model Intake scan, single/bulk finding retest, and
-    finding-level AI replay. Remaining work is blocked/approval-required rows so "nothing ran" is
-    auditable.
+    finding-level AI replay.
 16. Keep command-result records separate from scanner-family proof contracts. A queued operation is
     not evidence, and a command result may never mark a finding verified without downstream proof
     objects/evidence instances.
-17. DONE phase 1: add a read-only command-result UI panel under `/settings/arsenal`. Remaining work is
-    feeding the same records into the cross-product mission timeline once campaigns exist.
-18. Add blocked, denied, skipped, approval-required, and degraded command-result records. Successful
-    queued actions are not enough; "nothing ran because policy/scope/runtime checks blocked it" must
-    be auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
+17. DONE phase 1: add a read-only command-result UI panel under `/settings/arsenal`. DONE phase 1:
+    the same records feed the cross-product mission timeline (`GET /timeline`). Remaining work is
+    campaign records.
+18. DONE phase 1: blocked and approval-required command-result records are written before the
+    enforcement path raises (best-effort, FK-safe), so "nothing ran because policy/scope blocked it"
+    is auditable with the same operation id, scope/approval refs, blocked reasons, and next action.
+    Remaining: skipped/degraded rows for non-policy skip paths and runtime-check blocks.
 19. Add release/test gates for Command Arsenal and planner safety:
     `test:no-phantom-tools`, `test:no-benchmark-fitting`, `test:no-ai-verified`,
     `test:evidence-provenance`, `test:fleet-current`, `test:planner-scope`,

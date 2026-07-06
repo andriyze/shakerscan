@@ -158,6 +158,18 @@ def test_command_result_list_is_read_only_command():
     assert "command_result_rows" in cmd["evidence_contract"]
 
 
+def test_mission_timeline_is_read_only_command():
+    payload = arsenal.describe_commands()
+    commands = {item["name"]: item for item in payload["commands"]}
+
+    cmd = commands["mission.timeline"]
+    assert cmd["status"] == "read_only"
+    assert cmd["risk_tier"] == "read_only"
+    assert cmd["method"] == "GET"
+    assert cmd["path"] == "/timeline"
+    assert "timeline_events" in cmd["evidence_contract"]
+
+
 def test_mission_contract_catalog_is_contract_only():
     payload = arsenal.describe_contracts()
 

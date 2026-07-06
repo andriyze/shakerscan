@@ -1897,3 +1897,228 @@ def test_validate_approval_receipt_rejects_target_id_mismatch():
         _run_validate(conn, APPROVAL_ID, target_id="22222222-2222-4222-8222-222222222222")
     assert exc.value.status_code == 400
     assert "target" in exc.value.detail
+
+
+# ----- blocked/denied command_results audit rows -------------------------------
+# A rejected state-changing action must be as auditable as a queued one: the
+# enforcement path writes a durable command_results row (best-effort) before it
+# raises, so "nothing ran, because policy/scope blocked it" is visible.
+
+class _BlockedRecordingConn:
+    """FakeConn that answers the validator SELECTs, the durable-policy read, and
+    captures the command_results INSERT so blocked-row recording can be asserted."""
+
+    _RESULT_ARG_KEYS = [
+        "command", "status", "dry_run", "risk_tier", "operation_plan_id",
+        "scope_receipt_id", "approval_receipt_id", "campaign_id", "scan_id",
+        "finding_ids", "hypothesis_ids", "evidence_object_ids", "tool_receipt_ids",
+        "blocked_by", "next_action", "operator_message", "result_json", "created_by",
+    ]
+
+    def __init__(self, *, approval_row=None, scope_row=None, policy_on=False):
+        self.approval_row = approval_row
+        self.scope_row = scope_row
+        self.policy_on = policy_on
+        self.recorded = []
+
+    async def fetchval(self, query, *args):
+        if "FROM app_settings" in query:
+            return "true" if self.policy_on else None
+        return None
+
+    async def fetchrow(self, query, *args):
+        if "INSERT INTO command_results" in query:
+            row = {key: args[i] for i, key in enumerate(self._RESULT_ARG_KEYS)}
+            row["id"] = "cmd-blocked-1"
+            row["created_at"] = None
+            self.recorded.append(row)
+            return row
+        if "FROM approval_receipts" in query:
+            return self.approval_row
+        if "FROM scope_receipts" in query:
+            return self.scope_row
+        return None
+
+
+def test_validate_approval_receipt_records_blocked_row_before_raising():
+    conn = _BlockedRecordingConn(
+        approval_row=_make_approval_row(expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc)),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException):
+        _run_validate(conn, APPROVAL_ID, target_url="https://app.example.com/x")
+
+    assert len(conn.recorded) == 1
+    row = conn.recorded[0]
+    assert row["command"] == "finding.retest" or row["command"]  # derived from action_name default
+    assert row["status"] == "blocked"
+    assert json.loads(row["blocked_by"]) == ["approval_receipt_expired"]
+    # The (existing) approval receipt is referenced; scope not yet reached.
+    assert str(row["approval_receipt_id"]) == APPROVAL_ID
+
+
+def test_validate_approval_receipt_blocked_row_is_fk_safe_on_not_found():
+    # No approval row exists -> must NOT reference the (missing) receipt id, or the
+    # command_results FK insert would fail and lose the audit trail.
+    conn = _BlockedRecordingConn(approval_row=None)
+    with pytest.raises(api_module.HTTPException) as exc:
+        _run_validate(conn, APPROVAL_ID)
+    assert exc.value.status_code == 404
+    assert len(conn.recorded) == 1
+    assert conn.recorded[0]["approval_receipt_id"] is None
+
+
+def test_validate_approval_receipt_record_blocked_false_suppresses_row():
+    conn = _BlockedRecordingConn(
+        approval_row=_make_approval_row(confirmations=[]),
+        scope_row=_make_scope_row(),
+    )
+    with pytest.raises(api_module.HTTPException):
+        asyncio.run(
+            api_module._validate_approval_receipt_for_action(
+                conn, APPROVAL_ID, action_name="finding.bulk_retest", record_blocked=False
+            )
+        )
+    assert conn.recorded == []
+
+
+def test_require_approval_receipt_records_approval_required_row_when_missing():
+    conn = _BlockedRecordingConn(policy_on=True)
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(
+            api_module._require_approval_receipt_if_policy_enabled(
+                conn, None, action_name="scan.submit:quick"
+            )
+        )
+    assert exc.value.status_code == 409
+    assert len(conn.recorded) == 1
+    row = conn.recorded[0]
+    assert row["command"] == "scan.submit"
+    assert row["status"] == "approval_required"
+    assert json.loads(row["blocked_by"]) == ["approval_receipt_required"]
+    assert row["approval_receipt_id"] is None
+
+
+# ----- cross-product mission timeline ------------------------------------------
+
+def test_timeline_scan_status_maps_to_explicit_vocabulary():
+    assert api_module._timeline_scan_status("pending") == "queued"
+    assert api_module._timeline_scan_status("running") == "running"
+    assert api_module._timeline_scan_status("completed") == "completed"
+    assert api_module._timeline_scan_status("failed") == "failed"
+    assert api_module._timeline_scan_status("cancelled") == "cancelled"
+    assert api_module._timeline_scan_status(None) == "queued"
+
+
+def test_command_result_event_uses_live_scan_status_over_frozen_status():
+    # command result was recorded "queued"; the joined scan is now running.
+    row = {
+        "id": "cmd-1", "command": "scan.submit", "status": "queued", "risk_tier": "active",
+        "dry_run": False, "scan_id": "44444444-4444-4444-8444-444444444444",
+        "operation_plan_id": None, "campaign_id": None, "scope_receipt_id": None,
+        "approval_receipt_id": None, "finding_ids": [], "evidence_object_ids": [],
+        "tool_receipt_ids": [], "blocked_by": [], "next_action": "/scans/x",
+        "operator_message": "queued", "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "scan_status": "running", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+    }
+    ev = api_module._command_result_timeline_event(row)
+    assert ev["kind"] == "command_result"
+    assert ev["status"] == "running"          # live scan status wins
+    assert ev["active_scan_id"] == "44444444-4444-4444-8444-444444444444"
+    assert ev["target_url"] == "https://app.example.com"
+
+
+def test_timeline_sort_orders_newest_first_and_none_last():
+    older = {"created_at": "2026-07-05T00:00:00+00:00", "event_id": "old"}
+    newer = {"created_at": "2026-07-06T00:00:00+00:00", "event_id": "new"}
+    undated = {"created_at": None, "event_id": "none"}
+    events = [older, undated, newer]
+    events.sort(key=api_module._timeline_sort_key, reverse=True)
+    assert [e["event_id"] for e in events] == ["new", "old", "none"]
+
+
+def test_command_result_event_blocked_row_keeps_its_status():
+    row = {
+        "id": "cmd-2", "command": "asm.test", "status": "blocked", "risk_tier": "active",
+        "dry_run": False, "scan_id": None, "operation_plan_id": None, "campaign_id": None,
+        "scope_receipt_id": None, "approval_receipt_id": None,
+        "finding_ids": [], "evidence_object_ids": [], "tool_receipt_ids": [],
+        "blocked_by": ["approval_receipt_expired"], "next_action": None,
+        "operator_message": "blocked", "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
+        "scan_status": None, "scan_target_url": None, "scan_target_id": None,
+    }
+    ev = api_module._command_result_timeline_event(row)
+    assert ev["status"] == "blocked"          # no scan -> keep command-result status
+    assert ev["active_scan_id"] is None
+    assert ev["blocked_by"] == ["approval_receipt_expired"]
+
+
+class _TimelinePool:
+    def __init__(self, cr_rows, scan_rows, schedule_rows):
+        self._cr, self._scans, self._schedules = cr_rows, scan_rows, schedule_rows
+
+    def acquire(self):
+        pool = self
+
+        class _Acquire:
+            async def __aenter__(self):
+                class _Conn:
+                    async def fetch(self, query, *args):
+                        # Order matters: the scan query references command_results
+                        # in a NOT EXISTS subquery, so match the more specific
+                        # table roots first.
+                        if "FROM schedules sc" in query:
+                            return pool._schedules
+                        if "FROM scans s" in query:
+                            return pool._scans
+                        if "FROM command_results cr" in query:
+                            return pool._cr
+                        return []
+                return _Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Acquire()
+
+
+def test_mission_timeline_merges_sorts_and_reports_upcoming(monkeypatch):
+    cr_row = {
+        "id": "cmd-1", "command": "scan.submit", "status": "queued", "risk_tier": "active",
+        "dry_run": False, "scan_id": "44444444-4444-4444-8444-444444444444",
+        "operation_plan_id": None, "campaign_id": None, "scope_receipt_id": None,
+        "approval_receipt_id": None, "finding_ids": [], "evidence_object_ids": [],
+        "tool_receipt_ids": [], "blocked_by": [], "next_action": "/scans/x",
+        "operator_message": "queued", "created_at": datetime(2026, 7, 6, 12, tzinfo=timezone.utc),
+        "scan_status": "running", "scan_target_url": "https://app.example.com", "scan_target_id": None,
+    }
+    scan_row = {
+        "id": "55555555-5555-4555-8555-555555555555", "status": "completed",
+        "target_url": "https://old.example.com", "target_id": None, "scan_type": "quick",
+        "run_kind": "web_dast", "grade": "B", "findings_count": 2,
+        "created_at": datetime(2026, 7, 5, tzinfo=timezone.utc),
+    }
+    schedule_row = {
+        "id": "66666666-6666-4666-8666-666666666666", "name": "nightly", "target_id": None,
+        "target_url": "https://app.example.com", "frequency": "daily",
+        "schedule_kind": "asm_improve", "scan_type": "smart",
+        "next_run_at": datetime(2026, 7, 7, 2, tzinfo=timezone.utc),
+        "last_run_at": datetime(2026, 7, 6, 2, tzinfo=timezone.utc),
+    }
+    monkeypatch.setattr(api_module, "db_pool", _TimelinePool([cr_row], [scan_row], [schedule_row]))
+
+    result = asyncio.run(api_module.mission_timeline(limit=50))
+
+    assert result["execution_enabled"] is False
+    assert result["statuses"][0] == "planned"
+    # Two past events, newest first (command result @12:00 before scan @prev day).
+    assert [e["event_id"] for e in result["events"]] == ["cmd-1", "55555555-5555-4555-8555-555555555555"]
+    assert result["events"][0]["status"] == "running"       # live scan status
+    assert result["events"][1]["kind"] == "scan"
+    # Schedules are upcoming, not past events.
+    assert len(result["upcoming"]) == 1
+    up = result["upcoming"][0]
+    assert up["status"] == "planned"
+    assert up["command"] == "asm.improve"
+    # row_to_dict renders datetimes as ISO strings.
+    assert up["next_eligible_at"] == schedule_row["next_run_at"].isoformat()
