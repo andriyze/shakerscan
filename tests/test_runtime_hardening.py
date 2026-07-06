@@ -105,7 +105,22 @@ def test_scanner_sh_worker_logs_aggregate_api_scaled_containers():
 
     assert "show_worker_logs" in script
     assert "worker_log_containers" in script
-    assert "docker ps -a --filter name=shakerscan-worker" in script
+    assert "scan_worker_containers" in script
+    assert "docker ps -a --filter name=worker" in script
+    assert "/shakerscan/ && /worker/ && !/gungnir/" in script
     assert 'if [ "$SERVICE" = "worker" ] || [ "$SERVICE" = "workers" ]; then' in script
     assert 'awk -v name="$container"' in script
     assert "compose logs -f worker" in script
+
+
+def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
+    script = (ROOT / "scanner.sh").read_text()
+
+    assert "restart_worker_count" in script
+    assert 'restart_workers="$(restart_worker_count)"' in script
+    assert 'start_services "$restart_workers"' in script
+    assert 'remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."' in script
+    assert "refresh_workers_after_rebuild" in script
+    assert 'existing_workers="$(running_scan_worker_count)"' in script
+    assert 'refresh_workers_after_rebuild "$existing_workers"' in script
+    assert 'compose up --no-build -d --force-recreate --scale worker="$desired_count" worker' in script

@@ -1136,18 +1136,22 @@ contracts used by UI, REST, scheduler, AI Ops Router, and local-agent planners.
 ### 13. Operational / inventory-hygiene follow-ups
 **Status: OPEN (migrated from the now-archived asm-parallel-improvement-plan).** Most of the
 2026-06-17 live-validation items landed (A1/A3/A2 reachability + soft-404 + `gone` retirement,
-P1/P2/P3/P4/P5). `scanner.sh logs worker` now aggregates all `shakerscan-worker*` containers,
-including API-scaled workers that `docker compose logs worker` misses. Still open:
+P1/P2/P3/P4/P5). `scanner.sh logs worker` now aggregates all scanner worker containers, including
+API-scaled workers that `docker compose logs worker` misses. `scanner.sh restart` and scanner/all
+`rebuild` now remove/recreate API-scaled worker containers so stale workers do not survive outside
+Compose. Still open:
 
 - **Cap synthetic endpoint permutation (was A4).** Version/resource permutation can dominate the
   worklist before reachability filtering. Gate synthetic generation behind reachability signal and
   cap permutation breadth so soft-404 GC does not have to retire thousands of phantoms after creation.
-- **Worker restart/rebuild closure.** `_refuse_stale_job_if_needed` now fail-closes stale jobs, but
-  `./scanner.sh rebuild/restart` should also recreate API-scaled workers so users do not have to
-  manually scale down/up to replace them.
+- **DONE phase 1: Worker restart/rebuild closure.** `_refuse_stale_job_if_needed` fail-closes stale
+  jobs, and `./scanner.sh restart` now preserves the running worker count when auto-sized,
+  removes scanner worker containers left outside Compose, and recreates the fleet. Scanner/all
+  `./scanner.sh rebuild` records local-build mode, removes stale stopped workers, and recreates any
+  running worker fleet from the rebuilt image without requiring manual scale down/up.
 - **DONE phase 1: All-worker log aggregation (was P6).** `scanner.sh logs worker` / `workers`
-  enumerates all `shakerscan-worker*` containers with Docker, prefixes each line by container name,
-  supports follow mode, and falls back to Compose worker logs if no matching containers exist.
+  enumerates scanner worker containers with Docker, prefixes each line by container name, supports
+  follow mode, and falls back to Compose worker logs if no matching containers exist.
 
 ### 14. Verification requirements for the next cycle
 Every implementation increment above must include its own test slice:

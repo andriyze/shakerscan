@@ -1358,10 +1358,15 @@ print_help() {
 
 start_services() {
     local start_workers
+    local requested_workers="${1:-}"
 
     prepare_runtime_files
     persist_remote_access_env
-    start_workers="$(resolve_start_workers)"
+    if [ -n "$requested_workers" ]; then
+        start_workers="$requested_workers"
+    else
+        start_workers="$(resolve_start_workers)"
+    fi
     set_build_env
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
     if [ "$WORKERS" = "auto" ]; then
@@ -1390,12 +1395,15 @@ start_services() {
 stop_services() {
     echo -e "${YELLOW}Stopping ShakerScan...${NC}"
     compose down
+    remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
     echo -e "${GREEN}Services stopped${NC}"
 }
 
 restart_services() {
+    local restart_workers
+    restart_workers="$(restart_worker_count)"
     stop_services
-    start_services
+    start_services "$restart_workers"
 }
 
 # Reload source into running containers without a full stop/start.
@@ -1413,14 +1421,14 @@ reload_services() {
     # API-scaled workers (created by the /workers scaler, not compose) are not
     # covered by `compose restart worker`; restart them directly.
     local scaled
-    scaled=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null)
+    scaled=$(running_scan_worker_containers)
     for w in $scaled; do
         docker restart "$w" >/dev/null 2>&1 || true
     done
 
     # Verify host<->container parity for the single-file-mounted modules.
     local host_sha cont_sha drift=0 worker
-    worker=$(docker ps --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null | head -n1)
+    worker=$(running_scan_worker_containers | head -n1)
     if [ -n "$worker" ]; then
         sleep 4
         for f in scanner.py constants.py grading.py findings.py reporting.py signals.py target_context.py; do
@@ -1516,8 +1524,52 @@ show_logs() {
     fi
 }
 
+scan_worker_containers() {
+    docker ps -a --filter name=worker --format '{{.Names}}' 2>/dev/null |
+        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
+        sort
+}
+
+running_scan_worker_containers() {
+    docker ps --filter name=worker --format '{{.Names}}' 2>/dev/null |
+        awk 'BEGIN { IGNORECASE=1 } /shakerscan/ && /worker/ && !/gungnir/ { print }' |
+        sort
+}
+
+running_scan_worker_count() {
+    local count
+    count=$(running_scan_worker_containers | wc -l | tr -d '[:space:]')
+    echo "${count:-0}"
+}
+
+restart_worker_count() {
+    local resolved
+    local running
+    resolved="$(resolve_start_workers)"
+    running="$(running_scan_worker_count)"
+    if [ "$WORKERS" = "auto" ] && [ "${running:-0}" -gt "$resolved" ]; then
+        echo "$running"
+    else
+        echo "$resolved"
+    fi
+}
+
+remove_scan_worker_containers() {
+    local message="${1:-Removing scanner worker containers...}"
+    local containers
+    local container
+    containers="$(scan_worker_containers)"
+    if [ -z "$containers" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}${message}${NC}"
+    for container in $containers; do
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    done
+}
+
 worker_log_containers() {
-    docker ps -a --filter name=shakerscan-worker --format '{{.Names}}' 2>/dev/null | sort
+    scan_worker_containers
 }
 
 show_worker_logs() {
@@ -1671,6 +1723,8 @@ rebuild_images() {
     local NO_CACHE=""
     local SERVICES=""
     local SERVICE_DESC="all services"
+    local REFRESH_WORKERS=1
+    local existing_workers
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1682,16 +1736,19 @@ rebuild_images() {
             scanner)
                 SERVICES="api worker"
                 SERVICE_DESC="scanner services (api, worker)"
+                REFRESH_WORKERS=1
                 shift
                 ;;
             ui)
                 SERVICES="ui"
                 SERVICE_DESC="UI"
+                REFRESH_WORKERS=0
                 shift
                 ;;
             all)
                 SERVICES=""
                 SERVICE_DESC="all services"
+                REFRESH_WORKERS=1
                 shift
                 ;;
             *)
@@ -1708,6 +1765,8 @@ rebuild_images() {
         echo -e "${GREEN}Rebuilding $SERVICE_DESC (using cache)...${NC}"
     fi
 
+    existing_workers="$(running_scan_worker_count)"
+
     if [ -n "$SERVICES" ]; then
         compose build $NO_CACHE $SERVICES
     else
@@ -1715,10 +1774,31 @@ rebuild_images() {
     fi
 
     printf "local\n" > "$LOCAL_BUILD_MARKER"
+
+    if [ "$REFRESH_WORKERS" -eq 1 ]; then
+        refresh_workers_after_rebuild "$existing_workers"
+    fi
+
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
-    echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+    if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_workers:-0}" -gt 0 ]; then
+        echo -e "${BLUE}Local-build mode recorded. Running worker containers were recreated from the rebuilt image.${NC}"
+        echo -e "${BLUE}Run './scanner.sh restart' if you also need to recreate API/UI containers.${NC}"
+    else
+        echo -e "${BLUE}Local-build mode recorded. Run './scanner.sh restart' to use the new local images.${NC}"
+    fi
     echo -e "${BLUE}Use './scanner.sh restart --prebuilt' only when you intentionally want Docker Hub images.${NC}"
+}
+
+refresh_workers_after_rebuild() {
+    local desired_count="${1:-0}"
+    if [ "$desired_count" -lt 1 ]; then
+        remove_scan_worker_containers "Removing stale stopped worker containers after rebuild..."
+        return 0
+    fi
+
+    remove_scan_worker_containers "Recreating worker containers from rebuilt image..."
+    compose up --no-build -d --force-recreate --scale worker="$desired_count" worker
 }
 
 reset_database() {
