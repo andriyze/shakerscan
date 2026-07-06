@@ -4584,6 +4584,83 @@ def _apply_runtime_scope_guard_to_result(result: dict[str, Any], options: dict[s
     return result
 
 
+def _optional_uuid(value: Any) -> uuid.UUID | None:
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _record_runtime_scope_block_command_result(
+    conn,
+    *,
+    scan_id: str | None,
+    campaign_id: str | None,
+    target: str | None,
+    options: dict[str, Any],
+    runtime_scope_check: dict[str, Any],
+) -> str | None:
+    blocked_by = runtime_scope_check.get("blocked_by") if isinstance(runtime_scope_check.get("blocked_by"), list) else []
+    reason = ",".join(str(item) for item in blocked_by if str(item).strip()) or "runtime_scope_blocked"
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO command_results (
+                command, status, dry_run, risk_tier, operation_plan_id,
+                scope_receipt_id, approval_receipt_id, campaign_id, scan_id,
+                finding_ids, hypothesis_ids, evidence_object_ids, tool_receipt_ids,
+                blocked_by, next_action, operator_message, result_json, created_by
+            ) VALUES (
+                $1,$2,$3,$4,$5,
+                $6,$7,$8,$9,
+                $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,
+                $14::jsonb,$15,$16,$17::jsonb,$18
+            )
+            RETURNING id
+            """,
+            "scan.runtime_scope_check",
+            "blocked",
+            False,
+            str((options or {}).get("risk_tier") or "active"),
+            _optional_uuid((options or {}).get("operation_plan_id")),
+            (options or {}).get("scope_receipt_id"),
+            _optional_uuid((options or {}).get("approval_receipt_id")),
+            _optional_uuid(campaign_id or (options or {}).get("campaign_id")),
+            _optional_uuid(scan_id),
+            json.dumps([]),
+            json.dumps([]),
+            json.dumps([]),
+            json.dumps([]),
+            json.dumps(blocked_by or ["runtime_scope_blocked"]),
+            f"/scans/{scan_id}" if scan_id else None,
+            f"Blocked scan at runtime: actual destination failed scope re-check ({reason})",
+            json.dumps({
+                "target": target,
+                "runtime_scope_check": runtime_scope_check,
+            }),
+            "worker",
+        )
+        return str(row["id"]) if row and row.get("id") else None
+    except Exception as exc:
+        print(f"[worker] runtime scope command_result insert failed: {exc}", flush=True)
+        return None
+
+
+def _failure_result_for_scan_error(result: dict[str, Any], error: Any, diag: Any) -> dict[str, Any]:
+    metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+    metadata.setdefault("status", "failed")
+    if diag is not None:
+        metadata["failure_diagnostics"] = diag
+    return {
+        "error": error,
+        "failure_diagnostics": diag,
+        "tool_receipt_ids": result.get("tool_receipt_ids", []),
+        "scan_metadata": metadata,
+    }
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -4789,12 +4866,21 @@ async def process_scan_job(job_data: dict):
                         f"{error} | scanner_version={diag.get('scanner_version')} "
                         f"stdout_len={diag.get('stdout_len')} stderr_len={diag.get('stderr_len')}"
                     )
-                failure_result = {
-                    "error": error,
-                    "failure_diagnostics": diag,
-                    "tool_receipt_ids": result.get("tool_receipt_ids", []),
-                    "scan_metadata": {"status": "failed", "failure_diagnostics": diag},
-                }
+                metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+                runtime_check = metadata.get("runtime_scope_check") if isinstance(metadata, dict) else None
+                if metadata.get("runtime_scope_blocked") and isinstance(runtime_check, dict):
+                    command_result_id = await _record_runtime_scope_block_command_result(
+                        conn,
+                        scan_id=scan_id,
+                        campaign_id=campaign_id,
+                        target=target,
+                        options=options,
+                        runtime_scope_check=runtime_check,
+                    )
+                    if command_result_id:
+                        metadata["runtime_scope_command_result_id"] = command_result_id
+                        result["scan_metadata"] = metadata
+                failure_result = _failure_result_for_scan_error(result, error, diag)
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'failed',

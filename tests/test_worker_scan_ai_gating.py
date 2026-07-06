@@ -132,6 +132,66 @@ def test_runtime_scope_guard_skips_product_executors_until_adapters_capture_dest
     assert "scan_metadata" not in checked
 
 
+class _RuntimeScopeCommandResultConn:
+    def __init__(self):
+        self.args = None
+
+    async def fetchrow(self, query, *args):
+        assert "INSERT INTO command_results" in query
+        self.args = args
+        return {"id": "44444444-4444-4444-8444-444444444444"}
+
+
+def test_runtime_scope_block_records_command_result_row():
+    conn = _RuntimeScopeCommandResultConn()
+    command_result_id = asyncio.run(worker._record_runtime_scope_block_command_result(
+        conn,
+        scan_id="11111111-1111-4111-8111-111111111111",
+        campaign_id="22222222-2222-4222-8222-222222222222",
+        target="https://app.example.com",
+        options={
+            "scope_receipt_id": "scope-1",
+            "approval_receipt_id": "33333333-3333-4333-8333-333333333333",
+        },
+        runtime_scope_check={
+            "status": "blocked",
+            "blocked_by": ["host_out_of_allowed_scope"],
+            "normalized_scope": {"host": "evil.example.net"},
+        },
+    ))
+
+    assert command_result_id == "44444444-4444-4444-8444-444444444444"
+    assert conn.args[0] == "scan.runtime_scope_check"
+    assert conn.args[1] == "blocked"
+    assert conn.args[3] == "active"
+    assert conn.args[5] == "scope-1"
+    assert str(conn.args[6]) == "33333333-3333-4333-8333-333333333333"
+    assert str(conn.args[7]) == "22222222-2222-4222-8222-222222222222"
+    assert str(conn.args[8]) == "11111111-1111-4111-8111-111111111111"
+    assert json.loads(conn.args[13]) == ["host_out_of_allowed_scope"]
+    assert json.loads(conn.args[16])["runtime_scope_check"]["status"] == "blocked"
+    assert conn.args[17] == "worker"
+
+
+def test_failure_result_preserves_runtime_scope_metadata():
+    runtime_check = {"status": "blocked", "blocked_by": ["runtime_destination_unverified"]}
+    result = {
+        "scan_metadata": {
+            "runtime_scope_blocked": True,
+            "runtime_scope_check": runtime_check,
+            "runtime_scope_command_result_id": "44444444-4444-4444-8444-444444444444",
+        },
+        "tool_receipt_ids": ["tool-1"],
+    }
+
+    failure = worker._failure_result_for_scan_error(result, "blocked", None)
+
+    assert failure["scan_metadata"]["status"] == "failed"
+    assert failure["scan_metadata"]["runtime_scope_check"] == runtime_check
+    assert failure["scan_metadata"]["runtime_scope_command_result_id"] == "44444444-4444-4444-8444-444444444444"
+    assert failure["tool_receipt_ids"] == ["tool-1"]
+
+
 class _FakeProcess:
     def __init__(self, stdout_payload: bytes, stderr_payload: bytes = b""):
         self.stdout = asyncio.StreamReader()
